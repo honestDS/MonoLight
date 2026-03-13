@@ -1,12 +1,14 @@
 import os
 import uvicorn
 from app.api.v1.providers import router as provider_router
+from app.api.v1.auth import router as auth_router
 from fastapi import FastAPI
 from app.providers.database import engine, Base
 from app.models import provider
 
 app = FastAPI(title='Monobot API', version='1.0.0')
 app.include_router(provider_router, prefix='/api/v1')
+app.include_router(auth_router, prefix='/api/v1/auth', tags=['auth'])
 
 @app.on_event('startup')
 async def startup():

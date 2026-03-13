@@ -15,6 +15,9 @@ MonoLight 是一个异步驱动、模块化、分层设计的 AI 交互框架。
 程序入口。初始化 FastAPI 应用，挂载路由，并管理数据库引擎生命周期。
 
 ### 📂 `app/core/`
+包含核心业务逻辑与安全控制。
+* **Dispatcher:** 消息调度核心。
+* **Security:** 基于 JWT 和 passlib 的鉴权与安全工具类。
 框架大脑。包含 **Dispatcher**（调度器），负责将接收到的消息路由到具体的处理器。
 
 ### 📂 `app/adapters/`
@@ -28,6 +31,8 @@ MonoLight 是一个异步驱动、模块化、分层设计的 AI 交互框架。
 * **Providers:** 基础设施逻辑，如数据库连接池和外部 API 客户端封装。
 
 ### 📂 `app/api/` & `app/schemas/`
+* **API:** 包含模型提供商管理 (v1/providers) 与 认证 (v1/auth) 接口。
+* **Schemas:** 定义了统一响应格式 (UnifiedResponse) 与各模块的 Pydantic 模型。
 * **API:** 外部交互的 RESTful 接口。
 * **Schemas:** 用于请求/响应验证的 Pydantic 模型。
 
