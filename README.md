@@ -1,35 +1,35 @@
 # MonoLight
 
-> A reconstructed high-performance AI framework.
+> 一个重构的高性能 AI 框架。
 
-## 🛠 Project Overview
-MonoLight is a modern AI framework refactored in Python, focusing on performance, low coupling, and developer experience.
+## 🛠 项目概述
+MonoLight 是一个使用 Python 重构的现代化 AI 框架，专注于性能、低耦合和开发者体验。
 
-## 🏗 Architecture
-For detailed technical specifications, module responsibilities, and data flow, please refer to:
+## 🏗 技术架构
+有关详细的技术规格、模块职责和数据流向，请参阅：
 👉 **[ARCHITECTURE.md](./ARCHITECTURE.md)**
 
-## 🚀 Getting Started
+## 🚀 快速开始
 
-### Prerequisites
-* Python 3.10 or higher
+### 环境要求
+* Python 3.10 或更高版本
 * SQLite
 
-### Installation
+### 安装步骤
 ```bash
 pip install -r requirements.txt
 ```
 
-### Configuration
-Copy `.env.example` to `.env` and fill in your settings.
+### 配置说明
+拷贝 `.env.example` 为 `.env` 并根据环境修改配置。
 
-### Run
+### 启动项目
 ```bash
 python main.py
 ```
 
-## 🤝 Collaboration
-This project is maintained by **沉** and invited collaborators.
+## 🤝 协作开发
+本项目由 **沉** 及其邀请的协作者共同维护。
 
----
-© 2026 MonoLight Project. All Rights Reserved.
+## ⚖️ 开源协议
+本项目采用 [AGPL-3.0](./LICENSE) 协议开源。
