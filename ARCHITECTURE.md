@@ -1,25 +1,27 @@
-# MonoLight 架构说明
+# MonoLight 架构文档
 
 ## 1. 核心设计理念
-MonoLight 采用“后端管控、前端透明”的设计哲学。系统的核心是 **Profile 驱动架构**：通过在数据库中定义并激活具体的 Profile，系统会自动补全所有推理参数，将前端调用从繁琐的 API 细节中解放出来。
+MonoLight 采用后端管控、前端透明的设计哲学。系统的核心是 Profile 驱动架构：通过在数据库中定义并激活具体的 Profile，系统会自动补全所有推理参数，将前端调用从繁琐的 API 细节中解放出来。
 
-## 2. 核心模块职责
+## 2. 目录级分层架构
 
-### 📂 `app/core/dispatcher.py`
-调度大脑。包含 `ChatDispatcher`，负责根据当前激活的 Profile 自动填充模型 ID、温度、最大 Token 等参数，实现业务逻辑的分发。
+### 2.1 交互入口层 (Entry Layer)
+该层负责接收所有外部原始信号，并将其转化为系统内部可识别的请求对象。
+- **app/api/**: 处理标准的 HTTP RESTful 请求。如 Chat 接口、Profile 管理接口、鉴权接口。
+- **app/adapters/**: 处理第三方通讯平台（如 QQ、微信、Webhook）的异步接入。负责解析平台特定负载并调用调度器。
 
-### 📂 `app/models/profile.py` & `app/schemas/profile.py`
-配置管理中心。定义了模型配置的存储结构，支持多提供商、多模型配置的动态切换。
+### 2.2 核心控制层 (Control Layer)
+该层是系统的大脑，负责业务逻辑的流转与配置的注入。
+- **app/core/**: 包含 Dispatcher（调度中心）。它根据当前激活的 Profile 决定如何处理请求，并负责不同层级间的能力协调。
 
-### 📂 `app/api/v1/chat.py`
-精简对话接口。执行“文本入、标准响应出”的逻辑，完全屏蔽底层推理细节。
+### 2.3 资源与执行层 (Provider Layer)
+该层负责与所有外部服务及基础设施进行实际交互。
+- **app/providers/**: 包含数据库连接驱动 (database.py) 以及 LLM 客户端驱动 (llm.py)。它封装了所有底层的网络 IO 与数据持久化操作。
 
-### 📂 `app/transformers/openai.py`
-标准化响应转换器。将后端的推理结果统一转化为 OpenAI 兼容格式，确保护接前端的通用性。
+### 2.4 数据定义层 (Data Layer)
+该层定义了系统中流转的所有数据结构与约束。
+- **app/models/**: ORM 实体模型定义，映射数据库表结构。
+- **app/schemas/**: Pydantic 验证模型定义，负责 API 输入输出的数据校验与过滤。
 
-## 3. 数据处理流
-1. 前端发送极简 Body (`message` + `stream`)。
-2. `ChatDispatcher` 从数据库读取激活的 `Profile`。
-3. 结合用户消息与 Profile 参数构造完整的请求负载。
-4. 调用对应适配器获取响应。
-5. `Transformer` 统一输出格式。
+### 2.5 格式转换层 (Transformer Layer)
+- **app/transformers/**: 负责在不同协议间进行数据映射。如将内部响应转化为标准的 OpenAI 格式响应。
