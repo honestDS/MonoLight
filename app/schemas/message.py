@@ -1,6 +1,10 @@
-from pydantic import BaseModel
-from typing import Optional, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional, Any
 from datetime import datetime
+
+class ChatCompletionRequest(BaseModel):
+    message: str
+    stream: Optional[bool] = False
 
 class UniversalMessageModel(BaseModel):
     platform: str
@@ -9,4 +13,4 @@ class UniversalMessageModel(BaseModel):
     room_id: Optional[str] = None
     content: str
     raw_data: Optional[Any] = None
-    timestamp: datetime = datetime.now()
+    timestamp: datetime = Field(default_factory=datetime.now)
