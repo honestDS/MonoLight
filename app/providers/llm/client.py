@@ -1,40 +1,26 @@
-import aiohttp
-import json
-import logging
+import aiohttp, json, logging
 from app.models.profile import Profile
-
 logger = logging.getLogger(__name__)
 
 class LLMClient:
     @staticmethod
-    async def generate(profile: Profile, message: str):
+    async def generate(profile: Profile, messages: list):
         provider = profile.provider
-        headers = {
-            'Authorization': f'Bearer {provider.api_key}',
-            'Content-Type': 'application/json'
-        }
+        headers = {'Authorization': f'Bearer {provider.api_key}', 'Content-Type': 'application/json'}
         payload = {
             'model': profile.model_id,
-            'messages': [{'role': 'user', 'content': message}],
+            'messages': messages,
             'temperature': profile.temperature,
-            'max_tokens': profile.max_tokens,
             'stream': False
         }
-        
-        # 修复 URL 拼接中可能出现的多余斜杠问题
+        # 容错处理：若 max_tokens > 0 则带入参数，否则不传递该键以规避 API 报错
+        if profile.max_tokens and profile.max_tokens > 0:
+            payload['max_tokens'] = profile.max_tokens
+
         base_url = provider.base_url.rstrip('/')
         url = f'{base_url}/chat/completions'
-        
-        logger.info(f'Requesting LLM: {url}')
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as resp:
-                response_text = await resp.text()
-                if resp.status != 200:
-                    logger.error(f'LLM Error {resp.status}: {response_text}')
-                    raise Exception(f'LLM Provider Error: {resp.status} - {response_text}')
-                
-                try:
-                    return json.loads(response_text)
-                except json.JSONDecodeError:
-                    logger.error(f'Failed to decode JSON. Raw response: {response_text}')
-                    raise Exception(f'LLM returned non-JSON response: {response_text[:200]}')
+                txt = await resp.text()
+                if resp.status != 200: raise Exception(f'Error {resp.status}: {txt}')
+                return json.loads(txt)

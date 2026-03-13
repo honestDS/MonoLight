@@ -10,6 +10,7 @@ class ProfileBase(BaseModel):
     max_tokens: Optional[int] = 2048
     stream: Optional[bool] = False
     extra_config: Optional[Dict[str, Any]] = None
+    context_window_k: Optional[int] = 4
 
 class ProfileCreate(ProfileBase):
     pass
@@ -19,11 +20,13 @@ class ProfileUpdate(BaseModel):
     provider_id: Optional[int] = None
     model_id: Optional[str] = None
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    context_window_k: Optional[int] = None
     is_active: Optional[bool] = None
 
 class ProfileResponse(ProfileBase):
     id: int
     is_active: bool
-
     class Config:
         from_attributes = True
