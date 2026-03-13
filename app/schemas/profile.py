@@ -11,6 +11,7 @@ class ProfileBase(BaseModel):
     stream: Optional[bool] = False
     extra_config: Optional[Dict[str, Any]] = None
     context_window_k: Optional[int] = 4
+    prompt_id: Optional[int] = None
 
 class ProfileCreate(ProfileBase):
     pass
@@ -24,6 +25,7 @@ class ProfileUpdate(BaseModel):
     max_tokens: Optional[int] = None
     context_window_k: Optional[int] = None
     is_active: Optional[bool] = None
+    prompt_id: Optional[int] = None
 
 class ProfileResponse(ProfileBase):
     id: int

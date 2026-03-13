@@ -8,6 +8,7 @@ class Profile(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), unique=True, nullable=False)
     provider_id = Column(Integer, ForeignKey('model_providers.id'))
+    prompt_id = Column(Integer, ForeignKey('prompt_library.id'), nullable=True)
     model_id = Column(String(100), nullable=False)
     temperature = Column(Float, default=0.7)
     top_p = Column(Float, default=1.0)
@@ -18,3 +19,4 @@ class Profile(Base):
     context_window_k = Column(Integer, default=4)  # 会话上下文历史窗口大小（单位 K，控制输入长度）
 
     provider = relationship('ModelProvider')
+    prompt = relationship('PromptLibrary')
