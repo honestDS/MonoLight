@@ -1,23 +1,35 @@
-MonoLight
+# MonoLight
 
-一 项目简介
-MonoLight 是一个基于 Python 构建的现代化 AI 框架重构版本。它继承了 AstrBot 的核心理念，并专注于更高性能、更低耦合的架构设计。
+> A reconstructed high-performance AI framework.
 
-二 项目架构
-有关项目的详细技术架构、模块职责及数据流向，请参考文档：
-[ARCHITECTURE.md](./ARCHITECTURE.md)
+## 🛠 Project Overview
+MonoLight is a modern AI framework refactored in Python, focusing on performance, low coupling, and developer experience.
 
-三 环境要求
-1 Python 3.10+
-2 SQLite (默认数据库)
+## 🏗 Architecture
+For detailed technical specifications, module responsibilities, and data flow, please refer to:
+👉 **[ARCHITECTURE.md](./ARCHITECTURE.md)**
 
-四 快速开始
-1 安装依赖: pip install -r requirements.txt
-2 配置文件: 拷贝 .env.example 并修改为 .env
-3 启动项目: python main.py
+## 🚀 Getting Started
 
-五 协作开发
-本项目当前由沉及其邀请的协作者共同维护。
+### Prerequisites
+* Python 3.10 or higher
+* SQLite
 
-六 许可证
-Private Property - All Rights Reserved.
+### Installation
+```bash
+pip install -r requirements.txt
+```
+
+### Configuration
+Copy `.env.example` to `.env` and fill in your settings.
+
+### Run
+```bash
+python main.py
+```
+
+## 🤝 Collaboration
+This project is maintained by **沉** and invited collaborators.
+
+---
+© 2026 MonoLight Project. All Rights Reserved.
