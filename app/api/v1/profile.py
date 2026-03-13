@@ -4,9 +4,14 @@ from sqlalchemy import select, update
 from app.providers.database import get_db
 from app.models.profile import Profile
 from app.schemas.profile import ProfileCreate, ProfileResponse, ProfileUpdate
+from app.core.security import get_current_user
 from typing import List
 
-router = APIRouter(prefix='/profiles', tags=['Profile Management'])
+router = APIRouter(
+    prefix='/profiles', 
+    tags=['Profile Management'],
+    dependencies=[Depends(get_current_user)]
+)
 
 @router.post('/create', response_model=ProfileResponse)
 async def create_profile(profile: ProfileCreate, db: AsyncSession = Depends(get_db)):
