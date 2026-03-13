@@ -1,3 +1,6 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import json
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
@@ -10,7 +13,9 @@ class ContextManager:
         if not text: return 0
         chinese_count = len([c for c in text if '一' <= c <= '鿿'])
         other_count = len(text) - chinese_count
-        return int(chinese_count * 0.6 + other_count * 0.3)
+        c_coeff = float(os.getenv('TOKEN_COEFF_CHINESE', 0.6))
+        o_coeff = float(os.getenv('TOKEN_COEFF_OTHER', 0.3))
+        return int(chinese_count * c_coeff + other_count * o_coeff)
 
     @classmethod
     async def get_messages(cls, db: AsyncSession, session_id: str, profile: Profile, current_message: str):

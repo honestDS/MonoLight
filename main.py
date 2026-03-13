@@ -24,5 +24,8 @@ async def root():
     return {'status': 'MonoLight is running'}
 
 if __name__ == '__main__':
-    port = int(os.getenv('APP_PORT', 8000))
+    port_env = os.getenv('APP_PORT')
+    if not port_env:
+        raise ValueError('APP_PORT must be set in .env file')
+    port = int(port_env)
     uvicorn.run('main:app', host='0.0.0.0', port=port, reload=True)
