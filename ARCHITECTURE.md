@@ -1,40 +1,25 @@
 # MonoLight 架构说明
 
 ## 1. 核心设计理念
-MonoLight 是一个异步驱动、模块化、分层设计的 AI 交互框架。其目标是实现高性能的消息调度与高度可扩展的 Agent 能力。
+MonoLight 采用“后端管控、前端透明”的设计哲学。系统的核心是 **Profile 驱动架构**：通过在数据库中定义并激活具体的 Profile，系统会自动补全所有推理参数，将前端调用从繁琐的 API 细节中解放出来。
 
-## 2. 技术栈
-* **Web 框架:** [FastAPI](https://fastapi.tiangolo.com/)
-* **运行环境:** Python 3.10+
-* **数据库:** SQLAlchemy + SQLite
-* **异步 I/O:** 全流程异步处理链
+## 2. 核心模块职责
 
-## 3. 模块职责
+### 📂 `app/core/dispatcher.py`
+调度大脑。包含 `ChatDispatcher`，负责根据当前激活的 Profile 自动填充模型 ID、温度、最大 Token 等参数，实现业务逻辑的分发。
 
-### 📂 `main.py`
-程序入口。初始化 FastAPI 应用，挂载路由，并管理数据库引擎生命周期。
+### 📂 `app/models/profile.py` & `app/schemas/profile.py`
+配置管理中心。定义了模型配置的存储结构，支持多提供商、多模型配置的动态切换。
 
-### 📂 `app/core/`
-包含核心业务逻辑与安全控制。
-* **Dispatcher:** 消息调度核心。
-* **Security:** 基于 JWT 和 passlib 的鉴权与安全工具类。
-框架大脑。包含 **Dispatcher**（调度器），负责将接收到的消息路由到具体的处理器。
+### 📂 `app/api/v1/chat.py`
+精简对话接口。执行“文本入、标准响应出”的逻辑，完全屏蔽底层推理细节。
 
-### 📂 `app/adapters/`
-多平台统一接口。确保核心逻辑与具体的平台 API（如 QQ, 微信等）解耦。
+### 📂 `app/transformers/openai.py`
+标准化响应转换器。将后端的推理结果统一转化为 OpenAI 兼容格式，确保护接前端的通用性。
 
-### 📂 `app/transformers/`
-数据转换中心。处理平台特定负载与内部标准化消息格式之间的互转。
-
-### 📂 `app/models/` & `app/providers/`
-* **Models:** SQLAlchemy ORM 实体定义。
-* **Providers:** 基础设施逻辑，如数据库连接池和外部 API 客户端封装。
-
-### 📂 `app/api/` & `app/schemas/`
-* **API:** 包含模型提供商管理 (v1/providers) 与 认证 (v1/auth) 接口。
-* **Schemas:** 定义了统一响应格式 (UnifiedResponse) 与各模块的 Pydantic 模型。
-* **API:** 外部交互的 RESTful 接口。
-* **Schemas:** 用于请求/响应验证的 Pydantic 模型。
-
-## 4. 数据流向
-`外部消息` -> `适配器 (Adapters)` -> `转换器 (Transformers)` -> `调度中心 (Dispatcher)` -> `业务逻辑 / Agents` -> `响应输出`
+## 3. 数据处理流
+1. 前端发送极简 Body (`message` + `stream`)。
+2. `ChatDispatcher` 从数据库读取激活的 `Profile`。
+3. 结合用户消息与 Profile 参数构造完整的请求负载。
+4. 调用对应适配器获取响应。
+5. `Transformer` 统一输出格式。
