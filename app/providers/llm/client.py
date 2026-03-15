@@ -4,7 +4,7 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     @staticmethod
-    async def generate(profile: Profile, messages: list):
+    async def generate(profile: Profile, messages: list, tools: list = None, tool_choice: str = "auto"):
         provider = profile.provider
         headers = {'Authorization': f'Bearer {provider.api_key}', 'Content-Type': 'application/json'}
         payload = {
@@ -13,7 +13,11 @@ class LLMClient:
             'temperature': profile.temperature,
             'stream': False
         }
-        # 容错处理：若 max_tokens > 0 则带入参数，否则不传递该键以规避 API 报错
+        
+        if tools:
+            payload['tools'] = tools
+            payload['tool_choice'] = tool_choice
+
         if profile.max_tokens and profile.max_tokens > 0:
             payload['max_tokens'] = profile.max_tokens
 
