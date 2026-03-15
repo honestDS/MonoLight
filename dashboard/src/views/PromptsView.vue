@@ -1,0 +1,1 @@
+<template><div class="view-container"><h1>提示词库</h1></div></template>

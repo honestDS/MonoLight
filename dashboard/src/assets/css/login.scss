@@ -1,0 +1,125 @@
+.login-page {
+  height: calc(100vh - 40px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #f3f6f8;
+  padding: 20px;
+}
+
+.login-box {
+  width: 1000px;
+  height: 600px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+  display: flex;
+  overflow: hidden;
+}
+
+/* 左侧区域：深色调，与侧边栏呼应 */
+.login-left {
+  flex: 1.2;
+  background-color: #1e1e2d;
+  padding: 60px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  overflow: hidden;
+
+  .brand-logo {
+    color: #fff;
+    font-size: 32px;
+    font-weight: 800;
+    margin: 0;
+    letter-spacing: 2px;
+  }
+  .brand-desc {
+    color: rgba(255,255,255,0.6);
+    margin-top: 10px;
+    font-size: 16px;
+  }
+  
+  .illustration {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    .circle-bg {
+      width: 200px;
+      height: 200px;
+      background: linear-gradient(135deg, #2a2a40 0%, #1e1e2d 100%);
+      border-radius: 50%;
+      box-shadow: 20px 20px 60px #191926, -20px -20px 60px #232334;
+    }
+  }
+}
+
+/* 右侧区域：纯净白，类似 LinkedIn 布局 */
+.login-right {
+  flex: 1;
+  padding: 60px 80px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+
+  .form-header {
+    margin-bottom: 40px;
+    h2 { font-size: 28px; color: #1e1e2d; margin-bottom: 8px; }
+    p { color: #888; font-size: 14px; }
+  }
+
+  .login-form {
+    .custom-input .el-input__inner {
+      border: 1px solid transparent !important;
+      border-radius: 8px !important;
+      height: 48px !important;
+      transition: all 0.3s;
+    }
+    
+    .form-actions {
+      display: flex;
+      gap: 15px;
+      margin-top: 30px;
+      .btn-login {
+        flex: 1;
+        background-color: #1e1e2d !important;
+        border: none !important;
+        height: 48px;
+        border-radius: 24px !important;
+        font-weight: bold;
+      }
+      .btn-signup {
+        flex: 1;
+        height: 48px;
+        border-radius: 24px !important;
+        border: 1px solid #1e1e2d !important;
+        color: #1e1e2d !important;
+      }
+    }
+
+    .form-footer {
+      margin-top: 20px;
+      .forgot-pwd { color: #1e1e2d; text-decoration: none; font-size: 14px; font-weight: 500; }
+    }
+  }
+
+  .login-copyright {
+    position: absolute;
+    bottom: 30px;
+    left: 80px;
+    right: 80px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #ccc;
+    .footer-links a { color: #ccc; text-decoration: none; margin-left: 10px; }
+  }
+}
+
+@media (max-width: 900px) {
+  .login-left { display: none; }
+  .login-box { width: 450px; }
+}

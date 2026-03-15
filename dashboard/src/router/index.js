@@ -1,0 +1,25 @@
+import { createRouter, createWebHashHistory } from 'vue-router'
+
+const routes = [
+  { path: '/login', component: () => import('../views/LoginView.vue') },
+  { path: '/', component: () => import('../views/ChatView.vue') },
+  { path: '/profiles', component: () => import('../views/ProfilesView.vue') },
+  { path: '/prompts', component: () => import('../views/PromptsView.vue') },
+  { path: '/providers', component: () => import('../views/ProvidersView.vue') }
+]
+
+const router = createRouter({
+  history: createWebHashHistory(),
+  routes
+})
+
+router.beforeEach((to, from, next) => {
+  const token = localStorage.getItem('token')
+  if (to.path !== '/login' && !token) {
+    next('/login')
+  } else {
+    next()
+  }
+})
+
+export default router

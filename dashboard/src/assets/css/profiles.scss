@@ -1,0 +1,21 @@
+
+.profiles-container { padding: 10px; }
+.header-actions { margin-bottom: 20px; display: flex; justify-content: flex-end; }
+.profile-card { margin-bottom: 20px; }
+.active-tag { font-weight: bold; }
+
+
+/* 提升组件整体视觉大小 */
+.profiles-container {
+  padding: 30px;
+}
+.el-table {
+  font-size: 15px !important;
+}
+.el-button--default {
+  padding: 10px 20px !important;
+}
+.el-form-item__label {
+  font-size: 15px !important;
+  font-weight: 500;
+}
