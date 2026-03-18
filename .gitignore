@@ -1,3 +1,4 @@
 *.bak
 __pycache__/
 monobot.db
+monobot1.db
