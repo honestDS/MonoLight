@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 T = TypeVar('T')
 
-class UnifiedResponse(BaseModel, Generic[T]):
+class StandardResponse(BaseModel, Generic[T]):
     code: int = 200
     message: str = '成功'
     data: Optional[T] = None

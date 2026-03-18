@@ -14,7 +14,7 @@ request.interceptors.request.use(config => {
 
 request.interceptors.response.use(
   res => {
-    // 自动解包 UnifiedResponse 结构
+    // 自动解包 StandardResponse 结构
     const { code, data, message } = res.data;
     if (code !== undefined && code !== 200) {
       // 业务报错，直接抛出，让 catch 块处理

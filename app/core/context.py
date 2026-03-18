@@ -18,9 +18,9 @@ class ContextManager:
         return int(chinese_count * c_coeff + other_count * o_coeff)
 
     @classmethod
-    async def get_messages(cls, db: AsyncSession, session_id: str, profile: Profile, current_message: str):
+    async def get_messages(cls, db: AsyncSession, session_id: str, uid: str, profile: Profile, current_message: str):
         limit_tokens = profile.context_window_k * 1024 * 0.8
-        stmt = select(Message).where(Message.session_id == session_id).order_by(desc(Message.created_at)).limit(100)
+        stmt = select(Message).where(Message.session_id == session_id, Message.uid == uid).order_by(desc(Message.created_at), desc(Message.id)).limit(100)
         result = await db.execute(stmt)
         history = result.scalars().all()
 

@@ -6,10 +6,11 @@ MonoLight 采用后端管控、前端透明的设计哲学。系统核心由 Pro
 ## 2. 目录级分层架构
 
 ### 2.1 交互入口层 (Entry Layer)
-- **app/api/v1/**: 标准化业务接口。集成了 `UnifiedResponse` 响应包装器。
+- **app/api/v1/**: 标准化业务接口。集成了 `StandardResponse` 响应包装器。
 - **dashboard/**: 前端工程。基于 Vue 3 组合式 API 开发，实现了高度互动的配置管理界面。
 
 ### 2.2 核心控制层 (Control Layer)
+- **app/core/exceptions.py**: 异常基座。定义了全系统的业务异常类，实现了逻辑错误与 HTTP 响应的解耦。
 - **app/core/dispatcher.py**: 调度中心。支持 Agent 循环调用机制，负责 Profile 组装、工具分发及数据持久化。
 - **app/core/messages.py**: 业务文案中心。收口全系统成功/失败/异常提示，确保信息的一致性。
 - **app/core/security.py**: 安全层。负责 JWT 鉴权、CORS 策略及敏感操作拦截。
@@ -24,7 +25,7 @@ MonoLight 采用后端管控、前端透明的设计哲学。系统核心由 Pro
 - **app/schemas/**: Pydantic 模型。不仅负责类型校验，更集成了对模型采样参数的物理边界约束。
 
 ## 3. 标准响应协议
-系统全量采用 `UnifiedResponse` 结构：
+系统全量采用 `StandardResponse` 结构：
 - `code`: 状态码 (200, 4xx, 5xx)
 - `data`: 业务负载
 - `message`: 提示文案（由 core.messages 定义）

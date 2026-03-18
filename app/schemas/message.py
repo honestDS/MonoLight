@@ -4,6 +4,7 @@ from datetime import datetime
 
 class ChatCompletionRequest(BaseModel):
     message: str
+    session_id: Optional[str] = Field(None, description="会话唯一标识，若不传则自动生成")
     stream: Optional[bool] = False
 
 class UniversalMessageModel(BaseModel):

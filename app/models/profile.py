@@ -7,6 +7,7 @@ class Profile(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), unique=True, nullable=False)
+    uid = Column(Integer, ForeignKey('users.id'), nullable=True)
     provider_id = Column(Integer, ForeignKey('model_providers.id'))
     prompt_id = Column(Integer, ForeignKey('prompt_library.id'), nullable=True)
     model_id = Column(String(100), nullable=False)
@@ -20,3 +21,4 @@ class Profile(Base):
 
     provider = relationship('ModelProvider')
     prompt = relationship('PromptLibrary')
+    user = relationship('User', back_populates='profiles')

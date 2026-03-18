@@ -1,4 +1,4 @@
-from app.core import messages
+from app.core import constants
 import os
 import uvicorn
 from app.api.v1.providers import router as provider_router
@@ -6,12 +6,13 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
+from app.api.v1.users import router as user_router
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from app.schemas.response import UnifiedResponse
+from app.schemas.response import StandardResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,28 +28,28 @@ from sqlalchemy.exc import SQLAlchemyError
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     return JSONResponse(
         status_code=500,
-        content=UnifiedResponse.error(code=500, message=messages.ERR_DB_OPERATION_FAILED).model_dump()
+        content=StandardResponse.error(code=500, message=constants.ERR_DB_OPERATION_FAILED).model_dump()
     )
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content=UnifiedResponse.error(code=exc.status_code, message=(exc.detail if isinstance(exc.detail, str) else str(exc.detail))).model_dump()
+        content=StandardResponse.error(code=exc.status_code, message=(exc.detail if isinstance(exc.detail, str) else str(exc.detail))).model_dump()
     )
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
-        content=UnifiedResponse.error(code=422, message=messages.ERR_VALIDATION_FAILED + ": " + str(exc.errors())).model_dump()
+        content=StandardResponse.error(code=422, message=constants.ERR_VALIDATION_FAILED + ": " + str(exc.errors())).model_dump()
     )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
-        content=UnifiedResponse.error(code=500, message=messages.ERR_INTERNAL_SERVER_ERROR + ": " + str(exc)).model_dump()
+        content=StandardResponse.error(code=500, message=constants.ERR_INTERNAL_SERVER_ERROR + ": " + str(exc)).model_dump()
     )
 
 
@@ -64,6 +65,7 @@ app.include_router(auth_router, prefix='/api/v1/auth', tags=['auth'])
 app.include_router(chat_router, prefix='/api/v1')
 app.include_router(profile_router, prefix='/api/v1')
 app.include_router(prompt_router, prefix='/api/v1')
+app.include_router(user_router, prefix='/api/v1/admin', tags=['user_management'])
 
 @app.on_event('startup')
 async def startup():

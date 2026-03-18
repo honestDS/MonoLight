@@ -8,9 +8,9 @@ from pathlib import Path
 BLACKLIST = ["rm -rf"]
 
 class ShellExecutor:
-    def __init__(self, project_root: str, user_id: str = "test"):
+    def __init__(self, project_root: str, uid: str = "test"):
         self.project_root = Path(project_root)
-        # TODO: 当用户系统上线后，应取消下面 test 目录的硬编码，改回使用 f"temp_{user_id}"
+        # TODO: 当用户系统上线后，应取消下面 test 目录的硬编码，改回使用 f"temp_{uid}"
         # 目前由于用户系统尚未对接，统一使用 test 目录进行开发调试
         self.user_temp_dir = self.project_root / "temp" / "test" 
         self._ensure_temp_dir()

@@ -7,6 +7,7 @@ class Message(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String(100), index=True)
+    uid = Column(String(100), index=True)
     role = Column(String(20))
     content = Column(String)
     profile_id = Column(Integer, ForeignKey('agent_profiles.id'))
