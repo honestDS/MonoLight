@@ -3,13 +3,13 @@ from app.providers.database import Base
 from sqlalchemy.orm import relationship
 
 class Profile(Base):
-    __tablename__ = 'agent_profiles'
+    __tablename__ = 'profile'
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), unique=True, nullable=False)
-    uid = Column(Integer, ForeignKey('users.id'), nullable=True)
-    provider_id = Column(Integer, ForeignKey('model_providers.id'))
-    prompt_id = Column(Integer, ForeignKey('prompt_library.id'), nullable=True)
+    uid = Column(Integer, ForeignKey('user.id'), nullable=True)
+    provider_id = Column(Integer, ForeignKey('provider.id'))
+    prompt_id = Column(Integer, ForeignKey('prompt.id'), nullable=True)
     model_id = Column(String(100), nullable=False)
     temperature = Column(Float, default=0.7)
     top_p = Column(Float, default=1.0)

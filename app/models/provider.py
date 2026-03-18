@@ -8,7 +8,7 @@ class ProviderType(str, enum.Enum):
     GEMINI = 'GEMINI'
 
 class ModelProvider(Base):
-    __tablename__ = 'model_providers'
+    __tablename__ = 'provider'
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(unique=True, index=True)

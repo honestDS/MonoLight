@@ -4,11 +4,11 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 
 class PromptLibrary(Base):
-    __tablename__ = 'prompt_library'
+    __tablename__ = 'prompt'
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), unique=True, nullable=False)
-    uid = Column(Integer, ForeignKey('users.id'), nullable=True)
+    uid = Column(Integer, ForeignKey('user.id'), nullable=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -4,7 +4,7 @@ from app.providers.database import Base
 from sqlalchemy.orm import relationship
 
 class User(Base):
-    __tablename__ = 'users'
+    __tablename__ = 'user'
 
     id = Column(Integer, primary_key=True, index=True)
     uid = Column(String(50), unique=True, index=True, nullable=False) # 外部平台关联 ID

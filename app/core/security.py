@@ -3,7 +3,7 @@ from app.models.user import User
 from app.providers.database import AsyncSessionLocal, engine
 import os
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from jose import jwt
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -38,7 +38,7 @@ def get_password_hash(password: str) -> str:
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES', 10080)))
+    expire = datetime.now(UTC) + timedelta(minutes=int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES', 10080)))
     to_encode.update({'exp': expire})
     encoded_jwt = jwt.encode(to_encode, os.getenv('JWT_SECRET_KEY'), algorithm=os.getenv('JWT_ALGORITHM'))
     return encoded_jwt
