@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field, field_validator
 from typing import Optional, Dict, Any
 
 class ProfileBase(BaseModel):
@@ -32,5 +32,4 @@ class ProfileResponse(ProfileBase):
     id: int
     is_active: bool
     provider_name: Optional[str] = None
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

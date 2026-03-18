@@ -26,3 +26,20 @@
 
 ## 5. 开源协议
 本项目采用 AGPL-3.0 协议开源。
+## 自动化测试
+
+项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
+
+### 执行测试命令
+
+在项目根目录下执行以下命令运行全量测试：
+
+```bash
+PYTHONPATH=. pytest tests/
+```
+
+### 测试目录说明
+
+1. tests/unit: 核心逻辑单元测试
+2. tests/initialization: 数据库初始化与迁移逻辑测试
+3. tests/integration: API 异步接口集成测试

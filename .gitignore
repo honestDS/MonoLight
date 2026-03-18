@@ -1,4 +1,6 @@
 *.bak
+*.log
+.pytest_cache/
 __pycache__/
 monobot.db
 monobot1.db

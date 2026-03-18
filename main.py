@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from app.core import constants
 import os
 import uvicorn
@@ -19,7 +20,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.providers.database import engine, Base, AsyncSessionLocal
 from app.models import provider
 
-app = FastAPI(title='Monobot API', version='1.0.0')
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时逻辑
+    # 初始化默认 Profile
+    from sqlalchemy import select
+    from app.models.profile import Profile
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with AsyncSessionLocal() as session:
+        check = await session.execute(select(Profile).where(Profile.name == 'default'))
+        if not check.scalars().first():
+            default_profile = Profile(
+                name='default',
+                provider_id=-1,
+                model_id='gemini-3-flash-preview',
+                temperature=0.7,
+                top_p=1.0,
+                max_tokens=0,
+                stream=False,
+                extra_config={'additionalProp1': {}},
+                context_window_k=1024,
+                is_active=True
+            )
+            session.add(default_profile)
+            await session.commit()
+    yield
+app = FastAPI(lifespan=lifespan, title='Monobot API', version='1.0.0')
 
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -66,34 +94,6 @@ app.include_router(chat_router, prefix='/api/v1')
 app.include_router(profile_router, prefix='/api/v1')
 app.include_router(prompt_router, prefix='/api/v1')
 app.include_router(user_router, prefix='/api/v1/admin', tags=['user_management'])
-
-@app.on_event('startup')
-async def startup():
-
-    # 初始化默认 Profile
-    from sqlalchemy import select
-    from app.models.profile import Profile
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    async with AsyncSessionLocal() as session:
-        check = await session.execute(select(Profile).where(Profile.name == 'default'))
-        if not check.scalars().first():
-            default_profile = Profile(
-                name='default',
-                provider_id=-1,
-                model_id='gemini-3-flash-preview',
-                temperature=0.7,
-                top_p=1.0,
-                max_tokens=0,
-                stream=False,
-                extra_config={'additionalProp1': {}},
-                context_window_k=1024,
-                is_active=True
-            )
-            session.add(default_profile)
-            await session.commit()
-
 
 @app.get('/')
 async def root():

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import ConfigDict, BaseModel
 from typing import Optional
 from app.models.provider import ProviderType
 
@@ -26,5 +26,4 @@ class ProviderRead(BaseModel):
     api_key: str
     base_url: Optional[str] = None
     is_active: bool = True
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

@@ -10,3 +10,7 @@ passlib[bcrypt]
 python-jose[cryptography]
 aiohttp
 python-multipart
+
+pytest
+pytest-asyncio
+httpx
