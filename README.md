@@ -22,6 +22,7 @@
 - **全异步架构**: 基于 FastAPI (aiohttp) 与 SQLAlchemy 的高性能并发处理。
 
 ## 2. 交互入口
+- **API 详细文档 (Markdown)**: [API.md](./API.md)
 - **仪表盘 (Dashboard)**: 基于 Vue 3 + Element Plus 的现代管理后台，提供极致流畅的配置与交互体验。
 - **API 文档**: 内置 Swagger (/docs)，支持标准的鉴权与业务接口调用。
 
