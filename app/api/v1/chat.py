@@ -24,7 +24,7 @@ async def chat_completions(
     # 异步等待调度器返回真实推理结果
     session_id = request.session_id or str(uuid.uuid4())
     llm_response = await ChatDispatcher.dispatch(
-        db, request.message, uid=current_user["uid"], session_id=session_id
+        db, request.message, uid=getattr(current_user, "uid", None), session_id=session_id
     )
     # 格式化输出
     return OpenAITransformer.from_standard(llm_response)
@@ -35,8 +35,8 @@ async def get_user_sessions(
     db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     # 查询会话列表：普通用户仅限自己，超级管理员可查看全部
-    uid = current_user["uid"]
-    is_admin = current_user.get("is_superuser", False)
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
 
     stmt = select(
         Message.session_id,
@@ -77,8 +77,8 @@ async def delete_session(
     current_user: dict = Depends(get_current_user),
 ):
     # 删除会话：普通用户仅限自己，超级管理员可跨用户删除
-    uid = current_user["uid"]
-    is_admin = current_user.get("is_superuser", False)
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
 
     stmt = delete(Message).where(Message.session_id == session_id)
     if not is_admin:

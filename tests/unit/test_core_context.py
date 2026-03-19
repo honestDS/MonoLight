@@ -24,7 +24,8 @@ def test_estimate_tokens():
 
 @pytest.mark.asyncio
 async def test_get_messages_basic():
-    db = AsyncMock()
+    db = MagicMock()
+    db.execute = AsyncMock()
     profile = MagicMock(spec=Profile)
     profile.context_window_k = 4
     
@@ -50,7 +51,8 @@ async def test_get_messages_basic():
 
 @pytest.mark.asyncio
 async def test_get_messages_pop_assistant():
-    db = AsyncMock()
+    db = MagicMock()
+    db.execute = AsyncMock()
     profile = MagicMock(spec=Profile)
     profile.context_window_k = 4
     
@@ -70,7 +72,8 @@ async def test_get_messages_pop_assistant():
 
 @pytest.mark.asyncio
 async def test_get_messages_token_limit():
-    db = AsyncMock()
+    db = MagicMock()
+    db.execute = AsyncMock()
     profile = MagicMock(spec=Profile)
     profile.context_window_k = 0.1 # Very small window (~80 tokens)
     
@@ -88,7 +91,8 @@ async def test_get_messages_token_limit():
 
 @pytest.mark.asyncio
 async def test_get_messages_json_parsing():
-    db = AsyncMock()
+    db = MagicMock()
+    db.execute = AsyncMock()
     profile = MagicMock(spec=Profile)
     profile.context_window_k = 4
     

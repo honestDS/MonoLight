@@ -13,7 +13,7 @@ async def test_generate_success():
     
     mock_resp = MagicMock()
     mock_resp.status = 200
-    mock_resp.text = AsyncMock(return_value=mock_response_json)
+    mock_resp.text = AsyncMock(side_effect=lambda: mock_response_json)
     
     mock_ctx = MagicMock()
     mock_ctx.__aenter__.return_value = mock_resp
@@ -31,7 +31,7 @@ async def test_generate_success():
 async def test_generate_http_error():
     mock_resp = MagicMock()
     mock_resp.status = 401
-    mock_resp.text = AsyncMock(return_value="Unauthorized")
+    mock_resp.text = AsyncMock(side_effect=lambda: "Unauthorized")
     
     mock_ctx = MagicMock()
     mock_ctx.__aenter__.return_value = mock_resp

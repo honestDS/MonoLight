@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.schemas.response import StandardResponse
+from app.core.exceptions import BaseBusinessException, LLMException
 from sqlalchemy.exc import SQLAlchemyError
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -82,6 +83,49 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         ).model_dump(),
     )
 
+
+
+@app.exception_handler(BaseBusinessException)
+async def business_exception_handler(request: Request, exc: BaseBusinessException):
+    if isinstance(exc, LLMException):
+        import time
+        ts = int(time.time())
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": f"chatcmpl-err-{ts}",
+                "object": "chat.completion",
+                "created": ts,
+                "model": "monobot-v1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": exc.message
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            }
+        )
+    return JSONResponse(
+        status_code=exc.code,
+        content=StandardResponse.error(
+            code=exc.code, message=exc.message
+        ).model_dump(),
+    )
+    return JSONResponse(
+        status_code=exc.code,
+        content=StandardResponse.error(
+            code=exc.code, message=exc.message
+        ).model_dump(),
+    )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

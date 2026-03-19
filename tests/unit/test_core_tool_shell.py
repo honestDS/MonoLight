@@ -10,7 +10,9 @@ def executor():
 
 @pytest.mark.asyncio
 async def test_shell_execute_success(executor):
-    mock_process = AsyncMock()
+    mock_process = MagicMock()
+    mock_process.communicate = AsyncMock()
+    mock_process.wait = AsyncMock()
     mock_process.communicate.return_value = (b"output", b"")
     mock_process.returncode = 0
 
@@ -30,7 +32,9 @@ async def test_shell_execute_blacklist(executor):
 
 @pytest.mark.asyncio
 async def test_shell_execute_timeout(executor):
-    mock_process = AsyncMock()
+    mock_process = MagicMock()
+    mock_process.communicate = AsyncMock()
+    mock_process.wait = AsyncMock()
     mock_process.returncode = None
     mock_process.kill = MagicMock()
 

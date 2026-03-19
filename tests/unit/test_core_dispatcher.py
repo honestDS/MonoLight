@@ -6,12 +6,14 @@ from app.models.profile import Profile
 from app.models.provider import ModelProvider
 from app.models.prompt import PromptLibrary
 from app.core import constants
+from app.core.exceptions import LLMException
 
 @pytest.fixture
 def mock_db():
-    db = AsyncMock()
+    db = MagicMock()
     db.add = MagicMock()
     db.commit = AsyncMock()
+    db.execute = AsyncMock()
     mock_result = MagicMock()
     mock_scalars = MagicMock()
     mock_result.scalars.return_value = mock_scalars
@@ -35,8 +37,9 @@ def create_mock_profile():
 async def test_dispatch_no_active_profile(mock_db):
     db, mock_scalars = mock_db
     mock_scalars.first.return_value = None
-    result = await ChatDispatcher.dispatch(db, "hi", "u1")
-    assert "No active profile found" in result["choices"][0]["message"]["content"]
+    with pytest.raises(LLMException) as excinfo:
+        await ChatDispatcher.dispatch(db, "hi", "u1")
+    assert "No active profile found" in str(excinfo.value)
 
 @pytest.mark.asyncio
 async def test_dispatch_no_provider(mock_db):
@@ -44,9 +47,9 @@ async def test_dispatch_no_provider(mock_db):
     mock_profile = create_mock_profile()
     mock_profile.provider = None 
     mock_scalars.first.return_value = mock_profile
-    result = await ChatDispatcher.dispatch(db, "hi", "u1")
-    assert result["error"] is True
-    assert constants.ERR_PROFILE_PROVIDER_MISMATCH in result["choices"][0]["message"]["content"]
+    with pytest.raises(LLMException) as excinfo:
+        await ChatDispatcher.dispatch(db, "hi", "u1")
+    assert constants.ERR_PROFILE_PROVIDER_MISMATCH in str(excinfo.value)
 
 @pytest.mark.asyncio
 async def test_dispatch_with_system_prompt_injection(mock_db):
@@ -130,8 +133,9 @@ async def test_dispatch_llm_api_key_none_error(mock_db):
     mock_scalars.first.return_value = mock_profile
     
     with patch("app.core.context.ContextManager.get_messages", AsyncMock(return_value=[])):
-        result = await ChatDispatcher.dispatch(db, "hi", "u1")
-        assert constants.ERR_LLM_PROVIDER_NOT_CONFIGURED in result["choices"][0]["message"]["content"]
+        with pytest.raises(LLMException) as excinfo:
+            await ChatDispatcher.dispatch(db, "hi", "u1")
+        assert constants.ERR_LLM_PROVIDER_NOT_CONFIGURED in str(excinfo.value)
 
 @pytest.mark.asyncio
 async def test_dispatch_max_turns_limit(mock_db):

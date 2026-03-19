@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.core import constants
+from app.core.exceptions import LLMException, ServerException
 
 from app.models.profile import Profile
 from app.models.message import Message
@@ -29,15 +30,13 @@ class ChatDispatcher:
             )
             profile = (await db.execute(stmt)).scalars().first()
             if not profile:
-                raise Exception(
-                    "No active profile found. Please configure and activate a profile first."
-                )
+                raise LLMException(message="No active profile found. Please configure and activate a profile first.")
 
             # 强一致性校验：确保 Provider 关系已加载且存在
             if not profile.provider:
                 from app.core import constants as app_constants
 
-                raise Exception(app_constants.ERR_PROFILE_PROVIDER_MISMATCH)
+                raise LLMException(message=app_constants.ERR_PROFILE_PROVIDER_MISMATCH)
 
             # 2. 获取上下文
             messages = await ContextManager.get_messages(
@@ -87,8 +86,8 @@ class ChatDispatcher:
                 except Exception as e:
                     error_msg = str(e)
                     if "'NoneType' object has no attribute 'api_key'" in error_msg:
-                        raise Exception(constants.ERR_LLM_PROVIDER_NOT_CONFIGURED)
-                    raise Exception(f"大模型接口调用失败: {error_msg}")
+                        raise LLMException(message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED)
+                    raise LLMException(message=f"大模型接口调用失败: {error_msg}")
 
                 message_obj = response["choices"][0]["message"]
                 ai_content = message_obj.get("content") or ""
@@ -155,8 +154,7 @@ class ChatDispatcher:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Dispatcher Error: {error_msg}", exc_info=True)
-            # 仅返回错误内容字典，由 Transformer 统一负责 OpenAI 协议包装
-            return {
-                "choices": [{"message": {"role": "assistant", "content": error_msg}}],
-                "error": True,
-            }
+            if isinstance(e, (LLMException, ServerException)):
+                raise e
+            # 将原始异常消息透传给 ServerException
+            raise ServerException(message=error_msg)

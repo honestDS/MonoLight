@@ -19,8 +19,8 @@ router = APIRouter(
 )
 
 
-async def check_admin_privilege(current_user: dict = Depends(get_current_user)):
-    if not current_user.get("is_superuser"):
+async def check_admin_privilege(current_user=Depends(get_current_user)):
+    if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 

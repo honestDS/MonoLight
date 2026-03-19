@@ -8,8 +8,8 @@ from app.schemas.response import StandardResponse
 from app.core.security import get_current_user
 
 
-async def check_admin_privilege(current_user: dict = Depends(get_current_user)):
-    if not current_user.get("is_superuser"):
+async def check_admin_privilege(current_user=Depends(get_current_user)):
+    if not getattr(current_user, "is_superuser", False):
         from app.core.exceptions import ForbiddenException
         from app.core import constants
 
