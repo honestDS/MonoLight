@@ -12,7 +12,6 @@ from app.transformers.openai import OpenAITransformer
 from sqlalchemy import delete
 
 
-
 router = APIRouter(
     prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)]
 )
@@ -27,7 +26,10 @@ async def chat_completions(
     # 异步等待调度器返回真实推理结果
     session_id = request.session_id or str(uuid.uuid4())
     llm_response = await ChatDispatcher.dispatch(
-        db, request.message, uid=getattr(current_user, "uid", None), session_id=session_id
+        db,
+        request.message,
+        uid=getattr(current_user, "uid", None),
+        session_id=session_id,
     )
     # 格式化输出
     return OpenAITransformer.from_standard(llm_response)
@@ -68,8 +70,6 @@ async def get_user_sessions(
     ]
 
     return StandardResponse.success(data=data, message="会话列表获取成功")
-
-
 
 
 @router.post("/sessions/delete")

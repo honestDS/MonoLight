@@ -10,7 +10,6 @@ from app.core import constants
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 
 
-
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         from app.core import constants
@@ -18,7 +17,6 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
 
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
-
 
 
 router = APIRouter(

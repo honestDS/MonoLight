@@ -52,9 +52,13 @@ class ContextManager:
 
             try:
                 # 只有当数据库 role 为 tool 或是包含 tool_calls 的报文时，才需要恢复为报文结构
-                if msg.role == "tool" or (msg.role == "assistant" and "tool_calls" in content_str):
+                if msg.role == "tool" or (
+                    msg.role == "assistant" and "tool_calls" in content_str
+                ):
                     parsed = json.loads(content_str)
-                    if isinstance(parsed, dict) and (parsed.get("role") == msg.role or "tool_calls" in parsed):
+                    if isinstance(parsed, dict) and (
+                        parsed.get("role") == msg.role or "tool_calls" in parsed
+                    ):
                         msg_item = parsed
                     else:
                         msg_item = {"role": msg.role, "content": content_str}

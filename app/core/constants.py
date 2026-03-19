@@ -59,7 +59,9 @@ ERR_PROMPT_NAME_EXISTS = "提示词模板名称已存在"
 
 ERR_LLM_PROVIDER_NOT_CONFIGURED = "未检测到有效的模型供应商配置或 API Key。请在管理后台检查并激活一个包含有效密钥的厂商 Profile。"
 
-ERR_PROFILE_PROVIDER_MISMATCH = "当前激活的配置未关联有效的模型供应商或供应商已失效。请重新编辑并保存配置。"
+ERR_PROFILE_PROVIDER_MISMATCH = (
+    "当前激活的配置未关联有效的模型供应商或供应商已失效。请重新编辑并保存配置。"
+)
 
 # LLM 业务错误
 ERR_LLM_CONNECTION_FAILED = "连接大模型供应商网关失败，请检查网络或代理配置"

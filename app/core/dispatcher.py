@@ -31,7 +31,9 @@ class ChatDispatcher:
             )
             profile = (await db.execute(stmt)).scalars().first()
             if not profile:
-                raise LLMException(message="No active profile found. Please configure and activate a profile first.")
+                raise LLMException(
+                    message="No active profile found. Please configure and activate a profile first."
+                )
 
             # 强一致性校验：确保 Provider 关系已加载且存在
             if not profile.provider:
@@ -87,7 +89,9 @@ class ChatDispatcher:
                 except Exception as e:
                     error_msg = str(e)
                     if "'NoneType' object has no attribute 'api_key'" in error_msg:
-                        raise LLMException(message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED)
+                        raise LLMException(
+                            message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED
+                        )
                     raise LLMException(message=f"大模型接口调用失败: {error_msg}")
 
                 message_obj = response["choices"][0]["message"]

@@ -42,8 +42,6 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
     )
 
 
-
-
 class ResetAdminRequest(BaseModel):
     reset_token: str
 

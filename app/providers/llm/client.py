@@ -46,7 +46,9 @@ class LLMClient:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                        raise LLMException(
+                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
+                        )
                     return json.loads(txt)
         except aiohttp.ClientConnectorError as e:
             logger.error(f"LLM Connection Error: {str(e)}")

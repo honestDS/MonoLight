@@ -85,11 +85,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-
 @app.exception_handler(BaseBusinessException)
 async def business_exception_handler(request: Request, exc: BaseBusinessException):
     if isinstance(exc, LLMException):
         import time
+
         ts = int(time.time())
         return JSONResponse(
             status_code=200,
@@ -101,32 +101,26 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
                 "choices": [
                     {
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": exc.message
-                        },
-                        "finish_reason": "stop"
+                        "message": {"role": "assistant", "content": exc.message},
+                        "finish_reason": "stop",
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
-                    "total_tokens": 0
-                }
-            }
+                    "total_tokens": 0,
+                },
+            },
         )
     return JSONResponse(
         status_code=exc.code,
-        content=StandardResponse.error(
-            code=exc.code, message=exc.message
-        ).model_dump(),
+        content=StandardResponse.error(code=exc.code, message=exc.message).model_dump(),
     )
     return JSONResponse(
         status_code=exc.code,
-        content=StandardResponse.error(
-            code=exc.code, message=exc.message
-        ).model_dump(),
+        content=StandardResponse.error(code=exc.code, message=exc.message).model_dump(),
     )
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

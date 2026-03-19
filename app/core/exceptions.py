@@ -33,6 +33,7 @@ class ServerException(BaseBusinessException):
     def __init__(self, message: str = "系统内部错误", code: int = 500):
         super().__init__(code=code, message=message)
 
+
 class LLMException(BaseBusinessException):
-    def __init__(self, message: str = '大模型调用异常', code: int = 502):
+    def __init__(self, message: str = "大模型调用异常", code: int = 502):
         super().__init__(code=code, message=message)

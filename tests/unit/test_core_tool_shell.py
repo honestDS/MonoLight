@@ -11,6 +11,7 @@ from app.core.tools.shell import ShellExecutor
 def executor():
     return ShellExecutor(project_root="/tmp/monobot_test")
 
+
 @pytest.mark.asyncio
 async def test_shell_execute_success(executor):
     mock_process = MagicMock()
@@ -26,12 +27,14 @@ async def test_shell_execute_success(executor):
         assert result["stdout"] == "output"
         assert result["stderr"] == ""
 
+
 @pytest.mark.asyncio
 async def test_shell_execute_blacklist(executor):
     result_json = await executor.execute("rm -rf /")
     result = json.loads(result_json)
     assert result["exit_code"] == -1
     assert "Security Alert" in result["error"]
+
 
 @pytest.mark.asyncio
 async def test_shell_execute_timeout(executor):
@@ -49,10 +52,12 @@ async def test_shell_execute_timeout(executor):
             assert "timed out" in result["error"]
             mock_process.kill.assert_called_once()
 
+
 @pytest.mark.asyncio
 async def test_shell_execute_exception(executor):
-    with patch("asyncio.create_subprocess_shell", side_effect=Exception("Unexpected error")):
+    with patch(
+        "asyncio.create_subprocess_shell", side_effect=Exception("Unexpected error")
+    ):
         result_json = await executor.execute("ls")
         result = json.loads(result_json)
         assert "Unexpected error" in result["error"]
-
