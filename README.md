@@ -9,6 +9,7 @@
 > 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
 > 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
 > 3. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
+> 4. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
 
 ## 1. 核心特性
 - **自主 Agent 架构**: 内置 Dispatcher 循环机制，支持 AI 自主调用工具链完成复杂逻辑。

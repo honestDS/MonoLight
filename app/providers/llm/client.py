@@ -1,6 +1,8 @@
 import aiohttp
 import json
 import logging
+from app.core import constants
+from app.core.exceptions import LLMException
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +39,18 @@ class LLMClient:
 
         url = f"{base_url.rstrip('/')}/chat/completions"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as resp:
-                txt = await resp.text()
-                if resp.status != 200:
-                    raise Exception(f"LLM API Error {resp.status}: {txt}")
-                return json.loads(txt)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    txt = await resp.text()
+                    if resp.status != 200:
+                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                    return json.loads(txt)
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"LLM Connection Error: {str(e)}")
+            raise LLMException(f"{constants.ERR_LLM_CONNECTION_FAILED}: {str(e)}")
+        except LLMException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"LLM Unexpected Error: {str(e)}")
+            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: {str(e)}")

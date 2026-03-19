@@ -1,5 +1,5 @@
 import os
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.providers.database import get_db
@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.post("/login", response_model=StandardResponse)
-async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(get_db)):
     # 移除环境变量直接登录逻辑，管理员需在数据库中真实存在
 
     query = select(User).where(User.username == request.username)
@@ -49,7 +49,7 @@ class ResetAdminRequest(BaseModel):
 
 @router.post("/reset_admin")
 async def reset_admin_account(
-    request: ResetAdminRequest, db: AsyncSession = Depends(get_db)
+    request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)
 ):
     env_reset_token = os.getenv("ADMIN_RESET_TOKEN")
     if not env_reset_token or request.reset_token != env_reset_token:

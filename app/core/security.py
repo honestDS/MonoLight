@@ -1,75 +1,58 @@
-from sqlalchemy import select
-from app.models.user import User
-from app.providers.database import AsyncSessionLocal
-import os
+from datetime import datetime, timedelta
+from typing import Optional, Any
+from jose import jwt, JWTError
 import bcrypt
-from datetime import datetime, timedelta, UTC
-from jose import jwt
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.security import OAuth2PasswordBearer
+import os
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+from app.providers.database import AsyncSessionLocal
+from app.models.user import User
+
+# OAuth2 方案
+class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):
+    async def __call__(self, request: Request) -> Optional[str]:
+        return await super().__call__(request)
+
+oauth2_scheme = UnifiedOAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    验证密码。bcrypt 需要 bytes 格式。
+    """
     try:
-        if isinstance(plain_password, str):
-            password_bytes = plain_password.encode("utf-8")
-        else:
-            password_bytes = plain_password
-
-        if isinstance(hashed_password, str):
-            hash_bytes = hashed_password.encode("utf-8")
-        else:
-            hash_bytes = hashed_password
-
-        return bcrypt.checkpw(password_bytes, hash_bytes)
+        if not plain_password or not hashed_password:
+            return False
+        password_bytes = plain_password.encode('utf-8')
+        hashed_bytes = hashed_password.encode('utf-8')
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
     except Exception:
         return False
 
-
 def get_password_hash(password: str) -> str:
-    if isinstance(password, str):
-        password_bytes = password.encode("utf-8")
-    else:
-        password_bytes = password
-
-    if len(password_bytes) > 72:
-        raise ValueError("密码长度不能超过 72 字节")
-
-    # 生成盐值并哈希
+    """
+    生成密码哈希。
+    """
+    password_bytes = password.encode('utf-8')
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password_bytes, salt)
-    return hashed.decode("utf-8")
+    return hashed.decode('utf-8')
 
-
-def create_access_token(data: dict):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.now(UTC) + timedelta(
-        minutes=int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 10080))
-    )
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=float(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60)))
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(
         to_encode, os.getenv("JWT_SECRET_KEY"), algorithm=os.getenv("JWT_ALGORITHM")
     )
     return encoded_jwt
 
-
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
-
-
-class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):
-    async def __call__(self, request: Request):
-        try:
-            return await super().__call__(request)
-        except HTTPException as e:
-            if e.status_code == 401:
-                e.detail = "请先登录以获取访问权限"
-            raise e
-
-
-oauth2_scheme = UnifiedOAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无效的身份凭证",
@@ -82,21 +65,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
-
-        # 优化：在高频鉴权中复用连接池逻辑
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                stmt = select(User).where(User.username == username)
-                result = await session.execute(stmt)
-                user = result.scalars().first()
-            if not user or not user.is_active:
-                raise credentials_exception
-
-            return {
-                "uid": user.uid,
-                "username": user.username,
-                "is_superuser": user.is_superuser,
-            }
-
     except JWTError:
         raise credentials_exception
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.username == username))
+        user = result.scalars().first()
+        if user is None:
+            raise credentials_exception
+        return user
