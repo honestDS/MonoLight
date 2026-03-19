@@ -1,5 +1,6 @@
-from pydantic import ConfigDict, BaseModel, Field, field_validator
+from pydantic import ConfigDict, BaseModel, Field
 from typing import Optional, Dict, Any
+
 
 class ProfileBase(BaseModel):
     name: str
@@ -13,8 +14,10 @@ class ProfileBase(BaseModel):
     context_window_k: Optional[int] = Field(4, ge=1)
     prompt_id: Optional[int] = None
 
+
 class ProfileCreate(ProfileBase):
     pass
+
 
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
@@ -27,6 +30,7 @@ class ProfileUpdate(BaseModel):
     context_window_k: Optional[int] = None
     is_active: Optional[bool] = None
     prompt_id: Optional[int] = None
+
 
 class ProfileResponse(ProfileBase):
     id: int

@@ -18,7 +18,6 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from fastapi.middleware.cors import CORSMiddleware
 from app.providers.database import engine, Base, AsyncSessionLocal
-from app.models import provider
 
 
 @asynccontextmanager
@@ -51,9 +50,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Monobot API", version="1.0.0")
-
-
-from sqlalchemy.exc import SQLAlchemyError
 
 
 @app.exception_handler(SQLAlchemyError)

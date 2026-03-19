@@ -1,5 +1,6 @@
 import pytest
 
+
 @pytest.mark.asyncio
 async def test_app_health(client):
     # 假设存在根路径或健康检查路径

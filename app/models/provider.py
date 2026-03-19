@@ -1,14 +1,15 @@
 from sqlalchemy.orm import Mapped, mapped_column
 from app.providers.database import Base
-from enum import Enum
 import enum
 
+
 class ProviderType(str, enum.Enum):
-    OPENAI = 'OPENAI'
-    GEMINI = 'GEMINI'
+    OPENAI = "OPENAI"
+    GEMINI = "GEMINI"
+
 
 class ModelProvider(Base):
-    __tablename__ = 'provider'
+    __tablename__ = "provider"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(unique=True, index=True)

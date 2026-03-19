@@ -1,6 +1,7 @@
-from typing import Any, Dict, List
+from typing import Any, Dict
 import time
 from .base import BaseTransformer
+
 
 class OpenAITransformer(BaseTransformer):
     @classmethod
@@ -11,16 +12,16 @@ class OpenAITransformer(BaseTransformer):
     @classmethod
     def from_standard(cls, internal_data: Dict[str, Any]) -> Dict[str, Any]:
         # 统一从 choices 中提取内容，如果不存在则找顶级 content
-        choices = internal_data.get('choices', [])
+        choices = internal_data.get("choices", [])
         content = ""
-        model_name = internal_data.get('model', 'monobot-v1')
-        
+        model_name = internal_data.get("model", "monobot-v1")
+
         if choices and len(choices) > 0:
-            msg = choices[0].get('message', {})
-            content = msg.get('content', "")
-        
+            msg = choices[0].get("message", {})
+            content = msg.get("content", "")
+
         if not content:
-            content = internal_data.get('content', "")
+            content = internal_data.get("content", "")
 
         # 强制输出标准的 OpenAI 响应结构
         return {
@@ -31,16 +32,11 @@ class OpenAITransformer(BaseTransformer):
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": content
-                    },
-                    "finish_reason": "stop"
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
                 }
             ],
-            "usage": internal_data.get("usage", {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0
-            })
+            "usage": internal_data.get(
+                "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            ),
         }
