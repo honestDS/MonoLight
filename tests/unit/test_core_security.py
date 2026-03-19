@@ -1,11 +1,18 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from fastapi import HTTPException
-from app.core.security import create_access_token, get_current_user, get_password_hash, verify_password, UnifiedOAuth2PasswordBearer
-from datetime import timedelta
-from jose import jwt
 import os
-import bcrypt
+from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import HTTPException
+from jose import jwt
+
+from app.core.security import (
+    UnifiedOAuth2PasswordBearer,
+    create_access_token,
+    get_current_user,
+    get_password_hash,
+    verify_password,
+)
 
 os.environ["JWT_SECRET_KEY"] = "test_secret"
 os.environ["JWT_ALGORITHM"] = "HS256"

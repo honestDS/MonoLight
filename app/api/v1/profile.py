@@ -1,29 +1,30 @@
-from app.core import constants
-from app.core.exceptions import ResourceNotFoundException, ParameterException
 from fastapi import APIRouter, Depends
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
 from sqlalchemy.orm import joinedload
-from app.providers.database import get_db
+from app.core import constants
+from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.core.security import get_current_user
 from app.models.profile import Profile
-from app.models.provider import ModelProvider
 from app.models.prompt import PromptLibrary
+from app.models.provider import ModelProvider
+from app.providers.database import get_db
 from app.schemas.profile import ProfileCreate, ProfileResponse, ProfileUpdate
 from app.schemas.response import StandardResponse
-from app.core.security import get_current_user
+from typing import List
+
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     # 修复：get_current_user 返回的是 User 模型对象，不支持 .get() 字典方法
     if not getattr(current_user, "is_superuser", False):
-        from app.core.exceptions import ForbiddenException
         from app.core import constants
+        from app.core.exceptions import ForbiddenException
 
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
-from typing import List
 
 router = APIRouter(
     prefix="/profiles",

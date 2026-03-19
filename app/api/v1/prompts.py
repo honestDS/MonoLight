@@ -1,24 +1,25 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.providers.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.security import get_current_user
 from app.models.prompt import PromptLibrary
+from app.providers.database import get_db
 from app.schemas.prompt import PromptCreate, PromptResponse, PromptUpdate
 from app.schemas.response import StandardResponse
-from app.core.security import get_current_user
+from app.core import constants
+from app.core.exceptions import ParameterException, ResourceNotFoundException
+
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        from app.core.exceptions import ForbiddenException
         from app.core import constants
+        from app.core.exceptions import ForbiddenException
 
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
-from app.core import constants
-from app.core.exceptions import ResourceNotFoundException, ParameterException
 
 router = APIRouter(
     prefix="/prompts",

@@ -1,8 +1,13 @@
-import pytest
 from app.core.exceptions import (
-    BaseBusinessException, AuthException, ForbiddenException,
-    ResourceNotFoundException, ParameterException, ServerException, LLMException
+    AuthException,
+    BaseBusinessException,
+    ForbiddenException,
+    LLMException,
+    ParameterException,
+    ResourceNotFoundException,
+    ServerException,
 )
+
 
 def test_base_business_exception():
     exc = BaseBusinessException(code=400, message="test error", data={"key": "val"})

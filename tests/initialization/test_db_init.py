@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import inspect
+
 from app.providers.database import engine
 
 

@@ -1,10 +1,13 @@
-import pytest
-import aiohttp
 import json
-from unittest.mock import AsyncMock, patch, MagicMock
-from app.providers.llm.client import LLMClient
-from app.core.exceptions import LLMException
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import aiohttp
+import pytest
+
 from app.core import constants
+from app.core.exceptions import LLMException
+from app.providers.llm.client import LLMClient
+
 
 @pytest.mark.asyncio
 async def test_generate_success():

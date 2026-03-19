@@ -1,8 +1,11 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from app.core.tools.shell import ShellExecutor
 import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.core.tools.shell import ShellExecutor
+
 
 @pytest.fixture
 def executor():

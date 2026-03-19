@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, JSON, ForeignKey
-from app.providers.database import Base
+from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
+
+from app.providers.database import Base
 
 
 class Profile(Base):

@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core import constants
+from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.core.security import get_current_user
+from app.models.provider import ModelProvider
 from app.providers.database import get_db
 from app.schemas.provider import ProviderCreate, ProviderRead, ProviderUpdate
-from app.models.provider import ModelProvider
-from app.core.security import get_current_user
 from app.schemas.response import StandardResponse
-from app.core import constants
-from app.core.exceptions import ResourceNotFoundException, ParameterException
-from sqlalchemy import select
 
 router = APIRouter(
     prefix="/providers", tags=["Providers"], dependencies=[Depends(get_current_user)]

@@ -1,14 +1,17 @@
 import os
-from fastapi import APIRouter, Depends, Body
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
-from app.providers.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core import constants
+from app.core.exceptions import AuthException, ParameterException
+from app.core.security import create_access_token, get_password_hash, verify_password
 from app.models.user import User
+from app.providers.database import get_db
 from app.schemas.auth import LoginRequest
 from app.schemas.response import StandardResponse
-from app.core import constants
-from app.core.security import verify_password, create_access_token
-from app.core.exceptions import AuthException, ParameterException
 
 router = APIRouter()
 
@@ -39,8 +42,6 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
     )
 
 
-from app.core.security import get_password_hash
-from pydantic import BaseModel
 
 
 class ResetAdminRequest(BaseModel):

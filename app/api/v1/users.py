@@ -1,18 +1,20 @@
 import uuid
+
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.providers.database import get_db
-from app.models.user import User
-from app.schemas.user import UserCreate, UserResponse, UserUpdate
-from app.schemas.response import StandardResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import constants
-from app.core.security import get_current_user, get_password_hash
 from app.core.exceptions import (
     ForbiddenException,
-    ResourceNotFoundException,
     ParameterException,
+    ResourceNotFoundException,
 )
+from app.core.security import get_current_user, get_password_hash
+from app.models.user import User
+from app.providers.database import get_db
+from app.schemas.response import StandardResponse
+from app.schemas.user import UserCreate, UserResponse, UserUpdate
 
 router = APIRouter(
     prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)]

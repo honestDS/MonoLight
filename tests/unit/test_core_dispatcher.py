@@ -1,12 +1,14 @@
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
 import pytest
-import json
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from app.core.dispatcher import ChatDispatcher
-from app.models.profile import Profile
-from app.models.provider import ModelProvider
-from app.models.prompt import PromptLibrary
+
 from app.core import constants
+from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import LLMException
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
+from app.models.provider import ModelProvider
+
 
 @pytest.fixture
 def mock_db():

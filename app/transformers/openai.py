@@ -1,5 +1,6 @@
-from typing import Any, Dict
 import time
+from typing import Any, Dict
+
 from .base import BaseTransformer
 
 

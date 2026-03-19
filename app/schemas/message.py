@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Any
 from datetime import datetime
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 
 class ChatCompletionRequest(BaseModel):

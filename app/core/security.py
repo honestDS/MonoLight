@@ -1,15 +1,16 @@
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Any
-from jose import jwt, JWTError
-import bcrypt
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import OAuth2PasswordBearer
 import os
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import bcrypt
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 from sqlalchemy import select
 
-from app.providers.database import AsyncSessionLocal
 from app.models.user import User
+from app.providers.database import AsyncSessionLocal
+
 
 # OAuth2 方案
 class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):

@@ -1,6 +1,7 @@
-from pydantic import ConfigDict, BaseModel
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel, ConfigDict
 
 
 class PromptCreate(BaseModel):

@@ -1,7 +1,9 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from app.providers.database import Base
-from sqlalchemy.orm import relationship
 from datetime import datetime
+
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
+
+from app.providers.database import Base
 
 
 class PromptLibrary(Base):

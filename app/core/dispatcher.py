@@ -1,17 +1,18 @@
 import json
-import os
 import logging
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-from app.core import constants
-from app.core.exceptions import LLMException, ServerException
+import os
 
-from app.models.profile import Profile
-from app.models.message import Message
-from app.providers.llm.client import LLMClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core import constants
 from app.core.context import ContextManager
-from app.core.tools.shell import ShellExecutor, SHELL_TOOL_SCHEMA
+from app.core.exceptions import LLMException, ServerException
+from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
+from app.models.message import Message
+from app.models.profile import Profile
+from app.providers.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
 

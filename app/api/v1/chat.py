@@ -1,14 +1,17 @@
-from app.schemas.response import StandardResponse
-from app.models.message import Message
-from app.models.user import User
-from sqlalchemy import select, func, desc
 import uuid
 from fastapi import APIRouter, Depends
-from app.core.security import get_current_user
+from sqlalchemy import desc, func, select
 from app.core.dispatcher import ChatDispatcher
-from app.schemas.message import ChatCompletionRequest
+from app.core.security import get_current_user
+from app.models.message import Message
+from app.models.user import User
 from app.providers.database import AsyncSession, get_db
+from app.schemas.message import ChatCompletionRequest
+from app.schemas.response import StandardResponse
 from app.transformers.openai import OpenAITransformer
+from sqlalchemy import delete
+
+
 
 router = APIRouter(
     prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)]
@@ -67,7 +70,6 @@ async def get_user_sessions(
     return StandardResponse.success(data=data, message="会话列表获取成功")
 
 
-from sqlalchemy import delete
 
 
 @router.post("/sessions/delete")

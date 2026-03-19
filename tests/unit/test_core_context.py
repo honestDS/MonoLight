@@ -1,10 +1,12 @@
-import pytest
-import os
 import json
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from app.core.context import ContextManager
 from app.models.message import Message
 from app.models.profile import Profile
+
 
 @pytest.fixture
 def mock_profile():

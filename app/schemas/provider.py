@@ -1,5 +1,7 @@
-from pydantic import ConfigDict, BaseModel
 from typing import Optional
+
+from pydantic import BaseModel, ConfigDict
+
 from app.models.provider import ProviderType
 
 

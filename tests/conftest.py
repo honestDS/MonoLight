@@ -1,8 +1,10 @@
-import pytest
 import asyncio
-from httpx import AsyncClient, ASGITransport
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.providers.database import AsyncSessionLocal, Base, engine
 from main import app  # 修正：main.py 在根目录
-from app.providers.database import Base, engine, AsyncSessionLocal
 
 
 @pytest.fixture(scope="session")

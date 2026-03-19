@@ -3,6 +3,7 @@
 .pytest_cache/
 .ruff_cache/
 __pycache__/
+temp/
 monobot.db
 monobot1.db
 monolight.db

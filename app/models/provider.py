@@ -1,6 +1,8 @@
-from sqlalchemy.orm import Mapped, mapped_column
-from app.providers.database import Base
 import enum
+
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.providers.database import Base
 
 
 class ProviderType(str, enum.Enum):

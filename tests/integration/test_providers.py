@@ -1,6 +1,8 @@
-from app.core.exceptions import ResourceNotFoundException
-import pytest
 import uuid
+
+import pytest
+
+from app.core.exceptions import ResourceNotFoundException
 from app.core.security import get_password_hash
 from app.models.user import User
 

@@ -1,24 +1,24 @@
-from contextlib import asynccontextmanager
-from app.core import constants
 import os
+from contextlib import asynccontextmanager
+
 import uvicorn
-from app.api.v1.providers import router as provider_router
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
+from app.api.v1.providers import router as provider_router
 from app.api.v1.users import router as user_router
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from app.schemas.response import StandardResponse
+from app.core import constants
 from app.core.exceptions import BaseBusinessException, LLMException
-from sqlalchemy.exc import SQLAlchemyError
-
-from fastapi.middleware.cors import CORSMiddleware
-from app.providers.database import engine, Base, AsyncSessionLocal
+from app.providers.database import AsyncSessionLocal, Base, engine
+from app.schemas.response import StandardResponse
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI):
     # 启动时逻辑
     # 初始化默认 Profile
     from sqlalchemy import select
+
     from app.models.profile import Profile
 
     async with engine.begin() as conn:
