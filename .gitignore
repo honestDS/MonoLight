@@ -1,12 +1,9 @@
 *.bak
 *.log
+*.db
 
 .pytest_cache/
 .ruff_cache/
 __pycache__/
 temp/
 .coverage/
-
-monobot.db
-monobot1.db
-monolight.db

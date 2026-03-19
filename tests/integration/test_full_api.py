@@ -16,6 +16,7 @@ async def setup_test_db():
 
 @pytest.mark.asyncio
 async def test_isolated_integration_v1():
+    os.environ["ADMIN_RESET_TOKEN"] = "ed126d6c5a4ea6bf33774214633d2a16"
     # 这里的 engine 已经由 app/providers/database.py 自动切换到了 /tmp 目录下的临时库
     reset_token = "ed126d6c5a4ea6bf33774214633d2a16"
     
