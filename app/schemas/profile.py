@@ -24,11 +24,11 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     provider_id: Optional[int] = None
     model_id: Optional[str] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[float] = Field(None, ge=0, le=2.0)
+    top_p: Optional[float] = Field(None, ge=0, le=1.0)
     max_tokens: Optional[int] = None
     stream: Optional[bool] = None
-    context_window_k: Optional[int] = None
+    context_window_k: Optional[int] = Field(None, ge=1)
     is_active: Optional[bool] = None
     prompt_id: Optional[int] = None
 

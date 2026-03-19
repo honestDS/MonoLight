@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
@@ -13,7 +13,7 @@ class PromptLibrary(Base):
     name = Column(String(50), unique=True, nullable=False)
     uid = Column(Integer, ForeignKey("user.id"), nullable=True)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     profiles = relationship("Profile", back_populates="prompt")
     user = relationship("User", back_populates="prompts")
