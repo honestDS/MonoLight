@@ -9,7 +9,6 @@
 3. **认证方式**: 
    - 除 `/auth/login` 和 `/auth/reset_admin` 外，所有接口均需在 Header 中携带：
      `Authorization: Bearer <your_access_token>`
-4. **分页规范**: 列表类接口支持 `page` 和 `page_size` 参数。
 
 ---
 
