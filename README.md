@@ -2,6 +2,14 @@
 
 一个由后端配置驱动的极简自主 Agent 交互框架。管理员通过后端 Profile 与 Prompt 库集中定义模型行为，系统内置 Agent 循环执行引擎，支持通过工具链完成物理世界的任务执行。
 
+## AI Agent 开发规范守则
+
+> [!IMPORTANT]
+> 所有参与本项目贡献的 AI Agent 必须严格遵守以下开发标准与架构原则：
+> 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
+> 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
+> 3. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
+
 ## 1. 核心特性
 - **自主 Agent 架构**: 内置 Dispatcher 循环机制，支持 AI 自主调用工具链完成复杂逻辑。
 - **多用户系统**: 引入完整的用户权限体系与多角色管理。
