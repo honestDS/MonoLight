@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from app.core.log import get_logger
 from pathlib import Path
 
 # 命令黑名单，防止破坏性操作
@@ -8,11 +9,10 @@ BLACKLIST = ["rm -rf"]
 
 
 class ShellExecutor:
+    logger = get_logger(__name__)
     def __init__(self, project_root: str, uid: str = "test"):
         self.project_root = Path(project_root)
-        # TODO: 当用户系统上线后，应取消下面 test 目录的硬编码，改回使用 f"temp_{uid}"
-        # 目前由于用户系统尚未对接，统一使用 test 目录进行开发调试
-        self.user_temp_dir = self.project_root / "temp" / "test"
+        self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
         self._ensure_temp_dir()
 
     def _ensure_temp_dir(self):
@@ -23,6 +23,7 @@ class ShellExecutor:
         # 安全检查：检查命令是否包含黑名单关键词
         for forbidden in BLACKLIST:
             if forbidden in command:
+                self.logger.warning(f"Security Alert: Blocked command containing {forbidden}")
                 return json.dumps(
                     {
                         "error": f"Security Alert: The command contains forbidden pattern '{forbidden}'. Execution blocked.",
@@ -34,6 +35,7 @@ class ShellExecutor:
                 )
 
         try:
+            self.logger.debug(f"Executing: {command}")
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -53,6 +55,7 @@ class ShellExecutor:
                     "cwd": str(self.user_temp_dir),
                 }
             except asyncio.TimeoutError:
+                self.logger.error(f"Command timed out: {command}")
                 process.kill()
                 result = {
                     "error": f"Command timed out after {timeout} seconds",
@@ -64,6 +67,7 @@ class ShellExecutor:
             return json.dumps(result, ensure_ascii=False)
 
         except Exception as e:
+            self.logger.error(f"Execution Error: {str(e)}")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 

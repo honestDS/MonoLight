@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 
 from sqlalchemy import select
@@ -13,8 +12,10 @@ from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.models.message import Message
 from app.models.profile import Profile
 from app.providers.llm.client import LLMClient
+from app.core.log import LogManager, get_logger
 
-logger = logging.getLogger(__name__)
+LogManager.setup()
+logger = get_logger(__name__)
 
 
 class ChatDispatcher:
@@ -54,7 +55,7 @@ class ChatDispatcher:
                     0, {"role": "system", "content": profile.prompt.content}
                 )
             project_root = os.getcwd()
-            shell_executor = ShellExecutor(project_root=project_root)
+            shell_executor = ShellExecutor(project_root=project_root, uid=uid)
             tools = [SHELL_TOOL_SCHEMA]
 
             # 记录用户消息
@@ -121,9 +122,12 @@ class ChatDispatcher:
                     if tool_call["function"]["name"] == "execute_shell":
                         try:
                             args = json.loads(tool_call["function"]["arguments"])
+                            command = args.get("command")
+                            LogManager.log_tool_call(current_turn, "execute_shell", command)
                             cmd_result = await shell_executor.execute(
-                                args.get("command"), args.get("timeout", 30)
+                                command, args.get("timeout", 30)
                             )
+                            LogManager.log_tool_result(current_turn, cmd_result)
                         except Exception as e:
                             cmd_result = json.dumps(
                                 {"error": f"Tool Execution Error: {str(e)}"},
