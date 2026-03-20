@@ -10,6 +10,7 @@ BLACKLIST = ["rm -rf"]
 
 class ShellExecutor:
     logger = get_logger(__name__)
+
     def __init__(self, project_root: str, uid: str = "default"):
         self.project_root = Path(project_root)
         self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
@@ -23,7 +24,9 @@ class ShellExecutor:
         # 安全检查：检查命令是否包含黑名单关键词
         for forbidden in BLACKLIST:
             if forbidden in command:
-                self.logger.warning(f"Security Alert: Blocked command containing {forbidden}")
+                self.logger.warning(
+                    f"Security Alert: Blocked command containing {forbidden}"
+                )
                 return json.dumps(
                     {
                         "error": f"Security Alert: The command contains forbidden pattern '{forbidden}'. Execution blocked.",

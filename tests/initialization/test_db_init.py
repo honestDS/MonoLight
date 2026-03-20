@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy import inspect
 from app.providers.database import engine, Base
 
+
 @pytest.mark.asyncio
 async def test_tables_alignment(db_session):
     """验证所有物理表名是否已按单数对齐"""

@@ -22,6 +22,7 @@ if not DATABASE_URL:
 # 【终极安全锁】如果处于测试环境，强制重定向到系统临时目录
 if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     import tempfile
+
     temp_db = os.path.join(tempfile.gettempdir(), "monolight_test_session.db")
     DATABASE_URL = f"sqlite+aiosqlite:///{temp_db}"
 
@@ -30,8 +31,10 @@ AsyncSessionLocal = async_sessionmaker(
     bind=engine, class_=AsyncSession, expire_on_commit=False
 )
 
+
 class Base(DeclarativeBase):
     pass
+
 
 async def get_db():
     async with AsyncSessionLocal() as session:

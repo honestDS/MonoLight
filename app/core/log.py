@@ -3,37 +3,38 @@ import sys
 import logging
 from loguru import logger
 
+
 class LogManager:
     _configured = False
-    
+
     @classmethod
     def setup(cls, log_path: str = "data/logs/monolight.log", level: str = "INFO"):
         if cls._configured:
             return
-            
+
         # 确保工作目录
         cwd = os.getcwd()
         if not os.path.isabs(log_path):
             abs_log_path = os.path.abspath(os.path.join(cwd, log_path))
         else:
             abs_log_path = log_path
-            
+
         # 处理目录不存在的情况
         log_dir = os.path.dirname(abs_log_path)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
-            
+
         # 移除默认处理器
         logger.remove()
-        
+
         # 添加控制台输出 (带颜色)
         logger.add(
             sys.stdout,
             level=level,
             colorize=True,
-            format="<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"
+            format="<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>",
         )
-        
+
         # 添加文件输出 (自动滚动)
         logger.add(
             abs_log_path,
@@ -43,9 +44,9 @@ class LogManager:
             compression="zip",
             encoding="utf-8",
             enqueue=True,
-            format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] [{file}:{line}]: {message}"
+            format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] [{file}:{line}]: {message}",
         )
-        
+
         # 拦截标准 logging
         class InterceptHandler(logging.Handler):
             def emit(self, record):
@@ -55,14 +56,18 @@ class LogManager:
                     level = record.levelno
 
                 frame, depth = logging.currentframe(), 2
-                while frame is not None and frame.f_code.co_filename == logging.__file__:
+                while (
+                    frame is not None and frame.f_code.co_filename == logging.__file__
+                ):
                     frame = frame.f_back
                     depth += 1
 
-                logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+                logger.opt(depth=depth, exception=record.exc_info).log(
+                    level, record.getMessage()
+                )
 
         logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-        
+
         cls._configured = True
         logger.info(f"Log system initialized. Path: {abs_log_path}")
 
@@ -77,6 +82,7 @@ class LogManager:
     def log_tool_result(turn: int, result: str):
         # 记录工具执行结果日志
         logger.info(f"Turn {turn} | Tool Result: {result}")
+
 
 def get_logger(name: str):
     return logger.bind(name=name)

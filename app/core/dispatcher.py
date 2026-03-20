@@ -123,7 +123,9 @@ class ChatDispatcher:
                         try:
                             args = json.loads(tool_call["function"]["arguments"])
                             command = args.get("command")
-                            LogManager.log_tool_call(current_turn, "execute_shell", command)
+                            LogManager.log_tool_call(
+                                current_turn, "execute_shell", command
+                            )
                             cmd_result = await shell_executor.execute(
                                 command, args.get("timeout", 30)
                             )
