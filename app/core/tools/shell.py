@@ -10,7 +10,7 @@ BLACKLIST = ["rm -rf"]
 
 class ShellExecutor:
     logger = get_logger(__name__)
-    def __init__(self, project_root: str, uid: str = "test"):
+    def __init__(self, project_root: str, uid: str = "default"):
         self.project_root = Path(project_root)
         self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
         self._ensure_temp_dir()

@@ -1,4 +1,4 @@
-# Monobot 系统架构设计说明
+# MonoLight 系统架构设计说明
 
 ## 1. 设计哲学
 MonoLight 采用“管控分离、协议标准、安全优先”的设计理念。系统核心由 Profile 驱动架构与 PromptLibrary 资产库构成，通过解耦系统提示词与模型参数，并集成 Agent 自主执行能力，实现高度灵活的 AI 行为定义。
@@ -16,7 +16,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/core/security: 安全防护层。负责多租户 UID 隔离校验与权限拦截。
 
 ### 2.3 协议转换层 (Transformer Layer)
-- app/transformers/openai: 协议适配器。负责将 Monobot 内部推理结果包装为标准的 OpenAI chat.completion 结构。
+- app/transformers/openai: 协议适配器。负责将 MonoLight 内部推理结果包装为标准的 OpenAI chat.completion 结构。
 
 ### 2.4 数据驱动层 (Provider Layer)
 - app/providers/llm: LLM 抽象驱动，支持通过 API 密钥与端点原子化调用不同供应商。

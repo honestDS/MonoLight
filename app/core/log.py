@@ -7,7 +7,7 @@ class LogManager:
     _configured = False
     
     @classmethod
-    def setup(cls, log_path: str = "data/logs/monobot.log", level: str = "INFO"):
+    def setup(cls, log_path: str = "data/logs/monolight.log", level: str = "INFO"):
         if cls._configured:
             return
             

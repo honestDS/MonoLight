@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Monobot API", version="1.0.0")
+app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
 
 
 @app.exception_handler(SQLAlchemyError)
@@ -97,7 +97,7 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
                 "id": f"chatcmpl-err-{ts}",
                 "object": "chat.completion",
                 "created": ts,
-                "model": "monobot-v1",
+                "model": "monolight-v1",
                 "choices": [
                     {
                         "index": 0,

@@ -9,7 +9,7 @@ from app.core.tools.shell import ShellExecutor
 
 @pytest.fixture
 def executor():
-    return ShellExecutor(project_root="/tmp/monobot_test")
+    return ShellExecutor(project_root="/tmp/monolight_test")
 
 
 @pytest.mark.asyncio

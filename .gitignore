@@ -7,4 +7,4 @@
 __pycache__/
 temp/
 .coverage/
-data/monolight.db
+data/

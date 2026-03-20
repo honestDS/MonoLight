@@ -7,7 +7,7 @@ from .base import BaseTransformer
 class OpenAITransformer(BaseTransformer):
     @classmethod
     def to_standard(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        # 预留协议转换接口：用于将来解析 OpenAI 标准格式的请求体 (如 messages 列表) 并转换为 Monobot 内部指令
+        # 预留协议转换接口：用于将来解析 OpenAI 标准格式的请求体 (如 messages 列表) 并转换为 Monolight 内部指令
         return data
 
     @classmethod
@@ -15,7 +15,7 @@ class OpenAITransformer(BaseTransformer):
         # 统一从 choices 中提取内容，如果不存在则找顶级 content
         choices = internal_data.get("choices", [])
         content = ""
-        model_name = internal_data.get("model", "monobot-v1")
+        model_name = internal_data.get("model", "monolight-v1")
 
         if choices and len(choices) > 0:
             msg = choices[0].get("message", {})
