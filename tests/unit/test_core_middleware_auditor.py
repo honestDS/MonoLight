@@ -1,65 +1,56 @@
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from app.core.middleware.auditor import audit_command
 
 
 @pytest.mark.asyncio
 async def test_audit_command_success():
-    mock_response_content = {
+    """测试审计指令成功场景：正确解析 LLMClient 的返回"""
+    mock_llm_response = {
         "choices": [
             {"message": {"content": json.dumps({"score": 2, "reason": "Safe command"})}}
         ]
     }
-    mock_resp = MagicMock()
-    mock_resp.status = 200
-    mock_resp.json = AsyncMock(return_value=mock_response_content)
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=None)
-    mock_session = MagicMock()
-    mock_session.post = MagicMock(return_value=mock_resp)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
-    with patch("aiohttp.ClientSession", return_value=mock_session):
+    # 由于 auditor.py 已经重构为复用 LLMClient.generate，这里直接 mock 该方法
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_llm_response)):
         result = await audit_command("ls", "http://test.api", "key", "model-1")
         assert result["score"] == 2
         assert result["reason"] == "Safe command"
 
 
 @pytest.mark.asyncio
-async def test_audit_command_http_error():
-    mock_resp = MagicMock()
-    mock_resp.status = 500
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=None)
-    mock_session = MagicMock()
-    mock_session.post = MagicMock(return_value=mock_resp)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
-    with patch("aiohttp.ClientSession", return_value=mock_session):
+async def test_audit_command_markdown_json_success():
+    """测试审计指令成功场景：LLM 返回包含 Markdown 块的情况"""
+    mock_content = "```json\n{\"score\": 0, \"reason\": \"Verified\"}\n```"
+    mock_llm_response = {
+        "choices": [
+            {"message": {"content": mock_content}}
+        ]
+    }
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_llm_response)):
+        result = await audit_command("ls", "http://test.api", "key", "model-1")
+        assert result["score"] == 0
+        assert result["reason"] == "Verified"
+
+
+@pytest.mark.asyncio
+async def test_audit_command_error_handling():
+    """测试审计指令失败场景：LLMClient 抛出异常或返回无效内容"""
+    # 模拟网络异常或 API 错误导致的 LLMClient 失败
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(side_effect=Exception("API Error"))):
         result = await audit_command("ls", "http://test.api", "key", "model-1")
         assert result is None
 
 
 @pytest.mark.asyncio
-async def test_audit_command_invalid_json():
-    mock_response_content = {"choices": [{"message": {"content": "Not a JSON string"}}]}
-    mock_resp = MagicMock()
-    mock_resp.status = 200
-    mock_resp.json = AsyncMock(return_value=mock_response_content)
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=None)
-    mock_session = MagicMock()
-    mock_session.post = MagicMock(return_value=mock_resp)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
-    with patch("aiohttp.ClientSession", return_value=mock_session):
-        result = await audit_command("ls", "http://test.api", "key", "model-1")
-        assert result is None
-
-
-@pytest.mark.asyncio
-async def test_audit_command_exception():
-    with patch("aiohttp.ClientSession", side_effect=Exception("Network Down")):
+async def test_audit_command_invalid_content_json():
+    """测试审计指令失败场景：LLM 返回的内容不是合法的 JSON 格式"""
+    mock_llm_response = {
+        "choices": [
+            {"message": {"content": "Not a JSON output at all"}}
+        ]
+    }
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_llm_response)):
         result = await audit_command("ls", "http://test.api", "key", "model-1")
         assert result is None
