@@ -15,7 +15,6 @@ from typing import List
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
-    # 修复：get_current_user 返回的是 User 模型对象，不支持 .get() 字典方法
     if not getattr(current_user, "is_superuser", False):
         from app.core import constants
         from app.core.exceptions import ForbiddenException
@@ -91,7 +90,7 @@ async def activate_profile(
 @router.post("/update", response_model=StandardResponse[ProfileResponse])
 async def update_profile(
     profile_id: int,
-    update_data: ProfileUpdate,
+    profile: ProfileCreate,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
@@ -99,21 +98,21 @@ async def update_profile(
     if not db_profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    if update_data.name:
+    if profile.name:
         check = await db.execute(
             select(Profile).where(
-                Profile.name == update_data.name, Profile.id != profile_id
+                Profile.name == profile.name, Profile.id != profile_id
             )
         )
         if check.scalars().first():
             raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
 
-    if update_data.prompt_id:
-        prompt_check = await db.get(PromptLibrary, update_data.prompt_id)
+    if profile.prompt_id:
+        prompt_check = await db.get(PromptLibrary, profile.prompt_id)
         if not prompt_check:
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
-    for field, value in update_data.model_dump(exclude_unset=True).items():
+    for field, value in profile.model_dump().items():
         setattr(db_profile, field, value)
     await db.commit()
     await db.refresh(db_profile)

@@ -25,6 +25,12 @@ class Profile(Base):
         Integer, default=4
     )  # 会话上下文历史窗口大小（单位 K，控制输入长度）
 
-    provider = relationship("ModelProvider")
+    # 审计相关配置
+    audit_provider_id = Column(Integer, ForeignKey("provider.id"), nullable=True)
+    audit_model_id = Column(String(100), nullable=True)
+    audit_threshold = Column(Integer, default=5)
+
+    provider = relationship("ModelProvider", foreign_keys=[provider_id])
+    audit_provider = relationship("ModelProvider", foreign_keys=[audit_provider_id])
     prompt = relationship("PromptLibrary")
     user = relationship("User", back_populates="profiles")
