@@ -46,7 +46,7 @@ async def add_new_user(
             hashed_password=get_password_hash(user_in.password)
             if user_in.password
             else None,
-            is_superuser=user_in.is_superuser,
+            is_superuser=False,
         )
         db.add(new_user)
         await db.commit()
@@ -88,11 +88,10 @@ async def update_user(
         # 检查是否存在破坏性变更
         is_renaming = user_in.username and user_in.username != user.username
         is_deactivating = user_in.is_active is False
-        is_demoting = user_in.is_superuser is False
 
-        if is_renaming or is_deactivating or is_demoting:
+        if is_renaming or is_deactivating:
             raise ParameterException(
-                "超级管理员账户受核心保护，严禁执行禁用、降权或改名操作。"
+                "超级管理员账户受核心保护，严禁执行禁用或改名操作。"
             )
     if user_in.password:
         try:
@@ -103,12 +102,10 @@ async def update_user(
     if user_in.is_active is not None:
         user.is_active = user_in.is_active
 
-    # 只有非超级管理员才允许修改用户名和身份（由管理员操作）
+    # 只有非超级管理员才允许修改用户名（由管理员操作）
     if not user.is_superuser:
         if user_in.username:
             user.username = user_in.username
-        if user_in.is_superuser is not None:
-            user.is_superuser = user_in.is_superuser
 
     await db.commit()
     await db.refresh(user)

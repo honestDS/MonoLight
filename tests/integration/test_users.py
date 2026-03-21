@@ -29,15 +29,15 @@ async def test_user_management_flow():
         token = login_resp.json()["data"]["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
-        # --- 422 类型错误验证：is_superuser 传入不合法的字符串 (无法转换为 bool) ---
-        r_add_type = await ac.post(
+        # 422 验证：缺失必填字段 username
+        r_invalid = await ac.post(
             "/api/v1/admin/user/add",
-            json={"username": "u1", "password": "p1", "is_superuser": "not_a_boolean"},
+            json={"password": "p1"},
             headers=headers,
         )
-        assert r_add_type.status_code == 422
+        assert r_invalid.status_code == 422
 
-        # --- 422 类型错误验证：uid 传入非字符串 ---
+        # 422 验证：uid 传入非字符串类型
         r_up_type = await ac.post(
             "/api/v1/admin/user/update",
             json={"uid": 12345, "is_active": True},

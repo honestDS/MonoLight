@@ -42,7 +42,10 @@ async def lifespan(app: FastAPI):
                 top_p=1.0,
                 max_tokens=0,
                 stream=False,
-                extra_config={"additionalProp1": {}},
+                extra_config={
+                    "shell_timeout": 30,
+                    "additionalProp1": {}
+                },
                 context_window_k=1024,
                 is_active=True,
             )
@@ -112,10 +115,6 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
                 },
             },
         )
-    return JSONResponse(
-        status_code=exc.code,
-        content=StandardResponse.error(code=exc.code, message=exc.message).model_dump(),
-    )
     return JSONResponse(
         status_code=exc.code,
         content=StandardResponse.error(code=exc.code, message=exc.message).model_dump(),

@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class UserCreate(BaseModel):
     username: str = Field(..., description="用户名")
     password: Optional[str] = Field(None, description="密码")
-    is_superuser: bool = Field(False, description="是否为超级管理员")
 
     @field_validator("password")
     @classmethod
@@ -21,7 +20,6 @@ class UserUpdate(BaseModel):
     username: Optional[str] = Field(None, description="用户名")
     password: Optional[str] = Field(None, description="新密码")
     is_active: Optional[bool] = Field(None, description="是否激活")
-    is_superuser: Optional[bool] = Field(None, description="是否为超级管理员")
 
     @field_validator("password")
     @classmethod
