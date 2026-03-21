@@ -51,14 +51,14 @@ class ChatDispatcher:
             ModelProvider.id == profile.audit_provider_id
         )
         provider = (await db.execute(stmt)).scalars().first()
-        
+
         if not provider:
             return None
 
         audit_res = await audit_command(
             command, provider.base_url, provider.api_key, profile.audit_model_id
         )
-        
+
         if audit_res is None:
             return json.dumps(
                 {
@@ -79,7 +79,7 @@ class ChatDispatcher:
                 },
                 ensure_ascii=False,
             )
-            
+
         if score >= (profile.audit_threshold or 5):
             return json.dumps(
                 {
@@ -108,7 +108,9 @@ class ChatDispatcher:
 
             # 拦截逻辑：如果 provider_id <= 0 或 profile.provider 为空，引导用户设置
             if not profile.provider or profile.provider_id <= 0:
-                raise ParameterException(message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED)
+                raise ParameterException(
+                    message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED
+                )
 
             messages = await ContextManager.get_messages(
                 db, session_id, uid, profile, message
@@ -214,8 +216,8 @@ class ChatDispatcher:
                 ]
             }
         except ParameterException as e:
-             # 直接透传参数异常，以便前端显示引导信息
-             raise e
+            # 直接透传参数异常，以便前端显示引导信息
+            raise e
         except Exception as e:
             logger.error(f"Dispatcher Error: {e}", exc_info=True)
             raise ServerException(message=str(e))

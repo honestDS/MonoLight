@@ -2,6 +2,7 @@ from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 from app.providers.database import Base
 
+
 class Profile(Base):
     __tablename__ = "profile"
 

@@ -82,7 +82,7 @@ async def activate_profile(
 
     if profile.provider_id is None or profile.provider_id <= 0:
         raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
-    
+
     # 二次确认：即使 provider_id > 0，也要确保该 provider 在数据库中真实存在
     provider_exists = await db.get(ModelProvider, profile.provider_id)
     if not provider_exists:
@@ -112,7 +112,7 @@ async def update_profile(
             if not provider_check:
                 raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
         elif profile.provider_id == 0:
-             raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
+            raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     if profile.name:
         check = await db.execute(
@@ -131,7 +131,7 @@ async def update_profile(
     update_data = profile.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_profile, field, value)
-    
+
     await db.commit()
     await db.refresh(db_profile)
     return StandardResponse.success(

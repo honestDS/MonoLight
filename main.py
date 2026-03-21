@@ -30,18 +30,16 @@ async def lifespan(app: FastAPI):
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     async with AsyncSessionLocal() as session:
         # 1. 初始化默认 Prompt
-        prompt_res = await session.execute(select(PromptLibrary).where(PromptLibrary.name == "default"))
+        prompt_res = await session.execute(
+            select(PromptLibrary).where(PromptLibrary.name == "default")
+        )
         prompt_obj = prompt_res.scalars().first()
-        
+
         if not prompt_obj:
-            default_prompt = PromptLibrary(
-                name="default",
-                content="",
-                uid=None
-            )
+            default_prompt = PromptLibrary(name="default", content="", uid=None)
             session.add(default_prompt)
             await session.commit()
             await session.refresh(default_prompt)
@@ -50,9 +48,11 @@ async def lifespan(app: FastAPI):
             default_prompt_id = prompt_obj.id
 
         # 2. 初始化默认 Profile
-        profile_res = await session.execute(select(Profile).where(Profile.name == "default"))
+        profile_res = await session.execute(
+            select(Profile).where(Profile.name == "default")
+        )
         profile_obj = profile_res.scalars().first()
-        
+
         if not profile_obj:
             default_profile = Profile(
                 name="default",
@@ -63,9 +63,7 @@ async def lifespan(app: FastAPI):
                 top_p=1.0,
                 max_tokens=0,
                 stream=False,
-                extra_config={
-                    "shell_timeout": 30
-                },
+                extra_config={"shell_timeout": 30},
                 context_window_k=1024,
                 is_active=True,
             )

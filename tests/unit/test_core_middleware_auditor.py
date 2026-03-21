@@ -3,9 +3,14 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.core.middleware.auditor import audit_command
 
+
 @pytest.mark.asyncio
 async def test_audit_command_success():
-    mock_response_content = {"choices": [{"message": {"content": json.dumps({"score": 2, "reason": "Safe command"})}}]}
+    mock_response_content = {
+        "choices": [
+            {"message": {"content": json.dumps({"score": 2, "reason": "Safe command"})}}
+        ]
+    }
     mock_resp = MagicMock()
     mock_resp.status = 200
     mock_resp.json = AsyncMock(return_value=mock_response_content)
@@ -20,6 +25,7 @@ async def test_audit_command_success():
         assert result["score"] == 2
         assert result["reason"] == "Safe command"
 
+
 @pytest.mark.asyncio
 async def test_audit_command_http_error():
     mock_resp = MagicMock()
@@ -33,6 +39,7 @@ async def test_audit_command_http_error():
     with patch("aiohttp.ClientSession", return_value=mock_session):
         result = await audit_command("ls", "http://test.api", "key", "model-1")
         assert result is None
+
 
 @pytest.mark.asyncio
 async def test_audit_command_invalid_json():
@@ -49,6 +56,7 @@ async def test_audit_command_invalid_json():
     with patch("aiohttp.ClientSession", return_value=mock_session):
         result = await audit_command("ls", "http://test.api", "key", "model-1")
         assert result is None
+
 
 @pytest.mark.asyncio
 async def test_audit_command_exception():

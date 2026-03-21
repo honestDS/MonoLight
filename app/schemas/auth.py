@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 
+
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=50, examples=["admin"])
     password: str = Field(..., min_length=1, max_length=72, examples=["password"])
@@ -11,8 +12,12 @@ class LoginRequest(BaseModel):
             raise ValueError("password must not exceed 72 bytes")
         return v
 
+
 class ResetAdminRequest(BaseModel):
-    reset_token: str = Field(..., min_length=32, max_length=32, examples=["ed126d6c5a4ea6bf33774214633d2a16"])
+    reset_token: str = Field(
+        ..., min_length=32, max_length=32, examples=["ed126d6c5a4ea6bf33774214633d2a16"]
+    )
+
 
 class TokenResponse(BaseModel):
     access_token: str

@@ -7,6 +7,7 @@ from app.core.log import get_logger
 from app.models.profile import Profile
 from app.providers.database import AsyncSessionLocal
 
+
 class ShellExecutor:
     logger = get_logger(__name__)
 
@@ -39,7 +40,7 @@ class ShellExecutor:
     async def execute(self, command: str) -> str:
         # 强制使用数据库配置的超时，忽略参数传入的值
         profile_timeout = await self._get_profile_timeout()
-        
+
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -49,17 +50,23 @@ class ShellExecutor:
                 env=os.environ.copy(),
             )
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
-                return json.dumps({
-                    "stdout": stdout.decode("utf-8", errors="replace"),
-                    "stderr": stderr.decode("utf-8", errors="replace"),
-                    "exit_code": process.returncode
-                }, ensure_ascii=False)
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=profile_timeout
+                )
+                return json.dumps(
+                    {
+                        "stdout": stdout.decode("utf-8", errors="replace"),
+                        "stderr": stderr.decode("utf-8", errors="replace"),
+                        "exit_code": process.returncode,
+                    },
+                    ensure_ascii=False,
+                )
             except asyncio.TimeoutError:
                 process.kill()
                 return json.dumps({"error": "Command timed out"}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
+
 
 SHELL_TOOL_SCHEMA = {
     "type": "function",
@@ -69,7 +76,10 @@ SHELL_TOOL_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Shell command to execute."},
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute.",
+                },
             },
             "required": ["command"],
         },

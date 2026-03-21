@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+
 class ProfileBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, examples=["test"])
     provider_id: int = Field(..., ge=-1, examples=[1])
@@ -10,8 +11,7 @@ class ProfileBase(BaseModel):
     max_tokens: Optional[int] = Field(2048, examples=[0])
     stream: Optional[bool] = Field(False, examples=[False])
     extra_config: Optional[Dict[str, Any]] = Field(
-        None, 
-        examples=[{"shell_timeout": 30}]
+        None, examples=[{"shell_timeout": 30}]
     )
     context_window_k: Optional[int] = Field(4, ge=1, examples=[1024])
     prompt_id: Optional[int] = Field(None, gt=0, examples=[1])
@@ -28,8 +28,10 @@ class ProfileBase(BaseModel):
                 raise ValueError("shell_timeout must be a positive number")
         return v
 
+
 class ProfileCreate(ProfileBase):
     pass
+
 
 class ProfileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -56,6 +58,7 @@ class ProfileUpdate(BaseModel):
             if not isinstance(timeout, (int, float)) or timeout <= 0:
                 raise ValueError("shell_timeout must be a positive number")
         return v
+
 
 class ProfileResponse(ProfileBase):
     id: int

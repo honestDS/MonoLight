@@ -3,6 +3,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 import re
 from app.models.provider import ProviderType
 
+
 class ProviderBase(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     provider_type: Optional[ProviderType] = None
@@ -13,9 +14,10 @@ class ProviderBase(BaseModel):
     @field_validator("base_url")
     @classmethod
     def validate_url(cls, v: Optional[str]) -> Optional[str]:
-        if v and not re.match(r'^https?://', v):
+        if v and not re.match(r"^https?://", v):
             raise ValueError("base_url must start with http:// or https://")
         return v
+
 
 class ProviderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, examples=["OpenAI"])
@@ -27,12 +29,14 @@ class ProviderCreate(BaseModel):
     @field_validator("base_url")
     @classmethod
     def validate_url(cls, v: Optional[str]) -> Optional[str]:
-        if v and not re.match(r'^https?://', v):
+        if v and not re.match(r"^https?://", v):
             raise ValueError("base_url must start with http:// or https://")
         return v
 
+
 class ProviderUpdate(ProviderBase):
     pass
+
 
 class ProviderRead(BaseModel):
     id: int
