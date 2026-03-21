@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.context import ContextManager
-from app.core.exceptions import LLMException, ServerException
+from app.core.exceptions import LLMException, ServerException, ParameterException
 from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.models.message import Message
 from app.models.profile import Profile
@@ -12,6 +12,7 @@ from app.models.provider import ModelProvider
 from app.providers.llm.client import LLMClient
 from app.core.log import LogManager, get_logger
 from app.core.middleware.auditor import audit_command
+from app.core import constants
 
 LogManager.setup()
 logger = get_logger(__name__)
@@ -29,28 +30,21 @@ class ChatDispatcher:
 
         command = args.get("command", "")
 
-        # --- 增强的动态令牌校验逻辑 ---
         if command.startswith(CONFIRMATION_TOKEN):
-            # 校验上下文：寻找最近的一条 tool 消息，看它是否返回了 confirmation_required
             last_tool_result = None
             for m in reversed(messages):
                 if m.get("role") == "tool":
                     last_tool_result = m.get("content")
                     break
-
-            # 安全逻辑：只有上一轮执行确实被审计拦截要求确认时，当前带有令牌的指令才被视为合法
             if last_tool_result and "confirmation_required" in last_tool_result:
-                return None  # 合法确认，放行
+                return None
             else:
-                # 否则视为非法注入或非预期调用，强制去除令牌并进入审计流程
                 command = command[len(CONFIRMATION_TOKEN) :].strip()
 
-        # 如果阈值设为 0，视为用户显式信任所有指令，直接放行
         if profile.audit_threshold == 0:
             return None
 
-        # 如果未配置审计供应商 ID，则不执行审计，直接放行
-        if not profile.audit_provider_id:
+        if not profile.audit_provider_id or profile.audit_provider_id <= 0:
             return None
 
         stmt = select(ModelProvider).where(
@@ -58,7 +52,6 @@ class ChatDispatcher:
         )
         provider = (await db.execute(stmt)).scalars().first()
         
-        # 如果配置的审计供应商不存在，为了业务连续性，执行降级放行
         if not provider:
             return None
 
@@ -66,7 +59,6 @@ class ChatDispatcher:
             command, provider.base_url, provider.api_key, profile.audit_model_id
         )
         
-        # 审计系统故障（如网络超时或 API 错误）时，记录日志并返回错误，不建议降级放行以保安全
         if audit_res is None:
             return json.dumps(
                 {
@@ -79,7 +71,6 @@ class ChatDispatcher:
         score = audit_res.get("score", 10)
         reason = audit_res.get("reason", "Unknown")
 
-        # 评分达到 8 分及以上：硬拦截，不允许人工确认绕过
         if score >= 8:
             return json.dumps(
                 {
@@ -89,7 +80,6 @@ class ChatDispatcher:
                 ensure_ascii=False,
             )
             
-        # 评分达到用户设定的阈值：软拦截，要求用户手动发送带有 FORCE_EXECUTE_CONFIRMED 前缀的指令
         if score >= (profile.audit_threshold or 5):
             return json.dumps(
                 {
@@ -100,7 +90,7 @@ class ChatDispatcher:
                 ensure_ascii=False,
             )
 
-        return None  # 审计通过，风险分低于阈值
+        return None
 
     @staticmethod
     async def dispatch(
@@ -115,6 +105,10 @@ class ChatDispatcher:
             profile = (await db.execute(stmt)).scalars().first()
             if not profile:
                 raise LLMException(message="No active profile found.")
+
+            # 拦截逻辑：如果 provider_id <= 0 或 profile.provider 为空，引导用户设置
+            if not profile.provider or profile.provider_id <= 0:
+                raise ParameterException(message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
             messages = await ContextManager.get_messages(
                 db, session_id, uid, profile, message
@@ -181,12 +175,10 @@ class ChatDispatcher:
                     tool_name = tool_call["function"]["name"]
                     args = json.loads(tool_call["function"]["arguments"])
 
-                    # 1. 执行审计拦截（传入 messages 用于上下文校验）
                     cmd_result = await ChatDispatcher._audit_tool_call(
                         db, profile, tool_name, args, messages
                     )
 
-                    # 2. 如果审计未拦截且是 shell 指令，则执行
                     if cmd_result is None:
                         if tool_name == "execute_shell":
                             command = args.get("command", "")
@@ -221,6 +213,9 @@ class ChatDispatcher:
                     {"message": {"role": "assistant", "content": final_ai_content}}
                 ]
             }
+        except ParameterException as e:
+             # 直接透传参数异常，以便前端显示引导信息
+             raise e
         except Exception as e:
             logger.error(f"Dispatcher Error: {e}", exc_info=True)
             raise ServerException(message=str(e))

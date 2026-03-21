@@ -36,9 +36,11 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    provider_check = await db.get(ModelProvider, profile.provider_id)
-    if not provider_check:
-        raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
+    # 强制检查 provider_id 是否存在
+    if profile.provider_id and profile.provider_id > 0:
+        provider_check = await db.get(ModelProvider, profile.provider_id)
+        if not provider_check:
+            raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     name_check = await db.execute(select(Profile).where(Profile.name == profile.name))
     if name_check.scalars().first():
@@ -78,8 +80,13 @@ async def activate_profile(
     if not profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    if profile.provider_id is None or profile.provider_id == -1:
+    if profile.provider_id is None or profile.provider_id <= 0:
         raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
+    
+    # 二次确认：即使 provider_id > 0，也要确保该 provider 在数据库中真实存在
+    provider_exists = await db.get(ModelProvider, profile.provider_id)
+    if not provider_exists:
+        raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     await db.execute(update(Profile).values(is_active=False))
     profile.is_active = True
@@ -90,13 +97,22 @@ async def activate_profile(
 @router.post("/update", response_model=StandardResponse[ProfileResponse])
 async def update_profile(
     profile_id: int,
-    profile: ProfileCreate,
+    profile: ProfileUpdate,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
     db_profile = await db.get(Profile, profile_id)
     if not db_profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
+
+    # 如果更新了 provider_id，则必须校验其存在性
+    if profile.provider_id is not None:
+        if profile.provider_id > 0:
+            provider_check = await db.get(ModelProvider, profile.provider_id)
+            if not provider_check:
+                raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
+        elif profile.provider_id == 0:
+             raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     if profile.name:
         check = await db.execute(
@@ -112,8 +128,10 @@ async def update_profile(
         if not prompt_check:
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
-    for field, value in profile.model_dump().items():
+    update_data = profile.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
         setattr(db_profile, field, value)
+    
     await db.commit()
     await db.refresh(db_profile)
     return StandardResponse.success(
