@@ -6,20 +6,17 @@ import bcrypt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from sqlalchemy import select
 
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal
-
+from app.core.crud.user import user_crud
 
 # OAuth2 方案
 class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):
     async def __call__(self, request: Request) -> Optional[str]:
         return await super().__call__(request)
 
-
 oauth2_scheme = UnifiedOAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
-
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
@@ -34,7 +31,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
-
 def get_password_hash(password: str) -> str:
     """
     生成密码哈希。
@@ -43,7 +39,6 @@ def get_password_hash(password: str) -> str:
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password_bytes, salt)
     return hashed.decode("utf-8")
-
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
@@ -58,7 +53,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         to_encode, os.getenv("JWT_SECRET_KEY"), algorithm=os.getenv("JWT_ALGORITHM")
     )
     return encoded_jwt
-
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
@@ -77,8 +71,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise credentials_exception
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.username == username))
-        user = result.scalars().first()
+        user = await user_crud.get_by_username(db=session, username=username)
         if user is None:
             raise credentials_exception
         return user

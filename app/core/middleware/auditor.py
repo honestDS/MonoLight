@@ -2,7 +2,7 @@ import json
 from typing import Dict, Any, Optional
 from app.core.log import get_logger
 from app.providers.llm.client import LLMClient
-from app.schemas.message import InternalMessage, MessageRole
+from app.models.message import InternalMessage, MessageRole
 
 logger = get_logger(__name__)
 

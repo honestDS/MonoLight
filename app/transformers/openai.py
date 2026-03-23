@@ -4,9 +4,8 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from app.core import constants
 from app.core.exceptions import LLMException
-from app.schemas.message import (
+from app.models.message import (
     InternalMessage,
-    InternalResponse,
     InternalToolCall,
     MessageRole,
 )
@@ -27,7 +26,7 @@ class OpenAITransformer(BaseTransformer):
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
         **kwargs,
-    ) -> InternalResponse:
+    ) -> Dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -53,7 +52,7 @@ class OpenAITransformer(BaseTransformer):
                         raise LLMException(
                             f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
                         )
-                    return self.from_provider(json.loads(txt))
+                    return json.loads(txt)
         except Exception as e:
             logger.error(f"OpenAI Driver Error: {str(e)}")
             raise LLMException(str(e))
@@ -83,7 +82,7 @@ class OpenAITransformer(BaseTransformer):
         return provider_msgs
 
     @classmethod
-    def from_provider(cls, provider_response: Any) -> InternalResponse:
+    def from_provider(cls, provider_response: Any) -> InternalMessage:
         choice = provider_response["choices"][0]["message"]
         tool_calls = None
         if "tool_calls" in choice:
@@ -96,14 +95,8 @@ class OpenAITransformer(BaseTransformer):
                 for tc in choice["tool_calls"]
             ]
 
-        return InternalResponse(
-            message=InternalMessage(
-                role=MessageRole.ASSISTANT,
-                content=choice.get("content"),
-                tool_calls=tool_calls,
-            ),
-            model=provider_response.get("model", "unknown"),
-            usage=provider_response.get(
-                "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            ),
+        return InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=choice.get("content"),
+            tool_calls=tool_calls,
         )

@@ -2,22 +2,21 @@ from typing import List
 import json
 import os
 from dotenv import load_dotenv
-from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.message import Message
-from app.models.profile import Profile
-from app.schemas.profile import ProfileConfig
-from app.schemas.message import InternalMessage, MessageRole, InternalToolCall
+from app.models.profile import Profile, ProfileConfig
+from app.models.message import MessageRole, InternalMessage, InternalToolCall
+
+# CRUD Imports
+from app.core.crud.message import message_crud
 
 load_dotenv()
-
 
 class ContextManager:
     @staticmethod
     def estimate_tokens(text: str) -> int:
         if not text:
             return 0
-        chinese_count = len([c for c in text if "一" <= c <= "鿿"])
+        chinese_count = len([c for c in text if "\u4e00" <= c <= "\u9fff"])
         other_count = len(text) - chinese_count
         c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 0.6))
         o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
@@ -35,14 +34,8 @@ class ContextManager:
         cfg = ProfileConfig.model_validate(profile.configs)
         limit_tokens = cfg.other.context_window_k * 1024 * 0.8
 
-        stmt = (
-            select(Message)
-            .where(Message.session_id == session_id, Message.uid == uid)
-            .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(100)
-        )
-        result = await db.execute(stmt)
-        history = result.scalars().all()
+        # 使用 CRUD 获取最近 100 条消息历史
+        history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=100)
 
         temp_msgs = []
         current_total = cls.estimate_tokens(current_message)
@@ -59,21 +52,22 @@ class ContextManager:
                 tool_call_id = None
                 content = content_str
 
+                # 解析存储在 content 中的工具调用 JSON 数据
                 if role == MessageRole.TOOL or (
                     role == MessageRole.ASSISTANT and "tool_calls" in content_str
                 ):
-                    parsed = json.loads(content_str)
-                    if isinstance(parsed, dict):
-                        if "tool_calls" in parsed:
-                            tool_calls = (
-                                [InternalToolCall(**tc) for tc in parsed["tool_calls"]]
-                                if isinstance(parsed["tool_calls"], list)
-                                else None
-                            )
-                            content = parsed.get("content")
-                        if "tool_call_id" in parsed:
-                            tool_call_id = parsed["tool_call_id"]
-                            content = parsed.get("content")
+                    try:
+                        parsed = json.loads(content_str)
+                        if isinstance(parsed, dict):
+                            if "tool_calls" in parsed:
+                                tool_calls = [InternalToolCall(**tc) for tc in parsed["tool_calls"]]
+                                content = parsed.get("content")
+                            if "tool_call_id" in parsed:
+                                tool_call_id = parsed["tool_call_id"]
+                                content = parsed.get("content")
+                    except json.JSONDecodeError:
+                        # 如果不是 JSON，则作为普通文本处理
+                        pass
 
                 temp_msgs.insert(
                     0,
@@ -89,18 +83,12 @@ class ContextManager:
                 continue
 
         # 核心逻辑：修复 Tool Call 链条完整性
-        # 如果上下文截断导致出现了孤立的 Tool 消息（没有对应的 Assistant 请求），
-        # 或者孤立的带有 Tool Calls 的 Assistant 消息（没有对应的 Tool 结果），
-        # 需要进行清理，以满足 LLM 协议格式要求。
-        
         final_msgs = []
         i = 0
         while i < len(temp_msgs):
             msg = temp_msgs[i]
             
-            # 如果是带有工具调用的助手消息
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                # 寻找后续所有的工具结果
                 tool_call_ids = {tc.id for tc in msg.tool_calls}
                 j = i + 1
                 matched_tools = []
@@ -109,26 +97,21 @@ class ContextManager:
                         matched_tools.append(temp_msgs[j])
                     j += 1
                 
-                # 只有当所有的工具调用都有对应的结果时，才保留这一组消息
                 if len(matched_tools) == len(tool_call_ids):
                     final_msgs.append(msg)
                     final_msgs.extend(matched_tools)
-                    i = j # 跳过已处理的工具消息
+                    i = j
                 else:
-                    # 链条不完整，丢弃该助手消息及后续不匹配的工具消息
                     i += 1 
             elif msg.role == MessageRole.TOOL:
-                # 孤立的工具消息，直接丢弃
                 i += 1
             else:
-                # 普通 User 或 Assistant 文本消息
                 final_msgs.append(msg)
                 i += 1
 
+        # 移除开头孤立的工具请求
         if final_msgs and final_msgs[0].role == MessageRole.ASSISTANT and final_msgs[0].tool_calls:
             final_msgs.pop(0)
 
-        final_msgs.append(
-            InternalMessage(role=MessageRole.USER, content=current_message)
-        )
+        final_msgs.append(InternalMessage(role=MessageRole.USER, content=current_message))
         return final_msgs

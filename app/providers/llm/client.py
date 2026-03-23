@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 from app.transformers.openai import OpenAITransformer
-from app.schemas.message import InternalMessage, InternalResponse
+from app.models.message import InternalMessage, InternalResponse
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class LLMClient:
                 f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}"
             )
 
-        return await transformer.generate(
+        raw_response = await transformer.generate(
             api_key=api_key,
             base_url=base_url,
             model_id=model_id,
@@ -42,4 +42,21 @@ class LLMClient:
             tools=tools,
             tool_choice=tool_choice,
             **kwargs,
+        )
+        
+        # 核心修复：调用 transformer.from_provider 将原始 dict 转换为 InternalResponse
+        # 注意：目前的 OpenAITransformer.from_provider 返回的是 InternalMessage
+        # 而 BaseTransformer.from_provider 定义返回的是 InternalResponse
+        # 我们需要统一封装逻辑
+        
+        ai_message = transformer.from_provider(raw_response)
+        
+        return InternalResponse(
+            message=ai_message,
+            model=raw_response.get("model", model_id),
+            usage=raw_response.get("usage", {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            })
         )

@@ -2,11 +2,10 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from sqlalchemy import select
 from app.core.log import get_logger
-from app.models.profile import Profile
+from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
-from app.schemas.profile import ProfileConfig
+from app.core.crud.profile import profile_crud
 
 
 class ShellExecutor:
@@ -25,9 +24,7 @@ class ShellExecutor:
         """从已激活的 Profile 中获取超时配置"""
         try:
             async with AsyncSessionLocal() as session:
-                stmt = select(Profile).where(Profile.is_active)
-                result = await session.execute(stmt)
-                profile = result.scalars().first()
+                profile = await profile_crud.get_active(session)
                 if profile and profile.configs:
                     cfg = ProfileConfig.model_validate(profile.configs)
                     return cfg.tool.shell_timeout
