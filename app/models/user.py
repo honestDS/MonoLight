@@ -31,13 +31,19 @@ class User(UserBase, table=True):
 
 class UserCreate(SQLModel):
     username: str = PydanticField(
+        ...,
         min_length=3,
         max_length=50,
         pattern=r"^[a-zA-Z0-9_\-]+$",
         description="用户名",
+        json_schema_extra={"example": "new_user_01"}
     )
-    password: Optional[str] = PydanticField(
-        None, min_length=8, max_length=72, description="密码"
+    password: str = PydanticField(
+        ..., 
+        min_length=8, 
+        max_length=72, 
+        description="密码",
+        json_schema_extra={"example": "secure_pass_123"}
     )
 
     @field_validator("password")
@@ -46,14 +52,27 @@ class UserCreate(SQLModel):
         if v and len(v.encode("utf-8")) > 72:
             raise ValueError("password must not exceed 72 bytes")
         return v
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "username": "new_user_01",
+                "password": "secure_pass_123"
+            }
+        }
+    )
 
 class UserUpdate(SQLModel):
-    uid: str = Field(description="用户UID")
+    uid: str = PydanticField(..., description="用户UID", json_schema_extra={"example": "uuid_hex_string"})
     username: Optional[str] = PydanticField(
-        None, min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_\-]+$"
+        None, min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_\-]+$",
+        json_schema_extra={"example": "updated_name"}
     )
-    password: Optional[str] = PydanticField(None, min_length=8, max_length=72)
-    is_active: Optional[bool] = None
+    password: Optional[str] = PydanticField(
+        None, min_length=8, max_length=72,
+        json_schema_extra={"example": "new_secure_password"}
+    )
+    is_active: Optional[bool] = PydanticField(None, json_schema_extra={"example": True})
 
     @field_validator("password")
     @classmethod
@@ -61,6 +80,17 @@ class UserUpdate(SQLModel):
         if v and len(v.encode("utf-8")) > 72:
             raise ValueError("password must not exceed 72 bytes")
         return v
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "uid": "550e8400e29b41d4a716446655440000",
+                "username": "updated_name",
+                "password": "new_secure_password",
+                "is_active": True
+            }
+        }
+    )
 
 class UserResponse(UserBase):
     id: int

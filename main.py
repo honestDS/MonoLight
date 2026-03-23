@@ -114,12 +114,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 使用 APIRouter 内部定义的 tags，避免在 include_router 时重复或冲突定义
+app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(user_router, prefix="/api/v1/admin")
 app.include_router(provider_router, prefix="/api/v1")
-app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(prompt_router, prefix="/api/v1")
-app.include_router(user_router, prefix="/api/v1/admin", tags=["user_management"])
 
 
 @app.get("/")
