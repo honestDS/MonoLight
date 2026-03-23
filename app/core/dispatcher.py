@@ -27,7 +27,7 @@ CONFIRMATION_TOKEN = "FORCE_EXECUTE_CONFIRMED"
 class ChatDispatcher:
     @staticmethod
     async def _audit_tool_call(
-        db: AsyncSession, profile: Profile, tool_name: str, args: dict, messages: List[InternalMessage]
+        db: AsyncSession, profile: Profile, cfg: ProfileConfig, tool_name: str, args: dict, messages: List[InternalMessage]
     ) -> str | None:
         if tool_name != "execute_shell":
             return None
@@ -43,7 +43,6 @@ class ChatDispatcher:
             else:
                 command = command[len(CONFIRMATION_TOKEN) :].strip()
 
-        cfg = ProfileConfig.model_validate(profile.configs)
         if cfg.security.audit_threshold == 0:
             return None
         if not cfg.security.audit_provider_id or cfg.security.audit_provider_id <= 0:
@@ -91,6 +90,7 @@ class ChatDispatcher:
         tool_call: Any,
         db: AsyncSession,
         profile: Profile,
+        cfg: ProfileConfig,
         messages: List[InternalMessage],
         shell_executor: ShellExecutor,
         username: str,
@@ -103,7 +103,7 @@ class ChatDispatcher:
         logger.info(cmd_log)
 
         cmd_result = await ChatDispatcher._audit_tool_call(
-            db, profile, tool_name, args, messages
+            db, profile, cfg, tool_name, args, messages
         )
         
         if cmd_result is None:
@@ -142,7 +142,9 @@ class ChatDispatcher:
             if not profile:
                 raise LLMException(message="No active profile found.")
             
+            # 将 Pydantic 校验提至循环外
             cfg = ProfileConfig.model_validate(profile.configs)
+            
             messages = await ContextManager.get_messages(
                 db, session_id, uid, profile, message
             )
@@ -192,7 +194,6 @@ class ChatDispatcher:
                     final_ai_content = ai_msg.content
                     break
 
-                # 检查并行工具调用数量是否超限
                 if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
                     logger.warning(f"[{username}] Tool calls count ({len(ai_msg.tool_calls)}) exceeds limit ({cfg.tool.max_parallel_tools}).")
                     error_msg = json.dumps({
@@ -219,10 +220,9 @@ class ChatDispatcher:
                     await db.commit()
                     continue
 
-                # 并发执行工具
                 tasks = [
                     ChatDispatcher._process_single_tool(
-                        tc, db, profile, messages, shell_executor, username, session_id, current_turn
+                        tc, db, profile, cfg, messages, shell_executor, username, session_id, current_turn
                     )
                     for tc in ai_msg.tool_calls
                 ]
