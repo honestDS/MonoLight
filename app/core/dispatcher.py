@@ -157,20 +157,20 @@ class ChatDispatcher:
             shell_executor = ShellExecutor(project_root=os.getcwd(), uid=uid)
             tools = [SHELL_TOOL_SCHEMA]
 
-            # 初始用户消息立即持久化
+            # 初始用户消息持久化，确保会话存在
             db.add(Message(session_id=session_id, uid=uid, role="user", content=message, profile_id=profile.id))
             await db.commit()
 
             max_turns, current_turn, final_ai_content = 20, 0, ""
-            
-            # 用于存储中间产生的 Assistant 和 Tool 消息，最后统一持久化
             pending_db_messages: List[Message] = []
 
             while current_turn < max_turns:
                 current_turn += 1
                 
-                # 在长时间 LLM 请求前，发送一个轻量级查询以保持 Session 活跃
-                await db.execute(select(1))
+                # 在长时间 LLM 请求前，主动将 Session 切换回同步/非活跃状态是不可能的，
+                # 但 select(1) 的意义在于触发表层驱动的连接健康检查。
+                # 如果要彻底解决，最好的办法是在 generate 前暂时释放 Session，generate 后重新获取。
+                # 但当前架构依赖 db 注入。简化处理：移除 select(1)，改为在需要时才提交。
                 
                 response = await LLMClient.generate(
                     api_key=profile.provider.api_key,
@@ -244,8 +244,10 @@ class ChatDispatcher:
                             profile_id=profile.id,
                         )
                     )
+                
+                # 为了防止 Turn 过多导致 Session 压力，每轮工具执行完可以考虑刷新一次 commit
+                # 但为了绝对的生命周期安全，我们保持批量写入逻辑，并移除多余的 select(1)
             
-            # 批量持久化中间产生的消息
             if pending_db_messages:
                 db.add_all(pending_db_messages)
                 await db.commit()
@@ -257,5 +259,4 @@ class ChatDispatcher:
             }
         except Exception as e:
             logger.exception("Dispatcher Error")
-            # 即使发生错误，也尝试提交已产生的消息（可选，此处暂不实现以防脏数据）
             raise ServerException(message=str(e))
