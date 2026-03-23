@@ -192,20 +192,43 @@ class ChatDispatcher:
                     final_ai_content = ai_msg.content
                     break
 
-                # 限制并行工具调用数量
-                batch_tools = ai_msg.tool_calls[:cfg.tool.max_parallel_tools]
-                
+                # 检查并行工具调用数量是否超限
+                if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
+                    logger.warning(f"[{username}] Tool calls count ({len(ai_msg.tool_calls)}) exceeds limit ({cfg.tool.max_parallel_tools}).")
+                    error_msg = json.dumps({
+                        "error": "parallel_limit_exceeded",
+                        "message": f"Too many parallel tool calls. Requested: {len(ai_msg.tool_calls)}, Limit: {cfg.tool.max_parallel_tools}. Please refine your request to stay within the limit."
+                    }, ensure_ascii=False)
+                    
+                    for tool_call in ai_msg.tool_calls:
+                        tool_res = InternalMessage(
+                            role=MessageRole.TOOL,
+                            tool_call_id=tool_call.id,
+                            content=error_msg,
+                        )
+                        messages.append(tool_res)
+                        db.add(
+                            Message(
+                                session_id=session_id,
+                                uid=uid,
+                                role="tool",
+                                content=tool_res.model_dump_json(exclude_none=True),
+                                profile_id=profile.id,
+                            )
+                        )
+                    await db.commit()
+                    continue
+
                 # 并发执行工具
                 tasks = [
                     ChatDispatcher._process_single_tool(
                         tc, db, profile, messages, shell_executor, username, session_id, current_turn
                     )
-                    for tc in batch_tools
+                    for tc in ai_msg.tool_calls
                 ]
                 
                 tool_responses = await asyncio.gather(*tasks)
                 
-                # 处理并存储结果
                 for tool_res in tool_responses:
                     messages.append(tool_res)
                     db.add(
