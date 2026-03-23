@@ -8,7 +8,6 @@ from app.models.user import User
 from app.providers.database import AsyncSession, get_db
 from app.schemas.message import ChatCompletionRequest
 from app.schemas.response import StandardResponse
-from app.transformers.openai import OpenAITransformer
 from sqlalchemy import delete
 
 
@@ -32,7 +31,7 @@ async def chat_completions(
         session_id=session_id,
     )
     # 格式化输出
-    return OpenAITransformer.from_standard(llm_response)
+    return llm_response
 
 
 @router.get("/sessions/list")

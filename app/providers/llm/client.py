@@ -1,60 +1,45 @@
-import json
 import logging
-
-import aiohttp
-
-from app.core import constants
-from app.core.exceptions import LLMException
+from typing import Any, Dict, List, Optional
+from app.transformers.openai import OpenAITransformer
+from app.schemas.message import InternalMessage, InternalResponse
 
 logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    @staticmethod
+    _transformers = {"openai": OpenAITransformer()}
+
+    @classmethod
     async def generate(
+        cls,
         api_key: str,
         base_url: str,
         model_id: str,
-        messages: list,
+        messages: List[InternalMessage],
         temperature: float = 0.7,
         max_tokens: int = 0,
-        tools: list = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
-    ):
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model_id,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
+        protocol: str = "openai",
+        **kwargs,
+    ) -> InternalResponse:
+        transformer = cls._transformers.get(protocol.lower())
+        if not transformer:
+            from app.core.exceptions import LLMException
+            from app.core import constants
 
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = tool_choice
+            raise LLMException(
+                f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}"
+            )
 
-        if max_tokens and max_tokens > 0:
-            payload["max_tokens"] = max_tokens
-
-        url = f"{base_url.rstrip('/')}/chat/completions"
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise LLMException(
-                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
-                        )
-                    return json.loads(txt)
-        except aiohttp.ClientConnectorError as e:
-            logger.error(f"LLM Connection Error: {str(e)}")
-            raise LLMException(f"{constants.ERR_LLM_CONNECTION_FAILED}: {str(e)}")
-        except LLMException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"LLM Unexpected Error: {str(e)}")
-            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: {str(e)}")
+        return await transformer.generate(
+            api_key=api_key,
+            base_url=base_url,
+            model_id=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )

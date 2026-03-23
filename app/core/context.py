@@ -1,12 +1,13 @@
+from typing import List
 import json
 import os
-
 from dotenv import load_dotenv
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.models.message import Message
 from app.models.profile import Profile
+from app.schemas.profile import ProfileConfig
+from app.schemas.message import InternalMessage, MessageRole, InternalToolCall
 
 load_dotenv()
 
@@ -30,8 +31,10 @@ class ContextManager:
         uid: str,
         profile: Profile,
         current_message: str,
-    ):
-        limit_tokens = profile.context_window_k * 1024 * 0.8
+    ) -> List[InternalMessage]:
+        cfg = ProfileConfig.model_validate(profile.configs)
+        limit_tokens = cfg.other.context_window_k * 1024 * 0.8
+
         stmt = (
             select(Message)
             .where(Message.session_id == session_id, Message.uid == uid)
@@ -41,7 +44,7 @@ class ContextManager:
         result = await db.execute(stmt)
         history = result.scalars().all()
 
-        temp_messages = []
+        internal_msgs = []
         current_total = cls.estimate_tokens(current_message)
 
         for msg in history:
@@ -50,29 +53,49 @@ class ContextManager:
             if current_total + msg_tokens > limit_tokens:
                 break
 
+            # 解析历史消息为 InternalMessage
             try:
-                # 只有当数据库 role 为 tool 或是包含 tool_calls 的报文时，才需要恢复为报文结构
-                if msg.role == "tool" or (
-                    msg.role == "assistant" and "tool_calls" in content_str
+                role = MessageRole(msg.role)
+                tool_calls = None
+                tool_call_id = None
+                content = content_str
+
+                if role == MessageRole.TOOL or (
+                    role == MessageRole.ASSISTANT and "tool_calls" in content_str
                 ):
                     parsed = json.loads(content_str)
-                    if isinstance(parsed, dict) and (
-                        parsed.get("role") == msg.role or "tool_calls" in parsed
-                    ):
-                        msg_item = parsed
-                    else:
-                        msg_item = {"role": msg.role, "content": content_str}
-                else:
-                    msg_item = {"role": msg.role, "content": content_str}
-            except Exception:
-                msg_item = {"role": msg.role, "content": content_str}
+                    if isinstance(parsed, dict):
+                        if "tool_calls" in parsed:
+                            tool_calls = (
+                                [InternalToolCall(**tc) for tc in parsed["tool_calls"]]
+                                if isinstance(parsed["tool_calls"], list)
+                                else None
+                            )
+                            content = parsed.get("content")
+                        if "tool_call_id" in parsed:
+                            tool_call_id = parsed["tool_call_id"]
+                            content = parsed.get("content")
 
-            temp_messages.insert(0, msg_item)
+                internal_msgs.insert(
+                    0,
+                    InternalMessage(
+                        role=role,
+                        content=content,
+                        tool_calls=tool_calls,
+                        tool_call_id=tool_call_id,
+                    ),
+                )
+            except Exception:
+                internal_msgs.insert(
+                    0, InternalMessage(role=MessageRole(msg.role), content=content_str)
+                )
+
             current_total += msg_tokens
 
-        if temp_messages and temp_messages[0].get("role") == "assistant":
-            temp_messages.pop(0)
+        if internal_msgs and internal_msgs[0].role == MessageRole.ASSISTANT:
+            internal_msgs.pop(0)
 
-        final_messages = temp_messages
-        final_messages.append({"role": "user", "content": current_message})
-        return final_messages
+        internal_msgs.append(
+            InternalMessage(role=MessageRole.USER, content=current_message)
+        )
+        return internal_msgs

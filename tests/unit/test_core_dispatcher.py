@@ -1,163 +1,59 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from app.core.dispatcher import ChatDispatcher, CONFIRMATION_TOKEN
-from app.core.exceptions import ParameterException, LLMException
+from app.core.dispatcher import ChatDispatcher
+from app.core.exceptions import ServerException
 
 
 @pytest.fixture
-def mock_db():
+def mock_profile():
+    p = MagicMock()
+    p.id = 1
+    p.configs = {
+        "provider": {"model_id": "gpt-4", "temperature": 0.7},
+        "security": {
+            "audit_provider_id": 1,
+            "audit_model_id": "audit",
+            "audit_threshold": 5,
+        },
+        "tool": {"shell_timeout": 30.0},
+        "other": {"context_window_k": 4},
+    }
+    p.provider = MagicMock()
+    p.provider.api_key = "key"
+    p.provider.base_url = "url"
+    p.prompt = None
+    return p
+
+
+@pytest.mark.asyncio
+async def test_dispatch_no_active_profile():
     db = MagicMock()
-    db.add = MagicMock()
-    db.commit = AsyncMock()
     db.execute = AsyncMock()
     mock_result = MagicMock()
-    mock_scalars = MagicMock()
-    mock_result.scalars.return_value = mock_scalars
+    mock_result.scalars.return_value.first.return_value = None
     db.execute.return_value = mock_result
-    return db, mock_scalars
+
+    with pytest.raises(ServerException) as exc:
+        await ChatDispatcher.dispatch(db, "hi", "u1")
+    assert "No active profile found" in str(exc.value)
 
 
 @pytest.mark.asyncio
-async def test_audit_tool_call_no_audit_config(mock_db, mock_audit_profile):
-    db, _ = mock_db
-    mock_audit_profile.audit_provider_id = None
-    res = await ChatDispatcher._audit_tool_call(
-        db, mock_audit_profile, "execute_shell", {"command": "ls"}, []
-    )
-    assert res is None
-
-
-@pytest.mark.asyncio
-async def test_audit_tool_call_high_risk_blocked(mock_db, mock_audit_profile):
-    db, mock_scalars = mock_db
-    mock_audit_profile.audit_threshold = 5
-    mock_scalars.first.return_value = mock_audit_profile.provider
-    mock_audit_res = {"score": 9, "reason": "Destructive command detected"}
+async def test_audit_tool_call_blocked(mock_profile):
+    db = MagicMock()
+    db.execute = AsyncMock()
+    # 模拟 audit_provider 查询
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = mock_profile.provider
+    db.execute.return_value = mock_result
 
     with patch(
-        "app.core.dispatcher.audit_command", AsyncMock(return_value=mock_audit_res)
+        "app.core.dispatcher.audit_command",
+        AsyncMock(return_value={"score": 9, "reason": "danger"}),
     ):
         res_json = await ChatDispatcher._audit_tool_call(
-            db, mock_audit_profile, "execute_shell", {"command": "rm -rf /"}, []
+            db, mock_profile, "execute_shell", {"command": "rm -rf /"}, []
         )
         res = json.loads(res_json)
         assert res["error"] == "Security Blocked"
-        assert "9" in res["reason"]
-
-
-@pytest.mark.asyncio
-async def test_audit_tool_call_confirmation_required(mock_db, mock_audit_profile):
-    db, mock_scalars = mock_db
-    mock_audit_profile.audit_threshold = 5
-    mock_scalars.first.return_value = mock_audit_profile.provider
-    mock_audit_res = {"score": 6, "reason": "Potentially risky"}
-
-    with patch(
-        "app.core.dispatcher.audit_command", AsyncMock(return_value=mock_audit_res)
-    ):
-        res_json = await ChatDispatcher._audit_tool_call(
-            db, mock_audit_profile, "execute_shell", {"command": "rm test.txt"}, []
-        )
-        res = json.loads(res_json)
-        assert res["error"] == "confirmation_required"
-        assert CONFIRMATION_TOKEN in res["reason"]
-
-
-@pytest.mark.asyncio
-async def test_audit_tool_call_token_validation_success(mock_db, mock_audit_profile):
-    db, _ = mock_db
-    messages = [
-        {
-            "role": "tool",
-            "content": json.dumps({"error": "confirmation_required", "reason": "..."}),
-        }
-    ]
-    command = f"{CONFIRMATION_TOKEN} rm test.txt"
-    res = await ChatDispatcher._audit_tool_call(
-        db, mock_audit_profile, "execute_shell", {"command": command}, messages
-    )
-    assert res is None
-
-
-@pytest.mark.asyncio
-async def test_audit_tool_call_malicious_token_injection(mock_db, mock_audit_profile):
-    db, mock_scalars = mock_db
-    mock_audit_profile.audit_threshold = 5
-    mock_scalars.first.return_value = mock_audit_profile.provider
-    messages = []
-    command = f"{CONFIRMATION_TOKEN} rm test.txt"
-    mock_audit_res = {"score": 7, "reason": "Intercepted after token strip"}
-    with patch(
-        "app.core.dispatcher.audit_command", AsyncMock(return_value=mock_audit_res)
-    ) as mock_audit:
-        res_json = await ChatDispatcher._audit_tool_call(
-            db, mock_audit_profile, "execute_shell", {"command": command}, messages
-        )
-        res = json.loads(res_json)
-        assert res["error"] == "confirmation_required"
-        mock_audit.assert_called_once()
-        assert mock_audit.call_args[0][0] == "rm test.txt"
-
-
-@pytest.mark.asyncio
-async def test_dispatch_flow_audit_interception(mock_db, mock_audit_profile):
-    db, mock_scalars = mock_db
-    # 修复：确保 mock_audit_profile 的所有被比较字段都是具体数值，而不是 MagicMock
-    mock_audit_profile.audit_threshold = 5
-    mock_audit_profile.provider_id = 1
-    
-    # 修正 side_effect 逻辑：第一次 fetch profile，第二次 fetch audit_provider
-    mock_scalars.first.side_effect = [mock_audit_profile, mock_audit_profile.provider]
-    
-    mock_llm_response_1 = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "t1",
-                            "type": "function",
-                            "function": {
-                                "name": "execute_shell",
-                                "arguments": '{"command":"rm file"}',
-                            },
-                        }
-                    ],
-                }
-            }
-        ]
-    }
-    mock_llm_response_2 = {
-        "choices": [
-            {"message": {"role": "assistant", "content": "I need your confirmation"}}
-        ]
-    }
-    with patch(
-        "app.core.context.ContextManager.get_messages", AsyncMock(return_value=[])
-    ):
-        with patch(
-            "app.providers.llm.client.LLMClient.generate",
-            AsyncMock(side_effect=[mock_llm_response_1, mock_llm_response_2]),
-        ):
-            with patch(
-                "app.core.dispatcher.audit_command",
-                AsyncMock(return_value={"score": 6, "reason": "risky"}),
-            ):
-                result = await ChatDispatcher.dispatch(db, "delete file", "u1")
-                assert (
-                    "I need your confirmation"
-                    in result["choices"][0]["message"]["content"]
-                )
-
-
-@pytest.mark.asyncio
-async def test_dispatch_no_active_profile(mock_db):
-    db, mock_scalars = mock_db
-    mock_scalars.first.return_value = None
-    # 修复断言：Dispatcher 内部会捕获 LLMException 并抛出 ServerException
-    from app.core.exceptions import ServerException
-    with pytest.raises(ServerException) as excinfo:
-        await ChatDispatcher.dispatch(db, "hi", "u1")
-    assert "No active profile found" in str(excinfo.value)

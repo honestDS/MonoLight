@@ -16,7 +16,6 @@ from typing import List
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        from app.core import constants
         from app.core.exceptions import ForbiddenException
 
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
@@ -36,7 +35,6 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    # 强制检查 provider_id 是否存在
     if profile.provider_id and profile.provider_id > 0:
         provider_check = await db.get(ModelProvider, profile.provider_id)
         if not provider_check:
@@ -51,7 +49,14 @@ async def create_profile(
         if not prompt_check:
             raise ParameterException(constants.ERR_PROMPT_NOT_FOUND)
 
-    db_profile = Profile(**profile.model_dump())
+    # 这里的 configs 在 Pydantic 模型里是一个对象，但在数据库里需要是一个字典
+    db_profile = Profile(
+        name=profile.name,
+        provider_id=profile.provider_id,
+        prompt_id=profile.prompt_id,
+        configs=profile.configs.model_dump(),
+        is_active=False,
+    )
     db.add(db_profile)
     await db.commit()
     await db.refresh(db_profile)
@@ -83,7 +88,6 @@ async def activate_profile(
     if profile.provider_id is None or profile.provider_id <= 0:
         raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
 
-    # 二次确认：即使 provider_id > 0，也要确保该 provider 在数据库中真实存在
     provider_exists = await db.get(ModelProvider, profile.provider_id)
     if not provider_exists:
         raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
@@ -105,7 +109,6 @@ async def update_profile(
     if not db_profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    # 如果更新了 provider_id，则必须校验其存在性
     if profile.provider_id is not None:
         if profile.provider_id > 0:
             provider_check = await db.get(ModelProvider, profile.provider_id)
@@ -129,6 +132,10 @@ async def update_profile(
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
     update_data = profile.model_dump(exclude_unset=True)
+    if "configs" in update_data and update_data["configs"]:
+        # 如果更新了 configs，将其序列化为字典存入 JSON 字段
+        db_profile.configs = update_data.pop("configs")
+
     for field, value in update_data.items():
         setattr(db_profile, field, value)
 

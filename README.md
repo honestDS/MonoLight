@@ -14,14 +14,15 @@
 > 5. 如果修改了API接口，必须通过http://服务器IP:端口号/openapi.json 重新拉取最新的文档内容并更新项目跟目录下的API.json文件
 
 ## 1. 核心特性
-- **自主 Agent 架构**: 内置 Dispatcher 循环机制，支持 AI 自主调用工具链完成复杂逻辑。
+- **自主 Agent 架构**: 内置 Dispatcher 循环机制，支持标准协议下的工具调用反思。
 - **多用户系统**: 引入完整的用户权限体系与多角色管理。
 - **多用户会话隔离**: 实现用户会话隔离。
 - **配置管理中心**: 前后端深度打磨的配置管理页面，支持可视化管理模型参数、采样策略及提供商映射。
-- **异常驱动架构**: 引入 StandardResponse 与业务异常体系，通过全局 Handler 实现精准的错误分级与业务文案收口。
+- **协议标准化**: 引入 Transformer 层，实现不同 LLM 协议与内部标准对象（InternalMessage）的无缝转换。
+- **安全审计中间件**: 支持基于 LLM 的敏感指令实时审计与风险阻断。
 - **提示词资产管理**: 独立的 PromptLibrary 支持多套提示词随时切换与复用。
 - **物理工具集成**: 首发支持 ShellExecutor，允许 AI 在受控环境下执行系统指令。
-- **全异步架构**: 基于 FastAPI (aiohttp) 与 SQLAlchemy 的高性能并发处理。
+- **全异步高性能**: 基于 FastAPI、SQLAlchemy 异步模式与 aiohttp 构建。
 
 ## 2. 交互入口
 - **仪表盘 (Dashboard)**: 基于 Vue 3 + Element Plus 的现代管理后台，提供极致流畅的配置与交互体验。
@@ -40,8 +41,6 @@
 ## 4. 技术架构
 详细文档请参考 [ARCHITECTURE.md](./ARCHITECTURE.md)
 
-## 5. 开源协议
-本项目采用 AGPL-3.0 协议开源。
 ## 自动化测试
 
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
@@ -59,3 +58,6 @@ PYTHONPATH=. pytest tests/
 1. tests/unit: 核心逻辑单元测试
 2. tests/initialization: 数据库初始化与迁移逻辑测试
 3. tests/integration: API 异步接口集成测试
+
+## 开源协议
+本项目采用 AGPL-3.0 协议开源。

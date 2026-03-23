@@ -1,4 +1,4 @@
-# Monolight 开发规范 (v1.0)
+# Monolight 开发规范 (v1.1)
 
 ## 一、 项目概况
 Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发框架。本项目遵循严格的异步编程范式，所有 IO 操作必须使用 `await` 关键字。
@@ -21,19 +21,23 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
    ruff format .
    ```
 
-## 四、 新增功能与测试要求
+## 四、 核心模型与协议
+1. **标准消息对象**：所有模块间的消息传递必须使用 `app.schemas.message` 中的 `InternalMessage`。
+2. **配置管理**：Profile 配置更新必须通过 `ProfileConfig` 模型进行校验，确保 JSON 数据结构的正确性。
+3. **协议扩展**：新增模型供应商支持时，必须继承 `BaseTransformer` 并实现双向转换逻辑。
+
+## 五、 新增功能与测试要求
 - **目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。
 - **测试框架**：统一使用 `pytest` 与 `pytest-asyncio`。
 - **编写指南**：
   - 每个新增的 API 路由必须在 `tests/integration` 中拥有对应的异步请求测试。
-  - 使用 `conftest.py` 中定义的 `db_session` fixture 进行数据库隔离测试，严禁直接操作生产库。
-  - 断言必须清晰：除了断言状态码，还必须断言响应体（`StandardResponse`）的结构一致性。
+  - 使用 `conftest.py` 中定义的 `db_session` fixture 进行数据库隔离测试。
+  - 测试中的 Mock 逻辑必须基于 `InternalResponse` 等标准对象，严禁使用旧版字典结构。
 
-## 五、 异常处理规范
-1. 严禁使用空的 `try-except`。
-2. 业务异常必须继承自 `app.core.exceptions` 中的 `BaseMonolightException`。
-3. API 报错应统一抛出 FastAPI 的 `HTTPException` 或使用标准响应格式。
+## 六、 异常处理规范
+1. 业务异常必须继承自 `app.core.exceptions` 中的 `BaseBusinessException`。
+2. 所有 LLM 交互异常必须封装为 `LLMException` 并附带明确的错误上下文。
 
-## 六、 依赖管理
+## 七、 依赖管理
 1. 所有新依赖必须同步至 `requirements.txt`。
-2. 优先使用异步库，如 `httpx` 代替 `requests`。
+2. 优先使用异步库，如 `aiohttp` 代替 `requests`。

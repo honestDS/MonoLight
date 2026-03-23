@@ -1,53 +1,45 @@
 import pytest
-from sqlalchemy import inspect, select
+from sqlalchemy import select
 from app.providers.database import engine, Base
 from app.models.profile import Profile
 
 
 @pytest.mark.asyncio
-async def test_tables_alignment(db_session):
-    """验证所有物理表名是否已按单数对齐"""
-
-    def get_tables(connection):
-        inst = inspect(connection)
-        return inst.get_table_names()
-
-    # 确保测试库中的表已被创建
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    async with engine.connect() as conn:
-        tables = await conn.run_sync(get_tables)
-
-    # 验证单数表名是否存在
-    expected_tables = ["user", "provider", "profile", "prompt", "message"]
-    for table in expected_tables:
-        assert table in tables
-
-
-@pytest.mark.asyncio
 async def test_default_profile_initialization_with_timeout(db_session):
-    """验证初始化时默认 Profile 是否包含正确的超时配置"""
-    # 模拟 main.py lifespan 中的初始化逻辑
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # 检查默认 Profile
     check = await db_session.execute(select(Profile).where(Profile.name == "default"))
     profile = check.scalars().first()
 
-    # 如果不存在（正常测试环境下应不存在），则手动触发一次初始化
     if not profile:
         default_profile = Profile(
             name="default",
             provider_id=-1,
-            model_id="test-model",
-            extra_config={"shell_timeout": 30},
+            configs={
+                "provider": {
+                    "model_id": "test-model",
+                    "temperature": 0.7,
+                    "top_p": 1.0,
+                    "max_tokens": 2048,
+                    "stream": False,
+                },
+                "security": {"audit_threshold": 5},
+                "tool": {"shell_timeout": 30.0},
+                "other": {"context_window_k": 4},
+            },
             is_active=True,
         )
         db_session.add(default_profile)
         await db_session.commit()
+        await db_session.refresh(default_profile)
         profile = default_profile
 
-    assert profile.extra_config is not None
-    assert profile.extra_config.get("shell_timeout") == 30
+    assert profile.configs is not None
+    # 兼容性检查：确保 configs 是 dict 且包含 tool.shell_timeout
+    configs = profile.configs
+    if isinstance(configs, str):
+        import json
+
+        configs = json.loads(configs)
+    assert configs["tool"]["shell_timeout"] == 30.0

@@ -17,7 +17,6 @@ async def test_profile_management_full_flow():
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
-        # 1. Login
         await ac.post(
             "/api/v1/auth/reset_admin",
             json={"reset_token": "ed126d6c5a4ea6bf33774214633d2a16"},
@@ -28,34 +27,53 @@ async def test_profile_management_full_flow():
         token = login_resp.json()["data"]["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
-        # 2. Create Provider
-        provider_data = {
-            "name": "TestProvider",
-            "api_key": "sk-test",
-            "base_url": "http://test.api",
-            "provider_type": "OPENAI",
-            "is_active": True,
-        }
-        p_resp = await ac.post(
-            "/api/v1/providers/create", json=provider_data, headers=headers
+        # 1. 创建 Provider
+        # 确保 provider_type 与 Enum 匹配 (OPENAI)
+        provider_resp = await ac.post(
+            "/api/v1/providers/create",
+            json={
+                "name": "P1",
+                "api_key": "sk-test",
+                "base_url": "http://api.openai.com/v1",
+                "provider_type": "OPENAI",
+                "is_active": True,
+            },
+            headers=headers,
         )
-        assert p_resp.status_code == 200
-        provider_id = p_resp.json()["data"]["id"]
+        assert provider_resp.status_code == 200
+        provider_id = provider_resp.json()["data"]["id"]
 
-        # 3. Create Profile
+        # 2. 创建 Profile
         profile_data = {
-            "name": "AuditProfile",
+            "name": "C1",
             "provider_id": provider_id,
-            "model_id": "gpt-4",
-            "audit_provider_id": provider_id,
-            "audit_model_id": "gpt-4-audit",
-            "audit_threshold": 5,
-            "is_active": True,
+            "configs": {
+                "provider": {
+                    "model_id": "gpt-3.5-turbo",
+                    "temperature": 0.7,
+                    "top_p": 1.0,
+                    "max_tokens": 2048,
+                    "stream": False,
+                },
+                "security": {
+                    "audit_threshold": 5,
+                    "audit_provider_id": provider_id,
+                    "audit_model_id": "gpt-3.5-turbo",
+                },
+                "tool": {"shell_timeout": 30.0},
+                "other": {"context_window_k": 4},
+            },
         }
         resp = await ac.post(
             "/api/v1/profiles/create", json=profile_data, headers=headers
         )
         assert resp.status_code == 200
-        data = resp.json()["data"]
-        assert data is not None
-        assert data["audit_provider_id"] == provider_id
+        profile_id = resp.json()["data"]["id"]
+
+        # 3. 激活
+        resp = await ac.post(
+            "/api/v1/profiles/activate",
+            params={"profile_id": profile_id},
+            headers=headers,
+        )
+        assert resp.status_code == 200

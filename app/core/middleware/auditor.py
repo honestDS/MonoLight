@@ -2,6 +2,7 @@ import json
 from typing import Dict, Any, Optional
 from app.core.log import get_logger
 from app.providers.llm.client import LLMClient
+from app.schemas.message import InternalMessage, MessageRole
 
 logger = get_logger(__name__)
 
@@ -23,8 +24,10 @@ async def audit_command(
 ) -> Optional[Dict[str, Any]]:
     try:
         messages = [
-            {"role": "system", "content": AUDIT_PROMPT},
-            {"role": "user", "content": f"Command to analyze: {command}"},
+            InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_PROMPT),
+            InternalMessage(
+                role=MessageRole.USER, content=f"Command to analyze: {command}"
+            ),
         ]
 
         result = await LLMClient.generate(
@@ -35,24 +38,16 @@ async def audit_command(
             temperature=0.1,
         )
 
-        content = result["choices"][0]["message"]["content"]
+        content = result.message.content
 
         # 鲁棒性处理：剥离大模型可能输出的 Markdown JSON 标记
         clean_content = content.strip()
         if clean_content.startswith("```"):
-            lines = clean_content.splitlines()
-            if len(lines) >= 2:
-                # 尝试剥离 Markdown 块
-                # 寻找第一个 { 和最后一个 }
-                start = clean_content.find("{")
-                end = clean_content.rfind("}")
-                if start != -1 and end != -1:
-                    clean_content = clean_content[start : end + 1]
-                else:
-                    # 回退逻辑
-                    clean_content = "\n".join(lines[1:-1]).strip()
+            start = clean_content.find("{")
+            end = clean_content.rfind("}")
+            if start != -1 and end != -1:
+                clean_content = clean_content[start : end + 1]
         elif "{" in clean_content and "}" in clean_content:
-            # 如果不是 markdown 但混杂了文字
             start = clean_content.find("{")
             end = clean_content.rfind("}")
             clean_content = clean_content[start : end + 1]

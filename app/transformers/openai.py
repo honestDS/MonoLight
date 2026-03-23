@@ -1,43 +1,109 @@
-import time
-from typing import Any, Dict
-
+import json
+import logging
+from typing import Any, Dict, List, Optional
+import aiohttp
+from app.core import constants
+from app.core.exceptions import LLMException
+from app.schemas.message import (
+    InternalMessage,
+    InternalResponse,
+    InternalToolCall,
+    MessageRole,
+)
 from .base import BaseTransformer
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAITransformer(BaseTransformer):
-    @classmethod
-    def to_standard(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        # 预留协议转换接口：用于将来解析 OpenAI 标准格式的请求体 (如 messages 列表) 并转换为 Monolight 内部指令
-        return data
+    async def generate(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        messages: List[InternalMessage],
+        temperature: float = 0.7,
+        max_tokens: int = 0,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> InternalResponse:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_id,
+            "messages": self.to_provider(messages),
+            "temperature": temperature,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    txt = await resp.text()
+                    if resp.status != 200:
+                        raise LLMException(
+                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
+                        )
+                    return self.from_provider(json.loads(txt))
+        except Exception as e:
+            logger.error(f"OpenAI Driver Error: {str(e)}")
+            raise LLMException(str(e))
 
     @classmethod
-    def from_standard(cls, internal_data: Dict[str, Any]) -> Dict[str, Any]:
-        # 统一从 choices 中提取内容，如果不存在则找顶级 content
-        choices = internal_data.get("choices", [])
-        content = ""
-        model_name = internal_data.get("model", "monolight-v1")
+    def to_provider(
+        cls, internal_messages: List[InternalMessage], **kwargs
+    ) -> List[Dict[str, Any]]:
+        provider_msgs = []
+        for msg in internal_messages:
+            item = {"role": msg.role.value, "content": msg.content}
+            if msg.tool_calls:
+                item["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
+            if msg.tool_call_id:
+                item["tool_call_id"] = msg.tool_call_id
+            provider_msgs.append(item)
+        return provider_msgs
 
-        if choices and len(choices) > 0:
-            msg = choices[0].get("message", {})
-            content = msg.get("content", "")
+    @classmethod
+    def from_provider(cls, provider_response: Any) -> InternalResponse:
+        choice = provider_response["choices"][0]["message"]
+        tool_calls = None
+        if "tool_calls" in choice:
+            tool_calls = [
+                InternalToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    arguments=json.loads(tc["function"]["arguments"]),
+                )
+                for tc in choice["tool_calls"]
+            ]
 
-        if not content:
-            content = internal_data.get("content", "")
-
-        # 强制输出标准的 OpenAI 响应结构
-        return {
-            "id": internal_data.get("id", f"chatcmpl-{int(time.time())}"),
-            "object": "chat.completion",
-            "created": internal_data.get("created", int(time.time())),
-            "model": model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": internal_data.get(
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=choice.get("content"),
+                tool_calls=tool_calls,
+            ),
+            model=provider_response.get("model", "unknown"),
+            usage=provider_response.get(
                 "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             ),
-        }
+        )
