@@ -1,5 +1,7 @@
 import json
 import os
+import asyncio
+from typing import List, Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,7 +27,7 @@ CONFIRMATION_TOKEN = "FORCE_EXECUTE_CONFIRMED"
 class ChatDispatcher:
     @staticmethod
     async def _audit_tool_call(
-        db: AsyncSession, profile: Profile, tool_name: str, args: dict, messages: list
+        db: AsyncSession, profile: Profile, tool_name: str, args: dict, messages: List[InternalMessage]
     ) -> str | None:
         if tool_name != "execute_shell":
             return None
@@ -85,16 +87,51 @@ class ChatDispatcher:
         return None
 
     @staticmethod
+    async def _process_single_tool(
+        tool_call: Any,
+        db: AsyncSession,
+        profile: Profile,
+        messages: List[InternalMessage],
+        shell_executor: ShellExecutor,
+        username: str,
+        session_id: str,
+        turn: int
+    ) -> InternalMessage:
+        tool_name = tool_call.name
+        args = tool_call.arguments
+        cmd_log = f"[{username}] (Session: {session_id}) Turn {turn} | Tool Call: {tool_name} {{command: {args.get('command', '')}}}"
+        logger.info(cmd_log)
+
+        cmd_result = await ChatDispatcher._audit_tool_call(
+            db, profile, tool_name, args, messages
+        )
+        
+        if cmd_result is None:
+            if tool_name == "execute_shell":
+                command = args.get("command", "")
+                if command.startswith(CONFIRMATION_TOKEN):
+                    command = command[len(CONFIRMATION_TOKEN) :].strip()
+                cmd_result = await shell_executor.execute(command)
+            else:
+                cmd_result = json.dumps({"error": "Unknown tool"}, ensure_ascii=False)
+
+        res_log = f"[{username}] (Session: {session_id}) Turn {turn} | Tool Result: {cmd_result}"
+        logger.info(res_log)
+
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=cmd_result,
+        )
+
+    @staticmethod
     async def dispatch(
         db: AsyncSession, message: str, uid: str, session_id: str = "default"
     ):
         try:
-            # 获取用户信息以增强日志可读性
             user_stmt = select(User).where(User.uid == uid)
             user = (await db.execute(user_stmt)).scalars().first()
             username = user.username if user else "Unknown"
-
-            logger.info(f"[{username}] New request (Session: {session_id}): {message}")
 
             stmt = (
                 select(Profile)
@@ -104,11 +141,7 @@ class ChatDispatcher:
             profile = (await db.execute(stmt)).scalars().first()
             if not profile:
                 raise LLMException(message="No active profile found.")
-            if not profile.provider or profile.provider_id <= 0:
-                raise ParameterException(
-                    message=constants.ERR_LLM_PROVIDER_NOT_CONFIGURED
-                )
-
+            
             cfg = ProfileConfig.model_validate(profile.configs)
             messages = await ContextManager.get_messages(
                 db, session_id, uid, profile, message
@@ -117,24 +150,13 @@ class ChatDispatcher:
             if profile.prompt and profile.prompt.content:
                 messages = [m for m in messages if m.role != MessageRole.SYSTEM]
                 messages.insert(
-                    0,
-                    InternalMessage(
-                        role=MessageRole.SYSTEM, content=profile.prompt.content
-                    ),
+                    0, InternalMessage(role=MessageRole.SYSTEM, content=profile.prompt.content)
                 )
 
             shell_executor = ShellExecutor(project_root=os.getcwd(), uid=uid)
             tools = [SHELL_TOOL_SCHEMA]
 
-            db.add(
-                Message(
-                    session_id=session_id,
-                    uid=uid,
-                    role="user",
-                    content=message,
-                    profile_id=profile.id,
-                )
-            )
+            db.add(Message(session_id=session_id, uid=uid, role="user", content=message, profile_id=profile.id))
             await db.commit()
 
             max_turns, current_turn, final_ai_content = 20, 0, ""
@@ -149,9 +171,7 @@ class ChatDispatcher:
                     temperature=cfg.provider.temperature,
                     max_tokens=cfg.provider.max_tokens,
                     tools=tools,
-                    protocol=profile.provider.protocol
-                    if hasattr(profile.provider, "protocol")
-                    else "openai",
+                    protocol=getattr(profile.provider, "protocol", "openai"),
                 )
 
                 ai_msg = response.message
@@ -162,9 +182,7 @@ class ChatDispatcher:
                         session_id=session_id,
                         uid=uid,
                         role="assistant",
-                        content=ai_msg.model_dump_json(exclude_none=True)
-                        if ai_msg.tool_calls
-                        else ai_msg.content,
+                        content=ai_msg.model_dump_json(exclude_none=True) if ai_msg.tool_calls else ai_msg.content,
                         profile_id=profile.id,
                     )
                 )
@@ -172,44 +190,30 @@ class ChatDispatcher:
 
                 if not ai_msg.tool_calls:
                     final_ai_content = ai_msg.content
-                    logger.info(
-                        f"[{username}] (Session: {session_id}) Final response: {final_ai_content}"
-                    )
                     break
 
-                for tool_call in ai_msg.tool_calls:
-                    cmd_log = f"[{username}]  (Session: {session_id}) Turn {current_turn} | Tool Call: {tool_call.name} {{command: {tool_call.arguments.get('command', '')}}}"
-                    logger.info(cmd_log)
-
-                    cmd_result = await ChatDispatcher._audit_tool_call(
-                        db, profile, tool_call.name, tool_call.arguments, messages
+                # 限制并行工具调用数量
+                batch_tools = ai_msg.tool_calls[:cfg.tool.max_parallel_tools]
+                
+                # 并发执行工具
+                tasks = [
+                    ChatDispatcher._process_single_tool(
+                        tc, db, profile, messages, shell_executor, username, session_id, current_turn
                     )
-                    if cmd_result is None:
-                        if tool_call.name == "execute_shell":
-                            command = tool_call.arguments.get("command", "")
-                            if command.startswith(CONFIRMATION_TOKEN):
-                                command = command[len(CONFIRMATION_TOKEN) :].strip()
-                            cmd_result = await shell_executor.execute(command)
-                        else:
-                            cmd_result = json.dumps(
-                                {"error": "Unknown tool"}, ensure_ascii=False
-                            )
-
-                    res_log = f"[{username}]  (Session: {session_id}) Turn {current_turn} | Tool Result: {cmd_result}"
-                    logger.info(res_log)
-
-                    tool_response = InternalMessage(
-                        role=MessageRole.TOOL,
-                        tool_call_id=tool_call.id,
-                        content=cmd_result,
-                    )
-                    messages.append(tool_response)
+                    for tc in batch_tools
+                ]
+                
+                tool_responses = await asyncio.gather(*tasks)
+                
+                # 处理并存储结果
+                for tool_res in tool_responses:
+                    messages.append(tool_res)
                     db.add(
                         Message(
                             session_id=session_id,
                             uid=uid,
                             role="tool",
-                            content=tool_response.model_dump_json(exclude_none=True),
+                            content=tool_res.model_dump_json(exclude_none=True),
                             profile_id=profile.id,
                         )
                     )

@@ -19,6 +19,7 @@ class SecurityConfig(BaseModel):
 
 class ToolConfig(BaseModel):
     shell_timeout: float = Field(30.0, gt=0)
+    max_parallel_tools: int = Field(5, ge=1, le=20)
 
 
 class OtherConfig(BaseModel):
@@ -34,11 +35,10 @@ class ProfileConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def data_pump(cls, data: Any) -> Any:
-        # 定义当前模型的字段分布图
         schema_map = {
             "provider": ["model_id", "temperature", "top_p", "max_tokens", "stream"],
             "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
-            "tool": ["shell_timeout"],
+            "tool": ["shell_timeout", "max_parallel_tools"],
             "other": ["context_window_k"],
         }
         return standardize_config(data, schema_map)
