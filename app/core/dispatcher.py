@@ -142,7 +142,6 @@ class ChatDispatcher:
             if not profile:
                 raise LLMException(message="No active profile found.")
             
-            # 将 Pydantic 校验提至循环外
             cfg = ProfileConfig.model_validate(profile.configs)
             
             messages = await ContextManager.get_messages(
@@ -158,13 +157,21 @@ class ChatDispatcher:
             shell_executor = ShellExecutor(project_root=os.getcwd(), uid=uid)
             tools = [SHELL_TOOL_SCHEMA]
 
+            # 初始用户消息立即持久化
             db.add(Message(session_id=session_id, uid=uid, role="user", content=message, profile_id=profile.id))
             await db.commit()
 
             max_turns, current_turn, final_ai_content = 20, 0, ""
+            
+            # 用于存储中间产生的 Assistant 和 Tool 消息，最后统一持久化
+            pending_db_messages: List[Message] = []
 
             while current_turn < max_turns:
                 current_turn += 1
+                
+                # 在长时间 LLM 请求前，发送一个轻量级查询以保持 Session 活跃
+                await db.execute(select(1))
+                
                 response = await LLMClient.generate(
                     api_key=profile.provider.api_key,
                     base_url=profile.provider.base_url,
@@ -179,7 +186,7 @@ class ChatDispatcher:
                 ai_msg = response.message
                 messages.append(ai_msg)
 
-                db.add(
+                pending_db_messages.append(
                     Message(
                         session_id=session_id,
                         uid=uid,
@@ -188,17 +195,15 @@ class ChatDispatcher:
                         profile_id=profile.id,
                     )
                 )
-                await db.commit()
 
                 if not ai_msg.tool_calls:
                     final_ai_content = ai_msg.content
                     break
 
                 if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                    logger.warning(f"[{username}] Tool calls count ({len(ai_msg.tool_calls)}) exceeds limit ({cfg.tool.max_parallel_tools}).")
                     error_msg = json.dumps({
                         "error": "parallel_limit_exceeded",
-                        "message": f"Too many parallel tool calls. Requested: {len(ai_msg.tool_calls)}, Limit: {cfg.tool.max_parallel_tools}. Please refine your request to stay within the limit."
+                        "message": f"Too many parallel tool calls. Requested: {len(ai_msg.tool_calls)}, Limit: {cfg.tool.max_parallel_tools}."
                     }, ensure_ascii=False)
                     
                     for tool_call in ai_msg.tool_calls:
@@ -208,7 +213,7 @@ class ChatDispatcher:
                             content=error_msg,
                         )
                         messages.append(tool_res)
-                        db.add(
+                        pending_db_messages.append(
                             Message(
                                 session_id=session_id,
                                 uid=uid,
@@ -217,7 +222,6 @@ class ChatDispatcher:
                                 profile_id=profile.id,
                             )
                         )
-                    await db.commit()
                     continue
 
                 tasks = [
@@ -231,7 +235,7 @@ class ChatDispatcher:
                 
                 for tool_res in tool_responses:
                     messages.append(tool_res)
-                    db.add(
+                    pending_db_messages.append(
                         Message(
                             session_id=session_id,
                             uid=uid,
@@ -240,6 +244,10 @@ class ChatDispatcher:
                             profile_id=profile.id,
                         )
                     )
+            
+            # 批量持久化中间产生的消息
+            if pending_db_messages:
+                db.add_all(pending_db_messages)
                 await db.commit()
 
             return {
@@ -249,4 +257,5 @@ class ChatDispatcher:
             }
         except Exception as e:
             logger.exception("Dispatcher Error")
+            # 即使发生错误，也尝试提交已产生的消息（可选，此处暂不实现以防脏数据）
             raise ServerException(message=str(e))
