@@ -5,7 +5,8 @@ from typing import List, Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import ContextManager
-from app.core.exceptions import LLMException, ServerException
+from app.core.exceptions import BaseBusinessException, LLMException, ServerException
+from app.core.constants import ERR_PROFILE_NOT_FOUND, ERR_LLM_PROVIDER_NOT_CONFIGURED
 from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
 from app.models.profile import Profile, ProfileConfig
 from app.models.message import Message, MessageRole, InternalMessage
@@ -141,7 +142,7 @@ class ChatDispatcher:
 
             profile = await profile_crud.get_active(db)
             if not profile:
-                raise LLMException(message="No active profile found.")
+                raise LLMException(message=ERR_PROFILE_NOT_FOUND)
             
             cfg = ProfileConfig.model_validate(profile.configs)
             messages = await ContextManager.get_messages(db, session_id, uid, profile, message)
@@ -235,6 +236,10 @@ class ChatDispatcher:
                     {"message": {"role": "assistant", "content": final_ai_content}}
                 ]
             }
+        except BaseBusinessException:
+            # Re-raise known business exceptions directly
+            raise
         except Exception as e:
             logger.exception("Dispatcher Error")
+            # Wrap unknown exceptions as ServerException
             raise ServerException(message=str(e))
