@@ -2,7 +2,11 @@ from typing import Optional
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.crud.base import CRUDBase
-from app.models.prompt import PromptLibrary, PromptCreate, PromptUpdate
+from app.models.prompt import (
+    PromptLibrary,
+    PromptCreate,
+    PromptUpdate,
+)
 
 
 class CRUDPrompt(CRUDBase[PromptLibrary, PromptCreate, PromptUpdate]):

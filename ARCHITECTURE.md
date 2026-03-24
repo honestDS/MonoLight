@@ -48,6 +48,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 
 ### 2.7 全局配置与常量 (Constants Layer)
 - app/core/constants.py: 统一的消息资产库。定义了系统中所有面向用户的异常消息。
+- app/core/prompts.py: 系统级提示词模板中心。
 
 ### 2.8 核心 CRUD 层
 - app/core/crud: 该层作为业务逻辑与数据持久化之间的缓冲，负责屏蔽复杂的数据库查询细节。

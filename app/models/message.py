@@ -1,8 +1,21 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any
-from sqlmodel import SQLModel, Field, Column, DateTime
-from pydantic import ConfigDict, BaseModel
+from typing import (
+    Optional,
+    List,
+    Dict,
+    Any,
+)
+from sqlmodel import (
+    SQLModel,
+    Field,
+    Column,
+    DateTime,
+)
+from pydantic import (
+    ConfigDict,
+    BaseModel,
+)
 
 
 class MessageRole(str, Enum):

@@ -1,5 +1,8 @@
 import uuid
-from fastapi import APIRouter, Depends
+from fastapi import (
+    APIRouter,
+    Depends,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
 from app.core.exceptions import (
@@ -7,8 +10,15 @@ from app.core.exceptions import (
     ParameterException,
     ResourceNotFoundException,
 )
-from app.core.security import get_current_user, get_password_hash
-from app.models.user import UserCreate, UserResponse, UserUpdate
+from app.core.security import (
+    get_current_user,
+    get_password_hash,
+)
+from app.models.user import (
+    UserCreate,
+    UserResponse,
+    UserUpdate,
+)
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
 from app.core.crud.user import user_crud

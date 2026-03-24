@@ -2,7 +2,11 @@ from typing import Optional
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.crud.base import CRUDBase
-from app.models.provider import ModelProvider, ProviderCreate, ProviderUpdate
+from app.models.provider import (
+    ModelProvider,
+    ProviderCreate,
+    ProviderUpdate,
+)
 
 
 class CRUDProvider(CRUDBase[ModelProvider, ProviderCreate, ProviderUpdate]):

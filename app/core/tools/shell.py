@@ -6,13 +6,15 @@ from app.core.log import get_logger
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
 from app.core.crud.profile import profile_crud
+from app.core.prompts import CONFIRMATION_PREFIX
+from .base import BaseExecutor
 
 
-class ShellExecutor:
+class ShellExecutor(BaseExecutor):
     logger = get_logger(__name__)
 
     def __init__(self, project_root: str, uid: str = "default"):
-        self.project_root = Path(project_root)
+        super().__init__(project_root, uid)
         self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
         self._ensure_temp_dir()
 
@@ -33,6 +35,10 @@ class ShellExecutor:
         return 30.0
 
     async def execute(self, command: str) -> str:
+        # Handle confirmation prefix internally
+        if command.startswith(CONFIRMATION_PREFIX):
+            command = command.split(" ", 1)[-1]
+
         # 强制使用数据库配置的超时
         profile_timeout = await self._get_profile_timeout()
 

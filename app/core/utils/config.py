@@ -1,4 +1,7 @@
-from typing import Any, Dict
+from typing import (
+    Any,
+    Dict,
+)
 
 
 def standardize_config(data: Any, schema_map: Dict[str, list]) -> Any:

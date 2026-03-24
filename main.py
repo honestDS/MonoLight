@@ -2,10 +2,14 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import (
+    FastAPI,
+    Request,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -16,7 +20,10 @@ from app.api.v1.prompts import router as prompt_router
 from app.api.v1.providers import router as provider_router
 from app.api.v1.users import router as user_router
 from app.core import constants
-from app.core.exceptions import BaseBusinessException, LLMException
+from app.core.exceptions import (
+    BaseBusinessException,
+    LLMException,
+)
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
 
@@ -31,6 +38,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    path = "/www/server/python_project/Monobot/dashboard/public/favicon.ico"
+    if os.path.exists(path):
+        return FileResponse(path)
+    return JSONResponse(status_code=404, content={"message": "Favicon not found"})
 
 
 @app.exception_handler(SQLAlchemyError)

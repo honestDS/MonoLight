@@ -1,5 +1,8 @@
 import logging
-from sqlalchemy import text, inspect
+from sqlalchemy import (
+    text,
+    inspect,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 from app.providers.database import engine
@@ -7,7 +10,10 @@ from app.providers.database import engine
 # 强制导入所有模型以注册 Metadata
 from app.models.message import Message
 from app.models.user import User
-from app.models.profile import Profile, ProfileConfig
+from app.models.profile import (
+    Profile,
+    ProfileConfig,
+)
 from app.models.prompt import PromptLibrary
 from app.models.provider import ModelProvider
 

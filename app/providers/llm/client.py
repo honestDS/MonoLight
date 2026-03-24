@@ -1,7 +1,15 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+)
 from app.transformers.openai import OpenAITransformer
-from app.models.message import InternalMessage, InternalResponse
+from app.models.message import (
+    InternalMessage,
+    InternalResponse,
+)
 
 logger = logging.getLogger(__name__)
 

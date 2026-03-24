@@ -2,18 +2,46 @@ import json
 import hashlib
 import os
 import asyncio
-from typing import List, Any
+from typing import (
+    List,
+    Any,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.context import ContextManager
-from app.core.exceptions import BaseBusinessException, LLMException, ServerException
-from app.core.constants import *
-from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
-from app.models.profile import Profile, ProfileConfig
-from app.models.message import MessageRole, MessageType, InternalMessage
+from app.core.exceptions import (
+    BaseBusinessException,
+    LLMException,
+    ServerException,
+)
+from app.core.constants import (
+    ERR_PROFILE_NOT_FOUND,
+    ERR_LLM_PROVIDER_NOT_CONFIGURED,
+)
+from app.core.prompts import (
+    CONFIRMATION_PREFIX,
+    PROMPT_MAX_TURNS_REACHED,
+)
+from app.core.tools import (
+    ALL_TOOLS_SCHEMAS,
+    TOOL_EXECUTOR_MAP,
+    get_registered_tool_names
+)
+from app.models.profile import (
+    Profile,
+    ProfileConfig,
+)
+from app.models.message import (
+    MessageRole,
+    MessageType,
+    InternalMessage,
+)
 from app.providers.llm.client import LLMClient
-from app.core.log import LogManager, get_logger
-from app.core.middleware.auditor import audit_command
+from app.core.log import (
+    LogManager,
+    get_logger,
+)
+from app.core.middleware.auditor import AuditMiddleware
 
 # CRUD Imports
 from app.core.crud.user import user_crud
@@ -23,93 +51,40 @@ from app.core.crud.message import message_crud
 
 LogManager.setup()
 logger = get_logger(__name__)
-CONFIRMATION_PREFIX = "FORCE_EXECUTE_CONFIRMED_"
 
 
 class ChatDispatcher:
     @staticmethod
-    async def _audit_tool_call(
+    async def _save_message(
         db: AsyncSession,
-        profile: Profile,
-        cfg: ProfileConfig,
-        tool_name: str,
-        args: dict,
-        messages: List[InternalMessage],
-    ) -> str | None:
-        logger.debug(f"Auditing tool call: {tool_name}")
-
-        if tool_name != "execute_shell":
-            return None
-
-        command = args.get("command", "")
-        
-        # 验证动态确认令牌
-        if command.startswith(CONFIRMATION_PREFIX):
-            parts = command[len(CONFIRMATION_PREFIX):].split(" ", 1)
-            if len(parts) == 2:
-                token, real_cmd = parts[0], parts[1]
-                # 对指令进行 strip 处理后再计算哈希，以消除 AI 引入的随机换行干扰
-                audit_cmd_stripped = real_cmd.strip()
-                expected_token = hashlib.sha256(audit_cmd_stripped.encode()).hexdigest()[:12]
-                if token == expected_token:
-                    logger.info(f"Dynamic token verification passed for command: {real_cmd[:30]}...")
-                    return None
-                else:
-                    logger.warning(f"Token mismatch! Expected: {expected_token}, Got: {token}")
-            command = command.split(" ", 1)[-1].strip()  # 降级处理
-
-        if cfg.security.audit_threshold == 0:
-            logger.debug("Audit threshold is 0, skipping audit.")
-            return None
-        if not cfg.security.audit_provider_id or cfg.security.audit_provider_id <= 0:
-            logger.debug("Audit provider ID not configured, skipping audit.")
-            return None
-
-        provider = await provider_crud.get(db, cfg.security.audit_provider_id)
-        if not provider:
-            logger.debug(
-                f"Audit provider {cfg.security.audit_provider_id} not found in DB."
-            )
-            return None
-
-        logger.debug(f"Executing security audit for command: {command[:50]}...")
-        audit_res = await audit_command(
-            command, provider.base_url, provider.api_key, cfg.security.audit_model_id
+        session_id: str,
+        uid: str,
+        role: MessageRole,
+        msg_type: MessageType,
+        content: Any,
+        profile_id: int,
+    ):
+        await message_crud.create(
+            db,
+            obj_in={
+                "session_id": session_id,
+                "uid": uid,
+                "role": role,
+                "type": msg_type,
+                "content": (
+                    content.content if (msg_type == MessageType.TEXT and hasattr(content, 'content'))
+                    else (content.model_dump_json(exclude_none=True) if hasattr(content, 'model_dump_json') else str(content))
+                ),
+                "profile_id": profile_id,
+            },
         )
-        if audit_res is None:
-            return json.dumps(
-                {
-                    "error": "audit_system_failure",
-                    "reason": "Security Audit System is currently unavailable.",
-                },
-                ensure_ascii=False,
-            )
-        score = audit_res.get("score", 10)
-        reason = audit_res.get("reason", "Unknown")
-        logger.debug(f"Audit Result - Score: {score}, Reason: {reason}")
 
-        if score >= 8:
-            return json.dumps(
-                {
-                    "error": "Security Blocked",
-                    "reason": f"High risk score {score}: Security Blocked",
-                },
-                ensure_ascii=False,
-            )
-        if score >= cfg.security.audit_threshold:
-            # 生成 Token 时同样对指令进行 strip 处理，确保配对一致性
-            cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
-            dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"
-            return json.dumps(
-                {
-                    "error": "confirmation_required",
-                    "reason": f"Security Score {score}: High risk detected. To execute this EXACT command, you MUST re-send it with the unique verification prefix: {dynamic_token} [COMMAND]",
-                    "risky_command": command,
-                    "dynamic_token": dynamic_token
-                },
-                ensure_ascii=False,
-            )
-        return None
+    @staticmethod
+    @staticmethod
+    async def _audit_tool_call(
+        db, profile, cfg, tool_name, args, messages=None
+    ) -> str | None:
+        return await AuditMiddleware.audit(db, profile, cfg, tool_name, args)
 
     @staticmethod
     async def _process_single_tool(
@@ -118,10 +93,10 @@ class ChatDispatcher:
         profile: Profile,
         cfg: ProfileConfig,
         messages: List[InternalMessage],
-        shell_executor: ShellExecutor,
         username: str,
         session_id: str,
         turn: int,
+        uid: str,
     ) -> InternalMessage:
         tool_name = tool_call.name
         args = tool_call.arguments
@@ -133,14 +108,12 @@ class ChatDispatcher:
         )
 
         if cmd_result is None:
-            if tool_name == "execute_shell":
-                command = args.get("command", "")
-                if command.startswith(CONFIRMATION_PREFIX):
-                    command = command.split(" ", 1)[-1]
-                cmd_result = await shell_executor.execute(command)
+            executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)
+            if executor_cls:
+                instance = executor_cls(project_root=os.getcwd(), uid=uid)
+                cmd_result = await instance.execute(**args)
             else:
-                cmd_result = json.dumps({"error": "Unknown tool"}, ensure_ascii=False)
-
+                cmd_result = json.dumps({"error": f"Tool {tool_name} not registered"}, ensure_ascii=False)
         res_log = f"[{username}] (Session: {session_id}) Turn {turn} | Tool Result: {cmd_result}"
         logger.info(res_log)
 
@@ -176,28 +149,27 @@ class ChatDispatcher:
                     ),
                 )
 
-            shell_executor = ShellExecutor(project_root=os.getcwd(), uid=uid)
-            tools = [SHELL_TOOL_SCHEMA]
+            tools = ALL_TOOLS_SCHEMAS
 
-            await message_crud.create(
-                db,
-                obj_in={
-                    "session_id": session_id,
-                    "uid": uid,
-                    "role": MessageRole.USER,
-                    "type": MessageType.TEXT,
-                    "content": message,
-                    "profile_id": profile.id,
-                },
-            )
+            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, message, profile.id)
 
-            max_turns, current_turn, final_ai_content = 20, 0, ""
+            max_turns, current_turn, final_ai_content = cfg.tool.max_turns, 0, ""
             if not profile.provider:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
-            while current_turn < max_turns:
+            while current_turn <= max_turns:
                 current_turn += 1
-                await db.execute(select(1))
+
+                # 达到最大轮次时注入收官指令并确保协议合规
+                if current_turn == max_turns:
+                    summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
+                    notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
+                    messages.append(notice_msg)
+                    # 持久化注入的指令到数据库以保持审计一致性
+                    await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+                    current_tools = None
+                else:
+                    current_tools = tools
 
                 response = await LLMClient.generate(
                     api_key=profile.provider.api_key,
@@ -206,27 +178,21 @@ class ChatDispatcher:
                     messages=messages,
                     temperature=cfg.provider.temperature,
                     max_tokens=cfg.provider.max_tokens,
-                    tools=tools,
+                    tools=current_tools,
                     protocol=getattr(profile.provider, "protocol", "openai"),
                 )
 
                 ai_msg = response.message
+                # 空消息拦截逻辑
+                if not ai_msg.tool_calls and not (ai_msg.content or '').strip():
+                    from app.core.constants import ERR_LLM_EMPTY_RESPONSE
+                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                 messages.append(ai_msg)
 
-                await message_crud.create(
-                    db,
-                    obj_in={
-                        "session_id": session_id,
-                        "uid": uid,
-                        "role": MessageRole.ASSISTANT,
-                        "type": MessageType.TOOL_CALL
-                        if ai_msg.tool_calls
-                        else MessageType.TEXT,
-                        "content": ai_msg.model_dump_json(exclude_none=True)
-                        if ai_msg.tool_calls
-                        else ai_msg.content,
-                        "profile_id": profile.id,
-                    },
+                await ChatDispatcher._save_message(
+                    db, session_id, uid, MessageRole.ASSISTANT,
+                    MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
+                    ai_msg, profile.id
                 )
 
                 if not ai_msg.tool_calls:
@@ -249,17 +215,7 @@ class ChatDispatcher:
                             content=error_msg,
                         )
                         messages.append(tool_res)
-                        await message_crud.create(
-                            db,
-                            obj_in={
-                                "session_id": session_id,
-                                "uid": uid,
-                                "role": MessageRole.TOOL,
-                                "type": MessageType.TOOL_RESULT,
-                                "content": tool_res.model_dump_json(exclude_none=True),
-                                "profile_id": profile.id,
-                            },
-                        )
+                        await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
                     continue
 
                 tasks = [
@@ -269,10 +225,10 @@ class ChatDispatcher:
                         profile,
                         cfg,
                         messages,
-                        shell_executor,
                         username,
                         session_id,
                         current_turn,
+                        uid,
                     )
                     for tc in ai_msg.tool_calls
                 ]
@@ -281,17 +237,7 @@ class ChatDispatcher:
 
                 for tool_res in tool_responses:
                     messages.append(tool_res)
-                    await message_crud.create(
-                        db,
-                        obj_in={
-                            "session_id": session_id,
-                            "uid": uid,
-                            "role": MessageRole.TOOL,
-                            "type": MessageType.TOOL_RESULT,
-                            "content": tool_res.model_dump_json(exclude_none=True),
-                            "profile_id": profile.id,
-                        },
-                    )
+                    await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
 
             return {
                 "choices": [

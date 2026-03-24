@@ -1,6 +1,22 @@
-from typing import Optional, Dict, Any, TYPE_CHECKING
-from sqlmodel import SQLModel, Field, Relationship, Column, JSON
-from pydantic import ConfigDict, BaseModel, model_validator, Field as PydanticField
+from typing import (
+    Optional,
+    Dict,
+    Any,
+    TYPE_CHECKING,
+)
+from sqlmodel import (
+    SQLModel,
+    Field,
+    Relationship,
+    Column,
+    JSON,
+)
+from pydantic import (
+    ConfigDict,
+    BaseModel,
+    model_validator,
+    Field as PydanticField,
+)
 from app.core.utils.config import standardize_config
 
 if TYPE_CHECKING:
@@ -45,6 +61,9 @@ class ToolConfig(BaseModel):
     max_parallel_tools: int = PydanticField(
         5, ge=1, le=20, description="允许的最大并行工具调用数量"
     )
+    max_turns: int = PydanticField(
+        5, ge=1, le=20, description="允许的最大连续工具调用轮数"
+    )
 
 
 class OtherConfig(BaseModel):
@@ -70,7 +89,7 @@ class ProfileConfig(BaseModel):
         schema_map = {
             "provider": ["model_id", "temperature", "top_p", "max_tokens", "stream"],
             "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
-            "tool": ["shell_timeout", "max_parallel_tools"],
+            "tool": ["shell_timeout", "max_parallel_tools", "max_turns"],
             "other": ["context_window_k"],
         }
         return standardize_config(data, schema_map)
@@ -94,7 +113,7 @@ PROFILE_EXAMPLE = {
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
         },
-        "tool": {"shell_timeout": 30, "max_parallel_tools": 5},
+        "tool": {"shell_timeout": 30, "max_parallel_tools": 5, "max_turns": 5},
         "other": {"context_window_k": 1024},
     },
 }

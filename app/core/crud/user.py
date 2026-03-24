@@ -2,7 +2,11 @@ from typing import Optional
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.crud.base import CRUDBase
-from app.models.user import User, UserCreate, UserUpdate
+from app.models.user import (
+    User,
+    UserCreate,
+    UserUpdate,
+)
 
 
 class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):

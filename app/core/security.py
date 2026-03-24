@@ -1,11 +1,23 @@
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 from typing import Optional
 
 import bcrypt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import (
+    Depends,
+    HTTPException,
+    Request,
+    status,
+)
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import (
+    JWTError,
+    jwt,
+)
 
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal

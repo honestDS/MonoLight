@@ -1,10 +1,20 @@
-from typing import List, Tuple
+from typing import (
+    List,
+    Tuple,
+)
 import json
 import os
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.profile import Profile, ProfileConfig
-from app.models.message import MessageRole, InternalMessage, InternalToolCall
+from app.models.profile import (
+    Profile,
+    ProfileConfig,
+)
+from app.models.message import (
+    MessageRole,
+    InternalMessage,
+    InternalToolCall,
+)
 from app.core.log import get_logger
 from app.core.utils.tokenizer import estimate_tokens
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -34,7 +44,7 @@ class ContextManager:
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
         raw_history = await message_crud.get_history(
-            db, session_id=session_id, uid=uid, limit=100
+            db, session_id=session_id, uid=uid, limit=5000
         )
         parsed_history = parse_db_messages_to_internal(raw_history)
 
@@ -49,7 +59,7 @@ class ContextManager:
         )
 
         # 3. 压缩日志记录
-        if log_data["is_compressed"]:
+        if log_data["is_hard_truncated"]:
             logger.info(
                 f"Context compressed for session {session_id}. "
                 f"Tokens: {log_data['before']} -> {log_data['after']}"
@@ -117,40 +127,52 @@ class ContextManager:
 
         # B. 工具链一致性审计 (ID 匹配审计)
         audited_msgs = []
+        # 使用 set 记录已经作为工具链一部分被处理掉的消息对象 ID，防止重复添加
+        consumed_msg_ids = set()
+        
         i = 0
         while i < len(aligned_msgs):
             msg = aligned_msgs[i]
+            
+            # 如果该消息已经被之前的工具链审计包含了，直接跳过
+            if id(msg) in consumed_msg_ids:
+                i += 1
+                continue
+
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
                 required_ids = [tc.id for tc in msg.tool_calls]
-                j = i + 1
                 matched_tools = []
-                found_ids = []
-                while (
-                    j < len(aligned_msgs) and aligned_msgs[j].role == MessageRole.TOOL
-                ):
-                    t_id = aligned_msgs[j].tool_call_id
-                    if t_id in required_ids:
-                        matched_tools.append(aligned_msgs[j])
-                        found_ids.append(t_id)
-                    j += 1
-
-                if all(rid in found_ids for rid in required_ids):
+                found_tool_call_ids = set()
+                
+                # 寻找后续所有的工具返回结果
+                for j in range(i + 1, len(aligned_msgs)):
+                    target = aligned_msgs[j]
+                    if target.role == MessageRole.TOOL and target.tool_call_id in required_ids:
+                        if target.tool_call_id not in found_tool_call_ids:
+                            matched_tools.append(target)
+                            found_tool_call_ids.add(target.tool_call_id)
+                
+                # 只有当所有的工具调用都有对应的返回结果时，才保留这一整套链条
+                if len(found_tool_call_ids) == len(required_ids):
                     audited_msgs.append(msg)
-                    audited_msgs.extend(matched_tools)
-                    i = j
+                    for mt in matched_tools:
+                        audited_msgs.append(mt)
+                        consumed_msg_ids.add(id(mt))
+                    i += 1
                 else:
-                    logger.warning(
-                        f"Broken tool chain in {session_id}. Required: {required_ids}"
-                    )
-                    i = j
+                    # 如果工具链不完整，为了防止 LLM 报错，必须舍弃掉这个 Assistant 调用
+                    logger.warning(f"Broken tool chain in {session_id}. Required: {required_ids}")
+                    # 此时不添加该 assistant 消息，继续处理下一条
+                    i += 1
             elif msg.role == MessageRole.TOOL:
-                logger.warning(
-                    f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}"
-                )
+                # 孤立的工具结果（没有对应的 Assistant 调用），直接舍弃以保持协议合规
+                logger.warning(f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}")
                 i += 1
             else:
+                # 普通消息直接添加
                 audited_msgs.append(msg)
                 i += 1
+
 
         # 计算压缩后的 Token 数
         final_history_tokens = 0
@@ -163,7 +185,7 @@ class ContextManager:
         is_compressed = is_hard_truncated or (len(audited_msgs) < len(parsed_history))
 
         return audited_msgs, {
-            "is_compressed": is_compressed,
+            "is_hard_truncated": is_hard_truncated,
             "before": current_msg_tokens + raw_history_tokens,
             "after": current_msg_tokens + final_history_tokens,
         }

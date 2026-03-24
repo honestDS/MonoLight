@@ -1,8 +1,14 @@
 import enum
 import re
 from typing import Optional
-from pydantic import field_validator, ConfigDict
-from sqlmodel import SQLModel, Field
+from pydantic import (
+    field_validator,
+    ConfigDict,
+)
+from sqlmodel import (
+    SQLModel,
+    Field,
+)
 
 
 class ProviderType(str, enum.Enum):

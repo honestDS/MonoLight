@@ -1,12 +1,26 @@
 import os
 import uuid
-from fastapi import APIRouter, Body, Depends
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
-from app.core.exceptions import AuthException, ParameterException
-from app.core.security import create_access_token, get_password_hash, verify_password
+from app.core.exceptions import (
+    AuthException,
+    ParameterException,
+)
+from app.core.security import (
+    create_access_token,
+    get_password_hash,
+    verify_password,
+)
 from app.providers.database import get_db
-from app.schemas.auth import LoginRequest, ResetAdminRequest
+from app.schemas.auth import (
+    LoginRequest,
+    ResetAdminRequest,
+)
 from app.schemas.response import StandardResponse
 from app.core.crud.user import user_crud
 

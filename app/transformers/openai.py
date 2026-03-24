@@ -1,6 +1,11 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+)
 import aiohttp
 from app.core import constants
 from app.core.exceptions import LLMException

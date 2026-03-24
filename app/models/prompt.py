@@ -1,6 +1,19 @@
-from datetime import datetime, timezone
-from typing import Optional, List, TYPE_CHECKING
-from sqlmodel import SQLModel, Field, Relationship, Column, DateTime
+from datetime import (
+    datetime,
+    timezone,
+)
+from typing import (
+    Optional,
+    List,
+    TYPE_CHECKING,
+)
+from sqlmodel import (
+    SQLModel,
+    Field,
+    Relationship,
+    Column,
+    DateTime,
+)
 from pydantic import ConfigDict
 
 if TYPE_CHECKING:

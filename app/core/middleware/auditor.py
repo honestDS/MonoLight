@@ -1,8 +1,17 @@
+from app.core.prompts import CONFIRMATION_PREFIX
 import json
-from typing import Dict, Any, Optional
+import hashlib
+from typing import (
+    Dict,
+    Any,
+    Optional,
+)
 from app.core.log import get_logger
 from app.providers.llm.client import LLMClient
-from app.models.message import InternalMessage, MessageRole
+from app.models.message import (
+    InternalMessage,
+    MessageRole,
+)
 
 logger = get_logger(__name__)
 
@@ -65,4 +74,84 @@ async def audit_command(
         return json.loads(clean_content)
     except Exception as e:
         logger.error(f"Audit Exception: {e}")
+        return None
+
+class AuditMiddleware:
+    @staticmethod
+    def verify_token(command: str) -> tuple[bool, str]:
+        if command.startswith(CONFIRMATION_PREFIX):
+            parts = command[len(CONFIRMATION_PREFIX):].split(" ", 1)
+            if len(parts) == 2:
+                token, real_cmd = parts[0], parts[1]
+                audit_cmd_stripped = real_cmd.strip()
+                expected_token = hashlib.sha256(audit_cmd_stripped.encode()).hexdigest()[:12]
+                if token == expected_token:
+                    logger.info(f"Dynamic token verification passed for command: {real_cmd[:30]}...")
+                    return True, real_cmd
+                else:
+                    logger.warning(f"Token mismatch! Expected: {expected_token}, Got: {token}")
+        return False, command
+
+    @staticmethod
+    async def audit(
+        db, profile, cfg, tool_name: str, args: dict
+    ) -> str | None:
+        from app.core.tools import get_registered_tool_names
+        from app.core.crud.provider import provider_crud
+
+        if tool_name not in get_registered_tool_names():
+            return None
+
+        original_command = args.get("command", "")
+        is_verified, command = AuditMiddleware.verify_token(original_command)
+        
+        if is_verified:
+            return None
+
+        # Handle downgraded command if verification failed but prefix was present
+        if original_command.startswith(CONFIRMATION_PREFIX):
+             command = original_command.split(" ", 1)[-1].strip()
+
+        if cfg.security.audit_threshold == 0:
+            return None
+        
+        if not cfg.security.audit_provider_id or cfg.security.audit_provider_id <= 0:
+            return None
+
+        provider = await provider_crud.get(db, cfg.security.audit_provider_id)
+        if not provider:
+            return None
+
+        logger.debug(f"Executing security audit for command: {command[:50]}...")
+        audit_res = await audit_command(
+            command, provider.base_url, provider.api_key, cfg.security.audit_model_id
+        )
+        
+        if audit_res is None:
+            return json.dumps(
+                {"error": "audit_system_failure", "reason": "Security Audit System is currently unavailable."},
+                ensure_ascii=False
+            )
+
+        score = audit_res.get("score", 10)
+        reason = audit_res.get("reason", "Unknown")
+        
+        if score >= 8:
+            return json.dumps(
+                {"error": "Security Blocked", "reason": f"High risk score {score}: Security Blocked"},
+                ensure_ascii=False
+            )
+            
+        if score >= cfg.security.audit_threshold:
+            cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
+            dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"
+            return json.dumps(
+                {
+                    "error": "confirmation_required",
+                    "reason": f"Security Score {score}: High risk detected. To execute this EXACT command, you MUST re-send it with the unique verification prefix: {dynamic_token} [COMMAND]",
+                    "risky_command": command,
+                    "dynamic_token": dynamic_token
+                },
+                ensure_ascii=False
+            )
         return None
