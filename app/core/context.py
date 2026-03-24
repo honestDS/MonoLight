@@ -1,15 +1,17 @@
-from typing import List
+from typing import List, Tuple
 import json
 import os
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.profile import Profile, ProfileConfig
 from app.models.message import MessageRole, InternalMessage, InternalToolCall
+from app.core.log import get_logger
 
 # CRUD Imports
 from app.core.crud.message import message_crud
 
 load_dotenv()
+logger = get_logger(__name__)
 
 class ContextManager:
     @staticmethod
@@ -31,33 +33,28 @@ class ContextManager:
         profile: Profile,
         current_message: str,
     ) -> List[InternalMessage]:
+        """
+        获取经过压缩与对齐后的上下文消息列表。
+        """
         cfg = ProfileConfig.model_validate(profile.configs)
         limit_tokens = cfg.other.context_window_k * 1024 * 0.8
 
-        # 使用 CRUD 获取最近 100 条消息历史
-        history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=100)
-
-        temp_msgs = []
-        current_total = cls.estimate_tokens(current_message)
-
-        for msg in history:
-            content_str = msg.content or ""
-            msg_tokens = cls.estimate_tokens(content_str)
-            if current_total + msg_tokens > limit_tokens:
-                break
-
+        # 1. 加载并初步解析原始历史记录 (协议转换预处理)
+        # 虽然使用 CRUD 获取，但数据库存的是 Message 模型，content 为字符串，仍需解析其内部 JSON
+        raw_history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=100)
+        
+        parsed_history: List[InternalMessage] = []
+        for msg in raw_history:
             try:
                 role = MessageRole(msg.role)
+                content = msg.content or ""
                 tool_calls = None
                 tool_call_id = None
-                content = content_str
 
-                # 解析存储在 content 中的工具调用 JSON 数据
-                if role == MessageRole.TOOL or (
-                    role == MessageRole.ASSISTANT and "tool_calls" in content_str
-                ):
+                # 提取工具调用元数据
+                if role == MessageRole.TOOL or (role == MessageRole.ASSISTANT and "tool_calls" in content):
                     try:
-                        parsed = json.loads(content_str)
+                        parsed = json.loads(content)
                         if isinstance(parsed, dict):
                             if "tool_calls" in parsed:
                                 tool_calls = [InternalToolCall(**tc) for tc in parsed["tool_calls"]]
@@ -66,52 +63,124 @@ class ContextManager:
                                 tool_call_id = parsed["tool_call_id"]
                                 content = parsed.get("content")
                     except json.JSONDecodeError:
-                        # 如果不是 JSON，则作为普通文本处理
                         pass
-
-                temp_msgs.insert(
-                    0,
-                    InternalMessage(
-                        role=role,
-                        content=content,
-                        tool_calls=tool_calls,
-                        tool_call_id=tool_call_id,
-                    ),
-                )
-                current_total += msg_tokens
+                
+                parsed_history.append(InternalMessage(
+                    role=role,
+                    content=content,
+                    tool_calls=tool_calls,
+                    tool_call_id=tool_call_id
+                ))
             except Exception:
                 continue
 
-        # 核心逻辑：修复 Tool Call 链条完整性
-        final_msgs = []
-        i = 0
-        while i < len(temp_msgs):
-            msg = temp_msgs[i]
-            
-            if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                tool_call_ids = {tc.id for tc in msg.tool_calls}
-                j = i + 1
-                matched_tools = []
-                while j < len(temp_msgs) and temp_msgs[j].role == MessageRole.TOOL:
-                    if temp_msgs[j].tool_call_id in tool_call_ids:
-                        matched_tools.append(temp_msgs[j])
-                    j += 1
-                
-                if len(matched_tools) == len(tool_call_ids):
-                    final_msgs.append(msg)
-                    final_msgs.extend(matched_tools)
-                    i = j
-                else:
-                    i += 1 
-            elif msg.role == MessageRole.TOOL:
-                i += 1
-            else:
-                final_msgs.append(msg)
-                i += 1
+        # 2. 策略分发
+        # TODO: 未来可根据 profile.configs.other.compression_strategy 选择不同函数
+        # 例如: 'summary' -> _compress_by_summary, 'auto' -> _compress_by_atomic_truncate
+        
+        current_msg_tokens = cls.estimate_tokens(current_message)
+        
+        final_msgs, log_data = cls._strategy_atomic_truncate(
+            session_id=session_id,
+            parsed_history=parsed_history,
+            limit_tokens=limit_tokens,
+            current_msg_tokens=current_msg_tokens
+        )
 
-        # 移除开头孤立的工具请求
-        if final_msgs and final_msgs[0].role == MessageRole.ASSISTANT and final_msgs[0].tool_calls:
-            final_msgs.pop(0)
+        # 3. 压缩日志记录
+        if log_data["is_compressed"]:
+            logger.info(
+                f"Context compressed for session {session_id}. "
+                f"Tokens: {log_data['before']} -> {log_data['after']}"
+            )
 
         final_msgs.append(InternalMessage(role=MessageRole.USER, content=current_message))
         return final_msgs
+
+    @classmethod
+    def _strategy_atomic_truncate(
+        cls,
+        session_id: str,
+        parsed_history: List[InternalMessage],
+        limit_tokens: float,
+        current_msg_tokens: int
+    ) -> Tuple[List[InternalMessage], dict]:
+        """
+        默认策略：基于原子轮次对齐与工具审计的硬截断。
+        """
+        temp_msgs = []
+        current_total = current_msg_tokens
+        raw_history_tokens = 0
+        is_hard_truncated = False
+
+        # 反向装载（从新到旧）
+        for msg in parsed_history:
+            msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
+            msg_tokens = cls.estimate_tokens(msg_str)
+            
+            if current_total + msg_tokens > limit_tokens:
+                is_hard_truncated = True
+                break
+            
+            temp_msgs.insert(0, msg)
+            current_total += msg_tokens
+            raw_history_tokens += msg_tokens
+
+        # A. 原子化轮次对齐 (USER 头部对齐)
+        valid_start_index = -1
+        for idx, m in enumerate(temp_msgs):
+            if m.role == MessageRole.USER:
+                valid_start_index = idx
+                break
+        
+        aligned_msgs = temp_msgs[valid_start_index:] if valid_start_index != -1 else []
+
+        # B. 工具链一致性审计 (ID 匹配审计)
+        audited_msgs = []
+        i = 0
+        while i < len(aligned_msgs):
+            msg = aligned_msgs[i]
+            if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+                required_ids = [tc.id for tc in msg.tool_calls]
+                j = i + 1
+                matched_tools = []
+                found_ids = []
+                while j < len(aligned_msgs) and aligned_msgs[j].role == MessageRole.TOOL:
+                    t_id = aligned_msgs[j].tool_call_id
+                    if t_id in required_ids:
+                        matched_tools.append(aligned_msgs[j])
+                        found_ids.append(t_id)
+                    j += 1
+                
+                if all(rid in found_ids for rid in required_ids):
+                    audited_msgs.append(msg)
+                    audited_msgs.extend(matched_tools)
+                    i = j
+                else:
+                    logger.warning(f"Broken tool chain in {session_id}. Required: {required_ids}")
+                    i = j
+            elif msg.role == MessageRole.TOOL:
+                logger.warning(f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}")
+                i += 1
+            else:
+                audited_msgs.append(msg)
+                i += 1
+
+        # 计算压缩后的 Token 数
+        final_history_tokens = 0
+        for fm in audited_msgs:
+            fm_str = json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
+            final_history_tokens += cls.estimate_tokens(fm_str)
+
+        is_compressed = is_hard_truncated or (len(audited_msgs) < len(parsed_history))
+        
+        return audited_msgs, {
+            "is_compressed": is_compressed,
+            "before": current_msg_tokens + raw_history_tokens,
+            "after": current_msg_tokens + final_history_tokens
+        }
+
+    # 未来可在此扩展：
+    # @classmethod
+    # async def _strategy_summary(cls, ...) -> Tuple[List[InternalMessage], dict]:
+    #     pass
