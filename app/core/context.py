@@ -30,7 +30,7 @@ class ContextManager:
         获取经过压缩与对齐后的上下文消息列表。
         """
         cfg = ProfileConfig.model_validate(profile.configs)
-        limit_tokens = cfg.other.context_window_k * 1024 * 0.8
+        limit_tokens = cfg.other.context_window_k * 1024
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
         raw_history = await message_crud.get_history(

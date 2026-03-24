@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import asyncio
 from typing import List, Any
@@ -22,7 +23,7 @@ from app.core.crud.message import message_crud
 
 LogManager.setup()
 logger = get_logger(__name__)
-CONFIRMATION_TOKEN = "FORCE_EXECUTE_CONFIRMED"
+CONFIRMATION_PREFIX = "FORCE_EXECUTE_CONFIRMED_"
 
 
 class ChatDispatcher:
@@ -41,16 +42,21 @@ class ChatDispatcher:
             return None
 
         command = args.get("command", "")
-        if command.startswith(CONFIRMATION_TOKEN):
-            last_tool_result = None
-            for m in reversed(messages):
-                if m.role == MessageRole.TOOL:
-                    last_tool_result = m.content
-                    break
-            if last_tool_result and "confirmation_required" in last_tool_result:
-                return None
-            else:
-                command = command[len(CONFIRMATION_TOKEN) :].strip()
+        
+        # 验证动态确认令牌
+        if command.startswith(CONFIRMATION_PREFIX):
+            parts = command[len(CONFIRMATION_PREFIX):].split(" ", 1)
+            if len(parts) == 2:
+                token, real_cmd = parts[0], parts[1]
+                # 对指令进行 strip 处理后再计算哈希，以消除 AI 引入的随机换行干扰
+                audit_cmd_stripped = real_cmd.strip()
+                expected_token = hashlib.sha256(audit_cmd_stripped.encode()).hexdigest()[:12]
+                if token == expected_token:
+                    logger.info(f"Dynamic token verification passed for command: {real_cmd[:30]}...")
+                    return None
+                else:
+                    logger.warning(f"Token mismatch! Expected: {expected_token}, Got: {token}")
+            command = command.split(" ", 1)[-1].strip()  # 降级处理
 
         if cfg.security.audit_threshold == 0:
             logger.debug("Audit threshold is 0, skipping audit.")
@@ -91,11 +97,15 @@ class ChatDispatcher:
                 ensure_ascii=False,
             )
         if score >= cfg.security.audit_threshold:
+            # 生成 Token 时同样对指令进行 strip 处理，确保配对一致性
+            cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
+            dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"
             return json.dumps(
                 {
                     "error": "confirmation_required",
-                    "reason": f"Score {score}: Re-send with prefix {CONFIRMATION_TOKEN}. You need to request a second confirmation from the user, and if the user confirms, you need to re-execute the command and add before the command: {CONFIRMATION_TOKEN}",
+                    "reason": f"Security Score {score}: High risk detected. To execute this EXACT command, you MUST re-send it with the unique verification prefix: {dynamic_token} [COMMAND]",
                     "risky_command": command,
+                    "dynamic_token": dynamic_token
                 },
                 ensure_ascii=False,
             )
@@ -125,8 +135,8 @@ class ChatDispatcher:
         if cmd_result is None:
             if tool_name == "execute_shell":
                 command = args.get("command", "")
-                if command.startswith(CONFIRMATION_TOKEN):
-                    command = command[len(CONFIRMATION_TOKEN) :].strip()
+                if command.startswith(CONFIRMATION_PREFIX):
+                    command = command.split(" ", 1)[-1]
                 cmd_result = await shell_executor.execute(command)
             else:
                 cmd_result = json.dumps({"error": "Unknown tool"}, ensure_ascii=False)

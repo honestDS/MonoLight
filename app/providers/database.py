@@ -16,7 +16,7 @@ if not DATABASE_URL:
 if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     import tempfile
 
-    temp_db = os.path.join(tempfile.gettempdir(), "monolight_test_session.db")
+    temp_db = Path(tempfile.gettempdir()) / "monolight_test_session.db"
     DATABASE_URL = f"sqlite+aiosqlite:///{temp_db}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)

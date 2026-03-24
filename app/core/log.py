@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import sys
 import logging
 from loguru import logger
@@ -15,14 +16,12 @@ class LogManager:
         # 确保工作目录
         cwd = os.getcwd()
         if not os.path.isabs(log_path):
-            abs_log_path = os.path.abspath(os.path.join(cwd, log_path))
+            abs_log_path = str(Path(log_path).resolve())
         else:
             abs_log_path = log_path
 
         # 处理目录不存在的情况
-        log_dir = os.path.dirname(abs_log_path)
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
+        Path(abs_log_path).parent.mkdir(parents=True, exist_ok=True)
 
         # 移除默认处理器
         logger.remove()
