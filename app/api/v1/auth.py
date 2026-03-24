@@ -1,7 +1,6 @@
 import os
 import uuid
 from fastapi import APIRouter, Body, Depends
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
 from app.core.exceptions import AuthException, ParameterException
@@ -12,6 +11,7 @@ from app.schemas.response import StandardResponse
 from app.core.crud.user import user_crud
 
 router = APIRouter()
+
 
 @router.post("/login", response_model=StandardResponse)
 async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(get_db)):
@@ -34,6 +34,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
         message=constants.MSG_LOGIN_SUCCESS,
     )
 
+
 @router.post("/reset_admin")
 async def reset_admin_account(
     request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)
@@ -49,20 +50,29 @@ async def reset_admin_account(
     new_hashed_password = get_password_hash(default_password)
 
     if user:
-        user = await user_crud.update(db, db_obj=user, obj_in={
-            "hashed_password": new_hashed_password,
-            "is_superuser": True,
-            "is_active": True
-        })
+        user = await user_crud.update(
+            db,
+            db_obj=user,
+            obj_in={
+                "hashed_password": new_hashed_password,
+                "is_superuser": True,
+                "is_active": True,
+            },
+        )
     else:
         from app.models.user import UserCreate
+
         user_in = UserCreate(username=admin_username, password=default_password)
-        user = await user_crud.create(db, obj_in=user_in, update_dict={
-            "uid": uuid.uuid4().hex,
-            "hashed_password": new_hashed_password,
-            "is_superuser": True,
-            "is_active": True
-        })
+        user = await user_crud.create(
+            db,
+            obj_in=user_in,
+            update_dict={
+                "uid": uuid.uuid4().hex,
+                "hashed_password": new_hashed_password,
+                "is_superuser": True,
+                "is_active": True,
+            },
+        )
 
     user_data = {
         "用户标识": user.uid,

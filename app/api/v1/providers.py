@@ -16,10 +16,12 @@ router = APIRouter(
     prefix="/providers", tags=["Providers"], dependencies=[Depends(get_current_user)]
 )
 
+
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
+
 
 @router.post("/create", response_model=StandardResponse)
 async def create_provider(
@@ -29,11 +31,13 @@ async def create_provider(
 ):
     if await provider_crud.get_by_name(db, provider_in.name):
         raise ParameterException(constants.ERR_PROVIDER_NAME_EXISTS)
-    
+
     db_obj = await provider_crud.create(db, obj_in=provider_in)
     return StandardResponse.success(
-        data=ProviderResponse.model_validate(db_obj), message=constants.MSG_PROVIDER_CREATED
+        data=ProviderResponse.model_validate(db_obj),
+        message=constants.MSG_PROVIDER_CREATED,
     )
+
 
 @router.get("/list", response_model=StandardResponse)
 async def list_providers(db: AsyncSession = Depends(get_db)):
@@ -42,12 +46,14 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
         data=[ProviderResponse.model_validate(item) for item in providers]
     )
 
+
 @router.get("/get", response_model=StandardResponse)
 async def get_provider(provider_id: int, db: AsyncSession = Depends(get_db)):
     db_obj = await provider_crud.get(db, provider_id)
     if not db_obj:
         raise ResourceNotFoundException(constants.ERR_PROVIDER_NOT_FOUND)
     return StandardResponse.success(data=ProviderResponse.model_validate(db_obj))
+
 
 @router.post("/update", response_model=StandardResponse)
 async def update_provider(
@@ -66,8 +72,10 @@ async def update_provider(
 
     db_obj = await provider_crud.update(db, db_obj=db_obj, obj_in=provider_in)
     return StandardResponse.success(
-        data=ProviderResponse.model_validate(db_obj), message=constants.MSG_PROVIDER_UPDATED
+        data=ProviderResponse.model_validate(db_obj),
+        message=constants.MSG_PROVIDER_UPDATED,
     )
+
 
 @router.post("/delete")
 async def delete_provider(

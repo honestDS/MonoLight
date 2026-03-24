@@ -80,7 +80,7 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": exc.message},
+                        "message": {"role": "err", "content": exc.message},
                         "finish_reason": "stop",
                     }
                 ],

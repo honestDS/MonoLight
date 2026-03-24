@@ -18,15 +18,20 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 
+
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
+
 @router.get("/list", response_model=StandardResponse)
 async def list_prompts(db: AsyncSession = Depends(get_db)):
     prompts = await prompt_crud.get_multi(db)
-    return StandardResponse.success(data=[PromptResponse.model_validate(p) for p in prompts])
+    return StandardResponse.success(
+        data=[PromptResponse.model_validate(p) for p in prompts]
+    )
+
 
 @router.post("/create", response_model=StandardResponse)
 async def create_prompt(
@@ -36,12 +41,13 @@ async def create_prompt(
 ):
     if await prompt_crud.get_by_name(db, data.name):
         raise ParameterException(constants.ERR_PROMPT_NAME_EXISTS)
-    
+
     db_prompt = await prompt_crud.create(db, obj_in=data)
     return StandardResponse.success(
         data=PromptResponse.model_validate(db_prompt),
         message=constants.MSG_PROMPT_CREATED,
     )
+
 
 @router.post("/update", response_model=StandardResponse)
 async def update_prompt(
@@ -63,6 +69,7 @@ async def update_prompt(
         data=PromptResponse.model_validate(db_prompt),
         message=constants.MSG_PROMPT_UPDATED,
     )
+
 
 @router.post("/delete")
 async def delete_prompt(

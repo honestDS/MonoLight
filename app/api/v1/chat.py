@@ -12,6 +12,7 @@ router = APIRouter(
     prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)]
 )
 
+
 @router.post("/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -26,6 +27,7 @@ async def chat_completions(
         session_id=session_id,
     )
     return llm_response
+
 
 @router.get("/sessions/list")
 async def get_user_sessions(
@@ -45,6 +47,7 @@ async def get_user_sessions(
     ]
     return StandardResponse.success(data=data, message="会话列表获取成功")
 
+
 @router.post("/sessions/delete")
 async def delete_session(
     session_id: str,
@@ -53,7 +56,9 @@ async def delete_session(
 ):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
-    row_count = await message_crud.remove_session(db, session_id=session_id, uid=uid, is_admin=is_admin)
+    row_count = await message_crud.remove_session(
+        db, session_id=session_id, uid=uid, is_admin=is_admin
+    )
 
     if row_count == 0:
         return StandardResponse.success(message="会话未找到或已删除")

@@ -1,6 +1,6 @@
 from typing import List
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
 from app.core.exceptions import (
@@ -22,10 +22,12 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 
+
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
+
 
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
 async def create_profile(
@@ -46,13 +48,18 @@ async def create_profile(
 
     db_profile = await profile_crud.create(db, obj_in=profile_in)
     return StandardResponse.success(
-        data=ProfileResponse.model_validate(db_profile), message=constants.MSG_PROFILE_CREATED
+        data=ProfileResponse.model_validate(db_profile),
+        message=constants.MSG_PROFILE_CREATED,
     )
+
 
 @router.get("/list", response_model=StandardResponse[List[ProfileResponse]])
 async def list_profiles(db: AsyncSession = Depends(get_db)):
     profiles = await profile_crud.get_multi(db)
-    return StandardResponse.success(data=[ProfileResponse.model_validate(p) for p in profiles])
+    return StandardResponse.success(
+        data=[ProfileResponse.model_validate(p) for p in profiles]
+    )
+
 
 @router.post("/activate")
 async def activate_profile(
@@ -74,6 +81,7 @@ async def activate_profile(
     profile.is_active = True
     await db.commit()
     return StandardResponse.success(message=constants.MSG_PROFILE_ACTIVATED)
+
 
 @router.post("/update", response_model=StandardResponse[ProfileResponse])
 async def update_profile(
@@ -101,8 +109,10 @@ async def update_profile(
 
     db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in)
     return StandardResponse.success(
-        data=ProfileResponse.model_validate(db_profile), message=constants.MSG_PROFILE_UPDATED
+        data=ProfileResponse.model_validate(db_profile),
+        message=constants.MSG_PROFILE_UPDATED,
     )
+
 
 @router.post("/delete")
 async def delete_profile(

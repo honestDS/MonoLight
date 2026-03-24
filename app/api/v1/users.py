@@ -17,10 +17,12 @@ router = APIRouter(
     prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)]
 )
 
+
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
         raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
     return current_user
+
 
 @router.post("/add")
 async def add_new_user(
@@ -33,17 +35,24 @@ async def add_new_user(
 
     try:
         generated_uid = uuid.uuid4().hex
-        new_user = await user_crud.create(db, obj_in=user_in, update_dict={
-            "uid": generated_uid,
-            "hashed_password": get_password_hash(user_in.password) if user_in.password else None,
-            "is_superuser": False
-        })
+        new_user = await user_crud.create(
+            db,
+            obj_in=user_in,
+            update_dict={
+                "uid": generated_uid,
+                "hashed_password": get_password_hash(user_in.password)
+                if user_in.password
+                else None,
+                "is_superuser": False,
+            },
+        )
     except ValueError as e:
         raise ParameterException(str(e))
 
     return StandardResponse.success(
         data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED
     )
+
 
 @router.get("/list")
 async def list_all_users(
@@ -54,6 +63,7 @@ async def list_all_users(
         data=[UserResponse.model_validate(u) for u in users],
         message=constants.MSG_USER_LIST_SUCCESS,
     )
+
 
 @router.post("/update")
 async def update_user(
@@ -69,7 +79,9 @@ async def update_user(
         is_renaming = user_in.username and user_in.username != user.username
         is_deactivating = user_in.is_active is False
         if is_renaming or is_deactivating:
-            raise ParameterException("超级管理员账户受核心保护，严禁执行禁用或改名操作。")
+            raise ParameterException(
+                "超级管理员账户受核心保护，严禁执行禁用或改名操作。"
+            )
 
     update_dict = {}
     if user_in.password:
@@ -88,6 +100,7 @@ async def update_user(
     return StandardResponse.success(
         data=UserResponse.model_validate(user), message=constants.MSG_USER_UPDATED
     )
+
 
 @router.post("/delete")
 async def delete_user(

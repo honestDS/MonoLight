@@ -26,7 +26,9 @@ class OpenAITransformer(BaseTransformer):
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto",
         **kwargs,
-    ) -> Dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
+    ) -> Dict[
+        str, Any
+    ]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

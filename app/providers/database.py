@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
 
 load_dotenv()
 
@@ -16,6 +15,7 @@ if not DATABASE_URL:
 
 if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     import tempfile
+
     temp_db = os.path.join(tempfile.gettempdir(), "monolight_test_session.db")
     DATABASE_URL = f"sqlite+aiosqlite:///{temp_db}"
 
@@ -23,6 +23,7 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(
     bind=engine, class_=AsyncSession, expire_on_commit=False
 )
+
 
 async def get_db():
     async with AsyncSessionLocal() as session:

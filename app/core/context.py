@@ -1,9 +1,10 @@
 from typing import List, Tuple
 import json
+import os
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.profile import Profile, ProfileConfig
-from app.models.message import MessageRole, InternalMessage
+from app.models.message import MessageRole, InternalMessage, InternalToolCall
 from app.core.log import get_logger
 from app.core.utils.tokenizer import estimate_tokens
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -90,14 +91,29 @@ class ContextManager:
             current_total += msg_tokens
             raw_history_tokens += msg_tokens
 
-        # A. 原子化轮次对齐 (USER 头部对齐)
-        valid_start_index = -1
+        # A. 原子化轮次对齐 (保留所有窗口内的 SYSTEM 消息，并从第一个 USER 开始对齐后续消息)
+        system_msgs = [m for m in temp_msgs if m.role == MessageRole.SYSTEM]
+        
+        first_user_idx = -1
         for idx, m in enumerate(temp_msgs):
             if m.role == MessageRole.USER:
-                valid_start_index = idx
+                first_user_idx = idx
                 break
-
-        aligned_msgs = temp_msgs[valid_start_index:] if valid_start_index != -1 else []
+        
+        # 提取从第一个 USER 开始的所有消息
+        user_onwards = temp_msgs[first_user_idx:] if first_user_idx != -1 else []
+        
+        # 合并：保持 SYSTEM 在前，随后跟随对齐后的对话流（去重处理）
+        aligned_msgs = []
+        added_ids = set()
+        
+        for m in system_msgs:
+            aligned_msgs.append(m)
+            added_ids.add(id(m))
+            
+        for m in user_onwards:
+            if id(m) not in added_ids:
+                aligned_msgs.append(m)
 
         # B. 工具链一致性审计 (ID 匹配审计)
         audited_msgs = []

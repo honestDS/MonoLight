@@ -1,26 +1,30 @@
 import json
 from typing import List
-from app.models.message import Message, MessageRole, InternalMessage, InternalToolCall
+from app.models.message import (
+    Message,
+    MessageRole,
+    MessageType,
+    InternalMessage,
+    InternalToolCall,
+)
 
 
 def parse_db_messages_to_internal(raw_messages: List[Message]) -> List[InternalMessage]:
     """
     将数据库存储的原始 Message 对象列表解析并转换为业务协议所需的 InternalMessage 列表。
-    处理内容包括：JSON 反序列化、工具调用元数据提取、角色对齐。
+    通过 type 字段执行直接检测，无需依赖启发式逻辑。
     """
     parsed_history: List[InternalMessage] = []
     for msg in raw_messages:
         try:
             role = MessageRole(msg.role)
-            content = msg.content or ""
+            m_type = MessageType(msg.type)
+            content = (msg.content or "").strip()
             tool_calls = None
             tool_call_id = None
 
-            # 提取工具调用元数据
-            # 如果是 TOOL 角色，或者 content 中包含 tool_calls 关键字，尝试进行 JSON 解析
-            if role == MessageRole.TOOL or (
-                role == MessageRole.ASSISTANT and "tool_calls" in content
-            ):
+            # 直接检测：仅在类型明确为 TOOL_CALL 或 TOOL_RESULT 时尝试解析 JSON
+            if m_type == MessageType.TOOL_CALL or m_type == MessageType.TOOL_RESULT:
                 try:
                     parsed = json.loads(content)
                     if isinstance(parsed, dict):
@@ -33,7 +37,7 @@ def parse_db_messages_to_internal(raw_messages: List[Message]) -> List[InternalM
                             tool_call_id = parsed["tool_call_id"]
                             content = parsed.get("content")
                 except json.JSONDecodeError:
-                    # 若解析失败，则按普通文本 content 处理
+                    # 鲁棒性退避：解析失败按原样呈现
                     pass
 
             parsed_history.append(
@@ -45,6 +49,5 @@ def parse_db_messages_to_internal(raw_messages: List[Message]) -> List[InternalM
                 )
             )
         except Exception:
-            # 异常消息跳过，确保上下文链条稳定性
             continue
     return parsed_history
