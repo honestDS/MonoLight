@@ -1,11 +1,12 @@
 from typing import List, Tuple
 import json
-import os
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.profile import Profile, ProfileConfig
-from app.models.message import MessageRole, InternalMessage, InternalToolCall
+from app.models.message import MessageRole, InternalMessage
 from app.core.log import get_logger
+from app.core.utils.tokenizer import estimate_tokens
+from app.core.utils.message_parser import parse_db_messages_to_internal
 
 # CRUD Imports
 from app.core.crud.message import message_crud
@@ -13,17 +14,8 @@ from app.core.crud.message import message_crud
 load_dotenv()
 logger = get_logger(__name__)
 
-class ContextManager:
-    @staticmethod
-    def estimate_tokens(text: str) -> int:
-        if not text:
-            return 0
-        chinese_count = len([c for c in text if "\u4e00" <= c <= "\u9fff"])
-        other_count = len(text) - chinese_count
-        c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 0.6))
-        o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
-        return int(chinese_count * c_coeff + other_count * o_coeff)
 
+class ContextManager:
     @classmethod
     async def get_messages(
         cls,
@@ -39,52 +31,20 @@ class ContextManager:
         cfg = ProfileConfig.model_validate(profile.configs)
         limit_tokens = cfg.other.context_window_k * 1024 * 0.8
 
-        # 1. 加载并初步解析原始历史记录 (协议转换预处理)
-        # 虽然使用 CRUD 获取，但数据库存的是 Message 模型，content 为字符串，仍需解析其内部 JSON
-        raw_history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=100)
-        
-        parsed_history: List[InternalMessage] = []
-        for msg in raw_history:
-            try:
-                role = MessageRole(msg.role)
-                content = msg.content or ""
-                tool_calls = None
-                tool_call_id = None
-
-                # 提取工具调用元数据
-                if role == MessageRole.TOOL or (role == MessageRole.ASSISTANT and "tool_calls" in content):
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict):
-                            if "tool_calls" in parsed:
-                                tool_calls = [InternalToolCall(**tc) for tc in parsed["tool_calls"]]
-                                content = parsed.get("content")
-                            if "tool_call_id" in parsed:
-                                tool_call_id = parsed["tool_call_id"]
-                                content = parsed.get("content")
-                    except json.JSONDecodeError:
-                        pass
-                
-                parsed_history.append(InternalMessage(
-                    role=role,
-                    content=content,
-                    tool_calls=tool_calls,
-                    tool_call_id=tool_call_id
-                ))
-            except Exception:
-                continue
+        # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
+        raw_history = await message_crud.get_history(
+            db, session_id=session_id, uid=uid, limit=100
+        )
+        parsed_history = parse_db_messages_to_internal(raw_history)
 
         # 2. 策略分发
-        # TODO: 未来可根据 profile.configs.other.compression_strategy 选择不同函数
-        # 例如: 'summary' -> _compress_by_summary, 'auto' -> _compress_by_atomic_truncate
-        
-        current_msg_tokens = cls.estimate_tokens(current_message)
-        
+        current_msg_tokens = estimate_tokens(current_message)
+
         final_msgs, log_data = cls._strategy_atomic_truncate(
             session_id=session_id,
             parsed_history=parsed_history,
             limit_tokens=limit_tokens,
-            current_msg_tokens=current_msg_tokens
+            current_msg_tokens=current_msg_tokens,
         )
 
         # 3. 压缩日志记录
@@ -94,7 +54,9 @@ class ContextManager:
                 f"Tokens: {log_data['before']} -> {log_data['after']}"
             )
 
-        final_msgs.append(InternalMessage(role=MessageRole.USER, content=current_message))
+        final_msgs.append(
+            InternalMessage(role=MessageRole.USER, content=current_message)
+        )
         return final_msgs
 
     @classmethod
@@ -103,7 +65,7 @@ class ContextManager:
         session_id: str,
         parsed_history: List[InternalMessage],
         limit_tokens: float,
-        current_msg_tokens: int
+        current_msg_tokens: int,
     ) -> Tuple[List[InternalMessage], dict]:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
@@ -115,13 +77,15 @@ class ContextManager:
 
         # 反向装载（从新到旧）
         for msg in parsed_history:
-            msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
-            msg_tokens = cls.estimate_tokens(msg_str)
-            
+            msg_str = (
+                json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
+            )
+            msg_tokens = estimate_tokens(msg_str)
+
             if current_total + msg_tokens > limit_tokens:
                 is_hard_truncated = True
                 break
-            
+
             temp_msgs.insert(0, msg)
             current_total += msg_tokens
             raw_history_tokens += msg_tokens
@@ -132,7 +96,7 @@ class ContextManager:
             if m.role == MessageRole.USER:
                 valid_start_index = idx
                 break
-        
+
         aligned_msgs = temp_msgs[valid_start_index:] if valid_start_index != -1 else []
 
         # B. 工具链一致性审计 (ID 匹配审计)
@@ -145,22 +109,28 @@ class ContextManager:
                 j = i + 1
                 matched_tools = []
                 found_ids = []
-                while j < len(aligned_msgs) and aligned_msgs[j].role == MessageRole.TOOL:
+                while (
+                    j < len(aligned_msgs) and aligned_msgs[j].role == MessageRole.TOOL
+                ):
                     t_id = aligned_msgs[j].tool_call_id
                     if t_id in required_ids:
                         matched_tools.append(aligned_msgs[j])
                         found_ids.append(t_id)
                     j += 1
-                
+
                 if all(rid in found_ids for rid in required_ids):
                     audited_msgs.append(msg)
                     audited_msgs.extend(matched_tools)
                     i = j
                 else:
-                    logger.warning(f"Broken tool chain in {session_id}. Required: {required_ids}")
+                    logger.warning(
+                        f"Broken tool chain in {session_id}. Required: {required_ids}"
+                    )
                     i = j
             elif msg.role == MessageRole.TOOL:
-                logger.warning(f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}")
+                logger.warning(
+                    f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}"
+                )
                 i += 1
             else:
                 audited_msgs.append(msg)
@@ -169,18 +139,15 @@ class ContextManager:
         # 计算压缩后的 Token 数
         final_history_tokens = 0
         for fm in audited_msgs:
-            fm_str = json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
-            final_history_tokens += cls.estimate_tokens(fm_str)
+            fm_str = (
+                json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
+            )
+            final_history_tokens += estimate_tokens(fm_str)
 
         is_compressed = is_hard_truncated or (len(audited_msgs) < len(parsed_history))
-        
+
         return audited_msgs, {
             "is_compressed": is_compressed,
             "before": current_msg_tokens + raw_history_tokens,
-            "after": current_msg_tokens + final_history_tokens
+            "after": current_msg_tokens + final_history_tokens,
         }
-
-    # 未来可在此扩展：
-    # @classmethod
-    # async def _strategy_summary(cls, ...) -> Tuple[List[InternalMessage], dict]:
-    #     pass
