@@ -52,6 +52,10 @@ export const profileApi = {
   delete: (id) => request.post(`/profiles/delete?profile_id=${id}`)
 }
 
+export const promptApi = {
+  list: () => request.get('/prompts/list')
+}
+
 export const providerApi = {
   list: () => request.get('/providers/list')
 }

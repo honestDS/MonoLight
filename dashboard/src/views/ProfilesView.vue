@@ -2,7 +2,7 @@
   <div class="profiles-container">
     <div class="header-actions">
       <el-button type="primary" size="default" @click="showDialog('create')">新建配置</el-button>
-      <el-button type="default" size="default" @click="handleRefresh" :loading="loading" style="margin-left: 10px">刷新</el-button>
+      <el-button size="default" @click="handleRefresh">刷新列表</el-button>
     </div>
 
     <el-table :data="profiles" v-loading="loading" border stripe size="default">
@@ -11,23 +11,6 @@
       <el-table-column :resizable="false" label="模型 ID" min-width="150">
         <template #default="scope">
           {{ scope.row.configs?.provider?.model_id || '未设置' }}
-        </template>
-      </el-table-column>
-      
-      <el-table-column :resizable="false" label="推理参数" align="center">
-        <template #default="scope">
-          <div v-if="scope.row.configs?.provider" style="font-size: 12px">
-            Temp: {{ scope.row.configs.provider.temperature }} / TopP: {{ scope.row.configs.provider.top_p }}
-          </div>
-        </template>
-      </el-table-column>
-
-      <el-table-column :resizable="false" label="限制" align="center">
-        <template #default="scope">
-          <div v-if="scope.row.configs" style="font-size: 12px">
-            Tokens: {{ scope.row.configs.provider?.max_tokens }} <br/>
-            Context: {{ scope.row.configs.other?.context_window_k }}K
-          </div>
         </template>
       </el-table-column>
       
@@ -50,91 +33,116 @@
       </el-table-column>
     </el-table>
 
-    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="700px">
+    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="responsive-dialog" top="5vh">
       <el-form :model="form" label-width="120px" size="default">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane label="基础设置" name="base">
-            <el-row :gutter="20" style="margin-top: 20px">
-              <el-col :span="12">
-                <el-form-item label="配置名称">
-                  <el-input v-model="form.name" placeholder="唯一配置名称"></el-input>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="模型提供商">
-                  <el-select v-model="form.provider_id" placeholder="选择提供商" style="width: 100%">
-                    <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                  </el-select>
-                </el-form-item>
-              </el-col>
-              <el-col :span="24">
-                <el-form-item label="模型 ID">
-                  <el-input v-model="form.configs.provider.model_id" placeholder="如 gpt-4o"></el-input>
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row :gutter="20">
-              <el-col :span="12">
-                <el-form-item label="Temperature">
-                  <el-input-number v-model="form.configs.provider.temperature" :min="0" :max="2" :step="0.1" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="Top P">
-                  <el-input-number v-model="form.configs.provider.top_p" :min="0" :max="1" :step="0.05" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row :gutter="20">
-              <el-col :span="12">
-                <el-form-item label="最大 Token">
-                  <el-input-number v-model="form.configs.provider.max_tokens" :min="0" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="启用流式输出">
-                  <el-switch v-model="form.configs.provider.stream"></el-switch>
-                </el-form-item>
-              </el-col>
-            </el-row>
+            <div style="margin-top: 20px">
+              <el-form-item label="配置名称">
+                <el-input v-model="form.name" placeholder="唯一配置名称"></el-input>
+              </el-form-item>
+              <el-form-item label="模型提供商">
+                <el-select v-model="form.provider_id" placeholder="选择提供商" style="width: 100%">
+                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="关联提示词库">
+                <el-select v-model="form.prompt_id" placeholder="可选关联提示词" clearable style="width: 100%">
+                  <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+              </el-form-item>
+            </div>
           </el-tab-pane>
 
-          <!-- 进阶/工具设置 -->
-          <el-tab-pane label=" Agent & 系统" name="advanced">
-            <el-divider content-position="left">工具调用 (Agent)</el-divider>
-            <el-row :gutter="20">
-              <el-col :span="12">
-                <el-form-item label="Shell 超时(s)">
-                  <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="最大并行数">
-                  <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="最大连续轮数">
-                  <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-            </el-row>
+          <!-- 模型设置 -->
+          <el-tab-pane label="模型设置" name="model">
+            <div style="margin-top: 20px">
+              <el-form-item label="模型 ID">
+                <el-input v-model="form.configs.provider.model_id" placeholder="如 gpt-4o"></el-input>
+              </el-form-item>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="Temperature">
+                    <el-input-number v-model="form.configs.provider.temperature" :min="0" :max="2" :step="0.1" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="Top P">
+                    <el-input-number v-model="form.configs.provider.top_p" :min="0" :max="1" :step="0.05" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="最大 Token">
+                    <el-input-number v-model="form.configs.provider.max_tokens" :min="0" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="启用流式输出">
+                    <el-switch v-model="form.configs.provider.stream"></el-switch>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </div>
+          </el-tab-pane>
 
-            <el-divider content-position="left">系统设置</el-divider>
-            <el-row :gutter="20">
-              <el-col :span="12">
-                <el-form-item label="上下文限制 K">
-                  <el-input-number v-model="form.configs.other.context_window_k" :min="1" style="width: 100%"></el-input-number>
-                </el-form-item>
-              </el-col>
-            </el-row>
+          <!-- 安全设置 -->
+          <el-tab-pane label="安全设置" name="security">
+            <div style="margin-top: 20px">
+              <el-form-item label="审计提供商">
+                <el-select v-model="form.configs.security.audit_provider_id" placeholder="选择审计服务商" clearable style="width: 100%">
+                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="审计模型 ID">
+                <el-input v-model="form.configs.security.audit_model_id" placeholder="用于审计的模型 ID"></el-input>
+              </el-form-item>
+              <el-form-item label="拦截阈值 (0-7)">
+                <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
+                <div style="font-size: 12px; color: #909399;">分数越高，触发拦截的敏感度越低（越宽松）</div>
+              </el-form-item>
+            </div>
+          </el-tab-pane>
+
+          <!-- 工具设置 -->
+          <el-tab-pane label="工具设置" name="tool">
+            <div style="margin-top: 20px">
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="Shell 超时(s)">
+                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="最大并行数">
+                    <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="最大连续轮数">
+                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" style="width: 100%"></el-input-number>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </div>
+          </el-tab-pane>
+
+          <!-- 其他设置 -->
+          <el-tab-pane label="其他设置" name="other">
+            <div style="margin-top: 20px">
+              <el-form-item label="上下文限制 K">
+                <el-input-number v-model="form.configs.other.context_window_k" :min="1" style="width: 100%"></el-input-number>
+                <div style="font-size: 12px; color: #909399; margin-top: 5px;">关联短期上下文的历史消息轮数</div>
+              </el-form-item>
+            </div>
           </el-tab-pane>
         </el-tabs>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false" size="default">{{ t('common.cancel') }}</el-button>
-        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">{{ t('common.confirm') }}</el-button>
+        <el-button @click="dialogVisible = false" size="default">取消</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -144,11 +152,12 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { profileApi, providerApi } from '../api'
+import { profileApi, providerApi, promptApi } from '../api'
 
 const { t } = useI18n()
 const profiles = ref([])
 const providers = ref([])
+const prompts = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
@@ -169,6 +178,15 @@ const form = reactive({
   prompt_id: null,
   configs: defaultConfigs()
 })
+
+const fetchPrompts = async () => {
+  try {
+    const res = await promptApi.list()
+    prompts.value = res.data.data
+  } catch (err) {
+    ElMessage.error(err.message || '加载提示词库失败')
+  }
+}
 
 const fetchProviders = async () => {
   try {
@@ -194,6 +212,7 @@ const loadProfiles = async () => {
 const handleRefresh = () => {
   loadProfiles()
   fetchProviders()
+  fetchPrompts()
 }
 
 const handleActivate = async (id) => {
@@ -225,7 +244,6 @@ const showDialog = (type, row = null) => {
     form.name = row.name
     form.provider_id = row.provider_id
     form.prompt_id = row.prompt_id
-    // Deep merge configs to ensure all nested objects exist
     const base = defaultConfigs()
     if (row.configs) {
       Object.keys(base).forEach(key => {
@@ -269,6 +287,7 @@ const submitForm = async () => {
 onMounted(() => {
   loadProfiles()
   fetchProviders()
+  fetchPrompts()
 })
 </script>
 
@@ -279,4 +298,9 @@ onMounted(() => {
   .header-actions { margin-bottom: 20px; }
   .active-tag { font-weight: bold; }
 }
+
+.responsive-dialog {
+  max-width: 400px;
+}
+
 </style>
