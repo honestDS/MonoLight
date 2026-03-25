@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +11,31 @@ from app.models.profile import (
 
 
 class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
+    async def get_with_relations(self, db: AsyncSession, id: int) -> Optional[Profile]:
+        stmt = (
+            select(Profile)
+            .where(Profile.id == id)
+            .options(selectinload(Profile.provider))
+        )
+        result = await db.execute(stmt)
+        return result.scalars().first()
+    async def get_by_name(self, db: AsyncSession, name: str) -> Optional[Profile]:
+        stmt = select(Profile).where(Profile.name == name)
+        result = await db.execute(stmt)
+        return result.scalars().first()
+
+    async def get_multi(
+        self, db: AsyncSession, *, skip: int = 0, limit: int = 100
+    ) -> List[Profile]:
+        stmt = (
+            select(Profile)
+            .options(selectinload(Profile.provider))
+            .offset(skip)
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().all()
+
     async def get_active(self, db: AsyncSession) -> Optional[Profile]:
         stmt = (
             select(Profile)

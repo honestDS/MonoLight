@@ -151,6 +151,7 @@ class ChatDispatcher:
 
             tools = ALL_TOOLS_SCHEMAS
 
+            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
             await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, message, profile.id)
 
             max_turns, current_turn, final_ai_content = cfg.tool.max_turns, 0, ""
@@ -183,6 +184,7 @@ class ChatDispatcher:
                 )
 
                 ai_msg = response.message
+                logger.info(f"[{username}] (Session: {session_id}) Turn {current_turn} | LLM Response: {ai_msg.content or "[Tool Call]"}")
                 # 空消息拦截逻辑
                 if not ai_msg.tool_calls and not (ai_msg.content or '').strip():
                     from app.core.constants import ERR_LLM_EMPTY_RESPONSE

@@ -170,3 +170,4 @@ class ProfileResponse(ProfileBase):
     is_active: bool
     provider_name: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+

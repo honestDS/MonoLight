@@ -54,8 +54,13 @@ async def create_profile(
             raise ParameterException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.create(db, obj_in=profile_in)
+    # Re-fetch with provider
+    db_profile = await profile_crud.get_with_relations(db, db_profile.id)
+    res_data = ProfileResponse.model_validate(db_profile)
+    if db_profile.provider:
+        res_data.provider_name = db_profile.provider.name
     return StandardResponse.success(
-        data=ProfileResponse.model_validate(db_profile),
+        data=res_data,
         message=constants.MSG_PROFILE_CREATED,
     )
 
@@ -63,9 +68,13 @@ async def create_profile(
 @router.get("/list", response_model=StandardResponse[List[ProfileResponse]])
 async def list_profiles(db: AsyncSession = Depends(get_db)):
     profiles = await profile_crud.get_multi(db)
-    return StandardResponse.success(
-        data=[ProfileResponse.model_validate(p) for p in profiles]
-    )
+    results = []
+    for p in profiles:
+        item = ProfileResponse.model_validate(p)
+        if hasattr(p, 'provider') and p.provider:
+            item.provider_name = p.provider.name
+        results.append(item)
+    return StandardResponse.success(data=results)
 
 
 @router.post("/activate")
@@ -115,8 +124,13 @@ async def update_profile(
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in)
+    # Re-fetch with relations for provider_name
+    db_profile = await profile_crud.get_with_relations(db, db_profile.id)
+    res_data = ProfileResponse.model_validate(db_profile)
+    if db_profile.provider:
+        res_data.provider_name = db_profile.provider.name
     return StandardResponse.success(
-        data=ProfileResponse.model_validate(db_profile),
+        data=res_data,
         message=constants.MSG_PROFILE_UPDATED,
     )
 

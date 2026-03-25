@@ -36,7 +36,8 @@ request.interceptors.response.use(
 
 
 export const authApi = {
-  login: (data) => request.post('/auth/login', data)
+  login: (data) => request.post('/auth/login', data),
+  resetAdmin: (token) => request.post('/auth/reset_admin', { reset_token: token })
 }
 
 export const chatApi = {
