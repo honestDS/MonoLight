@@ -1,0 +1,52 @@
+/* 全局色彩定义与主题方案 */
+
+:root {
+  /* 品牌色 */
+  --color-primary: #409eff;
+  --color-primary-light: #ecf5ff;
+  --color-primary-dark: #337ecc;
+
+  /* 侧边栏主题色 */
+  --color-sidebar-bg: #409eff;
+  --color-sidebar-text: #ffffff;
+  --color-sidebar-active: #ffffff;
+  --color-sidebar-hover: #337ecc;
+
+  /* 状态色 */
+  --color-success: #67c23a;
+  --color-warning: #e6a23c;
+  --color-danger: #f56c6c;
+  --color-info: #909399;
+
+  /* 文字色 */
+  --color-text-main: #303133;
+  --color-text-regular: #606266;
+  --color-text-secondary: #909399;
+
+  /* 边框与背景 */
+  --color-border-base: #dcdfe6;
+  --color-border-light: #e4e7ed;
+  --color-bg-base: #ffffff;
+  --color-bg-page: #f5f7fa;
+
+  /* 登录页面颜色 */
+  --color-login-bg-page: #e0e8f0;
+  --color-login-bg-box: #ffffff;
+  --color-login-bg-left: #337ecc;
+  --color-login-gradient-start: #4d8fd8;
+  --color-login-shadow-dark: #2a6690;
+  --color-login-shadow-light: #5a9fe0;
+  --color-login-text-muted: #505666;
+  --color-login-text-light: #8a8d99;
+}
+
+/* 未来暗黑模式预留 */
+[data-theme='dark'] {
+  --color-primary: #409eff;
+  --color-text-main: #e5eaf3;
+  --color-text-regular: #cfd3dc;
+  --color-text-secondary: #a3a6ad;
+  --color-bg-base: #141414;
+  --color-bg-page: #000000;
+  --color-border-base: #4c4d4f;
+}

@@ -1,0 +1,75 @@
+@import "./theme.scss";
+
+/* 全局基础布局 */
+.view-container {
+  padding: 30px;
+  background-color: var(--color-bg-page);
+  min-height: calc(100vh - 130px - 60px);
+}
+
+.page-header-actions {
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 全局表单元素 */
+.full-width-input {
+  width: 100% !important;
+}
+
+.tab-pane-content {
+  margin-top: 20px;
+}
+
+.help-text {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  &.mt-5 {
+    margin-top: 5px;
+  }
+}
+
+/* 状态标记 */
+.active-status-tag {
+  font-weight: bold;
+}
+
+/* 全局 Element Plus 覆盖 */
+.el-table {
+  font-size: 15px !important;
+  color: var(--color-text-main) !important;
+}
+
+.el-button--default {
+  padding: 10px 20px !important;
+}
+
+.el-form-item__label {
+  font-size: 15px !important;
+  font-weight: 500;
+  color: var(--color-text-regular) !important;
+}
+
+.standard-dialog {
+  max-width: 600px;
+  .el-dialog__body {
+    background-color: var(--color-bg-base);
+  }
+}
+
+/* 全局 Element 组件视觉补强 */
+:root {
+  --el-font-size-base: 15px !important;
+}
+.el-button {
+  font-size: 14px !important;
+  padding: 12px 24px !important;
+}
+.el-input__inner, .el-textarea__inner {
+  font-size: 14px !important;
+}
+.el-card__header {
+  font-size: 18px !important;
+  font-weight: bold;
+}

@@ -1,31 +1,67 @@
-:root { --sidebar-bg: #1e1e2d; }
-body { margin: 0; background-color: #f5f7f9; font-family: "Helvetica Neue",Helvetica,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","微软雅黑",Arial,sans-serif; }
+/* 全局变量 */
+:root {
+  --el-font-size-base: 15px !important;
+}
+
+/* 基础样式 */
+body {
+  margin: 0;
+  background-color: #f5f7f9;
+  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
+}
+
+/* 侧边栏 */
+.sidebar {
+  background-color: var(--color-sidebar-bg);
+  display: flex;
+  flex-direction: column;
+  border-right: none !important;
+  overflow: hidden;
+  box-shadow: none !important;
+}
+
+/* Logo 区域 */
+.logo-container {
+  padding: 24px;
+  text-align: center;
+  background-color: var(--color-sidebar-bg);
+  border-right: none !important;
+  position: relative;
+  z-index: 10;
+}
+
+.logo-text {
+  color: #fff;
+  font-size: 20px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+/* 菜单 */
+.side-menu {
+  --el-menu-bg-color: var(--color-sidebar-bg);
+  --el-menu-text-color: var(--color-sidebar-text);
+  --el-menu-active-color: var(--color-sidebar-active);
+  border-right: none !important;
+  flex: 1;
+  width: 100% !important;
+  margin-right: -1px;
+
+  /* 选中项样式 */
+  .el-menu-item.is-active {
+    background-color: var(--color-sidebar-hover) !important;
+    color: var(--color-sidebar-active) !important;
+  }
+
+  .el-menu-item:hover {
+    background-color: var(--color-sidebar-hover) !important;
+  }
+}
+/* 全局布局 */
 .app-wrapper { height: 100vh; overflow: hidden; }
-.sidebar { 
-    background-color: var(--sidebar-bg); 
-    display: flex; 
-    flex-direction: column; 
-    border-right: none !important;
-    overflow: hidden;
-    box-shadow: none !important;
-}
-.logo-container { 
-    padding: 24px; 
-    text-align: center; 
-    background-color: var(--sidebar-bg);
-    border-right: none !important;
-    position: relative;
-    z-index: 10;
-    .logo-text { color: #fff; font-size: 20px; font-weight: bold; letter-spacing: 1px; } 
-}
-.side-menu { 
-    border-right: none !important; 
-    flex: 1; 
-    width: 100% !important;
-    /* 强制消除可能存在的 1px 偏移 */
-    margin-right: -1px; 
-}
 .app-header { background: #fff; border-bottom: 1px solid #ebedf0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
 .app-main { padding: 24px; overflow-y: auto; background: #f5f7f9; }
+
+/* 过渡动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }

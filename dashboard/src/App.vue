@@ -9,10 +9,7 @@
         <el-menu
           :default-active="$route.path"
           router
-          class="side-menu"
-          background-color="#1e1e2d"
-          text-color="#a2a3b7"
-          active-text-color="#ffffff">
+          class="side-menu">
           <el-menu-item index="/">
             <i class="el-icon-chat-line-round"></i>
             <span>智能交互</span>
@@ -88,29 +85,6 @@ export default {
 }
 </script>
 
-<style lang="scss">@import "@/assets/css/app.scss";</style>
-
-<style>
-/* 全局 Element 组件视觉补强 */
-:root {
-  --el-font-size-base: 15px !important;
-}
-.el-button {
-  font-size: 14px !important;
-  padding: 12px 24px !important;
-}
-.el-input__inner, .el-textarea__inner {
-  font-size: 14px !important;
-}
-.el-form-item__label {
-  font-size: 14px !important;
-  font-weight: 500 !important;
-}
-.el-table {
-  font-size: 14px !important;
-}
-.el-card__header {
-  font-size: 18px !important;
-  font-weight: bold;
-}
+<style lang="scss">
+@import "@/assets/css/app.scss";
 </style>

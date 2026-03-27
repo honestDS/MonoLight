@@ -1,6 +1,6 @@
 <template>
-  <div class="profiles-container">
-    <div class="header-actions">
+  <div class="view-container">
+    <div class="page-header-actions">
       <el-button type="primary" size="default" @click="showDialog('create')">新建配置</el-button>
       <el-button size="default" @click="handleRefresh">刷新列表</el-button>
     </div>
@@ -24,31 +24,31 @@
 
       <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
         <template #default="scope">
-          <div>
-            <el-button link type="primary" size="default" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
-            <el-button link type="primary" size="default" @click="showDialog('edit', scope.row)">编辑</el-button>
-            <el-button link type="danger" size="default" @click="handleDelete(scope.row.id)">删除</el-button>
+          <div class="action-buttons">
+            <el-button link type="primary" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
+            <el-button link type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
+            <el-button link type="danger" size="small" @click="handleDelete(scope.row.id)">删除</el-button>
           </div>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="responsive-dialog" top="5vh">
+    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
       <el-form :model="form" label-width="120px" size="default">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane label="基础设置" name="base">
-            <div style="margin-top: 20px">
+            <div class="tab-pane-content">
               <el-form-item label="配置名称">
                 <el-input v-model="form.name" placeholder="唯一配置名称"></el-input>
               </el-form-item>
               <el-form-item label="模型提供商">
-                <el-select v-model="form.provider_id" placeholder="选择提供商" style="width: 100%">
+                <el-select v-model="form.provider_id" placeholder="选择提供商" class="full-width-input">
                   <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
               </el-form-item>
               <el-form-item label="关联提示词库">
-                <el-select v-model="form.prompt_id" placeholder="可选关联提示词" clearable style="width: 100%">
+                <el-select v-model="form.prompt_id" placeholder="可选关联提示词" clearable class="full-width-input">
                   <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
               </el-form-item>
@@ -57,26 +57,26 @@
 
           <!-- 模型设置 -->
           <el-tab-pane label="模型设置" name="model">
-            <div style="margin-top: 20px">
+            <div class="tab-pane-content">
               <el-form-item label="模型 ID">
                 <el-input v-model="form.configs.provider.model_id" placeholder="如 gpt-4o"></el-input>
               </el-form-item>
               <el-row :gutter="20">
                 <el-col :span="12">
                   <el-form-item label="Temperature">
-                    <el-input-number v-model="form.configs.provider.temperature" :min="0" :max="2" :step="0.1" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.provider.temperature" :min="0" :max="2" :step="0.1" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
                   <el-form-item label="Top P">
-                    <el-input-number v-model="form.configs.provider.top_p" :min="0" :max="1" :step="0.05" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.provider.top_p" :min="0" :max="1" :step="0.05" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
               </el-row>
               <el-row :gutter="20">
                 <el-col :span="12">
                   <el-form-item label="最大 Token">
-                    <el-input-number v-model="form.configs.provider.max_tokens" :min="0" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.provider.max_tokens" :min="0" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
@@ -90,9 +90,9 @@
 
           <!-- 安全设置 -->
           <el-tab-pane label="安全设置" name="security">
-            <div style="margin-top: 20px">
+            <div class="tab-pane-content">
               <el-form-item label="审计提供商">
-                <el-select v-model="form.configs.security.audit_provider_id" placeholder="选择审计服务商" clearable style="width: 100%">
+                <el-select v-model="form.configs.security.audit_provider_id" placeholder="选择审计服务商" clearable class="full-width-input">
                   <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
               </el-form-item>
@@ -101,28 +101,28 @@
               </el-form-item>
               <el-form-item label="拦截阈值 (0-7)">
                 <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
-                <div style="font-size: 12px; color: #909399;">分数越高，触发拦截的敏感度越低（越宽松）</div>
+                <div class="help-text">分数越高，触发拦截的敏感度越低（越宽松）</div>
               </el-form-item>
             </div>
           </el-tab-pane>
 
           <!-- 工具设置 -->
           <el-tab-pane label="工具设置" name="tool">
-            <div style="margin-top: 20px">
+            <div class="tab-pane-content">
               <el-row :gutter="20">
                 <el-col :span="12">
                   <el-form-item label="Shell 超时(s)">
-                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
                   <el-form-item label="最大并行数">
-                    <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
                   <el-form-item label="最大连续轮数">
-                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" style="width: 100%"></el-input-number>
+                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
               </el-row>
@@ -131,10 +131,10 @@
 
           <!-- 其他设置 -->
           <el-tab-pane label="其他设置" name="other">
-            <div style="margin-top: 20px">
+            <div class="tab-pane-content">
               <el-form-item label="上下文限制 K">
-                <el-input-number v-model="form.configs.other.context_window_k" :min="1" style="width: 100%"></el-input-number>
-                <div style="font-size: 12px; color: #909399; margin-top: 5px;">关联短期上下文的历史消息轮数</div>
+                <el-input-number v-model="form.configs.other.context_window_k" :min="1" class="full-width-input"></el-input-number>
+                <div class="form-help-text mt-5">关联短期上下文的历史消息轮数</div>
               </el-form-item>
             </div>
           </el-tab-pane>
@@ -293,14 +293,4 @@ onMounted(() => {
 
 <style lang="scss">
 @import "@/assets/css/profiles.scss";
-.profiles-container {
-  padding: 20px;
-  .header-actions { margin-bottom: 20px; }
-  .active-tag { font-weight: bold; }
-}
-
-.responsive-dialog {
-  max-width: 400px;
-}
-
 </style>

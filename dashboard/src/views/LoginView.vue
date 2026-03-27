@@ -18,10 +18,10 @@
         </div>
 
         <el-dialog :title="$t('login.reset_admin')" v-model="resetDialog" width="400px" append-to-body center align-center>
-          <div style="margin-bottom: 15px; font-size: 13px; color: #909399;">{{ $t('login.reset_hint') }}</div>
+          <div class="reset-hint">{{ $t('login.reset_hint') }}</div>
           <el-input v-model="resetToken" :placeholder="$t('login.reset_token_placeholder')" show-password class="custom-input"></el-input>
           <template #footer>
-            <div style="text-align: right;">
+            <div class="dialog-footer">
               <el-button @click="resetDialog = false" size="default">{{ $t('login.cancel') }}</el-button>
               <el-button type="primary" :loading="resetLoading" @click="handleResetAdmin" size="default">{{ $t('login.reset_confirm') }}</el-button>
             </div>
