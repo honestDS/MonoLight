@@ -42,10 +42,22 @@ body {
   --el-menu-bg-color: var(--color-sidebar-bg);
   --el-menu-text-color: var(--color-sidebar-text);
   --el-menu-active-color: var(--color-sidebar-active);
+  --el-menu-item-height: 56px;
+  --el-menu-text-color: var(--color-sidebar-text);
+  --el-menu-hover-text-color: var(--color-sidebar-active);
+  --el-menu-hover-bg-color: var(--color-sidebar-hover);
   border-right: none !important;
   flex: 1;
   width: 100% !important;
   margin-right: -1px;
+
+  /* 重置菜单项对齐方式 */
+  .el-menu-item,
+  .el-sub-menu__title {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    display: flex !important;
+  }
 
   /* 选中项样式 */
   .el-menu-item.is-active {
@@ -55,6 +67,23 @@ body {
 
   .el-menu-item:hover {
     background-color: var(--color-sidebar-hover) !important;
+  }
+
+  /* 子菜单样式 */
+  .el-sub-menu {
+    .el-sub-menu__title {
+      &:hover {
+        background-color: var(--color-sidebar-hover) !important;
+      }
+    }
+
+    &.is-active > .el-sub-menu__title {
+      color: var(--color-sidebar-active) !important;
+    }
+  }
+
+  .el-menu--inline {
+    background-color: var(--color-sidebar-bg) !important;
   }
 }
 /* 全局布局 */

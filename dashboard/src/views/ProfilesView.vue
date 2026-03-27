@@ -1,41 +1,39 @@
 <template>
-  <div class="view-container">
-    <div class="page-header-actions">
-      <el-button type="primary" size="default" @click="showDialog('create')">新建配置</el-button>
-      <el-button size="default" @click="handleRefresh">刷新列表</el-button>
-    </div>
+  <BaseDataTable
+    :data="profiles"
+    :loading="loading"
+    create-text="新建配置"
+    @create="showDialog('create')"
+    @refresh="handleRefresh">
 
-    <el-table :data="profiles" v-loading="loading" border stripe size="default">
-      <el-table-column :resizable="false" prop="name" label="配置名称" min-width="120"></el-table-column>
-      <el-table-column :resizable="false" prop="provider_name" label="提供商" min-width="120"></el-table-column>
-      <el-table-column :resizable="false" label="模型 ID" min-width="150">
-        <template #default="scope">
-          {{ scope.row.configs?.provider?.model_id || '未设置' }}
-        </template>
-      </el-table-column>
-      
-      <el-table-column :resizable="false" label="状态" align="center">
-        <template #default="scope">
-          <el-tag :type="scope.row.is_active ? 'success' : 'info'" size="default">
-            {{ scope.row.is_active ? '活动中' : '闲置' }}
-          </el-tag>
-        </template>
-      </el-table-column>
+    <el-table-column :resizable="false" prop="name" label="配置名称" min-width="120" sortable></el-table-column>
+    <el-table-column :resizable="false" prop="provider_name" label="提供商" min-width="120" sortable></el-table-column>
+    <el-table-column :resizable="false" label="模型 ID" min-width="150" sortable>
+      <template #default="scope">
+        {{ scope.row.configs?.provider?.model_id || '未设置' }}
+      </template>
+    </el-table-column>
+    
+    <el-table-column :resizable="false" label="状态" align="center" sortable>
+      <template #default="scope">
+        <StatusTag :status="scope.row.is_active" active-text="活动中" inactive-text="闲置" />
+      </template>
+    </el-table-column>
 
-      <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
-        <template #default="scope">
-          <div class="action-buttons">
-            <el-button link type="primary" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
-            <el-button link type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="handleDelete(scope.row.id)">删除</el-button>
-          </div>
-        </template>
-      </el-table-column>
-    </el-table>
+    <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
+      <template #default="scope">
+        <div class="action-buttons">
+          <el-button type="success" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
+          <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
+          <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
+        </div>
+      </template>
+    </el-table-column>
+  </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
-      <el-form :model="form" label-width="120px" size="default">
-        <el-tabs v-model="activeTab">
+  <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+    <el-form :model="form" label-width="120px" size="default">
+      <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane label="基础设置" name="base">
             <div class="tab-pane-content">
@@ -99,9 +97,9 @@
               <el-form-item label="审计模型 ID">
                 <el-input v-model="form.configs.security.audit_model_id" placeholder="用于审计的模型 ID"></el-input>
               </el-form-item>
-              <el-form-item label="拦截阈值 (0-7)">
+              <el-form-item label="二次确认阈值 (0-7)">
                 <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
-                <div class="help-text">分数越高，触发拦截的敏感度越低（越宽松）</div>
+                <div class="help-text">分数越高，触发二次确认的敏感度越低（越宽松）</div>
               </el-form-item>
             </div>
           </el-tab-pane>
@@ -138,21 +136,23 @@
               </el-form-item>
             </div>
           </el-tab-pane>
-        </el-tabs>
-      </el-form>
-      <template #footer>
-        <el-button @click="dialogVisible = false" size="default">取消</el-button>
-        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
-      </template>
-    </el-dialog>
-  </div>
+      </el-tabs>
+    </el-form>
+    <template #footer>
+      <el-button @click="dialogVisible = false" size="default">取消</el-button>
+      <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { profileApi, providerApi, promptApi } from '../api'
+import BaseDataTable from '../components/BaseDataTable.vue'
+import StatusTag from '../components/StatusTag.vue'
+import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 
 const { t } = useI18n()
 const profiles = ref([])
@@ -179,6 +179,22 @@ const form = reactive({
   configs: defaultConfigs()
 })
 
+// loadProfiles 必须在 useDeleteConfirm 之前定义
+const loadProfiles = async () => {
+  loading.value = true
+  try {
+    const res = await profileApi.list()
+    profiles.value = res.data.data || []
+  } catch (err) {
+    ElMessage.error(err.message || '加载列表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+// 使用删除确认组合式函数
+const { handleDelete } = useDeleteConfirm(profileApi.delete, loadProfiles)
+
 const fetchPrompts = async () => {
   try {
     const res = await promptApi.list()
@@ -197,18 +213,6 @@ const fetchProviders = async () => {
   }
 }
 
-const loadProfiles = async () => {
-  loading.value = true
-  try {
-    const res = await profileApi.list()
-    profiles.value = res.data.data || []
-  } catch (err) {
-    ElMessage.error(err.message || '加载列表失败')
-  } finally {
-    loading.value = false
-  }
-}
-
 const handleRefresh = () => {
   loadProfiles()
   fetchProviders()
@@ -222,17 +226,6 @@ const handleActivate = async (id) => {
     loadProfiles()
   } catch (err) {
     ElMessage.error(err.message || '切换失败')
-  }
-}
-
-const handleDelete = async (id) => {
-  try {
-    await ElMessageBox.confirm(t('common.delete_confirm'), t('common.warning'), { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') })
-    await profileApi.delete(id)
-    ElMessage.success('配置已移除')
-    loadProfiles()
-  } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message || '删除失败')
   }
 }
 

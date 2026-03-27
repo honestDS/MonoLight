@@ -69,3 +69,15 @@ ERR_LLM_UNEXPECTED_ERROR = "大模型接口调用发生非预期异常"
 
 ERR_LLM_PROVIDER_NOT_CONFIGURED = "未检测到有效的模型供应商配置或 API Key。请在管理后台检查并激活一个包含有效密钥的厂商 Profile。"
 ERR_LLM_EMPTY_RESPONSE = '大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置'
+
+# 验证错误映射
+ERR_MAP = {
+    "missing": "缺失必填字段",
+    "value_error.missing": "缺失必填字段",
+    "string_too_short": "输入内容太短",
+    "string_too_long": "输入内容太长",
+    "int_parsing": "必须是有效的整数",
+    "json_invalid": "无效的 JSON 格式",
+    "enum": "不在允许的枚举值范围内",
+    "type_error.enum": "不在允许的枚举值范围内",
+}

@@ -70,10 +70,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    error_msgs = []
+    for error in exc.errors():
+        field = error.get('loc')[-1]
+        err_type = error.get('type')
+        msg = constants.ERR_MAP.get(err_type, error.get('msg'))
+        error_msgs.append(f'[{field}] {msg}')
+    
     return JSONResponse(
         status_code=422,
         content=StandardResponse.error(
-            code=422, message=constants.ERR_VALIDATION_FAILED + ": " + str(exc.errors())
+            code=422, message=f'{constants.ERR_VALIDATION_FAILED}: ' + ' | '.join(error_msgs)
         ).model_dump(),
     )
 

@@ -14,10 +14,28 @@
             <i class="el-icon-chat-line-round"></i>
             <span>智能交互</span>
           </el-menu-item>
-          <el-menu-item index="/profiles">
-            <i class="el-icon-operation"></i>
-            <span>配置管理</span>
+          <el-menu-item index="/users">
+            <i class="el-icon-user"></i>
+            <span>用户管理</span>
           </el-menu-item>
+          <el-sub-menu index="/system">
+            <template #title>
+              <i class="el-icon-setting"></i>
+              <span>系统配置</span>
+            </template>
+            <el-menu-item index="/profiles">
+              <i class="el-icon-operation"></i>
+              <span>配置管理</span>
+            </el-menu-item>
+            <el-menu-item index="/providers">
+              <i class="el-icon-set-up"></i>
+              <span>模型管理</span>
+            </el-menu-item>
+            <el-menu-item index="/prompts">
+              <i class="el-icon-document"></i>
+              <span>提示词管理</span>
+            </el-menu-item>
+          </el-sub-menu>
         </el-menu>
       </el-aside>
       <el-container>
@@ -71,8 +89,16 @@ export default {
     currentRouteName() {
       const map = {
         '/': '智能交互',
-        '/profiles': '配置管理'
+        '/users': '用户管理',
+        '/profiles': '配置管理',
+        '/providers': '模型管理',
+        '/prompts': '提示词管理'
       };
+      // 如果是系统配置子菜单中的路由，显示系统配置
+      const path = this.$route.path;
+      if (path === '/profiles' || path === '/providers' || path === '/prompts') {
+        return '系统配置';
+      }
       return map[this.$route.path] || '控制面板';
     }
   },

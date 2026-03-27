@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const request = axios.create({
   baseURL: 'http://154.36.178.178:8001/api/v1',
-  timeout: 10000
+  timeout: 120000  // 聊天接口timeout设为2分钟
 })
 
 request.interceptors.request.use(config => {
@@ -34,6 +34,12 @@ request.interceptors.response.use(
   }
 );
 
+export const adminApi = {
+  userList: () => request.get('/admin/user/list'),
+  userAdd: (data) => request.post('/admin/user/add', data),
+  userUpdate: (data) => request.post('/admin/user/update', data),
+  userDelete: (uid) => request.post(`/admin/user/delete?uid=${uid}`)
+}
 
 export const authApi = {
   login: (data) => request.post('/auth/login', data),
@@ -41,7 +47,12 @@ export const authApi = {
 }
 
 export const chatApi = {
-  send: (msg) => request.post('/chat/send', { message: msg })
+  // 聊天 completions 接口
+  completions: (data) => request.post('/chat/completions', data),
+  // 获取会话列表
+  sessionsList: () => request.get('/chat/sessions/list'),
+  // 删除会话
+  deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`)
 }
 
 export const profileApi = {
@@ -49,15 +60,24 @@ export const profileApi = {
   create: (data) => request.post('/profiles/create', data),
   activate: (id) => request.post(`/profiles/activate?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),
-  delete: (id) => request.post(`/profiles/delete?profile_id=${id}`)
+  delete: (id) => request.post(`/profiles/delete?profile_id=${id}`),
+  types: () => request.get('/profiles/types'),
 }
 
 export const promptApi = {
-  list: () => request.get('/prompts/list')
+  list: () => request.get('/prompts/list'),
+  create: (data) => request.post('/prompts/create', data),
+  update: (id, data) => request.post(`/prompts/update?prompt_id=${id}`, data),
+  delete: (id) => request.post(`/prompts/delete?prompt_id=${id}`)
 }
 
 export const providerApi = {
-  list: () => request.get('/providers/list')
+  list: () => request.get('/providers/list'),
+  types: () => request.get('/providers/types'),
+  create: (data) => request.post('/providers/create', data),
+  get: (id) => request.get(`/providers/get?provider_id=${id}`),
+  update: (id, data) => request.post(`/providers/update?provider_id=${id}`, data),
+  delete: (id) => request.post(`/providers/delete?provider_id=${id}`)
 }
 
 export default request
