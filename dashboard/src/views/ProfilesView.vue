@@ -1,39 +1,41 @@
 <template>
-  <BaseDataTable
-    :data="profiles"
-    :loading="loading"
-    create-text="新建配置"
-    @create="showDialog('create')"
-    @refresh="handleRefresh">
+  <div class="view-container">
+    <BaseDataTable
+      :data="profiles"
+      :loading="loading"
+      :data-length="profiles.length"
+      create-text="新建配置"
+      @create="showDialog('create')"
+      @refresh="handleRefresh">
 
-    <el-table-column :resizable="false" prop="name" label="配置名称" min-width="120" sortable></el-table-column>
-    <el-table-column :resizable="false" prop="provider_name" label="提供商" min-width="120" sortable></el-table-column>
-    <el-table-column :resizable="false" label="模型 ID" min-width="150" sortable>
-      <template #default="scope">
-        {{ scope.row.configs?.provider?.model_id || '未设置' }}
-      </template>
-    </el-table-column>
-    
-    <el-table-column :resizable="false" label="状态" align="center" sortable>
-      <template #default="scope">
-        <StatusTag :status="scope.row.is_active" active-text="活动中" inactive-text="闲置" />
-      </template>
-    </el-table-column>
+      <el-table-column :resizable="false" prop="name" label="配置名称" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" prop="provider_name" label="提供商" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" label="模型 ID" min-width="150" sortable>
+        <template #default="scope">
+          {{ scope.row.configs?.provider?.model_id || '未设置' }}
+        </template>
+      </el-table-column>
+      
+      <el-table-column :resizable="false" label="状态" align="center" sortable>
+        <template #default="scope">
+          <StatusTag :status="scope.row.is_active" active-text="活动中" inactive-text="闲置" />
+        </template>
+      </el-table-column>
 
-    <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
-      <template #default="scope">
-        <div class="action-buttons">
-          <el-button type="success" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
-          <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
-          <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
-        </div>
-      </template>
-    </el-table-column>
-  </BaseDataTable>
+      <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
+        <template #default="scope">
+          <div class="action-buttons">
+            <el-button type="success" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
+            <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
+          </div>
+        </template>
+      </el-table-column>
+    </BaseDataTable>
 
-  <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
-    <el-form :model="form" label-width="120px" size="default">
-      <el-tabs v-model="activeTab">
+    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+      <el-form :model="form" label-width="120px" size="default">
+        <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane label="基础设置" name="base">
             <div class="tab-pane-content">
@@ -132,17 +134,18 @@
             <div class="tab-pane-content">
               <el-form-item label="上下文限制 K">
                 <el-input-number v-model="form.configs.other.context_window_k" :min="1" class="full-width-input"></el-input-number>
-                <div class="form-help-text mt-5">关联短期上下文的历史消息轮数</div>
+                <div class="help-text mt-5">关联短期上下文的历史消息轮数</div>
               </el-form-item>
             </div>
           </el-tab-pane>
-      </el-tabs>
-    </el-form>
-    <template #footer>
-      <el-button @click="dialogVisible = false" size="default">取消</el-button>
-      <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
-    </template>
-  </el-dialog>
+        </el-tabs>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false" size="default">取消</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -285,5 +288,5 @@ onMounted(() => {
 </script>
 
 <style lang="scss">
-@import "@/assets/css/profiles.scss";
+@import "@/assets/css/common.scss";
 </style>

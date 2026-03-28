@@ -2,15 +2,17 @@
 
 :root {
   /* 品牌色 */
-  --color-primary: #409eff;
-  --color-primary-light: #ecf5ff;
-  --color-primary-dark: #337ecc;
+  --color-primary: #1e293b;
+  --color-primary-light: #334155;
+  --color-primary-dark: #0f172a;
 
-  /* 侧边栏主题色 */
-  --color-sidebar-bg: #409eff;
-  --color-sidebar-text: #ffffff;
-  --color-sidebar-active: #ffffff;
-  --color-sidebar-hover: #337ecc;
+  /* 侧边栏主题色 - 深色主题 */
+  --color-sidebar-bg: #0f172a;
+  --color-sidebar-border: #1e293b;
+  --color-sidebar-text: #94a3b8;
+  --color-sidebar-title: #f8fafc;
+  --color-sidebar-active: #60a5fa;
+  --color-sidebar-hover: #1e293b;
 
   /* 状态色 */
   --color-success: #67c23a;
@@ -29,15 +31,15 @@
   --color-bg-base: #ffffff;
   --color-bg-page: #f5f7fa;
 
-  /* 登录页面颜色 */
-  --color-login-bg-page: #e0e8f0;
+  /* 登录页面颜色 - 与侧边栏深色主题统一 */
+  --color-login-bg-page: #f1f5f9;
   --color-login-bg-box: #ffffff;
-  --color-login-bg-left: #337ecc;
-  --color-login-gradient-start: #4d8fd8;
-  --color-login-shadow-dark: #2a6690;
-  --color-login-shadow-light: #5a9fe0;
-  --color-login-text-muted: #505666;
-  --color-login-text-light: #8a8d99;
+  --color-login-bg-left: #0f172a;
+  --color-login-gradient-start: #1e293b;
+  --color-login-shadow-dark: #0f172a;
+  --color-login-shadow-light: #334155;
+  --color-login-text-muted: #64748b;
+  --color-login-text-light: #94a3b8;
 }
 
 /* 未来暗黑模式预留 */

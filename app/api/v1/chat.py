@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dispatcher import ChatDispatcher
 from app.core.security import get_current_user
 from app.providers.database import get_db
-from app.models.message import ChatCompletionRequest
+from app.models.message import ChatCompletionRequest, MessageResponse
 from app.schemas.response import StandardResponse
 from app.core.crud.message import message_crud
 
@@ -65,6 +65,26 @@ async def delete_session(
 
     if row_count == 0:
         return StandardResponse.success(message="会话未找到或已删除")
+
+@router.get("/sessions/history")
+async def get_session_history(
+    session_id: str,
+    page: int = 1,
+    size: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    uid = getattr(current_user, "uid", None)
+    offset = (page - 1) * size
+    messages = await message_crud.get_history_paged(
+        db, session_id=session_id, uid=uid, limit=size, offset=offset
+    )
+    
+    # 倒序取出，正序返回
+    messages.reverse()
+    
+    data = [MessageResponse.model_validate(m) for m in messages]
+    return StandardResponse.success(data=data, message="会话历史记录获取成功")
 
     return StandardResponse.success(
         message=f"已成功清理会话 {session_id} 的全部历史记录"

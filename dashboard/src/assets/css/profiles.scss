@@ -3,10 +3,84 @@
 /* Profiles 页面特有样式 */
 .profiles-container {
   @extend .view-container;
+  padding: 0;
 }
 
-.header-actions {
-  @extend .page-header-actions;
+/* 表格卡片 */
+.profiles-container .table-card {
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  overflow: hidden;
+
+  /* 表格头部区域 */
+  .table-header {
+    background: var(--color-bg-page);
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--color-border-light);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+
+    .table-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--color-text-secondary);
+    }
+  }
+
+  /* Element Plus 表格样式覆盖 */
+  .el-table {
+    --el-table-border-color: var(--color-border-light);
+    --el-table-header-bg-color: var(--color-bg-page);
+
+    font-size: 14px;
+    color: var(--color-text-main);
+
+    thead {
+      th.el-table__cell {
+        background: var(--color-bg-page) !important;
+        color: var(--color-text-secondary);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 16px;
+        border-bottom: 1px solid var(--color-border-light) !important;
+      }
+    }
+
+    tbody {
+      tr {
+        transition: background-color 0.2s;
+
+        &:hover {
+          background-color: var(--color-bg-page) !important;
+        }
+
+        td.el-table__cell {
+          padding: 16px;
+          border-bottom: 1px solid var(--color-border-light) !important;
+        }
+      }
+    }
+  }
+
+  /* 表格底部区域 */
+  .table-footer {
+    background: var(--color-bg-page);
+    padding: 16px 24px;
+    border-top: 1px solid var(--color-border-light);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+
+    .pagination-info {
+      font-size: 13px;
+      color: var(--color-text-secondary);
+    }
+  }
 }
 
 .action-buttons {

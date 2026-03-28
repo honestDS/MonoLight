@@ -33,7 +33,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 100
     ) -> List[Message]:
         """
-        获取指定会话的历史记录，按时间倒序排列以便 ContextManager 进行 Token 窗口截断
+        用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
         result = await db.execute(
             select(Message)
@@ -42,6 +42,13 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             .order_by(Message.created_at.desc())
             .limit(limit)
         )
+        return result.scalars().all()
+
+    async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> List[Message]:
+        """
+        用于前端分页加载会话历史记录
+        """
+        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.uid == uid).order_by(Message.created_at.desc()).limit(limit).offset(offset))
         return result.scalars().all()
 
     async def get_user_sessions(

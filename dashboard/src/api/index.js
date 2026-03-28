@@ -52,7 +52,9 @@ export const chatApi = {
   // 获取会话列表
   sessionsList: () => request.get('/chat/sessions/list'),
   // 删除会话
-  deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`)
+  deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`),
+  // 获取会话历史记录
+  sessionsHistory: (sessionId, page = 1, size = 20) => request.get(`/chat/sessions/history?session_id=${sessionId}&page=${page}&size=${size}`),
 }
 
 export const profileApi = {

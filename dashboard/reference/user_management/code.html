@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Clinical Architect - User Management</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "error-container": "#fe8983",
+              "on-primary": "#f6f7ff",
+              "on-tertiary-container": "#236000",
+              "secondary-fixed-dim": "#d3d4d9",
+              "on-secondary-container": "#505256",
+              "primary-fixed-dim": "#bbd6ff",
+              "secondary-fixed": "#e1e2e7",
+              "on-primary-fixed": "#004175",
+              "on-primary-fixed-variant": "#005da4",
+              "background": "#faf9fb",
+              "on-surface-variant": "#5b5f65",
+              "tertiary-dim": "#236000",
+              "error": "#9f403d",
+              "surface-bright": "#faf9fb",
+              "on-primary-container": "#005394",
+              "primary-fixed": "#d3e4ff",
+              "surface-dim": "#d6dae2",
+              "secondary": "#5d5f63",
+              "primary-dim": "#005495",
+              "on-tertiary": "#ecffdc",
+              "on-background": "#2f3338",
+              "tertiary": "#296d00",
+              "on-secondary": "#f8f9fd",
+              "surface-container-lowest": "#ffffff",
+              "inverse-primary": "#409eff",
+              "outline-variant": "#afb2b8",
+              "tertiary-container": "#9dfd6d",
+              "surface": "#faf9fb",
+              "surface-container-high": "#e6e8ee",
+              "surface-container": "#edeef2",
+              "inverse-surface": "#0d0e10",
+              "surface-tint": "#0060a9",
+              "tertiary-fixed-dim": "#90ee61",
+              "on-tertiary-fixed": "#1a4b00",
+              "on-secondary-fixed": "#3d3f43",
+              "surface-container-low": "#f3f3f7",
+              "on-error-container": "#752121",
+              "on-secondary-fixed-variant": "#595b5f",
+              "error-dim": "#4e0309",
+              "surface-variant": "#e0e2e9",
+              "on-error": "#fff7f6",
+              "tertiary-fixed": "#9dfd6d",
+              "outline": "#777b81",
+              "on-surface": "#2f3338",
+              "secondary-dim": "#515357",
+              "surface-container-highest": "#e0e2e9",
+              "primary": "#0060a9",
+              "primary-container": "#d3e4ff",
+              "on-tertiary-fixed-variant": "#286b00",
+              "secondary-container": "#e1e2e7",
+              "inverse-on-surface": "#9d9d9f"
+            },
+            fontFamily: {
+              "headline": ["Inter"],
+              "body": ["Inter"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #afb2b8; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-background text-on-surface flex overflow-hidden">
+<!-- SideNavBar Component -->
+<aside class="bg-slate-950 dark:bg-black font-sans antialiased text-sm tracking-tight h-screen w-64 fixed left-0 top-0 border-r border-slate-800 dark:border-slate-900 flex flex-col overflow-y-auto z-50">
+<div class="p-6">
+<div class="flex items-center gap-3 mb-8">
+<div class="w-8 h-8 bg-blue-600 flex items-center justify-center rounded">
+<span class="material-symbols-outlined text-white text-lg">architecture</span>
+</div>
+<div>
+<h1 class="text-lg font-bold tracking-tighter text-slate-50 dark:text-white">Clinical Architect</h1>
+<p class="text-[10px] text-slate-400 uppercase tracking-widest">LLM Admin v1.0</p>
+</div>
+</div>
+<nav class="space-y-1">
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span>Dashboard</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="forum">forum</span>
+<span>Conversation</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+<span>Sessions</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="hub">hub</span>
+<span>Models</span>
+</a>
+<a class="bg-blue-600/10 text-blue-400 border-r-2 border-blue-500 font-medium px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="group">group</span>
+<span>Users</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span>Settings</span>
+</a>
+</nav>
+</div>
+<div class="mt-auto p-6 border-t border-slate-800">
+<nav class="space-y-1">
+<a class="text-slate-400 hover:text-slate-100 px-4 py-2 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="description">description</span>
+<span>Documentation</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-2 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="help_outline">help_outline</span>
+<span>Support</span>
+</a>
+</nav>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 ml-64 min-h-screen relative flex flex-col">
+<!-- TopNavBar Component -->
+<header class="bg-white dark:bg-slate-950 font-sans text-sm font-medium fixed top-0 right-0 w-[calc(100%-16rem)] h-16 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 z-40">
+<div class="flex items-center gap-4">
+<div class="flex items-center text-slate-500 text-xs tracking-tight">
+<span>Admin</span>
+<span class="material-symbols-outlined text-sm mx-1">chevron_right</span>
+<span class="text-on-surface font-semibold">User Management</span>
+</div>
+<div class="h-8 w-[1px] bg-slate-200 mx-2"></div>
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">search</span>
+<input class="pl-9 pr-4 py-1.5 bg-surface-container-low border-none rounded-lg text-xs w-64 focus:ring-1 focus:ring-primary outline-none transition-all" placeholder="Global Search..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-5">
+<button class="text-slate-500 hover:text-blue-600 transition-all focus:ring-1 focus:ring-blue-500 outline-none p-1 rounded">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button class="text-slate-500 hover:text-blue-600 transition-all focus:ring-1 focus:ring-blue-500 outline-none p-1 rounded">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+</button>
+<div class="flex items-center gap-3 pl-4 border-l border-slate-200">
+<div class="text-right">
+<p class="text-xs font-bold leading-none">Admin Alpha</p>
+<p class="text-[10px] text-slate-500">Superuser</p>
+</div>
+<img alt="User Profile" class="w-8 h-8 rounded-full border border-slate-200" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBWjBHH9j_Wyo71wVzMY27YWnTygjEUejJMOmJcqGR6L1UZ7V9wRYLY4eQrUeha3MrJkvqYIIkgCLJ07AAV2zvUw52Hq1xACV40tMKwD-be4eRym1NZnn5ob6r8ktrrr3XwdwL8DI4jlQJkgnSNdrJDa19GP94WosgfoGO5GH85xCeRSFbwlbjR8nJWo7jof42e02Wy3gkXCvYjt0KBvX_zRkLsexkFBWWNMDEB4DkECisRlZW2_7OSBMH2HIOm9-_qCqkIia_zyzuh"/>
+</div>
+</div>
+</header>
+<!-- Content Canvas -->
+<div class="mt-16 p-8 flex-1 overflow-y-auto">
+<div class="max-w-7xl mx-auto space-y-6">
+<!-- Header Actions -->
+<div class="flex justify-between items-end">
+<div>
+<h2 class="text-2xl font-bold tracking-tight text-on-surface">User Management</h2>
+<p class="text-secondary text-sm">Configure administrative access and end-user permissions.</p>
+</div>
+<div class="flex gap-3">
+<button class="flex items-center gap-2 px-4 py-2 bg-white border border-outline-variant text-on-surface text-sm font-medium rounded hover:bg-surface-container-low transition-colors">
+<span class="material-symbols-outlined text-sm">filter_list</span>
+                            Filter
+                        </button>
+<button class="flex items-center gap-2 px-4 py-2 bg-primary text-on-primary text-sm font-medium rounded hover:opacity-90 transition-opacity">
+<span class="material-symbols-outlined text-sm">person_add</span>
+                            Add New User
+                        </button>
+</div>
+</div>
+<!-- Bento Stats (High-end UI pattern) -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+<div class="bg-surface-container-lowest p-5 border border-outline-variant rounded flex flex-col justify-between">
+<span class="text-secondary text-xs font-bold uppercase tracking-widest">Total Users</span>
+<div class="flex items-end justify-between mt-2">
+<span class="text-3xl font-bold text-on-surface">1,284</span>
+<span class="text-tertiary text-xs font-medium flex items-center">+12% <span class="material-symbols-outlined text-xs">arrow_upward</span></span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-5 border border-outline-variant rounded flex flex-col justify-between">
+<span class="text-secondary text-xs font-bold uppercase tracking-widest">Active Admins</span>
+<div class="flex items-end justify-between mt-2">
+<span class="text-3xl font-bold text-on-surface">24</span>
+<span class="text-secondary text-xs font-medium">Stable</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-5 border border-outline-variant rounded flex flex-col justify-between">
+<span class="text-secondary text-xs font-bold uppercase tracking-widest">Pending Requests</span>
+<div class="flex items-end justify-between mt-2">
+<span class="text-3xl font-bold text-error">7</span>
+<span class="text-error text-xs font-medium flex items-center">Critical</span>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-5 border border-outline-variant rounded flex flex-col justify-between">
+<span class="text-secondary text-xs font-bold uppercase tracking-widest">Storage Used</span>
+<div class="mt-4">
+<div class="w-full bg-surface-container-high h-1.5 rounded-full overflow-hidden">
+<div class="bg-primary h-full w-[64%]"></div>
+</div>
+<div class="flex justify-between mt-2">
+<span class="text-[10px] text-secondary">6.4 TB of 10 TB</span>
+<span class="text-[10px] text-on-surface font-bold">64%</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Main User Table -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded overflow-hidden">
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-low border-b border-outline-variant">
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider">User</th>
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider">Email Address</th>
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider">Role</th>
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider">Status</th>
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider">Registration</th>
+<th class="px-6 py-4 text-xs font-bold text-secondary uppercase tracking-wider text-right">Actions</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant">
+<!-- Row 1 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded-full bg-primary-container text-primary flex items-center justify-center text-xs font-bold">JD</div>
+<div>
+<p class="text-sm font-semibold text-on-surface">Jane Doe</p>
+<p class="text-[10px] text-secondary">ID: USER-4921</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">jane.doe@clinical-arch.ai</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-primary-container text-on-primary-container border border-primary/20">ADMIN</span>
+</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-tertiary uppercase">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                                            Active
+                                        </span>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">Oct 12, 2023</td>
+<td class="px-6 py-4 text-right">
+<button class="p-1 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-lg">edit_square</span>
+</button>
+<button class="p-1 hover:text-error transition-colors ml-2">
+<span class="material-symbols-outlined text-lg">delete</span>
+</button>
+</td>
+</tr>
+<!-- Row 2 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded-full bg-surface-container-high text-secondary flex items-center justify-center text-xs font-bold">MS</div>
+<div>
+<p class="text-sm font-semibold text-on-surface">Mark Smith</p>
+<p class="text-[10px] text-secondary">ID: USER-8832</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">m.smith@enterprise.com</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-secondary-container text-on-secondary-container border border-outline-variant">EDITOR</span>
+</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-tertiary uppercase">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                                            Active
+                                        </span>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">Jan 04, 2024</td>
+<td class="px-6 py-4 text-right">
+<button class="p-1 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-lg">edit_square</span>
+</button>
+<button class="p-1 hover:text-error transition-colors ml-2">
+<span class="material-symbols-outlined text-lg">delete</span>
+</button>
+</td>
+</tr>
+<!-- Row 3 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<img alt="User Avatar" class="w-8 h-8 rounded-full" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBOmvIgklA_YcYb3d5ta8h9BEqnfAM5pSJ6bFlZQaGjnJHTcFEQYwWJyfsiM7jlJ2pCl5NIqS0DhtL8_ohwsQoBZ7B0gKg35Fo6He9-8Ea3A7zthGJqnyxk5eXKFDEMtqbnkFzMidjuFo35ypeK3jUN5hEDRfJ9NoAFRPn1elmWdCp0WomF1e6ywBT-FQzfP4hr6SyMZJYS9ybo6uuA4ZsNCoHqTx9t-IdoUCWrUW2yzyhm5l3gYopw57-G9a5Evw3HmmvFDfxqLNGU"/>
+<div>
+<p class="text-sm font-semibold text-on-surface">Sarah Connor</p>
+<p class="text-[10px] text-secondary">ID: USER-1002</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">s.connor@cyberdyne.net</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-surface-container-high text-on-surface-variant border border-outline-variant">VIEWER</span>
+</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-secondary uppercase">
+<span class="w-1.5 h-1.5 rounded-full bg-outline"></span>
+                                            Inactive
+                                        </span>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">Feb 28, 2024</td>
+<td class="px-6 py-4 text-right">
+<button class="p-1 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-lg">edit_square</span>
+</button>
+<button class="p-1 hover:text-error transition-colors ml-2">
+<span class="material-symbols-outlined text-lg">delete</span>
+</button>
+</td>
+</tr>
+<!-- Row 4 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 rounded-full bg-error-container/20 text-error flex items-center justify-center text-xs font-bold">AL</div>
+<div>
+<p class="text-sm font-semibold text-on-surface">Arthur Leywin</p>
+<p class="text-[10px] text-secondary">ID: USER-2045</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">a.leywin@dicathen.org</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-primary-container text-on-primary-container border border-primary/20">ADMIN</span>
+</td>
+<td class="px-6 py-4">
+<span class="inline-flex items-center gap-1.5 text-[10px] font-bold text-error uppercase">
+<span class="w-1.5 h-1.5 rounded-full bg-error"></span>
+                                            Suspended
+                                        </span>
+</td>
+<td class="px-6 py-4 text-sm text-secondary">Mar 15, 2024</td>
+<td class="px-6 py-4 text-right">
+<button class="p-1 hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-lg">edit_square</span>
+</button>
+<button class="p-1 hover:text-error transition-colors ml-2">
+<span class="material-symbols-outlined text-lg">delete</span>
+</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!-- Table Pagination -->
+<div class="px-6 py-3 border-t border-outline-variant flex items-center justify-between bg-surface-container-low/50">
+<span class="text-[10px] text-secondary uppercase font-bold tracking-widest">Showing 4 of 1,284 users</span>
+<div class="flex items-center gap-1">
+<button class="p-1 text-outline-variant cursor-not-allowed">
+<span class="material-symbols-outlined text-lg">chevron_left</span>
+</button>
+<button class="w-6 h-6 flex items-center justify-center rounded bg-primary text-on-primary text-xs font-bold">1</button>
+<button class="w-6 h-6 flex items-center justify-center rounded hover:bg-surface-container-high text-on-surface text-xs">2</button>
+<button class="w-6 h-6 flex items-center justify-center rounded hover:bg-surface-container-high text-on-surface text-xs">3</button>
+<span class="px-1 text-xs text-secondary">...</span>
+<button class="w-6 h-6 flex items-center justify-center rounded hover:bg-surface-container-high text-on-surface text-xs">321</button>
+<button class="p-1 text-on-surface hover:text-primary">
+<span class="material-symbols-outlined text-lg">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Role Permissions Overview (Secondary Bento Content) -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+<div class="md:col-span-2 bg-surface-container-lowest border border-outline-variant rounded p-6">
+<h3 class="text-sm font-bold uppercase tracking-wider mb-4">Quick Access Log</h3>
+<div class="space-y-4">
+<div class="flex items-start gap-3">
+<div class="w-1 h-10 bg-primary rounded-full mt-1"></div>
+<div>
+<p class="text-xs font-semibold">User 'Sarah Connor' role changed to <span class="text-primary font-bold">Viewer</span></p>
+<p class="text-[10px] text-secondary">by Admin Alpha • 2 minutes ago</p>
+</div>
+</div>
+<div class="flex items-start gap-3">
+<div class="w-1 h-10 bg-tertiary rounded-full mt-1"></div>
+<div>
+<p class="text-xs font-semibold">New user registration: <span class="text-on-surface font-bold">Arthur Leywin</span></p>
+<p class="text-[10px] text-secondary">Automatic System Approval • 1 hour ago</p>
+</div>
+</div>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant rounded p-6">
+<h3 class="text-sm font-bold uppercase tracking-wider mb-4">Role Distribution</h3>
+<div class="space-y-3">
+<div class="flex justify-between items-center">
+<span class="text-xs text-secondary">Administrators</span>
+<span class="text-xs font-bold">24</span>
+</div>
+<div class="w-full bg-surface-container-high h-1 rounded-full">
+<div class="bg-primary h-full w-[15%]"></div>
+</div>
+<div class="flex justify-between items-center">
+<span class="text-xs text-secondary">Editors</span>
+<span class="text-xs font-bold">142</span>
+</div>
+<div class="w-full bg-surface-container-high h-1 rounded-full">
+<div class="bg-secondary-container h-full w-[45%]"></div>
+</div>
+<div class="flex justify-between items-center">
+<span class="text-xs text-secondary">Viewers</span>
+<span class="text-xs font-bold">1,118</span>
+</div>
+<div class="w-full bg-surface-container-high h-1 rounded-full">
+<div class="bg-tertiary-container h-full w-[85%]"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- Modal Dialog (Hidden Overlay Pattern) -->
+<!-- Positioned for design review, visibility managed via opacity for static demo -->
+<div class="fixed inset-0 bg-inverse-surface/40 backdrop-blur-sm z-[100] flex items-center justify-center opacity-0 pointer-events-none">
+<div class="bg-surface-container-lowest w-full max-w-lg rounded border border-outline-variant shadow-2xl flex flex-col overflow-hidden">
+<div class="px-6 py-4 bg-surface-container-low border-b border-outline-variant flex items-center justify-between">
+<h3 class="text-sm font-bold uppercase tracking-wider">Add New User</h3>
+<button class="text-secondary hover:text-on-surface transition-colors">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+<div class="p-6 space-y-5">
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold uppercase text-secondary tracking-widest">Full Name</label>
+<input class="w-full px-3 py-2 bg-white border border-outline-variant rounded text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none transition-all" placeholder="e.g. Alexander Vance" type="text"/>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold uppercase text-secondary tracking-widest">Email Address</label>
+<input class="w-full px-3 py-2 bg-white border border-outline-variant rounded text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none transition-all" placeholder="alex@clinical-arch.ai" type="email"/>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold uppercase text-secondary tracking-widest">Role Assignment</label>
+<select class="w-full px-3 py-2 bg-white border border-outline-variant rounded text-sm focus:ring-1 focus:ring-primary outline-none transition-all">
+<option>Viewer</option>
+<option>Editor</option>
+<option>Admin</option>
+</select>
+</div>
+<div class="space-y-1.5">
+<label class="text-[10px] font-bold uppercase text-secondary tracking-widest">Initial Status</label>
+<select class="w-full px-3 py-2 bg-white border border-outline-variant rounded text-sm focus:ring-1 focus:ring-primary outline-none transition-all">
+<option>Active</option>
+<option>Pending</option>
+</select>
+</div>
+</div>
+<div class="pt-4 border-t border-outline-variant">
+<div class="flex items-center gap-3">
+<input class="w-4 h-4 rounded border-outline-variant text-primary focus:ring-primary" id="invite-email" type="checkbox"/>
+<label class="text-xs text-secondary font-medium" for="invite-email">Send activation invitation via email</label>
+</div>
+</div>
+</div>
+<div class="px-6 py-4 bg-surface-container-low flex justify-end gap-3">
+<button class="px-4 py-2 text-xs font-bold uppercase tracking-widest text-secondary hover:text-on-surface transition-colors">Cancel</button>
+<button class="px-6 py-2 bg-primary text-on-primary text-xs font-bold uppercase tracking-widest rounded shadow-sm hover:opacity-90 transition-all">Create Account</button>
+</div>
+</div>
+</div>
+</body></html>

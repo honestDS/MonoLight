@@ -1,6 +1,6 @@
 .chat-view-container {
   display: flex;
-  height: 100%;
+  height: calc(100% - 40px);
   gap: 20px;
 }
 
@@ -121,10 +121,13 @@
     }
 
     .message-item {
+      display: flex;
+      flex-direction: column;      
       margin-bottom: 16px;
       max-width: 80%;
 
       &.user {
+        align-items: flex-end;
         margin-left: auto;
         .content {
           background: #409eff;
@@ -133,6 +136,7 @@
       }
 
       &.ai {
+        align-items: flex-start;
         margin-right: auto;
         .content {
           background: #f4f4f5;
@@ -149,7 +153,18 @@
         }
       }
 
+      .message-header {
+        margin-bottom: 6px;
+        padding: 0 4px;
+
+        .message-time {
+          font-size: 11px;
+          color: #909399;
+        }
+      }
+
       .content {
+        display: inline-block;
         padding: 10px 14px;
         border-radius: 8px;
         word-break: break-word;
@@ -194,6 +209,77 @@
         min-width: 80px;
         height: 48px;
       }
+    }
+  }
+}
+
+// 工具调用样式
+.tool-call-title {
+  color: #409eff;
+  font-weight: 500;
+  padding: 10px 14px;
+}
+
+.tool-call-content {
+  background: #f5f7fa;
+  padding: 12px;
+  border-radius: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 13px;
+  }
+}
+
+.tool-result-title {
+  color: #67c23a;
+  font-weight: 500;
+  padding: 10px 14px;
+}
+
+.tool-result-content {
+  background: #f0f9eb;
+  padding: 12px;
+  border-radius: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 13px;
+  }
+}
+
+// 覆盖 element-plus collapse 样式
+.chat-main .message-list {
+  .el-collapse {
+    border: none;
+    background: transparent;
+  }
+
+  .el-collapse-item {
+    margin-bottom: 8px;
+
+    &__header {
+      background: #f5f7fa;
+      border-radius: 4px;
+      border: none;
+    }
+
+    &__wrap {
+      border: none;
+    }
+
+    &__content {
+      padding: 8px 0;
     }
   }
 }

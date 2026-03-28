@@ -1,52 +1,55 @@
 <template>
-  <BaseDataTable
-    :data="providers"
-    :loading="loading"
-    create-text="添加提供商"
-    @create="openCreateDialog"
-    @refresh="handleRefresh">
+  <div class="view-container">
+    <BaseDataTable
+      :data="providers"
+      :loading="loading"
+      :data-length="providers.length"
+      create-text="添加提供商"
+      @create="openCreateDialog"
+      @refresh="handleRefresh">
 
-    <el-table-column :resizable="false" prop="name" label="名称" min-width="120" sortable></el-table-column>
-    <el-table-column :resizable="false" prop="provider_type" label="类型" min-width="120" sortable></el-table-column>
-    <el-table-column :resizable="false" prop="base_url" label="基础URL" min-width="200" sortable></el-table-column>
-    <el-table-column :resizable="false" prop="is_active" label="状态" align="center" width="100" sortable>
-      <template #default="scope">
-        <StatusTag :status="scope.row.is_active" />
-      </template>
-    </el-table-column>
-    <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
-      <template #default="scope">
-        <div class="action-buttons">
-          <el-button type="primary" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-          <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
-        </div>
-      </template>
-    </el-table-column>
-  </BaseDataTable>
+      <el-table-column :resizable="false" prop="name" label="名称" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" prop="provider_type" label="类型" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" prop="base_url" label="基础URL" min-width="200" sortable></el-table-column>
+      <el-table-column :resizable="false" label="状态" align="center" sortable>
+        <template #default="scope">
+          <StatusTag :status="scope.row.is_active" active-text="启用" inactive-text="禁用" />
+        </template>
+      </el-table-column>
+      <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
+        <template #default="scope">
+          <div class="action-buttons">
+            <el-button type="primary" size="small" @click="handleEdit(scope.row)">编辑</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
+          </div>
+        </template>
+      </el-table-column>
+    </BaseDataTable>
 
-  <!-- 提供商编辑/创建弹窗 -->
-  <el-dialog :title="isEdit ? '编辑提供商' : '添加提供商'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
-    <el-form :model="form" label-width="100px" size="default">
-      <el-form-item label="提供商名称">
-        <el-input v-model="form.name" placeholder="例如: OpenAI-Official" />
-      </el-form-item>
-      <el-form-item label="提供商类型">
-        <el-select v-model="form.provider_type" placeholder="请选择类型" class="full-width-input">
-          <el-option v-for="item in providerTypes" :key="item" :label="item" :value="item" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="API密钥">
-        <el-input v-model="form.api_key" type="password" show-password placeholder="请输入API密钥" />
-      </el-form-item>
-      <el-form-item label="基础URL">
-        <el-input v-model="form.base_url" placeholder="可选，默认为官方URL" />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="dialogVisible = false" size="default">取消</el-button>
-      <el-button type="primary" @click="submitForm" size="default" :loading="submitting">确定</el-button>
-    </template>
-  </el-dialog>
+    <!-- 提供商编辑/创建弹窗 -->
+    <el-dialog :title="isEdit ? '编辑提供商' : '添加提供商'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+      <el-form :model="form" label-width="100px" size="default">
+        <el-form-item label="提供商名称">
+          <el-input v-model="form.name" placeholder="例如: OpenAI-Official" />
+        </el-form-item>
+        <el-form-item label="提供商类型">
+          <el-select v-model="form.provider_type" placeholder="请选择类型" class="full-width-input">
+            <el-option v-for="item in providerTypes" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="API密钥">
+          <el-input v-model="form.api_key" type="password" show-password placeholder="请输入API密钥" />
+        </el-form-item>
+        <el-form-item label="基础URL">
+          <el-input v-model="form.base_url" placeholder="可选，默认为官方URL" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false" size="default">取消</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">确定</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -172,5 +175,5 @@ onMounted(() => {
 </script>
 
 <style lang="scss">
-@import "@/assets/css/providers.scss";
+@import "@/assets/css/common.scss";
 </style>

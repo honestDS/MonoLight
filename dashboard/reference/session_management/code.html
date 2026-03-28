@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Clinical Architect - Session Management</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "error-container": "#fe8983",
+              "on-primary": "#f6f7ff",
+              "on-tertiary-container": "#236000",
+              "secondary-fixed-dim": "#d3d4d9",
+              "on-secondary-container": "#505256",
+              "primary-fixed-dim": "#bbd6ff",
+              "secondary-fixed": "#e1e2e7",
+              "on-primary-fixed": "#004175",
+              "on-primary-fixed-variant": "#005da4",
+              "background": "#faf9fb",
+              "on-surface-variant": "#5b5f65",
+              "tertiary-dim": "#236000",
+              "error": "#9f403d",
+              "surface-bright": "#faf9fb",
+              "on-primary-container": "#005394",
+              "primary-fixed": "#d3e4ff",
+              "surface-dim": "#d6dae2",
+              "secondary": "#5d5f63",
+              "primary-dim": "#005495",
+              "on-tertiary": "#ecffdc",
+              "on-background": "#2f3338",
+              "tertiary": "#296d00",
+              "on-secondary": "#f8f9fd",
+              "surface-container-lowest": "#ffffff",
+              "inverse-primary": "#409eff",
+              "outline-variant": "#afb2b8",
+              "tertiary-container": "#9dfd6d",
+              "surface": "#faf9fb",
+              "surface-container-high": "#e6e8ee",
+              "surface-container": "#edeef2",
+              "inverse-surface": "#0d0e10",
+              "surface-tint": "#0060a9",
+              "tertiary-fixed-dim": "#90ee61",
+              "on-tertiary-fixed": "#1a4b00",
+              "on-secondary-fixed": "#3d3f43",
+              "surface-container-low": "#f3f3f7",
+              "on-error-container": "#752121",
+              "on-secondary-fixed-variant": "#595b5f",
+              "error-dim": "#4e0309",
+              "surface-variant": "#e0e2e9",
+              "on-error": "#fff7f6",
+              "tertiary-fixed": "#9dfd6d",
+              "outline": "#777b81",
+              "on-surface": "#2f3338",
+              "secondary-dim": "#515357",
+              "surface-container-highest": "#e0e2e9",
+              "primary": "#0060a9",
+              "primary-container": "#d3e4ff",
+              "on-tertiary-fixed-variant": "#286b00",
+              "secondary-container": "#e1e2e7",
+              "inverse-on-surface": "#9d9d9f"
+            },
+            fontFamily: {
+              "headline": ["Inter"],
+              "body": ["Inter"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            line-height: 1;
+            text-transform: none;
+            letter-spacing: normal;
+            word-wrap: normal;
+            white-space: nowrap;
+            direction: ltr;
+        }
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-background text-on-surface antialiased overflow-hidden">
+<!-- SideNavBar Shell -->
+<aside class="bg-slate-950 dark:bg-black font-sans antialiased text-sm tracking-tight h-screen w-64 fixed left-0 top-0 border-r border-slate-800 dark:border-slate-900 flex flex-col h-full overflow-y-auto z-50">
+<div class="p-6">
+<div class="flex items-center gap-3">
+<div class="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
+<span class="material-symbols-outlined text-white text-lg" data-icon="architecture">architecture</span>
+</div>
+<div>
+<h1 class="text-lg font-bold tracking-tighter text-slate-50 dark:text-white">Clinical Architect</h1>
+<p class="text-[10px] text-slate-500 uppercase tracking-widest">LLM Admin v1.0</p>
+</div>
+</div>
+</div>
+<nav class="flex-1 mt-4">
+<div class="px-3 mb-2">
+<p class="px-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Main Menu</p>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="dashboard">dashboard</span>
+<span>Dashboard</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="forum">forum</span>
+<span>Conversation</span>
+</a>
+<a class="bg-blue-600/10 text-blue-400 border-r-2 border-blue-500 font-medium px-4 py-3 flex items-center gap-3 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="history">history</span>
+<span>Sessions</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="hub">hub</span>
+<span>Models</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="group">group</span>
+<span>Users</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="settings">settings</span>
+<span>Settings</span>
+</a>
+</div>
+</nav>
+<div class="mt-auto border-t border-slate-800 p-4">
+<a class="text-slate-400 hover:text-slate-100 px-4 py-2 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="description">description</span>
+<span>Documentation</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-2 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined text-xl" data-icon="help_outline">help_outline</span>
+<span>Support</span>
+</a>
+</div>
+</aside>
+<!-- TopNavBar Shell -->
+<header class="bg-white dark:bg-slate-950 fixed top-0 right-0 w-[calc(100%-16rem)] h-16 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 z-40">
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2 text-slate-400 text-xs">
+<span>Admin</span>
+<span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span>
+<span class="text-on-surface font-semibold">Sessions</span>
+</div>
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg" data-icon="search">search</span>
+<input class="pl-10 pr-4 py-1.5 bg-surface-container-low border-none focus:ring-1 ring-blue-500 outline-none text-sm w-64 rounded" placeholder="Global Search..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button class="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-blue-600 transition-all">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-blue-600 transition-all">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+</button>
+<div class="h-8 w-[1px] bg-outline-variant mx-2"></div>
+<button class="flex items-center gap-3 pl-2 pr-1 py-1 rounded-full hover:bg-surface-container transition-all">
+<span class="text-xs font-bold text-on-surface">Admin User</span>
+<div class="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center overflow-hidden">
+<img alt="User Profile" class="w-full h-full object-cover" data-alt="professional portrait of a tech administrator avatar minimalist illustration" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD739BE_y860qYmdX5ovUjarzJsujsYqyS_HmaokVe2gXqomlE45hTTDcIt9DNl5FaQKg4KN6tCBAY_yYxihi27VsMdqMnOHSVCkyxLwlamvGf7C4TFisKm0cnXX01Hr1xjuFzmnzbN39czaVOKtJX3BjeinSqExR6sgn9ry6AY9jMUEPcNeb-__nG6OJzxbFBXN6a_UtBcYJ53yv_fAUa8StrFPI_8rpmVtOdFZRGgn603fftrkLnXLqqPks9ZVjtj96oHnJYociS0"/>
+</div>
+</button>
+</div>
+</header>
+<!-- Main Canvas -->
+<main class="ml-64 mt-16 p-8 h-[calc(100vh-4rem)] overflow-y-auto">
+<!-- Header Section -->
+<div class="flex justify-between items-end mb-8">
+<div>
+<h2 class="text-2xl font-bold text-on-surface tracking-tight">Session Management</h2>
+<p class="text-secondary body-md mt-1">Monitor and manage active administrative and user-level LLM sessions across the architect cluster.</p>
+</div>
+<div class="flex gap-3">
+<button class="px-4 py-2 bg-secondary-container text-on-secondary-container text-sm font-medium flex items-center gap-2 hover:bg-surface-container-high transition-colors rounded">
+<span class="material-symbols-outlined text-lg" data-icon="refresh">refresh</span>
+                    Refresh Logs
+                </button>
+<button class="px-4 py-2 bg-primary text-on-primary text-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity rounded">
+<span class="material-symbols-outlined text-lg" data-icon="block">block</span>
+                    Terminate All
+                </button>
+</div>
+</div>
+<!-- Metrics Bento Grid -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded">
+<div class="flex justify-between items-start mb-2">
+<span class="text-xs font-bold text-secondary uppercase tracking-wider">Active Sessions</span>
+<span class="material-symbols-outlined text-primary" data-icon="bolt">bolt</span>
+</div>
+<div class="text-3xl font-bold text-on-surface">1,284</div>
+<div class="text-[10px] text-tertiary font-bold mt-2 flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="trending_up">trending_up</span>
+                    +12% from last hour
+                </div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded">
+<div class="flex justify-between items-start mb-2">
+<span class="text-xs font-bold text-secondary uppercase tracking-wider">Avg. Duration</span>
+<span class="material-symbols-outlined text-primary" data-icon="timer">timer</span>
+</div>
+<div class="text-3xl font-bold text-on-surface">24m 12s</div>
+<div class="text-[10px] text-secondary font-bold mt-2">Global aggregate mean</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded">
+<div class="flex justify-between items-start mb-2">
+<span class="text-xs font-bold text-secondary uppercase tracking-wider">High Risk</span>
+<span class="material-symbols-outlined text-error" data-icon="warning">warning</span>
+</div>
+<div class="text-3xl font-bold text-on-surface text-error">03</div>
+<div class="text-[10px] text-error font-bold mt-2 uppercase">Requires Attention</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-5 rounded">
+<div class="flex justify-between items-start mb-2">
+<span class="text-xs font-bold text-secondary uppercase tracking-wider">Expired (24h)</span>
+<span class="material-symbols-outlined text-secondary" data-icon="history_toggle_off">history_toggle_off</span>
+</div>
+<div class="text-3xl font-bold text-on-surface">8,492</div>
+<div class="text-[10px] text-secondary font-bold mt-2 uppercase">Purging in 12h</div>
+</div>
+</div>
+<!-- Data Table Section -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded overflow-hidden flex flex-col">
+<div class="bg-surface-container-low px-6 py-4 border-b border-outline-variant flex justify-between items-center">
+<div class="flex gap-4">
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-semibold text-primary rounded">All Sessions</button>
+<button class="px-3 py-1 text-xs font-semibold text-secondary hover:text-on-surface">Active Only</button>
+<button class="px-3 py-1 text-xs font-semibold text-secondary hover:text-on-surface">Expired</button>
+</div>
+<div class="flex items-center gap-2">
+<span class="text-xs text-secondary">Displaying 1-10 of 1,284</span>
+<div class="flex border border-outline-variant rounded overflow-hidden">
+<button class="p-1 hover:bg-surface-container transition-colors"><span class="material-symbols-outlined text-sm" data-icon="chevron_left">chevron_left</span></button>
+<button class="p-1 hover:bg-surface-container transition-colors border-l border-outline-variant"><span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span></button>
+</div>
+</div>
+</div>
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-low text-[10px] uppercase tracking-widest text-secondary font-bold">
+<th class="px-6 py-3 border-b border-outline-variant">Status</th>
+<th class="px-6 py-3 border-b border-outline-variant">Session ID</th>
+<th class="px-6 py-3 border-b border-outline-variant">User Agent</th>
+<th class="px-6 py-3 border-b border-outline-variant">IP Address</th>
+<th class="px-6 py-3 border-b border-outline-variant">Duration</th>
+<th class="px-6 py-3 border-b border-outline-variant">Last Activity</th>
+<th class="px-6 py-3 border-b border-outline-variant text-right">Actions</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant">
+<!-- Session Row 1 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="flex items-center gap-2 text-xs font-bold text-tertiary">
+<span class="w-2 h-2 rounded-full bg-tertiary animate-pulse"></span>
+                                Active
+                            </span>
+</td>
+<td class="px-6 py-4 text-sm font-mono text-on-surface">sess_91A0XJk7L</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-lg" data-icon="browser_updated">browser_updated</span>
+<div class="text-xs">
+<p class="font-medium text-on-surface">Chrome / macOS</p>
+<p class="text-[10px] text-secondary">v119.0.0.0</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-xs text-secondary font-mono">192.168.1.104</td>
+<td class="px-6 py-4 text-xs text-on-surface">02h 15m 44s</td>
+<td class="px-6 py-4 text-xs text-secondary">Just now</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-2">
+<button class="p-2 hover:bg-surface-container-high text-primary rounded transition-all" title="View Details">
+<span class="material-symbols-outlined" data-icon="visibility">visibility</span>
+</button>
+<button class="p-2 hover:bg-error-container/20 text-error rounded transition-all" title="Terminate Session">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Session Row 2 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="flex items-center gap-2 text-xs font-bold text-tertiary">
+<span class="w-2 h-2 rounded-full bg-tertiary animate-pulse"></span>
+                                Active
+                            </span>
+</td>
+<td class="px-6 py-4 text-sm font-mono text-on-surface">sess_82V4PQm2N</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-lg" data-icon="smartphone">smartphone</span>
+<div class="text-xs">
+<p class="font-medium text-on-surface">Safari / iOS</p>
+<p class="text-[10px] text-secondary">v17.2</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-xs text-secondary font-mono">172.16.254.1</td>
+<td class="px-6 py-4 text-xs text-on-surface">45m 12s</td>
+<td class="px-6 py-4 text-xs text-secondary">3m ago</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-2">
+<button class="p-2 hover:bg-surface-container-high text-primary rounded transition-all">
+<span class="material-symbols-outlined" data-icon="visibility">visibility</span>
+</button>
+<button class="p-2 hover:bg-error-container/20 text-error rounded transition-all">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Session Row 3 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="flex items-center gap-2 text-xs font-bold text-secondary">
+<span class="w-2 h-2 rounded-full bg-outline"></span>
+                                Expired
+                            </span>
+</td>
+<td class="px-6 py-4 text-sm font-mono text-on-surface">sess_15H8RWl4B</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-lg" data-icon="terminal">terminal</span>
+<div class="text-xs">
+<p class="font-medium text-on-surface">Python SDK</p>
+<p class="text-[10px] text-secondary">v3.11.2</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-xs text-secondary font-mono">203.0.113.42</td>
+<td class="px-6 py-4 text-xs text-on-surface">12h 04m 00s</td>
+<td class="px-6 py-4 text-xs text-secondary">2h ago</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-2">
+<button class="p-2 hover:bg-surface-container-high text-primary rounded transition-all">
+<span class="material-symbols-outlined" data-icon="visibility">visibility</span>
+</button>
+<button class="p-2 opacity-30 cursor-not-allowed">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+</button>
+</div>
+</td>
+</tr>
+<!-- Session Row 4 -->
+<tr class="hover:bg-surface-container-low transition-colors group bg-error-container/5">
+<td class="px-6 py-4">
+<span class="flex items-center gap-2 text-xs font-bold text-error">
+<span class="w-2 h-2 rounded-full bg-error"></span>
+                                Suspicious
+                            </span>
+</td>
+<td class="px-6 py-4 text-sm font-mono text-on-surface">sess_99Z0KAl1S</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-error text-lg" data-icon="question_mark">question_mark</span>
+<div class="text-xs">
+<p class="font-medium text-error">Unknown Agent</p>
+<p class="text-[10px] text-error opacity-70">Malformed Headers</p>
+</div>
+</div>
+</td>
+<td class="px-6 py-4 text-xs text-error font-mono font-bold">45.12.33.201</td>
+<td class="px-6 py-4 text-xs text-on-surface">00m 04s</td>
+<td class="px-6 py-4 text-xs text-secondary">1m ago</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-2">
+<button class="p-2 hover:bg-surface-container-high text-primary rounded transition-all">
+<span class="material-symbols-outlined" data-icon="visibility">visibility</span>
+</button>
+<button class="px-3 py-1 bg-error text-white text-[10px] font-bold uppercase rounded flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="close">close</span>
+                                    Kill
+                                </button>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+<!-- Bottom Pagination Area -->
+<div class="p-6 border-t border-outline-variant flex justify-between items-center bg-surface-container-low">
+<div class="text-xs text-secondary flex items-center gap-4">
+<span>Showing 1 to 10 of 1,284 results</span>
+<select class="bg-white border border-outline-variant text-[10px] py-1 pl-2 pr-8 rounded focus:ring-1 ring-primary appearance-none">
+<option>10 per page</option>
+<option>25 per page</option>
+<option>50 per page</option>
+</select>
+</div>
+<div class="flex gap-1">
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-medium hover:bg-surface-container transition-colors rounded">Previous</button>
+<button class="px-3 py-1 bg-primary text-white text-xs font-bold rounded">1</button>
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-medium hover:bg-surface-container transition-colors rounded">2</button>
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-medium hover:bg-surface-container transition-colors rounded">3</button>
+<span class="px-2 py-1 text-secondary">...</span>
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-medium hover:bg-surface-container transition-colors rounded">129</button>
+<button class="px-3 py-1 bg-white border border-outline-variant text-xs font-medium hover:bg-surface-container transition-colors rounded">Next</button>
+</div>
+</div>
+</div>
+<!-- System Intelligence Log (Asymmetric Side Panel Concept) -->
+<div class="mt-8 grid grid-cols-3 gap-8">
+<div class="col-span-2 bg-surface-container-lowest border border-outline-variant p-6 rounded">
+<h3 class="text-sm font-bold uppercase tracking-widest text-secondary mb-4 flex items-center gap-2">
+<span class="material-symbols-outlined text-lg" data-icon="insights">insights</span>
+                    Session Security Intelligence
+                </h3>
+<div class="space-y-4">
+<div class="flex items-start gap-4 p-3 bg-surface-container-low rounded">
+<div class="w-8 h-8 flex items-center justify-center bg-blue-100 text-primary rounded">
+<span class="material-symbols-outlined text-lg" data-icon="info">info</span>
+</div>
+<div>
+<p class="text-sm font-medium text-on-surface">Automated Session Cleanup</p>
+<p class="text-xs text-secondary">System identified 42 idle sessions. Auto-termination scheduled for 04:00 UTC.</p>
+</div>
+</div>
+<div class="flex items-start gap-4 p-3 bg-error-container/10 rounded border-l-4 border-error">
+<div class="w-8 h-8 flex items-center justify-center bg-error-container text-on-error-container rounded">
+<span class="material-symbols-outlined text-lg" data-icon="gpp_maybe">gpp_maybe</span>
+</div>
+<div>
+<p class="text-sm font-medium text-on-surface">Multiple Login Anomaly</p>
+<p class="text-xs text-secondary">UID_8842 attempted 3 concurrent logins from disparate geographic IP blocks. Monitoring enabled.</p>
+</div>
+</div>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-6 rounded flex flex-col items-center justify-center text-center">
+<div class="w-24 h-24 mb-4 relative">
+<svg class="w-full h-full transform -rotate-90">
+<circle class="text-surface-container-high" cx="48" cy="48" fill="transparent" r="40" stroke="currentColor" stroke-width="8"></circle>
+<circle class="text-primary" cx="48" cy="48" fill="transparent" r="40" stroke="currentColor" stroke-dasharray="251.2" stroke-dashoffset="60" stroke-width="8"></circle>
+</svg>
+<div class="absolute inset-0 flex flex-col items-center justify-center">
+<span class="text-xl font-bold">78%</span>
+<span class="text-[8px] uppercase font-bold text-secondary tracking-tighter">Capacity</span>
+</div>
+</div>
+<h4 class="text-sm font-bold text-on-surface">Cluster Load</h4>
+<p class="text-xs text-secondary mt-1">Sessions are performing within nominal architect limits.</p>
+<button class="mt-4 w-full py-2 border border-primary text-primary text-xs font-bold rounded hover:bg-primary hover:text-white transition-all">
+                    Cluster Details
+                </button>
+</div>
+</div>
+</main>
+</body></html>

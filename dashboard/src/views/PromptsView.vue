@@ -1,41 +1,44 @@
 <template>
-  <BaseDataTable
-    :data="prompts"
-    :loading="loading"
-    create-text="新建提示词"
-    @create="showDialog('create')"
-    @refresh="handleRefresh">
+  <div class="view-container">
+    <BaseDataTable
+      :data="prompts"
+      :loading="loading"
+      :data-length="prompts.length"
+      create-text="新建提示词"
+      @create="showDialog('create')"
+      @refresh="handleRefresh">
 
-    <el-table-column :resizable="false" prop="name" label="名称" min-width="150" sortable></el-table-column>
-    <el-table-column :resizable="false" label="内容预览" min-width="300">
-      <template #default="scope">
-        {{ getShortContent(scope.row.content) }}
-      </template>
-    </el-table-column>
-    <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
-      <template #default="scope">
-        <div class="action-buttons">
-          <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
-          <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
-        </div>
-      </template>
-    </el-table-column>
-  </BaseDataTable>
+      <el-table-column :resizable="false" prop="name" label="名称" min-width="150" sortable></el-table-column>
+      <el-table-column :resizable="false" label="内容预览" min-width="300">
+        <template #default="scope">
+          {{ getShortContent(scope.row.content) }}
+        </template>
+      </el-table-column>
+      <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
+        <template #default="scope">
+          <div class="action-buttons">
+            <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
+          </div>
+        </template>
+      </el-table-column>
+    </BaseDataTable>
 
-  <el-dialog :title="dialogType === 'create' ? '新建提示词' : '编辑提示词'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
-    <el-form :model="form" label-width="100px" size="default">
-      <el-form-item label="提示词名称">
-        <el-input v-model="form.name" placeholder="请输入提示词名称"></el-input>
-      </el-form-item>
-      <el-form-item label="内容">
-        <el-input v-model="form.content" type="textarea" :rows="6" placeholder="请输入提示词内容"></el-input>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="dialogVisible = false" size="default">取消</el-button>
-      <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
-    </template>
-  </el-dialog>
+    <el-dialog :title="dialogType === 'create' ? '新建提示词' : '编辑提示词'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+      <el-form :model="form" label-width="100px" size="default">
+        <el-form-item label="提示词名称">
+          <el-input v-model="form.name" placeholder="请输入提示词名称"></el-input>
+        </el-form-item>
+        <el-form-item label="内容">
+          <el-input v-model="form.content" type="textarea" :rows="6" placeholder="请输入提示词内容"></el-input>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false" size="default">取消</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -125,5 +128,5 @@ onMounted(() => {
 </script>
 
 <style lang="scss">
-@import "@/assets/css/prompts.scss";
+@import "@/assets/css/common.scss";
 </style>

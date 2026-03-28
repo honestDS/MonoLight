@@ -4,39 +4,52 @@
     <el-container v-else class="app-wrapper">
       <el-aside width="220px" class="sidebar">
         <div class="logo-container">
-          <span class="logo-text">MonoLight</span>
+          <div class="logo-icon">
+            <i class="el-icon-s-grid"></i>
+          </div>
+          <div class="logo-content">
+            <span class="logo-text">MonoLight</span>
+            <span class="logo-version">LLM Admin v1.0</span>
+          </div>
         </div>
         <el-menu
           :default-active="$route.path"
           router
           class="side-menu">
           <el-menu-item index="/">
-            <i class="el-icon-chat-line-round"></i>
             <span>智能交互</span>
           </el-menu-item>
           <el-menu-item index="/users">
-            <i class="el-icon-user"></i>
             <span>用户管理</span>
           </el-menu-item>
           <el-sub-menu index="/system">
             <template #title>
-              <i class="el-icon-setting"></i>
               <span>系统配置</span>
             </template>
             <el-menu-item index="/profiles">
-              <i class="el-icon-operation"></i>
               <span>配置管理</span>
             </el-menu-item>
             <el-menu-item index="/providers">
-              <i class="el-icon-set-up"></i>
               <span>模型管理</span>
             </el-menu-item>
             <el-menu-item index="/prompts">
-              <i class="el-icon-document"></i>
               <span>提示词管理</span>
             </el-menu-item>
           </el-sub-menu>
         </el-menu>
+        <div class="sidebar-footer">
+          <el-menu
+            :default-active="$route.path"
+            router
+            class="side-menu-footer">
+            <el-menu-item index="/docs">
+              <span>文档中心</span>
+            </el-menu-item>
+            <el-menu-item index="/support">
+              <span>技术支持</span>
+            </el-menu-item>
+          </el-menu>
+        </div>
       </el-aside>
       <el-container>
         <el-header class="app-header">
@@ -51,6 +64,9 @@
           <transition name="fade" mode="out-in">
             <router-view></router-view>
           </transition>
+          <div class="app-footer">
+            <span>&copy; 2024 MonoLight LLM Admin. All rights reserved.</span>
+          </div>
         </el-main>
       </el-container>
     </el-container>

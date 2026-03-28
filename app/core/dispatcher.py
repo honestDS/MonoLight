@@ -1,4 +1,4 @@
-import json
+import json,time
 import hashlib
 import os
 import asyncio
@@ -150,9 +150,11 @@ class ChatDispatcher:
                 )
 
             tools = ALL_TOOLS_SCHEMAS
+            turn_messages: List[InternalMessage] = []
 
             logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
             await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, message, profile.id)
+            
 
             max_turns, current_turn, final_ai_content = cfg.tool.max_turns, 0, ""
             if not profile.provider:
@@ -168,6 +170,7 @@ class ChatDispatcher:
                     messages.append(notice_msg)
                     # 持久化注入的指令到数据库以保持审计一致性
                     await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+
                     current_tools = None
                 else:
                     current_tools = tools
@@ -196,6 +199,7 @@ class ChatDispatcher:
                     MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
                     ai_msg, profile.id
                 )
+                if ai_msg.tool_calls: turn_messages.append(ai_msg)
 
                 if not ai_msg.tool_calls:
                     final_ai_content = ai_msg.content
@@ -240,11 +244,13 @@ class ChatDispatcher:
                 for tool_res in tool_responses:
                     messages.append(tool_res)
                     await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                    turn_messages.append(tool_res)
 
             return {
                 "choices": [
-                    {"message": {"role": "assistant", "content": final_ai_content}}
-                ]
+                    {"message": {"role": "assistant", "content": final_ai_content}, "created_at": time.time()}
+                ],
+                "history": [m.model_dump(exclude_none=True) for m in turn_messages]
             }
         except BaseBusinessException:
             raise

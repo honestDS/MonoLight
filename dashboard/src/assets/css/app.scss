@@ -12,10 +12,10 @@ body {
 
 /* 侧边栏 */
 .sidebar {
-  background-color: var(--color-sidebar-bg);
+  background-color: var(--color-sidebar-bg) !important;
   display: flex;
   flex-direction: column;
-  border-right: none !important;
+  border-right: 1px solid var(--color-sidebar-border) !important;
   overflow: hidden;
   box-shadow: none !important;
 }
@@ -23,18 +23,44 @@ body {
 /* Logo 区域 */
 .logo-container {
   padding: 24px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   background-color: var(--color-sidebar-bg);
-  border-right: none !important;
-  position: relative;
-  z-index: 10;
+  border-bottom: 1px solid var(--color-sidebar-border);
+}
+
+.logo-icon {
+  width: 32px;
+  height: 32px;
+  background-color: var(--color-primary);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 18px;
+}
+
+.logo-content {
+  display: flex;
+  flex-direction: column;
 }
 
 .logo-text {
-  color: #fff;
-  font-size: 20px;
-  font-weight: bold;
-  letter-spacing: 1px;
+  color: var(--color-sidebar-title);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.logo-version {
+  color: var(--color-sidebar-text);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: 2px;
 }
 
 /* 菜单 */
@@ -42,31 +68,34 @@ body {
   --el-menu-bg-color: var(--color-sidebar-bg);
   --el-menu-text-color: var(--color-sidebar-text);
   --el-menu-active-color: var(--color-sidebar-active);
-  --el-menu-item-height: 56px;
-  --el-menu-text-color: var(--color-sidebar-text);
-  --el-menu-hover-text-color: var(--color-sidebar-active);
+  --el-menu-item-height: 48px;
+  --el-menu-hover-text-color: var(--color-sidebar-title);
   --el-menu-hover-bg-color: var(--color-sidebar-hover);
   border-right: none !important;
   flex: 1;
-  width: 100% !important;
-  margin-right: -1px;
+  width: calc(100% - 10px) !important;
 
-  /* 重置菜单项对齐方式 */
+  /* 菜单项样式 */
   .el-menu-item,
   .el-sub-menu__title {
-    flex-direction: column !important;
-    align-items: flex-start !important;
-    display: flex !important;
+    padding: 0 24px !important;
+    margin: 2px 12px;
+    border-radius: 0px;
+    transition: all 0.15s ease;
   }
 
-  /* 选中项样式 */
+  /* 选中项样式 - 带右侧边框和背景 */
   .el-menu-item.is-active {
-    background-color: var(--color-sidebar-hover) !important;
+    background-color: rgba(96, 165, 250, 0.1) !important;
     color: var(--color-sidebar-active) !important;
+    border-right: 2px solid var(--color-sidebar-active);
+    margin-right: 0;
+    padding-right: 22px !important;
   }
 
   .el-menu-item:hover {
     background-color: var(--color-sidebar-hover) !important;
+    color: var(--color-sidebar-title) !important;
   }
 
   /* 子菜单样式 */
@@ -74,6 +103,7 @@ body {
     .el-sub-menu__title {
       &:hover {
         background-color: var(--color-sidebar-hover) !important;
+        color: var(--color-sidebar-title) !important;
       }
     }
 
@@ -83,13 +113,77 @@ body {
   }
 
   .el-menu--inline {
-    background-color: var(--color-sidebar-bg) !important;
+    background-color: transparent !important;
+  }
+
+  /* 子菜单项缩进 */
+  .el-menu--inline .el-menu-item {
+    padding-left: 48px !important;
+  }
+}
+
+/* 侧边栏底部区域 */
+.sidebar-footer {
+  padding: 0;
+  border-top: 1px solid var(--color-sidebar-border);
+  margin-top: auto;
+
+  .el-menu-item {
+    padding: 0 !important;
+    margin: 0 !important;
+    font-size: 12px;
+    width: 100% !important;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+/* 底部菜单 */
+.side-menu-footer {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--color-sidebar-text);
+  --el-menu-hover-text-color: var(--color-sidebar-title);
+  --el-menu-hover-bg-color: var(--color-sidebar-hover);
+  border-right: none !important;
+
+  .el-menu-item {
+    padding: 8px 16px !important;
+    font-size: 12px;
+    margin: 2px 12px;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+
+    &:hover {
+      background-color: var(--color-sidebar-hover) !important;
+    }
   }
 }
 /* 全局布局 */
 .app-wrapper { height: 100vh; overflow: hidden; }
 .app-header { background: #fff; border-bottom: 1px solid #ebedf0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
-.app-main { padding: 24px; overflow-y: auto; background: #f5f7f9; }
+.app-main { 
+  padding: 24px; 
+  overflow-y: auto; 
+  background: #f5f7f9;
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 60px);
+}
+
+/* 页脚 */
+.app-footer {
+  position: fixed;
+  bottom: 0;
+  left: 220px;
+  right: 0;
+  padding: 16px 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  border-top: 1px solid var(--color-border-light);
+  background: var(--color-primary);
+  z-index: 100;
+}
 
 /* 过渡动画 */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }

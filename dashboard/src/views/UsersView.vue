@@ -1,56 +1,59 @@
 <template>
-  <BaseDataTable
-    :data="users"
-    :loading="loading"
-    create-text="新建用户"
-    @create="showDialog('create')"
-    @refresh="handleRefresh">
+  <div class="view-container">
+    <BaseDataTable
+      :data="users"
+      :loading="loading"
+      :data-length="users.length"
+      create-text="新建用户"
+      @create="showDialog('create')"
+      @refresh="handleRefresh">
 
-    <el-table-column :resizable="false" prop="username" label="用户名" min-width="120" sortable></el-table-column>
-    <el-table-column :resizable="false" label="角色" min-width="100" sortable>
-      <template #default="scope">
-        <el-tag :type="scope.row.is_superuser ? 'danger' : 'info'" size="default">
-          {{ scope.row.is_superuser ? '超级管理员' : '普通用户' }}
-        </el-tag>
-      </template>
-    </el-table-column>
-    <el-table-column :resizable="false" label="状态" align="center" width="100" sortable>
-      <template #default="scope">
-        <StatusTag :status="scope.row.is_active" />
-      </template>
-    </el-table-column>
+      <el-table-column :resizable="false" prop="username" label="用户名" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" label="角色" min-width="100" sortable>
+        <template #default="scope">
+          <el-tag :type="scope.row.is_superuser ? 'danger' : 'info'" size="default">
+            {{ scope.row.is_superuser ? '超级管理员' : '普通用户' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column :resizable="false" label="状态" align="center" sortable>
+        <template #default="scope">
+          <StatusTag :status="scope.row.is_active" active-text="启用" inactive-text="禁用" />
+        </template>
+      </el-table-column>
 
-    <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
-      <template #default="scope">
-        <div class="action-buttons">
-          <el-button size="small" :type="scope.row.is_active ? 'warning' : 'success'" @click="handleToggleStatus(scope.row)">
-            {{ scope.row.is_active ? '禁用' : '启用' }}
-          </el-button>
-          <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
-          <el-button type="danger" size="small" @click="handleDelete(scope.row.uid, scope.row.username)">删除</el-button>
-        </div>
-      </template>
-    </el-table-column>
-  </BaseDataTable>
+      <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
+        <template #default="scope">
+          <div class="action-buttons">
+            <el-button size="small" :type="scope.row.is_active ? 'warning' : 'success'" @click="handleToggleStatus(scope.row)">
+              {{ scope.row.is_active ? '禁用' : '启用' }}
+            </el-button>
+            <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(scope.row.uid, scope.row.username)">删除</el-button>
+          </div>
+        </template>
+      </el-table-column>
+    </BaseDataTable>
 
-  <el-dialog :title="dialogType === 'create' ? '新建用户' : '编辑用户'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
-    <el-form :model="form" label-width="100px" size="default">
-      <el-form-item label="用户名">
-        <el-input v-model="form.username" placeholder="请输入用户名" :disabled="dialogType === 'edit'"></el-input>
-      </el-form-item>
-      <el-form-item label="密码">
-        <el-input v-model="form.password" type="password" show-password placeholder="请输入密码"></el-input>
-        <div class="form-help-text" v-if="dialogType === 'edit'">留空则不修改密码</div>
-      </el-form-item>
-      <el-form-item label="状态">
-        <el-switch v-model="form.is_active"></el-switch>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="dialogVisible = false" size="default">取消</el-button>
-      <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
-    </template>
-  </el-dialog>
+    <el-dialog :title="dialogType === 'create' ? '新建用户' : '编辑用户'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+      <el-form :model="form" label-width="100px" size="default">
+        <el-form-item label="用户名">
+          <el-input v-model="form.username" placeholder="请输入用户名" :disabled="dialogType === 'edit'"></el-input>
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="form.password" type="password" show-password placeholder="请输入密码"></el-input>
+          <div class="help-text" v-if="dialogType === 'edit'">留空则不修改密码</div>
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch v-model="form.is_active"></el-switch>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogVisible = false" size="default">取消</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -168,25 +171,6 @@ onMounted(() => {
 })
 </script>
 
-<style lang="scss" scoped>
-.action-buttons {
-  display: flex;
-  gap: 8px;
-  justify-content: center;
-}
-
-.form-help-text {
-  font-size: 12px;
-  color: #909399;
-  line-height: 1.5;
-  margin-top: 4px;
-}
-
-.full-width-input {
-  width: 100%;
-}
-
-.mt-5 {
-  margin-top: 5px;
-}
+<style lang="scss">
+@import "@/assets/css/common.scss";
 </style>

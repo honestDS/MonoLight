@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Conversation Management | Clinical Architect</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "error-container": "#fe8983",
+              "on-primary": "#f6f7ff",
+              "on-tertiary-container": "#236000",
+              "secondary-fixed-dim": "#d3d4d9",
+              "on-secondary-container": "#505256",
+              "primary-fixed-dim": "#bbd6ff",
+              "secondary-fixed": "#e1e2e7",
+              "on-primary-fixed": "#004175",
+              "on-primary-fixed-variant": "#005da4",
+              "background": "#faf9fb",
+              "on-surface-variant": "#5b5f65",
+              "tertiary-dim": "#236000",
+              "error": "#9f403d",
+              "surface-bright": "#faf9fb",
+              "on-primary-container": "#005394",
+              "primary-fixed": "#d3e4ff",
+              "surface-dim": "#d6dae2",
+              "secondary": "#5d5f63",
+              "primary-dim": "#005495",
+              "on-tertiary": "#ecffdc",
+              "on-background": "#2f3338",
+              "tertiary": "#296d00",
+              "on-secondary": "#f8f9fd",
+              "surface-container-lowest": "#ffffff",
+              "inverse-primary": "#409eff",
+              "outline-variant": "#afb2b8",
+              "tertiary-container": "#9dfd6d",
+              "surface": "#faf9fb",
+              "surface-container-high": "#e6e8ee",
+              "surface-container": "#edeef2",
+              "inverse-surface": "#0d0e10",
+              "surface-tint": "#0060a9",
+              "tertiary-fixed-dim": "#90ee61",
+              "on-tertiary-fixed": "#1a4b00",
+              "on-secondary-fixed": "#3d3f43",
+              "surface-container-low": "#f3f3f7",
+              "on-error-container": "#752121",
+              "on-secondary-fixed-variant": "#595b5f",
+              "error-dim": "#4e0309",
+              "surface-variant": "#e0e2e9",
+              "on-error": "#fff7f6",
+              "tertiary-fixed": "#9dfd6d",
+              "outline": "#777b81",
+              "on-surface": "#2f3338",
+              "secondary-dim": "#515357",
+              "surface-container-highest": "#e0e2e9",
+              "primary": "#0060a9",
+              "primary-container": "#d3e4ff",
+              "on-tertiary-fixed-variant": "#286b00",
+              "secondary-container": "#e1e2e7",
+              "inverse-on-surface": "#9d9d9f"
+            },
+            fontFamily: {
+              "headline": ["Inter"],
+              "body": ["Inter"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #afb2b8; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-background text-on-background antialiased flex">
+<!-- SideNavBar (Shared Component) -->
+<aside class="bg-slate-950 dark:bg-black font-sans antialiased text-sm tracking-tight h-screen w-64 fixed left-0 top-0 border-r border-slate-800 dark:border-slate-900 flex flex-col h-full overflow-y-auto z-50">
+<div class="p-6">
+<div class="flex items-center gap-3 mb-8">
+<div class="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
+<span class="material-symbols-outlined text-white text-lg" style="font-variation-settings: 'FILL' 1;">architecture</span>
+</div>
+<div>
+<h1 class="text-lg font-bold tracking-tighter text-slate-50 dark:text-white">Clinical Architect</h1>
+<p class="text-[10px] text-slate-500 uppercase tracking-widest">LLM Admin v1.0</p>
+</div>
+</div>
+<nav class="space-y-1">
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span>Dashboard</span>
+</a>
+<a class="bg-blue-600/10 text-blue-400 border-r-2 border-blue-500 font-medium px-4 py-3 flex items-center gap-3 transition-colors duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="forum" style="font-variation-settings: 'FILL' 1;">forum</span>
+<span>Conversation</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+<span>Sessions</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="hub">hub</span>
+<span>Models</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="group">group</span>
+<span>Users</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span>Settings</span>
+</a>
+</nav>
+</div>
+<div class="mt-auto p-6 space-y-1 border-t border-slate-800">
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="description">description</span>
+<span>Documentation</span>
+</a>
+<a class="text-slate-400 hover:text-slate-100 px-4 py-3 flex items-center gap-3 hover:bg-slate-900 transition-colors duration-150 rounded" href="#">
+<span class="material-symbols-outlined" data-icon="help_outline">help_outline</span>
+<span>Support</span>
+</a>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 ml-64 min-h-screen flex flex-col">
+<!-- TopNavBar (Shared Component) -->
+<header class="bg-white dark:bg-slate-950 font-sans text-sm font-medium fixed top-0 right-0 w-[calc(100%-16rem)] h-16 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 z-40">
+<div class="flex items-center gap-4 flex-1">
+<nav class="flex items-center text-slate-500 dark:text-slate-400 gap-2">
+<span>Admin</span>
+<span class="material-symbols-outlined text-xs">chevron_right</span>
+<span class="text-blue-600 font-semibold">Conversations</span>
+</nav>
+<div class="relative w-96 ml-8">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg" data-icon="search">search</span>
+<input class="w-full bg-surface-container-low border-none rounded py-2 pl-10 pr-4 text-xs focus:ring-1 ring-blue-500 outline-none transition-all" placeholder="Global Search..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-5">
+<button class="text-slate-500 dark:text-slate-400 hover:text-blue-600 transition-all relative">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+<span class="absolute top-0 right-0 w-2 h-2 bg-error rounded-full border-2 border-white"></span>
+</button>
+<button class="text-slate-500 dark:text-slate-400 hover:text-blue-600 transition-all">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+</button>
+<div class="h-8 w-px bg-slate-200 dark:bg-slate-800 mx-2"></div>
+<div class="flex items-center gap-3 group cursor-pointer">
+<div class="text-right">
+<p class="text-xs font-bold text-on-background">Dr. Aris Thorne</p>
+<p class="text-[10px] text-slate-500">System Architect</p>
+</div>
+<img alt="User Profile" class="w-10 h-10 rounded object-cover border border-outline-variant" data-alt="professional portrait of a middle-aged male architect with clean glasses and a serious but approachable expression" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA9Ze3bYFUkPSdJyxz7soclu6JWM8sspMxW1bBKtKYzHSf-j8VQ7Y4diRqTUNLs2fXIBjpurwsCzYDf_EqZ9w02epW1HpQqeizMFIvxxU21MXjRRJ0l4DpGm4GS-eJtmwhKxubcHyWPhxaDd-c5SOQIp8guTXEQjeI--YTlz-kVvYXQlSrDPtISFhk1DfG-9xUEezBrllK3ZIxrQYZDqcM5R2Jy7HsZ7iOh3bf3u9HXr55EZUw-0B8kHUch1KWeG6yqugQu7FTVq4N-"/>
+</div>
+</div>
+</header>
+<!-- Content Canvas -->
+<div class="mt-16 p-8 flex gap-8 flex-1 overflow-hidden">
+<!-- Filter Sidebar (Advanced Filtering) -->
+<aside class="w-72 flex-shrink-0">
+<div class="bg-surface-container-lowest border border-outline-variant rounded p-6 sticky top-24">
+<div class="flex items-center justify-between mb-6">
+<h2 class="text-sm font-bold uppercase tracking-wider text-slate-500">Advanced Filters</h2>
+<button class="text-blue-600 text-xs font-medium hover:underline">Clear all</button>
+</div>
+<div class="space-y-6">
+<!-- Provider Filter -->
+<div>
+<label class="block text-xs font-semibold text-on-surface mb-3">Model Provider</label>
+<div class="space-y-2">
+<label class="flex items-center gap-2 cursor-pointer group">
+<input checked="" class="rounded-sm border-outline text-primary focus:ring-primary w-4 h-4" type="checkbox"/>
+<span class="text-sm text-secondary group-hover:text-on-surface transition-colors">OpenAI</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer group">
+<input checked="" class="rounded-sm border-outline text-primary focus:ring-primary w-4 h-4" type="checkbox"/>
+<span class="text-sm text-secondary group-hover:text-on-surface transition-colors">Anthropic</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer group">
+<input class="rounded-sm border-outline text-primary focus:ring-primary w-4 h-4" type="checkbox"/>
+<span class="text-sm text-secondary group-hover:text-on-surface transition-colors">Google Vertex</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer group">
+<input class="rounded-sm border-outline text-primary focus:ring-primary w-4 h-4" type="checkbox"/>
+<span class="text-sm text-secondary group-hover:text-on-surface transition-colors">Meta Llama</span>
+</label>
+</div>
+</div>
+<!-- Date Range -->
+<div>
+<label class="block text-xs font-semibold text-on-surface mb-3">Time Period</label>
+<select class="w-full bg-surface-container-low border border-outline-variant rounded px-3 py-2 text-sm focus:ring-1 ring-primary outline-none">
+<option>Last 24 Hours</option>
+<option>Last 7 Days</option>
+<option selected="">Last 30 Days</option>
+<option>Custom Range...</option>
+</select>
+</div>
+<!-- User ID -->
+<div>
+<label class="block text-xs font-semibold text-on-surface mb-3">User ID / Email</label>
+<input class="w-full bg-surface-container-low border border-outline-variant rounded px-3 py-2 text-sm focus:ring-1 ring-primary outline-none" placeholder="e.g. user_8829" type="text"/>
+</div>
+<!-- Status Multi-select -->
+<div>
+<label class="block text-xs font-semibold text-on-surface mb-3">Conversation Status</label>
+<div class="flex flex-wrap gap-2">
+<span class="px-3 py-1 bg-tertiary-container text-on-tertiary-container text-[10px] font-bold rounded cursor-pointer border border-tertiary/20">Active</span>
+<span class="px-3 py-1 bg-surface-container-high text-secondary text-[10px] font-bold rounded cursor-pointer border border-outline-variant">Completed</span>
+<span class="px-3 py-1 bg-error-container text-on-error-container text-[10px] font-bold rounded cursor-pointer border border-error/20">Error</span>
+</div>
+</div>
+<button class="w-full bg-primary text-on-primary py-2.5 rounded font-semibold text-sm hover:opacity-90 active:scale-[0.98] transition-all">
+                            Apply Analysis Filters
+                        </button>
+</div>
+</div>
+</aside>
+<!-- Table Container (Main Grid) -->
+<section class="flex-1 min-w-0">
+<!-- Dashboard Statistics Bento -->
+<div class="grid grid-cols-3 gap-4 mb-8">
+<div class="bg-surface-container-lowest border border-outline-variant p-4 rounded flex items-center gap-4">
+<div class="w-12 h-12 bg-primary/10 rounded flex items-center justify-center text-primary">
+<span class="material-symbols-outlined text-2xl">chat_bubble</span>
+</div>
+<div>
+<p class="text-xs text-secondary font-medium">Total Conversations</p>
+<p class="text-2xl font-bold font-headline text-on-background">12,842</p>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-4 rounded flex items-center gap-4">
+<div class="w-12 h-12 bg-tertiary-container/30 rounded flex items-center justify-center text-tertiary">
+<span class="material-symbols-outlined text-2xl">bolt</span>
+</div>
+<div>
+<p class="text-xs text-secondary font-medium">Active Streams</p>
+<p class="text-2xl font-bold font-headline text-on-background">418</p>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant p-4 rounded flex items-center gap-4">
+<div class="w-12 h-12 bg-error-container/30 rounded flex items-center justify-center text-error">
+<span class="material-symbols-outlined text-2xl">warning</span>
+</div>
+<div>
+<p class="text-xs text-secondary font-medium">Failed Requests</p>
+<p class="text-2xl font-bold font-headline text-on-background">0.24%</p>
+</div>
+</div>
+</div>
+<!-- Main Data Table -->
+<div class="bg-surface-container-lowest border border-outline-variant rounded overflow-hidden flex flex-col">
+<div class="bg-surface-container-low px-6 py-4 border-b border-outline-variant flex items-center justify-between">
+<h3 class="font-bold text-on-surface">Conversation Logs</h3>
+<div class="flex gap-2">
+<button class="p-2 hover:bg-surface-container-high rounded transition-colors text-secondary">
+<span class="material-symbols-outlined" data-icon="download">download</span>
+</button>
+<button class="p-2 hover:bg-surface-container-high rounded transition-colors text-secondary">
+<span class="material-symbols-outlined" data-icon="refresh">refresh</span>
+</button>
+</div>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="bg-surface-container-lowest text-[11px] uppercase tracking-wider text-secondary border-b border-outline-variant">
+<th class="px-6 py-3 font-semibold">Conversation ID</th>
+<th class="px-6 py-3 font-semibold">User Entity</th>
+<th class="px-6 py-3 font-semibold">Model</th>
+<th class="px-6 py-3 font-semibold">Start Time</th>
+<th class="px-6 py-3 font-semibold text-center">Status</th>
+<th class="px-6 py-3 font-semibold text-right">Actions</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant">
+<!-- Row 1 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="text-xs font-mono text-primary bg-primary/5 px-1.5 py-0.5 rounded">#CX-9921-A</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">JD</div>
+<span class="text-sm text-on-surface">jane.doe@enterprise.com</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 bg-secondary-container text-on-secondary-container text-[10px] font-bold rounded">GPT-4o</span>
+</td>
+<td class="px-6 py-4 text-xs text-secondary">
+                                        2023-11-24 <span class="ml-1 opacity-60">14:22:01</span>
+</td>
+<td class="px-6 py-4 text-center">
+<span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-tertiary-container text-on-tertiary-container text-[10px] font-bold">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span> ACTIVE
+                                        </span>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+<button class="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="View Transcript"><span class="material-symbols-outlined text-lg">visibility</span></button>
+<button class="p-1.5 text-secondary hover:bg-slate-100 rounded" title="Archive"><span class="material-symbols-outlined text-lg">archive</span></button>
+<button class="p-1.5 text-error hover:bg-red-50 rounded" title="Delete"><span class="material-symbols-outlined text-lg">delete</span></button>
+</div>
+</td>
+</tr>
+<!-- Row 2 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="text-xs font-mono text-primary bg-primary/5 px-1.5 py-0.5 rounded">#CX-9844-B</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">SM</div>
+<span class="text-sm text-on-surface">s.miller@hospital.org</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 bg-secondary-container text-on-secondary-container text-[10px] font-bold rounded">Claude 3.5</span>
+</td>
+<td class="px-6 py-4 text-xs text-secondary">
+                                        2023-11-24 <span class="ml-1 opacity-60">13:05:44</span>
+</td>
+<td class="px-6 py-4 text-center">
+<span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-surface-container-high text-secondary text-[10px] font-bold">
+                                            COMPLETED
+                                        </span>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+<button class="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="View Transcript"><span class="material-symbols-outlined text-lg">visibility</span></button>
+<button class="p-1.5 text-secondary hover:bg-slate-100 rounded" title="Archive"><span class="material-symbols-outlined text-lg">archive</span></button>
+<button class="p-1.5 text-error hover:bg-red-50 rounded" title="Delete"><span class="material-symbols-outlined text-lg">delete</span></button>
+</div>
+</td>
+</tr>
+<!-- Row 3 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="text-xs font-mono text-primary bg-primary/5 px-1.5 py-0.5 rounded">#CX-9750-C</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-red-100 flex items-center justify-center text-[10px] font-bold text-error">UK</div>
+<span class="text-sm text-on-surface">unknown_token_22</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 bg-secondary-container text-on-secondary-container text-[10px] font-bold rounded">Llama 3 70B</span>
+</td>
+<td class="px-6 py-4 text-xs text-secondary">
+                                        2023-11-24 <span class="ml-1 opacity-60">12:44:12</span>
+</td>
+<td class="px-6 py-4 text-center">
+<span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-error-container text-on-error-container text-[10px] font-bold">
+                                            ERROR
+                                        </span>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+<button class="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="View Transcript"><span class="material-symbols-outlined text-lg">visibility</span></button>
+<button class="p-1.5 text-secondary hover:bg-slate-100 rounded" title="Archive"><span class="material-symbols-outlined text-lg">archive</span></button>
+<button class="p-1.5 text-error hover:bg-red-50 rounded" title="Delete"><span class="material-symbols-outlined text-lg">delete</span></button>
+</div>
+</td>
+</tr>
+<!-- Row 4 -->
+<tr class="hover:bg-surface-container-low transition-colors group">
+<td class="px-6 py-4">
+<span class="text-xs font-mono text-primary bg-primary/5 px-1.5 py-0.5 rounded">#CX-9611-X</span>
+</td>
+<td class="px-6 py-4">
+<div class="flex items-center gap-2">
+<div class="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">RT</div>
+<span class="text-sm text-on-surface">research.team@uni.edu</span>
+</div>
+</td>
+<td class="px-6 py-4">
+<span class="px-2 py-0.5 bg-secondary-container text-on-secondary-container text-[10px] font-bold rounded">Gemini Pro</span>
+</td>
+<td class="px-6 py-4 text-xs text-secondary">
+                                        2023-11-24 <span class="ml-1 opacity-60">11:59:00</span>
+</td>
+<td class="px-6 py-4 text-center">
+<span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-surface-container-high text-secondary text-[10px] font-bold">
+                                            COMPLETED
+                                        </span>
+</td>
+<td class="px-6 py-4 text-right">
+<div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+<button class="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="View Transcript"><span class="material-symbols-outlined text-lg">visibility</span></button>
+<button class="p-1.5 text-secondary hover:bg-slate-100 rounded" title="Archive"><span class="material-symbols-outlined text-lg">archive</span></button>
+<button class="p-1.5 text-error hover:bg-red-50 rounded" title="Delete"><span class="material-symbols-outlined text-lg">delete</span></button>
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!-- Pagination -->
+<div class="bg-surface-container-low px-6 py-4 border-t border-outline-variant flex items-center justify-between text-xs text-secondary">
+<p>Showing 1 to 10 of 12,842 conversations</p>
+<div class="flex items-center gap-1">
+<button class="w-8 h-8 flex items-center justify-center rounded border border-outline-variant hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">first_page</span>
+</button>
+<button class="w-8 h-8 flex items-center justify-center rounded border border-outline-variant hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">chevron_left</span>
+</button>
+<button class="w-8 h-8 flex items-center justify-center rounded bg-primary text-on-primary font-bold">1</button>
+<button class="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-high transition-colors">2</button>
+<button class="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-high transition-colors">3</button>
+<span class="px-2">...</span>
+<button class="w-8 h-8 flex items-center justify-center rounded hover:bg-surface-container-high transition-colors">1284</button>
+<button class="w-8 h-8 flex items-center justify-center rounded border border-outline-variant hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">chevron_right</span>
+</button>
+<button class="w-8 h-8 flex items-center justify-center rounded border border-outline-variant hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined text-sm">last_page</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Footer System Logs -->
+<div class="mt-8 bg-inverse-surface text-inverse-on-surface rounded p-4 font-mono text-[10px] leading-relaxed opacity-90 border border-slate-800">
+<div class="flex justify-between border-b border-slate-800 pb-2 mb-2">
+<span class="text-blue-400 font-bold uppercase tracking-widest">Live Engine Logs</span>
+<span class="text-slate-500">Node Cluster: US-EAST-1 (Ready)</span>
+</div>
+<p><span class="text-slate-500">[14:25:01]</span> <span class="text-tertiary">INFO</span>: Socket stream initialized for session #CX-9921-A</p>
+<p><span class="text-slate-500">[14:24:58]</span> <span class="text-blue-400">DEBUG</span>: Prompt routing successful. Destination: OpenAI GPT-4o-Turbo</p>
+<p><span class="text-slate-500">[14:24:52]</span> <span class="text-error">WARN</span>: Token limit approaching for User Entity jane.doe@enterprise.com</p>
+<p><span class="text-slate-500">[14:24:45]</span> <span class="text-tertiary">INFO</span>: Data validation complete for request packet v2.04</p>
+</div>
+</section>
+</div>
+</main>
+</body></html>

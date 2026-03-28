@@ -1,4 +1,5 @@
 from datetime import datetime
+import time
 from enum import Enum
 from typing import (
     Optional,
@@ -13,8 +14,10 @@ from sqlmodel import (
     DateTime,
 )
 from pydantic import (
+    field_validator,
     ConfigDict,
     BaseModel,
+    Field as PyField
 )
 
 
@@ -43,6 +46,7 @@ class InternalMessage(BaseModel):
     content: Optional[str] = None
     tool_calls: Optional[List[InternalToolCall]] = None
     tool_call_id: Optional[str] = None
+    created_at: float = PyField(default_factory=lambda: time.time())
 
 
 class InternalResponse(BaseModel):
@@ -79,8 +83,15 @@ class MessageCreate(MessageBase):
 class MessageResponse(MessageBase):
     id: int
     profile_id: int
-    created_at: datetime
+    created_at: Any
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def convert_datetime_to_timestamp(cls, v):
+        if isinstance(v, datetime):
+            return v.timestamp()
+        return v
 
 
 class ChatCompletionRequest(BaseModel):
