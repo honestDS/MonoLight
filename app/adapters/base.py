@@ -1,14 +1,15 @@
-from abc import (
-    ABC,
-    abstractmethod,
-)
+from abc import ABC, abstractmethod
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
-class BaseAdapter(ABC):
+class BaseChatAdapter(ABC):
     @abstractmethod
-    async def connect(self):
-        pass
-
-    @abstractmethod
-    async def send(self, target_id: str, content: str):
+    async def chat(
+        self,
+        db: AsyncSession,
+        message: str,
+        uid: str,
+        session_id: str = None
+    ):
         pass
