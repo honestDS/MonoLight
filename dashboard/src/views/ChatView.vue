@@ -79,12 +79,30 @@
         </template>
       </div>
       <div class="input-area">
-        <el-button type="primary" @click="createNewSession" class="new-session-btn">
-          <i class="el-icon-plus"></i> 新建会话
-        </el-button>
-        <span v-if="currentSessionId" class="current-session-id">
-          当前会话: {{ currentSessionId.substring(0, 8) }}...
-        </span>
+        <div class="toolbar-row">
+          <el-button type="primary" @click="createNewSession" class="new-session-btn">
+            <i class="el-icon-plus"></i> 新建会话
+          </el-button>
+          <div class="mode-selector">
+            <button 
+              type="button" 
+              :class="['mode-btn', { active: !isWsMode }]"
+              @click="handleModeChange(false)"
+            >非流</button>
+            <button 
+              type="button" 
+              :class="['mode-btn', { active: isWsMode }]"
+              @click="handleModeChange(true)"
+            >流式</button>
+          </div>
+          <span v-if="currentSessionId" class="current-session-id">
+            当前会话: {{ currentSessionId.substring(0, 8) }}...
+          </span>
+          <div class="ws-status" :class="{ connected: isWsMode && wsConnected }">
+            <span class="status-dot"></span>
+            {{ isWsMode ? (wsConnected ? '流式已连接' : '流式未连接') : '非流模式' }}
+          </div>
+        </div>
         <div class="input-wrapper">
           <el-input
             v-model="inputMsg" 
@@ -96,7 +114,12 @@
             class="chat-input"
             :resize="'none'"
           />
-          <el-button type="primary" :loading="loading" @click="send" :disabled="!inputMsg.trim()">
+          <el-button 
+            type="primary" 
+            :loading="loading" 
+            @click="send" 
+            :disabled="!inputMsg.trim() || loading"
+          >
             发送
           </el-button>
         </div>
@@ -106,11 +129,14 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElCollapse, ElCollapseItem } from 'element-plus'
-import { useChatSession } from '../composables/useChatSession'
+import { useChatSession } from '../composables/chat/useChatSession'
 
 const chat = useChatSession()
+
+// 本地流式模式状态
+const isWsMode = ref(false)
 
 // 解构状态
 const {
@@ -121,7 +147,9 @@ const {
   sessions,
   sessionsLoading,
   currentSessionId,
-  activeCollapse
+  activeCollapse,
+  transportMode,
+  wsConnected
 } = chat
 
 // 解构方法
@@ -131,6 +159,8 @@ const {
   selectSession,
   createNewSession,
   send,
+  setTransportMode,
+  disconnectWebSocket,
   formatTimestamp,
   isToolCall,
   isToolResult,
@@ -138,11 +168,15 @@ const {
   getToolArguments,
   getToolResultName,
   getToolResultContent,
-  getMessageTimestamp
+  getMessageTimestamp,
+  handleScroll
 } = chat
 
-// 获取滚动处理函数
-const { handleScroll } = chat
+// 通信模式切换
+const handleModeChange = async (val) => {
+  isWsMode.value = val
+  await setTransportMode(val ? 'ws' : 'http')
+}
 
 onMounted(() => {
   loadSessions()
@@ -155,6 +189,7 @@ onUnmounted(() => {
   if (messageList.value) {
     messageList.value.removeEventListener('scroll', handleScroll)
   }
+  disconnectWebSocket()
 })
 </script>
 

@@ -1,10 +1,13 @@
 from fastapi import (
     APIRouter,
     Depends,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import web_chat_adapter
+from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
 from app.core.security import get_current_user
 from app.models.message import ChatCompletionRequest, MessageResponse
@@ -105,3 +108,46 @@ async def get_session_history(
 
     data = [MessageResponse.model_validate(m) for m in messages]
     return StandardResponse.success(data=data, message="会话历史记录获取成功")
+
+
+@router.websocket("/ws")
+async def chat_websocket(
+    websocket: WebSocket,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    WebSocket 对话接口
+    认证方式与 HTTP 接口一致（通常通过 Query Token 或 Header）
+    """
+    await websocket.accept()
+    uid = getattr(current_user, "uid", None)
+
+    try:
+        while True:
+            # 接收 JSON 消息
+            data = await websocket.receive_json()
+            message = data.get("message")
+            session_id = data.get("session_id")
+
+            if not message:
+                await websocket.send_json({"error": "Message is required"})
+                continue
+
+            # 调用 WebSocket 适配器
+            response = await ws_chat_adapter.chat(
+                db=db,
+                message=message,
+                uid=uid,
+                session_id=session_id
+            )
+
+            # 发送响应
+            await websocket.send_json(response)
+    except WebSocketDisconnect:
+        # 连接正常关闭
+        pass
+    except Exception as e:
+        # 异常处理
+        await websocket.send_json({"error": str(e)})
+        await websocket.close()

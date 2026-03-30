@@ -5,6 +5,10 @@ const request = axios.create({
   timeout: 120000  // 聊天接口timeout设为2分钟
 })
 
+// WebSocket 独立配置
+const WS_BASE_URL = '154.36.178.178:8001'
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws'
+
 request.interceptors.request.use(config => {
   const token = localStorage.getItem('token')
   if (token) { config.headers['Authorization'] = `Bearer ${token}` }
@@ -47,6 +51,13 @@ export const authApi = {
 }
 
 export const chatApi = {
+    // 聊天 WS 接口
+    createWebSocket(token) {
+        const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/chat/ws?token=${token}`
+        console.log('WebSocket connecting to:', wsUrl)
+        return new WebSocket(wsUrl)
+    },
+
   // 聊天 completions 接口
   completions: (data) => request.post('/chat/completions', data),
   // 获取会话列表

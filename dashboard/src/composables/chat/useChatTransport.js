@@ -1,0 +1,231 @@
+/**
+ * 聊天通信 composable
+ * 封装 HTTP 和 WebSocket 两种通信模式
+ */
+import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { chatApi } from '../../api'
+import { useWebSocket } from '../useWebSocket'
+
+export function useChatTransport() {
+  // ==================== 通信模式管理 ====================
+  
+  // 通信模式: 'http' - 普通HTTP模式, 'ws' - WebSocket流式模式
+  const transportMode = ref('http')  // 默认使用HTTP模式
+  const wsConnected = ref(false)     // WebSocket连接状态
+  let currentThinkingId = null
+  
+  // WebSocket 管理
+  const wsManager = useWebSocket()
+
+  // ==================== WebSocket 相关方法 ====================
+  
+  /**
+   * 处理 WebSocket 消息
+   * @param {Object} data - WebSocket 消息数据
+   * @param {Object} options - 处理选项
+   * @param {Function} options.onToolCall - 工具调用处理回调
+   * @param {Function} options.onResponse - AI 响应处理回调
+   * @param {Function} options.onComplete - 完成处理回调
+   * @param {Function} options.scrollToBottom - 滚动到底部回调
+   * @param {Function} options.setLoading - 设置 loading 状态回调
+   */
+  const handleWsMessage = (data, options = {}) => {
+    const { onToolCall, onResponse, onComplete, scrollToBottom, setLoading } = options
+    console.log('WebSocket message:', data)
+
+    // 忽略心跳响应
+    if (data.type === 'pong' || data.type === 'ping') return
+
+    // 处理流式响应
+    if (data.choices && Array.isArray(data.choices)) {
+      const choice = data.choices[0]
+      if (!choice) return
+
+      // WS 消息结构和 HTTP 一样，使用 message 而不是 delta
+      const content = choice.message?.content || ''
+      const finishReason = choice.finish_reason
+
+      // 处理工具调用
+      if (choice.message?.tool_calls) {
+        const toolCall = choice.message.tool_calls[0]
+        if (toolCall && onToolCall) {
+          onToolCall(toolCall)
+        }
+      }
+
+      // 处理完成：复用 HTTP 的处理逻辑（持久连接，不断开）
+      if (finishReason) {
+        console.log('WebSocket响应完成, finishReason:', finishReason)
+
+        // 调用完成回调
+        if (onComplete) {
+          onComplete(data, currentThinkingId)
+        }
+
+        // 保持连接，不调用 disconnectWebSocket()
+        if (setLoading) {
+          setLoading(false)
+        }
+        if (scrollToBottom) {
+          scrollToBottom()
+        }
+      }
+      return
+    }
+  }
+
+  /**
+   * 断开 WebSocket 连接
+   */
+  const disconnectWebSocket = () => {
+    wsManager.disconnect()
+    wsConnected.value = false
+  }
+
+  // ==================== 发送方法 ====================
+  
+  /**
+   * HTTP 方式发送消息
+   * @param {Object} options - 发送选项
+   * @param {string} options.message - 消息内容
+   * @param {string|null} options.sessionId - 会话 ID
+   * @returns {Promise<Object>} API 响应
+   */
+  const httpSend = async ({ message, sessionId }) => {
+    const res = await chatApi.completions({
+      message,
+      session_id: sessionId || null,
+      stream: false
+    })
+    return res.data
+  }
+
+  /**
+   * WebSocket 方式发送消息 (懒连接)
+   * @param {Object} options - 发送选项
+   * @param {string} options.message - 消息内容
+   * @param {string|null} options.sessionId - 会话 ID
+   * @param {Object} options.wsOptions - WebSocket 处理选项
+   * @returns {Promise<boolean>} 是否发送成功
+   */
+  const wsSend = async ({ message, sessionId, wsOptions = {} }) => {
+    const token = localStorage.getItem('token')
+    if (!token) {
+      throw new Error('未登录')
+    }
+    
+    // 懒连接：只有在发送消息时才会尝试连接WebSocket
+    if (!wsManager.isConnected.value) {
+      ElMessage.info('正在建立WebSocket连接...')
+      try {
+        await wsManager.connect(token)
+        wsConnected.value = true
+        // 连接成功后才注册消息处理器
+        if (wsOptions.onMessage) {
+          wsManager.onMessage(wsOptions.onMessage)
+        }
+      } catch (e) {
+        console.error('WebSocket连接失败:', e)
+        ElMessage.error('WebSocket 连接失败，将使用 HTTP 模式')
+        // 回退到HTTP模式
+        transportMode.value = 'http'
+        return false
+      }
+    }
+    
+    // 通过 WebSocket 发送
+    const wsData = {
+      type: 'chat',
+      message,
+      session_id: sessionId || null
+    }
+    
+    if (!wsManager.sendMessage(wsData)) {
+      ElMessage.error('WebSocket 消息发送失败')
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 根据当前通信模式发送消息
+   * @param {Object} options - 发送选项
+   * @returns {Promise} 发送结果
+   */
+  const send = async (options) => {
+    if (transportMode.value === 'ws') {
+      return wsSend(options)
+    } else {
+      return httpSend(options)
+    }
+  }
+
+  /**
+   * 切换通信模式
+   * @param {string} mode - 通信模式，'http' 或 'ws'
+   * @param {Function} disconnectCallback - 断开连接回调
+   */
+  const setTransportMode = async (mode, disconnectCallback = null) => {
+    if (mode === 'ws' && transportMode.value !== 'ws') {
+      // 切换到WebSocket模式（懒连接，稍后发送消息时才连接）
+      transportMode.value = mode
+    } else if (mode === 'http' && transportMode.value !== 'http') {
+      // 切换到HTTP模式，先断开WebSocket（如果已连接）
+      if (wsConnected.value) {
+        if (disconnectCallback) {
+          disconnectCallback()
+        } else {
+          disconnectWebSocket()
+        }
+      }
+      transportMode.value = mode
+    }
+  }
+
+  /**
+   * 获取当前 thinking ID
+   * @returns {number} thinking ID
+   */
+  const getCurrentThinkingId = () => currentThinkingId
+
+  /**
+   * 设置当前 thinking ID
+   * @param {number} id - thinking ID
+   */
+  const setCurrentThinkingId = (id) => {
+    currentThinkingId = id
+  }
+
+  /**
+   * 初始化 WebSocket
+   * @returns {Promise} 连接结果
+   */
+  const initWebSocket = async () => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      await wsManager.connect(token)
+      wsConnected.value = true
+      return true
+    }
+    return false
+  }
+
+  return {
+    // 状态
+    transportMode,
+    wsConnected,
+    // 方法
+    handleWsMessage,
+    disconnectWebSocket,
+    httpSend,
+    wsSend,
+    send,
+    setTransportMode,
+    getCurrentThinkingId,
+    setCurrentThinkingId,
+    initWebSocket,
+    // WebSocket 管理器（供外部使用）
+    wsManager
+  }
+}

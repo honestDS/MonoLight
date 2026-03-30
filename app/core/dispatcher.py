@@ -370,6 +370,7 @@ class ChatDispatcher:
                             "role": "assistant",
                             "content": final_ai_content,
                         },
+                        "finish_reason":True,
                         "created_at": time.time(),
                     }
                 ],

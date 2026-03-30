@@ -9,7 +9,6 @@ import bcrypt
 from fastapi import (
     Depends,
     HTTPException,
-    Request,
     status,
 )
 from fastapi.security import OAuth2PasswordBearer
@@ -17,6 +16,7 @@ from jose import (
     JWTError,
     jwt,
 )
+from starlette.requests import HTTPConnection
 
 from app.core.crud.user import user_crud
 from app.models.user import User
@@ -25,8 +25,18 @@ from app.providers.database import AsyncSessionLocal
 
 # OAuth2 方案
 class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):
-    async def __call__(self, request: Request) -> str | None:
-        return await super().__call__(request)
+    async def __call__(self, request: HTTPConnection) -> str | None:
+        # 尝试从 Header 获取
+        token: str | None = None
+        try:
+            # OAuth2PasswordBearer.__call__ expects Request, but Request is a subclass of HTTPConnection
+            # and in FastAPI/Starlette, they are interchangeable for the purpose of header access.
+            token = await super().__call__(request) # type: ignore
+        except HTTPException:
+            # 如果 Header 没有（基类抛出异常），尝试从 Query Params 获取
+            token = request.query_params.get("token")
+
+        return token
 
 
 oauth2_scheme = UnifiedOAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
