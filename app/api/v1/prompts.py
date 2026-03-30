@@ -3,7 +3,9 @@ from fastapi import (
     Depends,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import constants
+from app.core.crud.prompt import prompt_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
@@ -17,7 +19,6 @@ from app.models.prompt import (
 )
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
-from app.core.crud.prompt import prompt_crud
 
 router = APIRouter(
     prefix="/prompts",

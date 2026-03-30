@@ -1,14 +1,15 @@
 from typing import (
-    List,
     Any,
 )
-from sqlmodel import (
-    select,
-    func,
-    desc,
-    delete,
-)
+
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import (
+    delete,
+    desc,
+    func,
+    select,
+)
+
 from app.core.crud.base import CRUDBase
 from app.models.message import (
     Message,
@@ -20,7 +21,7 @@ from app.models.user import User
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
     async def get_by_session(
         self, db: AsyncSession, session_id: str, limit: int = 100
-    ) -> List[Message]:
+    ) -> list[Message]:
         result = await db.execute(
             select(Message)
             .where(Message.session_id == session_id)
@@ -31,7 +32,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
 
     async def get_history(
         self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 100
-    ) -> List[Message]:
+    ) -> list[Message]:
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
@@ -44,16 +45,28 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         )
         return result.scalars().all()
 
-    async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> List[Message]:
+    async def get_history_paged(self, db: AsyncSession, *, session_id: str,
+        uid: str,
+        limit: int = 20,
+        offset: int = 0
+    ) -> list[Message]:
         """
         用于前端分页加载会话历史记录
         """
-        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.uid == uid).order_by(Message.created_at.desc()).limit(limit).offset(offset))
+        stmt = (
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await db.execute(stmt)
         return result.scalars().all()
 
     async def get_user_sessions(
         self, db: AsyncSession, uid: str = None, is_admin: bool = False
-    ) -> List[Any]:
+    ) -> list[Any]:
         stmt = select(
             Message.session_id,
             func.max(Message.created_at).label("last_active"),

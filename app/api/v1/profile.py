@@ -1,11 +1,15 @@
-from typing import List
+
 from fastapi import (
     APIRouter,
     Depends,
 )
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import constants
+from app.core.crud.profile import profile_crud
+from app.core.crud.prompt import prompt_crud
+from app.core.crud.provider import provider_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
@@ -19,9 +23,6 @@ from app.models.profile import (
 )
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
-from app.core.crud.profile import profile_crud
-from app.core.crud.provider import provider_crud
-from app.core.crud.prompt import prompt_crud
 
 router = APIRouter(
     prefix="/profiles",
@@ -65,13 +66,13 @@ async def create_profile(
     )
 
 
-@router.get("/list", response_model=StandardResponse[List[ProfileResponse]])
+@router.get("/list", response_model=StandardResponse[list[ProfileResponse]])
 async def list_profiles(db: AsyncSession = Depends(get_db)):
     profiles = await profile_crud.get_multi(db)
     results = []
     for p in profiles:
         item = ProfileResponse.model_validate(p)
-        if hasattr(p, 'provider') and p.provider:
+        if hasattr(p, "provider") and p.provider:
             item.provider_name = p.provider.name
         results.append(item)
     return StandardResponse.success(data=results)

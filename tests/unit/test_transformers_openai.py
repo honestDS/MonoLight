@@ -1,6 +1,8 @@
 import json
+
+from app.schemas.message import InternalMessage, InternalToolCall, MessageRole
+
 from app.transformers.openai import OpenAITransformer
-from app.schemas.message import InternalMessage, MessageRole, InternalToolCall
 
 
 def test_openai_to_provider():

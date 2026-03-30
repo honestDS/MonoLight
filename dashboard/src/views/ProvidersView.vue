@@ -59,6 +59,7 @@ import { providerApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { defaultProviderForm } from '../constants'
 
 // 数据结构定义 (基于 API.json ProviderCreate / ProviderUpdate)
 const providers = ref([])
@@ -69,15 +70,9 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 
-const form = reactive({
-  name: '',
-  provider_type: 'OPENAI',
-  api_key: '',
-  base_url: '',
-  is_active: true
-})
+const form = reactive(defaultProviderForm())
 
-// fetchProviders 必须在 useDeleteConfirm 之前定义
+// 加载提供商列表
 const fetchProviders = async () => {
   loading.value = true
   try {
@@ -112,13 +107,7 @@ const handleRefresh = () => {
 const openCreateDialog = () => {
   isEdit.value = false
   currentId.value = null
-  Object.assign(form, {
-    name: '',
-    provider_type: 'OPENAI',
-    api_key: '',
-    base_url: '',
-    is_active: true
-  })
+  Object.assign(form, defaultProviderForm())
   dialogVisible.value = true
 }
 
@@ -126,7 +115,6 @@ const openCreateDialog = () => {
 const handleEdit = (row) => {
   isEdit.value = true
   currentId.value = row.id
-  // 直接使用列表中的数据
   Object.assign(form, {
     name: row.name,
     provider_type: row.provider_type,

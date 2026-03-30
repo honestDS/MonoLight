@@ -1,10 +1,9 @@
 import os
 from datetime import (
+    UTC,
     datetime,
     timedelta,
-    timezone,
 )
-from typing import Optional
 
 import bcrypt
 from fastapi import (
@@ -19,14 +18,14 @@ from jose import (
     jwt,
 )
 
+from app.core.crud.user import user_crud
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal
-from app.core.crud.user import user_crud
 
 
 # OAuth2 方案
 class UnifiedOAuth2PasswordBearer(OAuth2PasswordBearer):
-    async def __call__(self, request: Request) -> Optional[str]:
+    async def __call__(self, request: Request) -> str | None:
         return await super().__call__(request)
 
 
@@ -57,12 +56,12 @@ def get_password_hash(password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(
+        expire = datetime.now(UTC) + timedelta(
             minutes=float(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
         )
     to_encode.update({"exp": expire})

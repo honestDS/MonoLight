@@ -1,6 +1,7 @@
-from typing import Optional
-from sqlmodel import select
+
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
 from app.core.crud.base import CRUDBase
 from app.models.provider import (
     ModelProvider,
@@ -10,7 +11,7 @@ from app.models.provider import (
 
 
 class CRUDProvider(CRUDBase[ModelProvider, ProviderCreate, ProviderUpdate]):
-    async def get_by_name(self, db: AsyncSession, name: str) -> Optional[ModelProvider]:
+    async def get_by_name(self, db: AsyncSession, name: str) -> ModelProvider | None:
         result = await db.execute(
             select(ModelProvider).where(ModelProvider.name == name)
         )

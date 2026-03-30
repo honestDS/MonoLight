@@ -4,10 +4,8 @@ from abc import (
 )
 from typing import (
     Any,
-    Dict,
-    List,
-    Optional,
 )
+
 from app.models.message import (
     InternalMessage,
     InternalResponse,
@@ -21,10 +19,10 @@ class BaseTransformer(ABC):
         api_key: str,
         base_url: str,
         model_id: str,
-        messages: List[InternalMessage],
+        messages: list[InternalMessage],
         temperature: float = 0.7,
         max_tokens: int = 0,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         **kwargs,
     ) -> InternalResponse:
@@ -32,7 +30,7 @@ class BaseTransformer(ABC):
 
     @classmethod
     @abstractmethod
-    def to_provider(cls, internal_messages: List[InternalMessage], **kwargs) -> Any:
+    def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> Any:
         """将内部标准消息转换为厂商特定协议格式"""
         pass
 

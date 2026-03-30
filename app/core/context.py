@@ -1,26 +1,21 @@
-from typing import (
-    List,
-    Tuple,
-)
 import json
-import os
+
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# CRUD Imports
+from app.core.crud.message import message_crud
+from app.core.log import get_logger
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.core.utils.tokenizer import estimate_tokens
+from app.models.message import (
+    InternalMessage,
+    MessageRole,
+)
 from app.models.profile import (
     Profile,
     ProfileConfig,
 )
-from app.models.message import (
-    MessageRole,
-    InternalMessage,
-    InternalToolCall,
-)
-from app.core.log import get_logger
-from app.core.utils.tokenizer import estimate_tokens
-from app.core.utils.message_parser import parse_db_messages_to_internal
-
-# CRUD Imports
-from app.core.crud.message import message_crud
 
 load_dotenv()
 logger = get_logger(__name__)
@@ -35,7 +30,7 @@ class ContextManager:
         uid: str,
         profile: Profile,
         current_message: str,
-    ) -> List[InternalMessage]:
+    ) -> list[InternalMessage]:
         """
         获取经过压缩与对齐后的上下文消息列表。
         """
@@ -74,10 +69,10 @@ class ContextManager:
     def _strategy_atomic_truncate(
         cls,
         session_id: str,
-        parsed_history: List[InternalMessage],
+        parsed_history: list[InternalMessage],
         limit_tokens: float,
         current_msg_tokens: int,
-    ) -> Tuple[List[InternalMessage], dict]:
+    ) -> tuple[list[InternalMessage], dict]:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
         """
@@ -103,24 +98,24 @@ class ContextManager:
 
         # A. 原子化轮次对齐 (保留所有窗口内的 SYSTEM 消息，并从第一个 USER 开始对齐后续消息)
         system_msgs = [m for m in temp_msgs if m.role == MessageRole.SYSTEM]
-        
+
         first_user_idx = -1
         for idx, m in enumerate(temp_msgs):
             if m.role == MessageRole.USER:
                 first_user_idx = idx
                 break
-        
+
         # 提取从第一个 USER 开始的所有消息
         user_onwards = temp_msgs[first_user_idx:] if first_user_idx != -1 else []
-        
+
         # 合并：保持 SYSTEM 在前，随后跟随对齐后的对话流（去重处理）
         aligned_msgs = []
         added_ids = set()
-        
+
         for m in system_msgs:
             aligned_msgs.append(m)
             added_ids.add(id(m))
-            
+
         for m in user_onwards:
             if id(m) not in added_ids:
                 aligned_msgs.append(m)
@@ -129,11 +124,11 @@ class ContextManager:
         audited_msgs = []
         # 使用 set 记录已经作为工具链一部分被处理掉的消息对象 ID，防止重复添加
         consumed_msg_ids = set()
-        
+
         i = 0
         while i < len(aligned_msgs):
             msg = aligned_msgs[i]
-            
+
             # 如果该消息已经被之前的工具链审计包含了，直接跳过
             if id(msg) in consumed_msg_ids:
                 i += 1
@@ -143,7 +138,7 @@ class ContextManager:
                 required_ids = [tc.id for tc in msg.tool_calls]
                 matched_tools = []
                 found_tool_call_ids = set()
-                
+
                 # 寻找后续所有的工具返回结果
                 for j in range(i + 1, len(aligned_msgs)):
                     target = aligned_msgs[j]
@@ -151,7 +146,7 @@ class ContextManager:
                         if target.tool_call_id not in found_tool_call_ids:
                             matched_tools.append(target)
                             found_tool_call_ids.add(target.tool_call_id)
-                
+
                 # 只有当所有的工具调用都有对应的返回结果时，才保留这一整套链条
                 if len(found_tool_call_ids) == len(required_ids):
                     audited_msgs.append(msg)
@@ -182,7 +177,7 @@ class ContextManager:
             )
             final_history_tokens += estimate_tokens(fm_str)
 
-        is_compressed = is_hard_truncated or (len(audited_msgs) < len(parsed_history))
+        is_hard_truncated or (len(audited_msgs) < len(parsed_history))
 
         return audited_msgs, {
             "is_hard_truncated": is_hard_truncated,

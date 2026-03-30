@@ -1,0 +1,10 @@
+target-version = "py313"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP", "W", "Q"]
+ignore = ["E701"]
+
+[lint.per-file-ignores]
+"app/core/prompts.py" = ["E501"]
+"app/core/constants.py" = ["E501"]

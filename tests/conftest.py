@@ -1,10 +1,12 @@
 import os
-import pytest
 from unittest.mock import MagicMock
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from app.providers.database import Base
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from app.models.profile import Profile
 from app.models.provider import ModelProvider
+from app.providers.database import Base
 
 
 @pytest.fixture(scope="session", autouse=True)

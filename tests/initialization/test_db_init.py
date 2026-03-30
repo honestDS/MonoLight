@@ -1,7 +1,8 @@
 import pytest
 from sqlalchemy import select
-from app.providers.database import engine, Base
+
 from app.models.profile import Profile
+from app.providers.database import Base, engine
 
 
 @pytest.mark.asyncio

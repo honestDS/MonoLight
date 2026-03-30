@@ -1,35 +1,30 @@
 from typing import (
     Any,
-    Generic,
-    List,
-    Optional,
-    Type,
     TypeVar,
-    Union,
-    Dict,
 )
+
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
     SQLModel,
     select,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 ModelType = TypeVar("ModelType", bound=SQLModel)
 CreateSchemaType = TypeVar("CreateSchemaType", bound=SQLModel)
 UpdateSchemaType = TypeVar("UpdateSchemaType", bound=SQLModel)
 
 
-class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
-    def __init__(self, model: Type[ModelType]):
+class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType: SQLModel]:
+    def __init__(self, model: type[ModelType]):
         self.model = model
 
-    async def get(self, db: AsyncSession, id: Any) -> Optional[ModelType]:
+    async def get(self, db: AsyncSession, id: Any) -> ModelType | None:
         result = await db.execute(select(self.model).where(self.model.id == id))
         return result.scalars().first()
 
     async def get_multi(
         self, db: AsyncSession, *, skip: int = 0, limit: int = 100
-    ) -> List[ModelType]:
+    ) -> list[ModelType]:
         result = await db.execute(select(self.model).offset(skip).limit(limit))
         return result.scalars().all()
 
@@ -37,8 +32,8 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         self,
         db: AsyncSession,
         *,
-        obj_in: Union[CreateSchemaType, Dict[str, Any]],
-        update_dict: Dict[str, Any] = None,
+        obj_in: CreateSchemaType | dict[str, Any],
+        update_dict: dict[str, Any] = None,
     ) -> ModelType:
         if isinstance(obj_in, dict):
             obj_in_data = obj_in
@@ -58,7 +53,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         db: AsyncSession,
         *,
         db_obj: ModelType,
-        obj_in: Union[UpdateSchemaType, Dict[str, Any]],
+        obj_in: UpdateSchemaType | dict[str, Any],
     ) -> ModelType:
         obj_data = db_obj.model_dump()
         if isinstance(obj_in, dict):
@@ -73,7 +68,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         await db.refresh(db_obj)
         return db_obj
 
-    async def remove(self, db: AsyncSession, *, id: Any) -> Optional[ModelType]:
+    async def remove(self, db: AsyncSession, *, id: Any) -> ModelType | None:
         obj = await self.get(db, id)
         if obj:
             await db.delete(obj)

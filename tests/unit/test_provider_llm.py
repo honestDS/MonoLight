@@ -1,7 +1,9 @@
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
+from app.schemas.message import InternalMessage, InternalResponse, MessageRole
+
 from app.providers.llm.client import LLMClient
-from app.schemas.message import InternalResponse, InternalMessage, MessageRole
 
 
 @pytest.mark.asyncio

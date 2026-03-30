@@ -2,11 +2,10 @@ import json
 import logging
 from typing import (
     Any,
-    Dict,
-    List,
-    Optional,
 )
+
 import aiohttp
+
 from app.core import constants
 from app.core.exceptions import LLMException
 from app.models.message import (
@@ -14,6 +13,7 @@ from app.models.message import (
     InternalToolCall,
     MessageRole,
 )
+
 from .base import BaseTransformer
 
 logger = logging.getLogger(__name__)
@@ -25,13 +25,13 @@ class OpenAITransformer(BaseTransformer):
         api_key: str,
         base_url: str,
         model_id: str,
-        messages: List[InternalMessage],
+        messages: list[InternalMessage],
         temperature: float = 0.7,
         max_tokens: int = 0,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         **kwargs,
-    ) -> Dict[
+    ) -> dict[
         str, Any
     ]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
         headers = {
@@ -66,8 +66,8 @@ class OpenAITransformer(BaseTransformer):
 
     @classmethod
     def to_provider(
-        cls, internal_messages: List[InternalMessage], **kwargs
-    ) -> List[Dict[str, Any]]:
+        cls, internal_messages: list[InternalMessage], **kwargs
+    ) -> list[dict[str, Any]]:
         provider_msgs = []
         for msg in internal_messages:
             item = {"role": msg.role.value, "content": msg.content}

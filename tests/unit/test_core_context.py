@@ -1,9 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+from app.schemas.message import MessageRole
+
 from app.core.context import ContextManager
 from app.models.message import Message
 from app.models.profile import Profile
-from app.schemas.message import MessageRole
 
 
 @pytest.fixture

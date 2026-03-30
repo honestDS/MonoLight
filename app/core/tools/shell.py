@@ -1,12 +1,13 @@
 import asyncio
 import json
 import os
-from pathlib import Path
+
+from app.core.crud.profile import profile_crud
 from app.core.log import get_logger
+from app.core.prompts import CONFIRMATION_PREFIX
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
-from app.core.crud.profile import profile_crud
-from app.core.prompts import CONFIRMATION_PREFIX
+
 from .base import BaseExecutor
 
 
@@ -62,7 +63,7 @@ class ShellExecutor(BaseExecutor):
                     },
                     ensure_ascii=False,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 return json.dumps(
                     {"error": f"Command timed out after {profile_timeout}s"},

@@ -1,27 +1,30 @@
 from typing import (
-    Optional,
-    Dict,
-    Any,
     TYPE_CHECKING,
+    Any,
+    Optional,
 )
-from sqlmodel import (
-    SQLModel,
-    Field,
-    Relationship,
-    Column,
-    JSON,
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    model_validator,
 )
 from pydantic import (
-    ConfigDict,
-    BaseModel,
-    model_validator,
     Field as PydanticField,
 )
+from sqlmodel import (
+    JSON,
+    Column,
+    Field,
+    Relationship,
+    SQLModel,
+)
+
 from app.core.utils.config import standardize_config
 
 if TYPE_CHECKING:
-    from app.models.provider import ModelProvider
     from app.models.prompt import PromptLibrary
+    from app.models.provider import ModelProvider
 
 
 class ProviderConfig(BaseModel):
@@ -41,10 +44,10 @@ class ProviderConfig(BaseModel):
 class SecurityConfig(BaseModel):
     """安全审计系统参数配置"""
 
-    audit_provider_id: Optional[int] = PydanticField(
+    audit_provider_id: int | None = PydanticField(
         None, gt=0, description="执行安全审计的提供商 ID"
     )
-    audit_model_id: Optional[str] = PydanticField(
+    audit_model_id: str | None = PydanticField(
         None, description="用于审计的具体模型 ID"
     )
     audit_threshold: int = PydanticField(
@@ -126,8 +129,8 @@ class ProfileBase(SQLModel):
         index=True, unique=True, nullable=False, min_length=1, max_length=100
     )
     provider_id: int = Field(foreign_key="provider.id", ge=-1)
-    prompt_id: Optional[int] = Field(default=None, foreign_key="prompt.id", gt=0)
-    configs: Dict[str, Any] = Field(
+    prompt_id: int | None = Field(default=None, foreign_key="prompt.id", gt=0)
+    configs: dict[str, Any] = Field(
         default={},
         sa_column=Column(JSON),
         description="Profile 详细配置对象",
@@ -140,7 +143,7 @@ class Profile(ProfileBase, table=True):
     """Profile 数据库实体模型"""
 
     __tablename__ = "profile"
-    id: Optional[int] = Field(default=None, primary_key=True, index=True)
+    id: int | None = Field(default=None, primary_key=True, index=True)
     is_active: bool = Field(default=False)
     provider: "ModelProvider" = Relationship()
     prompt: Optional["PromptLibrary"] = Relationship(back_populates="profiles")
@@ -155,10 +158,10 @@ class ProfileCreate(ProfileBase):
 class ProfileUpdate(SQLModel):
     """Profile 更新模型"""
 
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    provider_id: Optional[int] = Field(None, ge=-1)
-    prompt_id: Optional[int] = Field(None, gt=0)
-    configs: Optional[Dict[str, Any]] = None
+    name: str | None = Field(None, min_length=1, max_length=100)
+    provider_id: int | None = Field(None, ge=-1)
+    prompt_id: int | None = Field(None, gt=0)
+    configs: dict[str, Any] | None = None
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 
@@ -168,6 +171,6 @@ class ProfileResponse(ProfileBase):
 
     id: int
     is_active: bool
-    provider_name: Optional[str] = None
+    provider_name: str | None = None
     model_config = ConfigDict(from_attributes=True)
 

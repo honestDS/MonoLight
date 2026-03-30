@@ -150,14 +150,13 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { profileApi, providerApi, promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { defaultProfileConfigs } from '../constants'
 
-const { t } = useI18n()
 const profiles = ref([])
 const providers = ref([])
 const prompts = ref([])
@@ -167,22 +166,15 @@ const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
 
-const defaultConfigs = () => ({
-  provider: { model_id: '', temperature: 0.7, top_p: 1.0, max_tokens: 2048, stream: false },
-  security: { audit_provider_id: null, audit_model_id: null, audit_threshold: 5 },
-  tool: { shell_timeout: 30, max_parallel_tools: 5, max_turns: 5 },
-  other: { context_window_k: 4 }
-})
-
 const form = reactive({
   id: null,
   name: '',
   provider_id: null,
   prompt_id: null,
-  configs: defaultConfigs()
+  configs: defaultProfileConfigs()
 })
 
-// loadProfiles 必须在 useDeleteConfirm 之前定义
+// 加载配置列表
 const loadProfiles = async () => {
   loading.value = true
   try {
@@ -240,7 +232,7 @@ const showDialog = (type, row = null) => {
     form.name = row.name
     form.provider_id = row.provider_id
     form.prompt_id = row.prompt_id
-    const base = defaultConfigs()
+    const base = defaultProfileConfigs()
     if (row.configs) {
       Object.keys(base).forEach(key => {
         if (row.configs[key]) {
@@ -254,7 +246,7 @@ const showDialog = (type, row = null) => {
     form.name = ''
     form.provider_id = null
     form.prompt_id = null
-    form.configs = defaultConfigs()
+    form.configs = defaultProfileConfigs()
   }
   dialogVisible.value = true
 }

@@ -74,54 +74,27 @@
 </template>
 
 <script>
+import { useResizeObserver } from './composables/useResizeObserver'
+import { routeNameMap } from './constants'
 
-// 修复 ResizeObserver loop completed with undelivered notifications 错误
-const debounce = (fn, delay) => {
-  let timer = null;
-  return function () {
-    let context = this;
-    let args = arguments;
-    clearTimeout(timer);
-    timer = setTimeout(function () {
-      fn.apply(context, args);
-    }, delay);
-  };
-};
-
-const _ResizeObserver = window.ResizeObserver;
-window.ResizeObserver = class ResizeObserver extends _ResizeObserver {
-  constructor(callback) {
-    callback = debounce(callback, 16);
-    super(callback);
-  }
-};
+// 初始化 ResizeObserver 防抖补丁
+useResizeObserver()
 
 export default {
   name: 'App',
   computed: {
     isLoginPage() {
-      return this.$route.path === '/login';
+      return this.$route.path === '/login'
     },
     currentRouteName() {
-      const map = {
-        '/': '智能交互',
-        '/users': '用户管理',
-        '/profiles': '配置管理',
-        '/providers': '模型管理',
-        '/prompts': '提示词管理'
-      };
-      // 如果是系统配置子菜单中的路由，显示系统配置
-      const path = this.$route.path;
-      if (path === '/profiles' || path === '/providers' || path === '/prompts') {
-        return '系统配置';
-      }
-      return map[this.$route.path] || '控制面板';
+      const path = this.$route.path
+      return routeNameMap[path] || '控制面板'
     }
   },
   methods: {
     logout() {
-      localStorage.removeItem('token');
-      this.$router.push('/login');
+      localStorage.removeItem('token')
+      this.$router.push('/login')
     }
   }
 }

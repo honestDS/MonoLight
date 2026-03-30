@@ -1,8 +1,10 @@
 import json
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
+from app.schemas.message import InternalMessage, InternalResponse, MessageRole
+
 from app.core.middleware.auditor import audit_command
-from app.schemas.message import InternalMessage, MessageRole, InternalResponse
 
 
 @pytest.mark.asyncio

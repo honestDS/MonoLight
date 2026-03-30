@@ -1,6 +1,8 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
+
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import ServerException
 

@@ -1,7 +1,8 @@
-import os
-from pathlib import Path
-import sys
 import logging
+import os
+import sys
+from pathlib import Path
+
 from loguru import logger
 
 
@@ -14,7 +15,7 @@ class LogManager:
             return
 
         # 确保工作目录
-        cwd = os.getcwd()
+        os.getcwd()
         if not os.path.isabs(log_path):
             abs_log_path = str(Path(log_path).resolve())
         else:
@@ -31,7 +32,10 @@ class LogManager:
             sys.stdout,
             level=level,
             colorize=True,
-            format="<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>",
+            format=(
+                "<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> "
+                "<level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"
+            ),
         )
 
         # 添加文件输出 (自动滚动)

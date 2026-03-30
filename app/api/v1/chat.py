@@ -1,15 +1,17 @@
 import uuid
+
 from fastapi import (
     APIRouter,
     Depends,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.crud.message import message_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.security import get_current_user
-from app.providers.database import get_db
 from app.models.message import ChatCompletionRequest, MessageResponse
+from app.providers.database import get_db
 from app.schemas.response import StandardResponse
-from app.core.crud.message import message_crud
 
 router = APIRouter(
     prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)]
@@ -79,10 +81,10 @@ async def get_session_history(
     messages = await message_crud.get_history_paged(
         db, session_id=session_id, uid=uid, limit=size, offset=offset
     )
-    
+
     # 倒序取出，正序返回
     messages.reverse()
-    
+
     data = [MessageResponse.model_validate(m) for m in messages]
     return StandardResponse.success(data=data, message="会话历史记录获取成功")
 

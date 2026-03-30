@@ -1,20 +1,21 @@
 from datetime import datetime
 from typing import (
-    Optional,
-    List,
     TYPE_CHECKING,
 )
+
 from pydantic import (
-    field_validator,
     ConfigDict,
+    field_validator,
+)
+from pydantic import (
     Field as PydanticField,
 )
 from sqlmodel import (
-    Field,
-    SQLModel,
-    Relationship,
     Column,
     DateTime,
+    Field,
+    Relationship,
+    SQLModel,
     func,
 )
 
@@ -32,18 +33,18 @@ class UserBase(SQLModel):
 class User(UserBase, table=True):
     __tablename__ = "user"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
-    hashed_password: Optional[str] = Field(default=None, max_length=255)
+    id: int | None = Field(default=None, primary_key=True)
+    hashed_password: str | None = Field(default=None, max_length=255)
 
-    created_at: Optional[datetime] = Field(
+    created_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), server_default=func.now()),
     )
-    updated_at: Optional[datetime] = Field(
+    updated_at: datetime | None = Field(
         default=None, sa_column=Column(DateTime(timezone=True), onupdate=func.now())
     )
 
-    prompts: List["PromptLibrary"] = Relationship(back_populates="user")
+    prompts: list["PromptLibrary"] = Relationship(back_populates="user")
 
 
 class UserCreate(SQLModel):
@@ -65,7 +66,7 @@ class UserCreate(SQLModel):
 
     @field_validator("password")
     @classmethod
-    def password_length_check(cls, v: Optional[str]) -> Optional[str]:
+    def password_length_check(cls, v: str | None) -> str | None:
         if v and len(v.encode("utf-8")) > 72:
             raise ValueError("password must not exceed 72 bytes")
         return v
@@ -81,24 +82,24 @@ class UserUpdate(SQLModel):
     uid: str = PydanticField(
         ..., description="用户UID", json_schema_extra={"example": "uuid_hex_string"}
     )
-    username: Optional[str] = PydanticField(
+    username: str | None = PydanticField(
         None,
         min_length=3,
         max_length=50,
         pattern=r"^[a-zA-Z0-9_\-]+$",
         json_schema_extra={"example": "updated_name"},
     )
-    password: Optional[str] = PydanticField(
+    password: str | None = PydanticField(
         None,
         min_length=8,
         max_length=72,
         json_schema_extra={"example": "new_secure_password"},
     )
-    is_active: Optional[bool] = PydanticField(None, json_schema_extra={"example": True})
+    is_active: bool | None = PydanticField(None, json_schema_extra={"example": True})
 
     @field_validator("password")
     @classmethod
-    def password_length_check(cls, v: Optional[str]) -> Optional[str]:
+    def password_length_check(cls, v: str | None) -> str | None:
         if v and len(v.encode("utf-8")) > 72:
             raise ValueError("password must not exceed 72 bytes")
         return v

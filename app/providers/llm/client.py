@@ -1,15 +1,13 @@
 import logging
 from typing import (
     Any,
-    Dict,
-    List,
-    Optional,
 )
-from app.transformers.openai import OpenAITransformer
+
 from app.models.message import (
     InternalMessage,
     InternalResponse,
 )
+from app.transformers.openai import OpenAITransformer
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +21,18 @@ class LLMClient:
         api_key: str,
         base_url: str,
         model_id: str,
-        messages: List[InternalMessage],
+        messages: list[InternalMessage],
         temperature: float = 0.7,
         max_tokens: int = 0,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         protocol: str = "openai",
         **kwargs,
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            from app.core.exceptions import LLMException
             from app.core import constants
+            from app.core.exceptions import LLMException
 
             raise LLMException(
                 f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}"

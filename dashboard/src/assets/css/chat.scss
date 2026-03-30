@@ -145,6 +145,7 @@
       }
 
       &.thinking {
+        align-items: flex-start;
         margin-right: auto;
         .content {
           background: #f0f0f0;

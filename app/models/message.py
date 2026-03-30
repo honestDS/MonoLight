@@ -1,27 +1,21 @@
-from datetime import datetime
 import time
-from enum import Enum
+from datetime import datetime
+from enum import StrEnum
 from typing import (
-    Optional,
-    List,
-    Dict,
     Any,
 )
+
+from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import Field as PyField
 from sqlmodel import (
-    SQLModel,
-    Field,
     Column,
     DateTime,
-)
-from pydantic import (
-    field_validator,
-    ConfigDict,
-    BaseModel,
-    Field as PyField
+    Field,
+    SQLModel,
 )
 
 
-class MessageRole(str, Enum):
+class MessageRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -29,7 +23,7 @@ class MessageRole(str, Enum):
     ERR = "err"
 
 
-class MessageType(str, Enum):
+class MessageType(StrEnum):
     TEXT = "text"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
@@ -38,21 +32,21 @@ class MessageType(str, Enum):
 class InternalToolCall(BaseModel):
     id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
 
 
 class InternalMessage(BaseModel):
     role: MessageRole
-    content: Optional[str] = None
-    tool_calls: Optional[List[InternalToolCall]] = None
-    tool_call_id: Optional[str] = None
+    content: str | None = None
+    tool_calls: list[InternalToolCall] | None = None
+    tool_call_id: str | None = None
     created_at: float = PyField(default_factory=lambda: time.time())
 
 
 class InternalResponse(BaseModel):
     message: InternalMessage
     model: str
-    usage: Dict[str, Any] = {
+    usage: dict[str, Any] = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
@@ -64,12 +58,12 @@ class MessageBase(SQLModel):
     uid: str = Field(index=True, max_length=100)
     role: MessageRole = Field(max_length=20)
     type: MessageType = Field(default=MessageType.TEXT, max_length=20)
-    content: Optional[str] = Field(default=None)
+    content: str | None = Field(default=None)
 
 
 class Message(MessageBase, table=True):
     __tablename__ = "message"
-    id: Optional[int] = Field(default=None, primary_key=True, index=True)
+    id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field(foreign_key="profile.id")
     created_at: datetime = Field(
         default_factory=datetime.now, sa_column=Column(DateTime)
@@ -96,5 +90,5 @@ class MessageResponse(MessageBase):
 
 class ChatCompletionRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None
-    stream: Optional[bool] = False
+    session_id: str | None = None
+    stream: bool | None = False

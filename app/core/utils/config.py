@@ -1,10 +1,9 @@
 from typing import (
     Any,
-    Dict,
 )
 
 
-def standardize_config(data: Any, schema_map: Dict[str, list]) -> Any:
+def standardize_config(data: Any, schema_map: dict[str, list]) -> Any:
     """
     配置标准化引擎（数据泵）：
     用于输入（写入数据库前）与输出（从数据库读取后）的结构对齐。
@@ -14,7 +13,7 @@ def standardize_config(data: Any, schema_map: Dict[str, list]) -> Any:
         return data
 
     # 1. 字段深度扫描：建立全路径扁平化索引
-    flat_pool: Dict[str, Any] = {}
+    flat_pool: dict[str, Any] = {}
 
     def _scan(d: dict):
         for k, v in d.items():

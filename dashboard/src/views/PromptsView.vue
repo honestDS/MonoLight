@@ -47,6 +47,7 @@ import { ElMessage } from 'element-plus'
 import { promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { getShortContent } from '../utils'
 
 const prompts = ref([])
 const loading = ref(false)
@@ -60,7 +61,7 @@ const form = reactive({
   content: ''
 })
 
-// loadPrompts 必须在 useDeleteConfirm 之前定义
+// 加载提示词列表
 const loadPrompts = async () => {
   loading.value = true
   try {
@@ -75,12 +76,6 @@ const loadPrompts = async () => {
 
 // 使用删除确认组合式函数
 const { handleDelete } = useDeleteConfirm(promptApi.delete, loadPrompts)
-
-// 获取内容简短预览
-const getShortContent = (content) => {
-  if (!content) return '暂无内容'
-  return content.length > 100 ? content.substring(0, 100) + '...' : content
-}
 
 const handleRefresh = () => {
   loadPrompts()

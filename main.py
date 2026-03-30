@@ -8,8 +8,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -72,15 +71,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     error_msgs = []
     for error in exc.errors():
-        field = error.get('loc')[-1]
-        err_type = error.get('type')
-        msg = constants.ERR_MAP.get(err_type, error.get('msg'))
-        error_msgs.append(f'[{field}] {msg}')
-    
+        field = error.get("loc")[-1]
+        err_type = error.get("type")
+        msg = constants.ERR_MAP.get(err_type, error.get("msg"))
+        error_msgs.append(f"[{field}] {msg}")
+
     return JSONResponse(
         status_code=422,
         content=StandardResponse.error(
-            code=422, message=f'{constants.ERR_VALIDATION_FAILED}: ' + ' | '.join(error_msgs)
+            code=422, message=f"{constants.ERR_VALIDATION_FAILED}: " + " | ".join(error_msgs)
         ).model_dump(),
     )
 

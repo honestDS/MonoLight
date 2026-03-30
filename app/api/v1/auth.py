@@ -1,12 +1,15 @@
 import os
 import uuid
+
 from fastapi import (
     APIRouter,
     Body,
     Depends,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import constants
+from app.core.crud.user import user_crud
 from app.core.exceptions import (
     AuthException,
     ParameterException,
@@ -22,7 +25,6 @@ from app.schemas.auth import (
     ResetAdminRequest,
 )
 from app.schemas.response import StandardResponse
-from app.core.crud.user import user_crud
 
 router = APIRouter()
 

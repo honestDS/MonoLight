@@ -63,6 +63,7 @@ import { adminApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import { defaultUserForm } from '../constants'
 
 const users = ref([])
 const loading = ref(false)
@@ -70,14 +71,9 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
 
-const form = reactive({
-  uid: null,
-  username: '',
-  password: '',
-  is_active: true
-})
+const form = reactive(defaultUserForm())
 
-// loadUsers 必须在 useDeleteConfirm 之前定义
+// 加载用户列表
 const loadUsers = async () => {
   loading.value = true
   try {
@@ -123,10 +119,7 @@ const showDialog = (type, row = null) => {
     form.password = ''
     form.is_active = row.is_active !== false
   } else {
-    form.uid = null
-    form.username = ''
-    form.password = ''
-    form.is_active = true
+    Object.assign(form, defaultUserForm())
   }
   dialogVisible.value = true
 }

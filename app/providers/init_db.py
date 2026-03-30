@@ -1,25 +1,21 @@
 import logging
+
 from sqlalchemy import (
-    text,
     inspect,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
-from app.providers.database import engine
-
-# 强制导入所有模型以注册 Metadata
-from app.models.message import Message
-from app.models.user import User
-from app.models.profile import (
-    Profile,
-    ProfileConfig,
-)
-from app.models.prompt import PromptLibrary
-from app.models.provider import ModelProvider
 
 # CRUD Imports
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
+
+# 强制导入所有模型以注册 Metadata
+from app.models.profile import (
+    ProfileConfig,
+)
+from app.providers.database import engine
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -75,9 +71,15 @@ async def sync_database_schema():
 
                     # 构造 ALTER 语句
                     if dialect_name == "mysql":
-                        alter_query = f"ALTER TABLE `{table_name}` ADD `{column.name}` {col_type_compiled}{default_clause}"
+                        alter_query = (
+                        f"ALTER TABLE `{table_name}` ADD `{column.name}` "
+                        f"{col_type_compiled}{default_clause}"
+                    )
                     else:
-                        alter_query = f"ALTER TABLE {table_name} ADD COLUMN {column.name} {col_type_compiled}{default_clause}"
+                        alter_query = (
+                        f"ALTER TABLE {table_name} ADD COLUMN {column.name} "
+                        f"{col_type_compiled}{default_clause}"
+                    )
 
                     try:
                         await conn.execute(text(alter_query))

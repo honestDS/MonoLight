@@ -68,7 +68,7 @@ ERR_LLM_API_RESPONSE_ERROR = "大模型 API 返回异常响应"
 ERR_LLM_UNEXPECTED_ERROR = "大模型接口调用发生非预期异常"
 
 ERR_LLM_PROVIDER_NOT_CONFIGURED = "未检测到有效的模型供应商配置或 API Key。请在管理后台检查并激活一个包含有效密钥的厂商 Profile。"
-ERR_LLM_EMPTY_RESPONSE = '大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置'
+ERR_LLM_EMPTY_RESPONSE = "大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置"
 
 # 验证错误映射
 ERR_MAP = {

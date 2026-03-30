@@ -1,20 +1,20 @@
 import json
-from typing import List
+
 from app.models.message import (
+    InternalMessage,
+    InternalToolCall,
     Message,
     MessageRole,
     MessageType,
-    InternalMessage,
-    InternalToolCall,
 )
 
 
-def parse_db_messages_to_internal(raw_messages: List[Message]) -> List[InternalMessage]:
+def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalMessage]:
     """
     将数据库存储的原始 Message 对象列表解析并转换为业务协议所需的 InternalMessage 列表。
     通过 type 字段执行直接检测，无需依赖启发式逻辑。
     """
-    parsed_history: List[InternalMessage] = []
+    parsed_history: list[InternalMessage] = []
     for msg in raw_messages:
         try:
             role = MessageRole(msg.role)

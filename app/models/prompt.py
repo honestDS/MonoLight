@@ -1,24 +1,24 @@
 from datetime import (
+    UTC,
     datetime,
-    timezone,
 )
 from typing import (
-    Optional,
-    List,
     TYPE_CHECKING,
+    Optional,
 )
+
+from pydantic import ConfigDict
 from sqlmodel import (
-    SQLModel,
-    Field,
-    Relationship,
     Column,
     DateTime,
+    Field,
+    Relationship,
+    SQLModel,
 )
-from pydantic import ConfigDict
 
 if TYPE_CHECKING:
-    from app.models.user import User
     from app.models.profile import Profile
+    from app.models.user import User
 
 
 class PromptBase(SQLModel):
@@ -31,13 +31,13 @@ class PromptBase(SQLModel):
 
 class PromptLibrary(PromptBase, table=True):
     __tablename__ = "prompt"
-    id: Optional[int] = Field(default=None, primary_key=True, index=True)
-    uid: Optional[int] = Field(default=None, foreign_key="user.id", nullable=True)
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: int | None = Field(default=None, foreign_key="user.id", nullable=True)
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         sa_column=Column(DateTime(timezone=True)),
     )
-    profiles: List["Profile"] = Relationship(back_populates="prompt")
+    profiles: list["Profile"] = Relationship(back_populates="prompt")
     user: Optional["User"] = Relationship(back_populates="prompts")
 
 
@@ -47,8 +47,8 @@ class PromptCreate(PromptBase):
 
 
 class PromptUpdate(SQLModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    content: Optional[str] = Field(None, min_length=1)
+    name: str | None = Field(None, min_length=1, max_length=100)
+    content: str | None = Field(None, min_length=1)
 
 
 class PromptResponse(PromptBase):
