@@ -154,6 +154,16 @@
         }
       }
 
+      &.error {
+        align-items: flex-start;
+        margin-right: auto;
+        .content {
+          background: #fef0f0;
+          color: #f56c6c;
+          border: 1px solid #fbc4c4;
+        }
+      }
+
       .message-header {
         margin-bottom: 6px;
         padding: 0 4px;

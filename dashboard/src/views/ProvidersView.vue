@@ -10,6 +10,9 @@
 
       <el-table-column :resizable="false" prop="name" label="名称" min-width="120" sortable></el-table-column>
       <el-table-column :resizable="false" prop="provider_type" label="类型" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" label="模型类型" min-width="120" sortable>
+        <template #default="scope">{{ getModelUsageLabel(scope.row.usage) }}</template>
+      </el-table-column>
       <el-table-column :resizable="false" prop="base_url" label="基础URL" min-width="200" sortable></el-table-column>
       <el-table-column :resizable="false" label="状态" align="center" sortable>
         <template #default="scope">
@@ -35,6 +38,11 @@
         <el-form-item label="提供商类型">
           <el-select v-model="form.provider_type" placeholder="请选择类型" class="full-width-input">
             <el-option v-for="item in providerTypes" :key="item" :label="item" :value="item" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="模型类型">
+          <el-select v-model="form.usage" placeholder="模型类型" class="full-width-input">
+            <el-option v-for="item in modelUsages" :key="item" :label="getModelUsageLabel(item)" :value="item" />
           </el-select>
         </el-form-item>
         <el-form-item label="API密钥">
@@ -64,11 +72,21 @@ import { defaultProviderForm } from '../constants'
 // 数据结构定义 (基于 API.json ProviderCreate / ProviderUpdate)
 const providers = ref([])
 const providerTypes = ref([])
+const modelUsages = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
+
+// 模型用途映射表
+const modelUsageMap = {
+  CHAT: '对话模型',
+  EMBEDDING: '向量模型'
+}
+
+// 获取模型用途中文名称
+const getModelUsageLabel = (value) => modelUsageMap[value] || value
 
 const form = reactive(defaultProviderForm())
 
@@ -92,7 +110,9 @@ const { handleDelete } = useDeleteConfirm(providerApi.delete, fetchProviders)
 const fetchProviderTypes = async () => {
   try {
     const res = await providerApi.types()
-    providerTypes.value = res.data.data || []
+    const data = res.data.data
+    providerTypes.value = data?.provider_types || []
+    modelUsages.value = data?.model_usages || []
   } catch (err) {
     console.error('获取类型失败', err)
   }
@@ -118,6 +138,7 @@ const handleEdit = (row) => {
   Object.assign(form, {
     name: row.name,
     provider_type: row.provider_type,
+    usage: row.usage,
     api_key: row.api_key,
     base_url: row.base_url,
     is_active: row.is_active
@@ -137,6 +158,7 @@ const submitForm = async () => {
       await providerApi.update(currentId.value, {
         name: form.name,
         provider_type: form.provider_type,
+        usage: form.usage,
         api_key: form.api_key,
         base_url: form.base_url,
         is_active: form.is_active

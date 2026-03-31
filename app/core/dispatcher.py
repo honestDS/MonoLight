@@ -1,3 +1,8 @@
+from app.schemas.response import (
+    LLMResponse,
+    LLMChoice,
+    LLMChoiceMessage
+)
 import asyncio
 import json
 import os
@@ -13,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.constants import (
     ERR_LLM_PROVIDER_NOT_CONFIGURED,
     ERR_PROFILE_NOT_FOUND,
+    ERR_PROVIDER_EMBEDDING_ONLY,
 )
 from app.core.context import (
     ContextManager,
@@ -46,6 +52,7 @@ from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
+from app.models.provider import ModelUsage
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -182,12 +189,30 @@ class ChatDispatcher:
         try:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
-
             profile = await profile_crud.get_active(db)
+            
+            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
+            await ChatDispatcher._save_message(
+                db,
+                session_id,
+                uid,
+                MessageRole.USER,
+                MessageType.TEXT,
+                message,
+                profile.id if profile.id else -1,
+            )
+            
             if not profile:
                 raise LLMException(message=ERR_PROFILE_NOT_FOUND)
 
             cfg = ProfileConfig.model_validate(profile.configs)
+
+            if not profile.provider:
+                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+            
+            if profile.provider.usage == ModelUsage.EMBEDDING:
+                raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+
             messages = await ContextManager.get_messages(
                 db,
                 session_id,
@@ -205,20 +230,11 @@ class ChatDispatcher:
                         content=profile.prompt.content,
                     ),
                 )
+            
+            # todo...此处应该将知识库信息追加到系统提示词的尾部
 
             tools = ALL_TOOLS_SCHEMAS
             turn_messages: list[InternalMessage] = []
-
-            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
-            await ChatDispatcher._save_message(
-                db,
-                session_id,
-                uid,
-                MessageRole.USER,
-                MessageType.TEXT,
-                message,
-                profile.id,
-            )
 
             (
                 max_turns,
@@ -232,6 +248,7 @@ class ChatDispatcher:
             if not profile.provider:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
+                
             while current_turn <= max_turns:
                 current_turn += 1
 
@@ -363,19 +380,16 @@ class ChatDispatcher:
                     )
                     turn_messages.append(tool_res)
 
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": final_ai_content,
-                        },
-                        "finish_reason":True,
-                        "created_at": time.time(),
-                    }
+            return LLMResponse(
+                choices=[
+                    LLMChoice(
+                        message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content),
+                        finish_reason=True,
+                        created_at=time.time()
+                    )
                 ],
-                "history": [m.model_dump(exclude_none=True) for m in turn_messages],
-            }
+                history=[m.model_dump(exclude_none=True) for m in turn_messages]
+            ).model_dump()
         except BaseBusinessException:
             raise
         except Exception as e:

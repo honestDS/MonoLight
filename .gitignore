@@ -8,3 +8,4 @@ __pycache__/
 temp/
 .coverage/
 data/
+WebSocket流式改造规划.md

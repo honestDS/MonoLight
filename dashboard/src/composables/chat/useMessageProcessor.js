@@ -21,6 +21,7 @@ export function useMessageProcessor() {
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
     const aiCreatedAt = response.choices?.[0]?.created_at || null
+    const role = response.choices?.[0]?.message?.role || ''
 
     // 清理 thinking 占位符（先精确匹配，再模糊匹配）
     let thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId)
@@ -72,7 +73,7 @@ export function useMessageProcessor() {
     } else {
       messagesRef.value.push({
         id: thinkingId,
-        role: 'assistant',
+        role: role,
         content: aiContent,
         created_at: aiCreatedAt
       })

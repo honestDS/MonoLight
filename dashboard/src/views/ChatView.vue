@@ -37,7 +37,7 @@
           <p>请选择左侧会话或新建会话开始聊天</p>
         </div>
         <template v-else>
-          <div v-for="msg in messages" :key="msg.id" :class="['message-item', msg.role === 'user' ? 'user' : msg.role === 'thinking' ? 'thinking' : 'ai']">
+          <div v-for="msg in messages" :key="msg.id" :class="['message-item', getMessageClass(msg.role)]">
             <!-- 普通消息或工具调用消息 -->
             <template v-if="isToolCall(msg)">
               <div class="message-header">
@@ -86,21 +86,21 @@
           <div class="mode-selector">
             <button 
               type="button" 
-              :class="['mode-btn', { active: !isWsMode }]"
+              :class="['mode-btn', { active: !isWsModeComputed }]"
               @click="handleModeChange(false)"
             >非流</button>
             <button 
               type="button" 
-              :class="['mode-btn', { active: isWsMode }]"
+              :class="['mode-btn', { active: isWsModeComputed }]"
               @click="handleModeChange(true)"
             >流式</button>
           </div>
           <span v-if="currentSessionId" class="current-session-id">
             当前会话: {{ currentSessionId.substring(0, 8) }}...
           </span>
-          <div class="ws-status" :class="{ connected: isWsMode && wsConnected }">
+          <div class="ws-status" :class="{ connected: isWsModeComputed && wsConnected }">
             <span class="status-dot"></span>
-            {{ isWsMode ? (wsConnected ? '流式已连接' : '流式未连接') : '非流模式' }}
+            {{ isWsModeComputed ? (wsConnected ? '流式已连接' : '流式未连接') : '非流模式' }}
           </div>
         </div>
         <div class="input-wrapper">
@@ -129,14 +129,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElCollapse, ElCollapseItem } from 'element-plus'
 import { useChatSession } from '../composables/chat/useChatSession'
 
 const chat = useChatSession()
 
-// 本地流式模式状态
+// 本地流式模式状态（从 transportMode 计算）
 const isWsMode = ref(false)
+
+// 计算属性：根据 transportMode 计算当前是否为流式模式
+const isWsModeComputed = computed(() => transportMode.value === 'ws')
 
 // 解构状态
 const {
@@ -149,7 +152,8 @@ const {
   currentSessionId,
   activeCollapse,
   transportMode,
-  wsConnected
+  wsConnected,
+  sessionCreating
 } = chat
 
 // 解构方法
@@ -176,6 +180,16 @@ const {
 const handleModeChange = async (val) => {
   isWsMode.value = val
   await setTransportMode(val ? 'ws' : 'http')
+}
+
+// 消息角色映射到CSS类名的辅助函数
+const getMessageClass = (role) => {
+  const roleMap = {
+    user: 'user',
+    thinking: 'thinking',
+    err: 'error'
+  }
+  return roleMap[role] || 'ai'
 }
 
 onMounted(() => {

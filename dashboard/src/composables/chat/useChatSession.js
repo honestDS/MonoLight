@@ -87,15 +87,14 @@ export function useChatSession() {
         isNewSession = true
         await messageProcessor.handleNewSession(
           sessionManager.sessions,
-          (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect),
-          thinkingId
+          (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect,false),
+          thinkingId,
+          sessionManager.sessionCreating
         )
       }
 
-      if (!isNewSession) {
-        messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
-        nextTick(() => chatState.scrollToBottom())
-      }
+      messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
+      nextTick(() => chatState.scrollToBottom())
     } catch (err) {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       ElMessage.error(err.message || '发送失败')
@@ -145,13 +144,13 @@ export function useChatSession() {
             if (!sessionManager.currentSessionId.value) {
               messageProcessor.handleNewSession(
                 sessionManager.sessions,
-                (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect),
+                (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
                 thinkingId,
-                false
+                false,
+                sessionManager.sessionCreating
               )
-            } else {
-              messageProcessor.processAiResponse(chatState.messages, data, thinkingId, chatState.scrollToBottom)
             }
+            messageProcessor.processAiResponse(chatState.messages, data, thinkingId, chatState.scrollToBottom)
           },
           scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
           setLoading: (val) => { chatState.loading.value = val }
@@ -189,7 +188,7 @@ export function useChatSession() {
   /**
    * 新建会话
    */
-  const createNewSession = () => {
+  const createNewSession = () => {    
     transport.setTransportMode('http', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
@@ -247,6 +246,7 @@ export function useChatSession() {
     currentSessionId: sessionManager.currentSessionId,
     activeCollapse: sessionManager.activeCollapse,
     hasMore: sessionManager.hasMore,
+    sessionCreating: sessionManager.sessionCreating,
     
     // 状态 - 通信相关
     transportMode: transport.transportMode,

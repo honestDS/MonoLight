@@ -27,6 +27,7 @@ export const defaultProfileConfigs = () => ({
 export const defaultProviderForm = () => ({
   name: '',
   provider_type: 'OPENAI',
+  model_usage: 'CHAT',
   api_key: '',
   base_url: '',
   is_active: true

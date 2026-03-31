@@ -23,6 +23,7 @@ export function useSessionManager() {
   const currentPage = ref(1)
   const hasMore = ref(true)
   const historyLoading = ref(false)
+  const sessionCreating = ref(false)
   let isFirstLoad = true
   let loadedPageCount = 0
 
@@ -62,13 +63,16 @@ export function useSessionManager() {
    * @param {Object} session - 会话对象
    * @param {boolean} disconnect - 是否断开连接，默认为 true
    * @param {Function} disconnectCallback - 断开连接的回调函数
+   * @param {boolean} loadHistory - 是否重新加载历史记录
    */
-  const selectSession = (session, disconnectCallback = null, disconnect = true) => {
+  const selectSession = (session, disconnectCallback = null, disconnect = true, loadHistory = true) => {
     if (disconnect && disconnectCallback) {
       disconnectCallback()
     }    
     currentSessionId.value = session?.session_id
-    
+    if (!loadHistory){
+      return
+    }
     // 重置分页状态
     currentPage.value = 1
     hasMore.value = true
@@ -122,7 +126,8 @@ export function useSessionManager() {
       disconnectCallback()
     }
     currentSessionId.value = null
-    ElMessage.info('新会话已创建，请输入消息开始聊天')
+    // 设置新建会话状态为 true
+    sessionCreating.value = true
   }
 
   /**
@@ -162,6 +167,7 @@ export function useSessionManager() {
     activeCollapse,
     hasMore,
     historyLoading,
+    sessionCreating,
     // 方法
     setLoadHistoryCallback,
     loadSessions,

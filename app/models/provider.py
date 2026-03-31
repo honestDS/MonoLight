@@ -11,9 +11,15 @@ from sqlmodel import (
 )
 
 
+
+class ModelUsage(enum.StrEnum):
+    CHAT = 'CHAT'
+    EMBEDDING = 'EMBEDDING'
+
+
 class ProviderType(enum.StrEnum):
     OPENAI = "OPENAI"
-    GEMINI = "GEMINI"
+    #GEMINI = "GEMINI"
 
 
 class ProviderBase(SQLModel):
@@ -21,6 +27,7 @@ class ProviderBase(SQLModel):
         index=True, unique=True, nullable=False, min_length=1, max_length=100
     )
     provider_type: ProviderType = Field(nullable=False)
+    usage: ModelUsage = Field(default=ModelUsage.CHAT, nullable=False)
     api_key: str = Field(nullable=False, min_length=1)
     base_url: str | None = Field(default=None)
     is_active: bool = Field(default=True)
@@ -45,6 +52,7 @@ class ProviderCreate(ProviderBase):
 class ProviderUpdate(SQLModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     provider_type: ProviderType | None = None
+    usage: ModelUsage | None = None
     api_key: str | None = Field(None, min_length=1)
     base_url: str | None = None
     is_active: bool | None = None

@@ -9,6 +9,9 @@ from app.models.message import (
 )
 from app.transformers.openai import OpenAITransformer
 
+from app.core import constants
+from app.core.exceptions import LLMException
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,9 +34,6 @@ class LLMClient:
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            from app.core import constants
-            from app.core.exceptions import LLMException
-
             raise LLMException(
                 f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}"
             )

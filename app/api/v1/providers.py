@@ -15,7 +15,7 @@ from app.core.security import get_current_user
 from app.models.provider import (
     ProviderCreate,
     ProviderResponse,
-    ProviderType,
+    ModelUsage, ProviderType,
     ProviderUpdate,
 )
 from app.providers.database import get_db
@@ -51,7 +51,12 @@ async def create_provider(
 
 @router.get("/types", response_model=StandardResponse)
 async def get_provider_types():
-    return StandardResponse.success(data=[e.value for e in ProviderType])
+    return StandardResponse.success(
+        data={
+            "provider_types": [e.value for e in ProviderType],
+            "model_usages": [e.value for e in ModelUsage],
+        }
+    )
 
 @router.get("/list", response_model=StandardResponse)
 async def list_providers(db: AsyncSession = Depends(get_db)):

@@ -81,3 +81,4 @@ ERR_MAP = {
     "enum": "不在允许的枚举值范围内",
     "type_error.enum": "不在允许的枚举值范围内",
 }
+ERR_PROVIDER_EMBEDDING_ONLY = "该模型提供商目前仅配置用于向量化(Embedding)任务，无法直接进行对话回复。"

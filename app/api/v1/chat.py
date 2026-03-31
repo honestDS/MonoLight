@@ -14,6 +14,19 @@ from app.models.message import ChatCompletionRequest, MessageResponse
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
 
+from app.core.log import (
+    LogManager,
+    get_logger,
+)
+LogManager.setup()
+logger = get_logger(__name__)
+
+from app.core.exceptions import (
+    BaseBusinessException,
+    LLMException,
+    ServerException,
+)
+
 router = APIRouter(
     prefix="/chat",
     tags=["Chat"],
@@ -149,5 +162,6 @@ async def chat_websocket(
         pass
     except Exception as e:
         # 异常处理
+        logger.error("chat/ws error:" + str(e))
         await websocket.send_json({"error": str(e)})
         await websocket.close()
