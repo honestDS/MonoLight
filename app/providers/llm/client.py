@@ -1,4 +1,5 @@
 import logging
+from collections.abc import AsyncGenerator
 from typing import (
     Any,
 )
@@ -16,6 +17,39 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     _transformers = {"openai": OpenAITransformer()}
+
+    @classmethod
+    async def generate_stream(
+        cls,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        messages: list[InternalMessage],
+        temperature: float = 0.7,
+        max_tokens: int = 0,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        protocol: str = "openai",
+        **kwargs,
+    ) -> AsyncGenerator[dict[str, Any]]:
+        transformer = cls._transformers.get(protocol.lower())
+        if not transformer:
+            raise LLMException(
+                f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}"
+            )
+
+        async for chunk in transformer.generate_stream(
+            api_key=api_key,
+            base_url=base_url,
+            model_id=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        ):
+            yield chunk
 
     @classmethod
     async def generate(

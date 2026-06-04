@@ -9,6 +9,101 @@ import { isToolCall, isToolResult } from '../../utils'
 
 export function useMessageProcessor() {
   // ==================== 消息处理方法 ====================
+
+  /**
+   * 处理流式的增量文本推送事件
+   */
+  const processStreamContent = (messagesRef, text, turn, thinkingId) => {
+    // 移除 thinking 占位符
+    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (thinkingIndex !== -1) {
+      messagesRef.value.splice(thinkingIndex, 1)
+    }
+
+    // 寻找最近一条且属于当前 turn 的 assistant 消息
+    // 注意：如果上一条是 tool 或 user 消息，代表是新的 assistant 输出，应该新建一条
+    const lastMsg = messagesRef.value[messagesRef.value.length - 1]
+    if (lastMsg && lastMsg.role === 'assistant' && lastMsg.turn === turn) {
+      lastMsg.content += text
+      // 强制触发 Vue 数组的深层响应更新
+      messagesRef.value[messagesRef.value.length - 1] = { ...lastMsg }
+    } else {
+      messagesRef.value.push({
+        id: thinkingId || Date.now(),
+        role: 'assistant',
+        content: text,
+        turn: turn,
+        created_at: Date.now() / 1000
+      })
+    }
+  }
+
+  /**
+   * 处理流式下的工具调用开始（推送 tool_call 占位）
+   */
+  const processStreamToolStart = (messagesRef, toolCall) => {
+    // 移除 thinking 占位符
+    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (thinkingIndex !== -1) {
+      messagesRef.value.splice(thinkingIndex, 1)
+    }
+
+    // 匹配后端 InternalMessage Pydantic 模型的序列化结构：
+    // tool_calls 是 InternalToolCall 列表，含有 id, name, arguments，直属，无 function 包装
+    const contentObj = {
+      role: 'assistant',
+      tool_calls: [{
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: toolCall.arguments
+      }]
+    }
+
+    messagesRef.value.push({
+      id: `tool_call_${toolCall.id || Date.now()}`,
+      role: 'assistant', 
+      content: JSON.stringify(contentObj),
+      created_at: Date.now() / 1000
+    })
+  }
+
+  /**
+   * 处理流式下的工具调用结束（推送 tool 返回结果）
+   */
+  const processStreamToolEnd = (messagesRef, toolEnd) => {
+    // 匹配后端 InternalMessage Pydantic 模型的序列化结构：
+    // 含有 role, tool_call_id, content
+    const contentObj = {
+      role: 'tool',
+      tool_call_id: toolEnd.tool_call_id,
+      content: toolEnd.result
+    }
+
+    messagesRef.value.push({
+      id: `tool_res_${toolEnd.tool_call_id || Date.now()}`,
+      role: 'tool',
+      content: JSON.stringify(contentObj),
+      created_at: Date.now() / 1000
+    })
+  }
+
+  /**
+   * 处理流式下的业务错误事件
+   */
+  const processStreamError = (messagesRef, errorMessage, thinkingId) => {
+    // 清理 thinking 占位符
+    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (thinkingIndex !== -1) {
+      messagesRef.value.splice(thinkingIndex, 1)
+    }
+
+    messagesRef.value.push({
+      id: thinkingId || Date.now(),
+      role: 'err',
+      content: errorMessage,
+      created_at: Date.now() / 1000
+    })
+  }
   
   /**
    * 处理完整的 AI 响应消息（WS 和 HTTP 共用）
@@ -186,6 +281,10 @@ export function useMessageProcessor() {
 
   return {
     // 方法
+    processStreamContent,
+    processStreamToolStart,
+    processStreamToolEnd,
+    processStreamError,
     processAiResponse,
     handleToolCallMessage,
     handleNewSession,

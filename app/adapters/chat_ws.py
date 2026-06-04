@@ -1,5 +1,7 @@
 import time
 import uuid
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,18 +22,18 @@ class WebSocketChatAdapter(BaseChatAdapter):
         message: str,
         uid: str,
         session_id: str = None
-    ):
+    ) -> AsyncGenerator[dict[str, Any]]:
         actual_session_id = session_id or str(uuid.uuid4())
         try:
-            llm_response = await ChatDispatcher.dispatch(
+            async for chunk in ChatDispatcher.dispatch_stream(
                 db=db,
                 message=message,
                 uid=uid,
                 session_id=actual_session_id,
-            )
-            return llm_response
+            ):
+                yield chunk
         except BaseBusinessException as e:
-            return LLMResponse(
+            yield LLMResponse(
                 choices=[
                     LLMChoice(
                         message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message),
@@ -43,7 +45,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
             ).model_dump()
         except Exception as e:
             logger.exception(f"Unexpected error in WebSocketChatAdapter: {str(e)}")
-            return LLMResponse(
+            yield LLMResponse(
                 choices=[
                     LLMChoice(
                         message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR),

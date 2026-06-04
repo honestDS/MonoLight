@@ -132,37 +132,44 @@ export function useChatSession() {
       content: 'Thinking...' 
     })
     
-    // 设置 WebSocket 消息处理回调
-    const wsOptions = {
-      onMessage: (data) => {
-        transport.handleWsMessage(data, {
-          onToolCall: (toolCall) => {
-            messageProcessor.handleToolCallMessage(chatState.messages, toolCall, chatState.scrollToBottom)
-          },
-          onComplete: (data, thinkingId) => {
-            // 处理新会话
-            if (!sessionManager.currentSessionId.value) {
-              messageProcessor.handleNewSession(
-                sessionManager.sessions,
-                (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
-                thinkingId,
-                false,
-                sessionManager.sessionCreating
-              )
-            }
-            messageProcessor.processAiResponse(chatState.messages, data, thinkingId, chatState.scrollToBottom)
-          },
-          scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
-          setLoading: (val) => { chatState.loading.value = val }
-        })
-      }
+    // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
+    const callbacks = {
+      onContent: (text, turn, thinkingId) => {
+        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId)
+      },
+      onToolStart: (toolCall) => {
+        messageProcessor.processStreamToolStart(chatState.messages, toolCall)
+      },
+      onToolEnd: (toolEnd) => {
+        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd)
+      },
+      onError: (errorMessage, thinkingId) => {
+        messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
+        ElMessage.error(errorMessage || '流式对话过程出错')
+      },
+      onComplete: (data, thinkingId) => {
+        // 处理新会话
+        if (!sessionManager.currentSessionId.value) {
+          messageProcessor.handleNewSession(
+            sessionManager.sessions,
+            (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
+            thinkingId,
+            false,
+            sessionManager.sessionCreating
+          )
+        }
+        // 清理 thinking 占位符
+        messageProcessor.cleanupThinkingMessage(chatState.messages)
+      },
+      scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
+      setLoading: (val) => { chatState.loading.value = val }
     }
     
     try {
       await transport.wsSend({
         message: text,
         sessionId: sessionManager.currentSessionId.value,
-        wsOptions
+        callbacks
       })
     } catch (e) {
       console.error('WebSocket发送失败:', e)

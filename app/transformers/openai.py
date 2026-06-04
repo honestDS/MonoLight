@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import (
     Any,
 )
@@ -62,6 +63,67 @@ class OpenAITransformer(BaseTransformer):
                     return json.loads(txt)
         except Exception as e:
             logger.error(f"OpenAI Driver Error: {str(e)}")
+            raise LLMException(str(e))
+
+    async def generate_stream(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        messages: list[InternalMessage],
+        temperature: float = 0.7,
+        max_tokens: int = 0,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> AsyncGenerator[dict[str, Any]]:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_id,
+            "messages": self.to_provider(messages),
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status != 200:
+                        txt = await resp.text()
+                        raise LLMException(
+                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
+                        )
+
+                    buffer = ""
+                    async for line in resp.content.iter_any():
+                        # 使用 iter_any() 获取任意大小的非阻塞原始字节块，避免阻塞
+                        chunks = line.decode("utf-8")
+                        buffer += chunks
+
+                        while "\n" in buffer:
+                            raw_line, buffer = buffer.split("\n", 1)
+                            raw_line = raw_line.strip()
+                            if not raw_line:
+                                continue
+                            if raw_line.startswith("data: "):
+                                data_content = raw_line[6:]
+                                if data_content == "[DONE]":
+                                    break
+                                try:
+                                    yield json.loads(data_content)
+                                except Exception as json_err:
+                                    logger.warning(f"Failed to parse SSE line: {raw_line}, error: {json_err}")
+        except Exception as e:
+            logger.error(f"OpenAI Stream Driver Error: {str(e)}")
             raise LLMException(str(e))
 
     @classmethod

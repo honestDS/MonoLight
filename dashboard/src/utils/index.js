@@ -30,6 +30,9 @@ export const getShortContent = (content, maxLength = 100) => {
 export const isToolCall = (msg) => {
   try {
     const content = msg.content
+    if (typeof content === 'object' && content !== null) {
+      return content.role === 'assistant' && content.tool_calls && content.tool_calls.length > 0
+    }
     if (typeof content === 'string') {
       const parsed = JSON.parse(content)
       return parsed.role === 'assistant' && parsed.tool_calls && parsed.tool_calls.length > 0
@@ -43,8 +46,14 @@ export const isToolCall = (msg) => {
 // 获取工具调用名称
 export const getToolName = (msg) => {
   try {
-    const parsed = JSON.parse(msg.content)
-    return parsed.tool_calls?.[0]?.name || '未知工具'
+    const content = msg.content
+    if (typeof content === 'object' && content !== null) {
+      const tc = content.tool_calls?.[0]
+      return tc?.name || tc?.function?.name || '未知工具'
+    }
+    const parsed = JSON.parse(content)
+    const tc = parsed.tool_calls?.[0]
+    return tc?.name || tc?.function?.name || '未知工具'
   } catch {
     return '未知工具'
   }
@@ -53,8 +62,15 @@ export const getToolName = (msg) => {
 // 获取工具调用参数
 export const getToolArguments = (msg) => {
   try {
-    const parsed = JSON.parse(msg.content)
-    const args = parsed.tool_calls?.[0]?.arguments
+    const content = msg.content
+    let tc = null
+    if (typeof content === 'object' && content !== null) {
+      tc = content.tool_calls?.[0]
+    } else {
+      const parsed = JSON.parse(content)
+      tc = parsed.tool_calls?.[0]
+    }
+    const args = tc?.arguments || tc?.function?.arguments
     if (typeof args === 'string') {
       return args
     }
@@ -68,6 +84,9 @@ export const getToolArguments = (msg) => {
 export const isToolResult = (msg) => {
   try {
     const content = msg.content
+    if (typeof content === 'object' && content !== null) {
+      return content.role === 'tool'
+    }
     if (typeof content === 'string') {
       const parsed = JSON.parse(content)
       return parsed.role === 'tool'
@@ -81,7 +100,11 @@ export const isToolResult = (msg) => {
 // 获取工具返回名称
 export const getToolResultName = (msg) => {
   try {
-    const parsed = JSON.parse(msg.content)
+    const content = msg.content
+    if (typeof content === 'object' && content !== null) {
+      return content.tool_call_id ? `ID: ${content.tool_call_id.substring(0, 8)}` : '工具返回'
+    }
+    const parsed = JSON.parse(content)
     return parsed.tool_call_id ? `ID: ${parsed.tool_call_id.substring(0, 8)}` : '工具返回'
   } catch {
     return '工具返回'
@@ -91,7 +114,11 @@ export const getToolResultName = (msg) => {
 // 获取工具返回内容
 export const getToolResultContent = (msg) => {
   try {
-    const parsed = JSON.parse(msg.content)
+    const content = msg.content
+    if (typeof content === 'object' && content !== null) {
+      return content.content || ''
+    }
+    const parsed = JSON.parse(content)
     return parsed.content || ''
   } catch {
     return msg.content

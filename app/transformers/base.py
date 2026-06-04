@@ -2,6 +2,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+from collections.abc import AsyncGenerator
 from typing import (
     Any,
 )
@@ -26,6 +27,21 @@ class BaseTransformer(ABC):
         tool_choice: str = "auto",
         **kwargs,
     ) -> InternalResponse:
+        pass
+
+    @abstractmethod
+    async def generate_stream(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        messages: list[InternalMessage],
+        temperature: float = 0.7,
+        max_tokens: int = 0,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> AsyncGenerator[dict[str, Any]]:
         pass
 
     @classmethod

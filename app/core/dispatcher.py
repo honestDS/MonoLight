@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import AsyncGenerator
 from typing import (
     Any,
 )
@@ -49,6 +50,7 @@ from app.core.tools import (
 )
 from app.models.message import (
     InternalMessage,
+    InternalToolCall,
     MessageRole,
     MessageType,
 )
@@ -67,6 +69,307 @@ logger = get_logger(__name__)
 
 
 class ChatDispatcher:
+    @staticmethod
+    async def dispatch_stream(
+        db: AsyncSession,
+        message: str,
+        uid: str,
+        session_id: str = "default",
+    ) -> AsyncGenerator[dict[str, Any]]:
+        try:
+            user = await user_crud.get_by_uid(db, uid)
+            username = user.username if user else "Unknown"
+            profile = await profile_crud.get_active(db)
+
+            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
+            await ChatDispatcher._save_message(
+                db,
+                session_id,
+                uid,
+                MessageRole.USER,
+                MessageType.TEXT,
+                message,
+                profile.id if profile.id else -1,
+            )
+
+            if not profile:
+                raise LLMException(message=ERR_PROFILE_NOT_FOUND)
+
+            cfg = ProfileConfig.model_validate(profile.configs)
+
+            if not profile.provider:
+                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+
+            if profile.provider.usage == ModelUsage.EMBEDDING:
+                raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+
+            messages = await ContextManager.get_messages(
+                db,
+                session_id,
+                uid,
+                profile,
+                message,
+            )
+
+            if profile.prompt and profile.prompt.content:
+                messages = [m for m in messages if m.role != MessageRole.SYSTEM]
+                messages.insert(
+                    0,
+                    InternalMessage(
+                        role=MessageRole.SYSTEM,
+                        content=profile.prompt.content,
+                    ),
+                )
+
+            tools = ALL_TOOLS_SCHEMAS
+            turn_messages: list[InternalMessage] = []
+
+            (
+                max_turns,
+                current_turn,
+                _final_ai_content,
+            ) = (
+                cfg.tool.max_turns,
+                0,
+                "",
+            )
+            if not profile.provider:
+                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+
+            while current_turn <= max_turns:
+                current_turn += 1
+
+                # 达到最大轮次时注入收官指令并确保协议合规
+                if current_turn == max_turns:
+                    summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
+                    notice_msg = InternalMessage(
+                        role=MessageRole.USER,
+                        content=summary_notice,
+                    )
+                    messages.append(notice_msg)
+                    # 持久化注入的指令到数据库以保持审计一致性
+                    await ChatDispatcher._save_message(
+                        db,
+                        session_id,
+                        uid,
+                        MessageRole.USER,
+                        MessageType.TEXT,
+                        summary_notice,
+                        profile.id,
+                    )
+
+                    current_tools = None
+                else:
+                    current_tools = tools
+
+                # 用于拼接当前轮次的工具调用和文本
+                current_tool_calls_map = {} # index -> {id, name, arguments_chunks}
+                current_content_chunks = []
+
+                async for chunk in LLMClient.generate_stream(
+                    api_key=profile.provider.api_key,
+                    base_url=profile.provider.base_url,
+                    model_id=cfg.provider.model_id,
+                    messages=messages,
+                    temperature=cfg.provider.temperature,
+                    max_tokens=cfg.provider.max_tokens,
+                    tools=current_tools,
+                    protocol=getattr(
+                        profile.provider,
+                        "protocol",
+                        "openai",
+                    ),
+                ):
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+
+                    # 1. 处理文本内容增量
+                    content = delta.get("content")
+                    if content:
+                        current_content_chunks.append(content)
+                        yield {
+                            "type": "content",
+                            "content": content,
+                            "turn": current_turn,
+                        }
+
+                    # 2. 处理工具调用增量
+                    tool_calls = delta.get("tool_calls")
+                    if tool_calls:
+                        for tc in tool_calls:
+                            idx = tc.get("index", 0)
+                            if idx not in current_tool_calls_map:
+                                current_tool_calls_map[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc.get("id"):
+                                current_tool_calls_map[idx]["id"] = tc.get("id")
+                            if tc.get("function", {}).get("name"):
+                                current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
+                            if tc.get("function", {}).get("arguments"):
+                                current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+
+                # 流结束，整理最终 AI 响应
+                final_content = "".join(current_content_chunks)
+                final_tool_calls = []
+                for idx, tc_data in sorted(current_tool_calls_map.items()):
+                    if tc_data.get("name"):
+                        args_dict = {}
+                        if tc_data.get("arguments"):
+                            try:
+                                args_dict = json.loads(tc_data.get("arguments"))
+                            except Exception as parse_err:
+                                logger.warning(
+                                    "Failed to parse arguments json: %s, error: %s",
+                                    tc_data.get("arguments"),
+                                    parse_err,
+                                )
+                        final_tool_calls.append(
+                            InternalToolCall(
+                                id=tc_data.get("id") or f"call_{idx}",
+                                name=tc_data.get("name"),
+                                arguments=args_dict,
+                            )
+                        )
+
+                # 空消息拦截逻辑
+                if not final_tool_calls and not final_content.strip():
+                    from app.core.constants import (
+                        ERR_LLM_EMPTY_RESPONSE,
+                    )
+                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+
+                ai_msg = InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=final_content if final_content else None,
+                    tool_calls=final_tool_calls if final_tool_calls else None,
+                )
+
+                logger.info(
+                    f"[{username}] (Session: {session_id}) Turn {current_turn} | "
+                    f"LLM Response: {ai_msg.content or '[Tool Call]'}"
+                )
+
+                messages.append(ai_msg)
+
+                await ChatDispatcher._save_message(
+                    db,
+                    session_id,
+                    uid,
+                    MessageRole.ASSISTANT,
+                    MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
+                    ai_msg,
+                    profile.id,
+                )
+                if ai_msg.tool_calls:
+                    turn_messages.append(ai_msg)
+
+                if not ai_msg.tool_calls:
+                    _final_ai_content = ai_msg.content
+                    break
+
+                if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
+                    error_msg = json.dumps(
+                        {
+                            "error": "parallel_limit_exceeded",
+                            "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(
+                                requested=len(ai_msg.tool_calls),
+                                limit=cfg.tool.max_parallel_tools,
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+
+                    for tool_call in ai_msg.tool_calls:
+                        tool_res = InternalMessage(
+                            role=MessageRole.TOOL,
+                            tool_call_id=tool_call.id,
+                            content=error_msg,
+                        )
+                        messages.append(tool_res)
+                        await ChatDispatcher._save_message(
+                            db,
+                            session_id,
+                            uid,
+                            MessageRole.TOOL,
+                            MessageType.TOOL_RESULT,
+                            tool_res,
+                            profile.id,
+                        )
+                    continue
+
+                # 实时推送每个工具执行的开始
+                for tc in ai_msg.tool_calls:
+                    yield {
+                        "type": "tool_start",
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                        "tool_call_id": tc.id,
+                    }
+
+                tasks = [
+                    ChatDispatcher._process_single_tool(
+                        tc,
+                        db,
+                        profile,
+                        cfg,
+                        messages,
+                        username,
+                        session_id,
+                        current_turn,
+                        uid,
+                    )
+                    for tc in ai_msg.tool_calls
+                ]
+
+                tool_responses = await asyncio.gather(*tasks)
+
+                for tool_res in tool_responses:
+                    messages.append(tool_res)
+                    await ChatDispatcher._save_message(
+                        db,
+                        session_id,
+                        uid,
+                        MessageRole.TOOL,
+                        MessageType.TOOL_RESULT,
+                        tool_res,
+                        profile.id,
+                    )
+                    turn_messages.append(tool_res)
+                    # 实时推送工具执行的结束与结果
+                    tool_name = next(
+                        (tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id),
+                        "unknown",
+                    )
+                    yield {
+                        "type": "tool_end",
+                        "name": tool_name,
+                        "result": tool_res.content,
+                        "tool_call_id": tool_res.tool_call_id,
+                    }
+
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "history": [m.model_dump(exclude_none=True) for m in turn_messages]
+            }
+        except BaseBusinessException as bbe:
+            yield {
+                "type": "error",
+                "message": bbe.message,
+            }
+        except Exception as e:
+            logger.exception("Dispatcher Stream Error")
+            yield {
+                "type": "error",
+                "message": str(e),
+            }
+
     @staticmethod
     async def _save_message(
         db: AsyncSession,

@@ -142,16 +142,14 @@ async def chat_websocket(
                 await websocket.send_json({"error": "Message is required"})
                 continue
 
-            # 调用 WebSocket 适配器
-            response = await ws_chat_adapter.chat(
+            # 调用 WebSocket 适配器并以流式逐帧发送响应
+            async for response in ws_chat_adapter.chat(
                 db=db,
                 message=message,
                 uid=uid,
                 session_id=session_id
-            )
-
-            # 发送响应
-            await websocket.send_json(response)
+            ):
+                await websocket.send_json(response)
     except WebSocketDisconnect:
         # 连接正常关闭
         pass

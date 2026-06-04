@@ -18,6 +18,16 @@ export function useChatTransport() {
   // WebSocket 管理
   const wsManager = useWebSocket()
 
+  // 存储当前活跃的流式回调
+  let activeCallbacks = null
+
+  // 注册唯一持久的消息分发器，解决连接重用时回调失效问题
+  wsManager.onMessage((data) => {
+    if (activeCallbacks) {
+      handleWsMessage(data, activeCallbacks)
+    }
+  })
+
   // ==================== WebSocket 相关方法 ====================
   
   /**
@@ -31,39 +41,103 @@ export function useChatTransport() {
    * @param {Function} options.setLoading - 设置 loading 状态回调
    */
   const handleWsMessage = (data, options = {}) => {
-    const { onToolCall, onResponse, onComplete, scrollToBottom, setLoading } = options
-    console.log('WebSocket message:', data)
+    const { onContent, onToolStart, onToolEnd, onComplete, onError, scrollToBottom, setLoading } = options
 
     // 忽略心跳响应
     if (data.type === 'pong' || data.type === 'ping') return
 
-    // 处理流式响应
+    const type = data.type
+
+    // 1. 处理增量文本推送
+    if (type === 'content') {
+      if (onContent) {
+        onContent(data.content, data.turn, currentThinkingId)
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    // 2. 处理工具调用开始
+    if (type === 'tool_start') {
+      if (onToolStart) {
+        onToolStart({
+          id: data.tool_call_id,
+          name: data.name, // 后端推送的 key 是 name，非 tool_name
+          arguments: data.arguments
+        })
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    // 3. 处理工具调用结束
+    if (type === 'tool_end') {
+      if (onToolEnd) {
+        onToolEnd({
+          tool_call_id: data.tool_call_id,
+          name: data.name, // 后端推送的 key 是 name，非 tool_name
+          result: data.result
+        })
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    // 4. 处理对话结束
+    if (type === 'done') {
+      if (onComplete) {
+        onComplete(data, currentThinkingId)
+      }
+      if (setLoading) {
+        setLoading(false)
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    // 5. 处理异常通知
+    if (type === 'error') {
+      console.error('WebSocket业务错误:', data.message)
+      if (onError) {
+        onError(data.message, currentThinkingId)
+      }
+      if (setLoading) {
+        setLoading(false)
+      }
+      return
+    }
+
+    // 兼容老的数据结构（如异常直接以 LLMResponse 格式返回）
     if (data.choices && Array.isArray(data.choices)) {
       const choice = data.choices[0]
       if (!choice) return
-
-      // WS 消息结构和 HTTP 一样，使用 message 而不是 delta
+      
       const content = choice.message?.content || ''
       const finishReason = choice.finish_reason
 
-      // 处理工具调用
-      if (choice.message?.tool_calls) {
-        const toolCall = choice.message.tool_calls[0]
-        if (toolCall && onToolCall) {
-          onToolCall(toolCall)
+      // 异常角色
+      if (choice.message?.role === 'err') {
+        if (onError) {
+          onError(content, currentThinkingId)
         }
+        if (setLoading) {
+          setLoading(false)
+        }
+        return
       }
 
-      // 处理完成：复用 HTTP 的处理逻辑（持久连接，不断开）
       if (finishReason) {
-        console.log('WebSocket响应完成, finishReason:', finishReason)
-
-        // 调用完成回调
         if (onComplete) {
           onComplete(data, currentThinkingId)
         }
-
-        // 保持连接，不调用 disconnectWebSocket()
         if (setLoading) {
           setLoading(false)
         }
@@ -106,25 +180,23 @@ export function useChatTransport() {
    * @param {Object} options - 发送选项
    * @param {string} options.message - 消息内容
    * @param {string|null} options.sessionId - 会话 ID
-   * @param {Object} options.wsOptions - WebSocket 处理选项
+   * @param {Object} options.callbacks - 流式事件处理回调对象
    * @returns {Promise<boolean>} 是否发送成功
    */
-  const wsSend = async ({ message, sessionId, wsOptions = {} }) => {
+  const wsSend = async ({ message, sessionId, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) {
       throw new Error('未登录')
     }
     
+    // 更新最新消息的回调引用
+    activeCallbacks = callbacks
+    
     // 懒连接：只有在发送消息时才会尝试连接WebSocket
     if (!wsManager.isConnected.value) {
-      ElMessage.info('正在建立WebSocket连接...')
       try {
         await wsManager.connect(token)
         wsConnected.value = true
-        // 连接成功后才注册消息处理器
-        if (wsOptions.onMessage) {
-          wsManager.onMessage(wsOptions.onMessage)
-        }
       } catch (e) {
         console.error('WebSocket连接失败:', e)
         ElMessage.error('WebSocket 连接失败，将使用 HTTP 模式')
