@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import (
     TYPE_CHECKING,
 )
@@ -16,8 +16,9 @@ from sqlmodel import (
     Field,
     Relationship,
     SQLModel,
-    func,
 )
+
+from app.core.utils.dt import get_local_time
 
 if TYPE_CHECKING:
     from app.models.prompt import PromptLibrary
@@ -37,12 +38,12 @@ class User(UserBase, table=True):
     hashed_password: str | None = Field(default=None, max_length=255)
 
     created_at: datetime | None = Field(
-        default_factory=lambda: datetime.now(UTC),
+        default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),
     )
     updated_at: datetime | None = Field(
-        default_factory=lambda: datetime.now(UTC),
-        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
+        default_factory=get_local_time,
+        sa_column=Column(DateTime(timezone=True), onupdate=get_local_time),
     )
 
     prompts: list["PromptLibrary"] = Relationship(back_populates="user")

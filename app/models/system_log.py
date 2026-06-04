@@ -7,6 +7,8 @@ from sqlmodel import (
     SQLModel,
 )
 
+from app.core.utils.dt import get_local_time
+
 
 class SystemLogBase(SQLModel):
     level: str = Field(index=True, max_length=20)
@@ -22,7 +24,7 @@ class SystemLog(SystemLogBase, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     created_at: datetime | None = Field(
-        default=None,
+        default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),
     )
 

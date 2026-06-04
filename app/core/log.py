@@ -3,10 +3,12 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
+
+from app.core.utils.dt import get_local_time
 
 
 class LogManager:
@@ -17,12 +19,11 @@ class LogManager:
         if cls._configured:
             return
 
-        # 设置时区补丁（默认北京时间 +8）
-        tz_offset = int(os.getenv("LOG_TZ_OFFSET", "8"))
-        tz = timezone(timedelta(hours=tz_offset))
-
+        # 设置时区补丁
         def patch_record(record):
-            record["time"] = record["time"].astimezone(tz)
+            # 直接使用工具函数获取带时区的当前时间并替换记录时间
+            # record["time"] 是 loguru 生成的，包含微秒，astimezone 会保留精度
+            record["time"] = get_local_time()
 
         logger.configure(patcher=patch_record)
 
@@ -158,11 +159,11 @@ class LogManager:
         logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
         cls._configured = True
-        # 记录启动时的时区信息，方便排查
-        now_aware = datetime.now().astimezone(tz)
+        # 记录启动时的信息，方便排查
+        now_aware = get_local_time()
         logger.info(
             f"Log system initialized. Path: {abs_log_path} | "
-            f"Timezone: {tz} | Time: {now_aware.isoformat()}"
+            f"Time: {now_aware.isoformat()}"
         )
 
     @staticmethod

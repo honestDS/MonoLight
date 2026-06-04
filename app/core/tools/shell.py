@@ -47,10 +47,11 @@ class ShellExecutor(BaseExecutor):
         if command.startswith(CONFIRMATION_PREFIX):
             command = command.split(" ", 1)[-1]
 
+        import platform
+        system_info = f"{platform.system()} {platform.release()}"
+
         for blacklisted in self.COMMAND_BLACKLIST:
             if blacklisted.lower() in command.lower():
-                import platform
-                system_info = f"{platform.system()} {platform.release()}"
                 return json.dumps(
                     {
                         "stdout": f"不允许使用shell工具执行该命令: {blacklisted}",
@@ -106,15 +107,16 @@ class ShellExecutor(BaseExecutor):
                         "stdout": result.stdout,
                         "stderr": result.stderr,
                         "exit_code": result.returncode,
+                        "system_info": system_info,
                     },
                     ensure_ascii=False,
                 )
             except subprocess.TimeoutExpired:
                 t_logger.error(
-                    f"[{self.uid}] Sync command timed out after {profile_timeout}s"
+                    f"[{self.uid}] Sync command timed out after {profile_timeout}s system_info: {system_info}"
                 )
                 return json.dumps(
-                    {"error": f"Command timed out after {profile_timeout}s"},
+                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
             except Exception as e:
@@ -152,6 +154,7 @@ class ShellExecutor(BaseExecutor):
                         "stdout": out,
                         "stderr": err,
                         "exit_code": process.returncode,
+                        "system_info": system_info,
                     },
                     ensure_ascii=False,
                 )
@@ -159,10 +162,10 @@ class ShellExecutor(BaseExecutor):
                 if process:
                     process.kill()
                 t_logger.error(
-                    f"[{self.uid}] Command timed_out after {profile_timeout}s"
+                    f"[{self.uid}] Command timed_out after {profile_timeout}s system_info: {system_info}"
                 )
                 return json.dumps(
-                    {"error": f"Command timed out after {profile_timeout}s"},
+                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
         except Exception as e:

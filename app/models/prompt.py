@@ -1,5 +1,4 @@
 from datetime import (
-    UTC,
     datetime,
 )
 from typing import (
@@ -15,6 +14,8 @@ from sqlmodel import (
     Relationship,
     SQLModel,
 )
+
+from app.core.utils.dt import get_local_time
 
 if TYPE_CHECKING:
     from app.models.profile import Profile
@@ -34,7 +35,7 @@ class PromptLibrary(PromptBase, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: int | None = Field(default=None, foreign_key="user.id", nullable=True)
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
+        default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),
     )
     profiles: list["Profile"] = Relationship(back_populates="prompt")

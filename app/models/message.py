@@ -1,5 +1,5 @@
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import (
     Any,
@@ -13,6 +13,8 @@ from sqlmodel import (
     Field,
     SQLModel,
 )
+
+from app.core.utils.dt import get_local_time
 
 
 class MessageRole(StrEnum):
@@ -67,7 +69,7 @@ class Message(MessageBase, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field(foreign_key="profile.id")
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
+        default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),
     )
 
