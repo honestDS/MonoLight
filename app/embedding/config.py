@@ -4,7 +4,6 @@ Embedding 配置模型
 定义 Embedding 模块的配置结构，支持从环境变量加载。
 """
 
-from typing import Optional
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -21,11 +20,11 @@ class EmbeddingConfig(BaseModel):
         default="text-embedding-3-small",
         description="模型标识符",
     )
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None,
         description="API 密钥（线上服务需要）",
     )
-    base_url: Optional[str] = Field(
+    base_url: str | None = Field(
         default=None,
         description="API 基础 URL",
     )
@@ -35,7 +34,7 @@ class EmbeddingConfig(BaseModel):
         le=2048,
         description="批处理大小",
     )
-    dimensions: Optional[int] = Field(
+    dimensions: int | None = Field(
         default=None,
         ge=1,
         description="向量维度（某些模型支持自定义维度）",
@@ -45,7 +44,7 @@ class EmbeddingConfig(BaseModel):
         ge=1,
         description="API 请求超时时间（秒）",
     )
-    model_cache_dir: Optional[str] = Field(
+    model_cache_dir: str | None = Field(
         default=None,
         description="本地模型缓存目录",
     )
@@ -71,16 +70,16 @@ class EmbeddingSettings(BaseSettings):
     embedding_model_id: str = Field(
         default="text-embedding-3-small", alias="EMBEDDING_MODEL_ID"
     )
-    embedding_api_key: Optional[str] = Field(default=None, alias="EMBEDDING_API_KEY")
-    embedding_base_url: Optional[str] = Field(
+    embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")
+    embedding_base_url: str | None = Field(
         default=None, alias="EMBEDDING_BASE_URL"
     )
     embedding_batch_size: int = Field(default=100, alias="EMBEDDING_BATCH_SIZE")
-    embedding_dimensions: Optional[int] = Field(
+    embedding_dimensions: int | None = Field(
         default=None, alias="EMBEDDING_DIMENSIONS"
     )
     embedding_timeout: int = Field(default=30, alias="EMBEDDING_TIMEOUT")
-    embedding_model_cache_dir: Optional[str] = Field(
+    embedding_model_cache_dir: str | None = Field(
         default=None, alias="EMBEDDING_MODEL_CACHE_DIR"
     )
 

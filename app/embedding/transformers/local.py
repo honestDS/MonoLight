@@ -4,7 +4,6 @@ Local Embedding Transformer
 基于 sentence-transformers 的本地模型适配器。
 """
 
-from typing import List
 
 from app.core.exceptions import ServerException
 from app.embedding.transformers.base import (
@@ -38,7 +37,7 @@ class LocalEmbeddingTransformer(BaseEmbeddingTransformer):
         except Exception as e:
             raise ServerException(f"加载本地 Embedding 模型失败: {str(e)}")
 
-    async def embed(self, texts: List[str]) -> EmbeddingResponse:
+    async def embed(self, texts: list[str]) -> EmbeddingResponse:
         """
         使用本地模型进行向量化
 

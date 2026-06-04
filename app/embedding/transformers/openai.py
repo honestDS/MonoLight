@@ -4,7 +4,6 @@ OpenAI Embedding Transformer
 适配 OpenAI Embeddings API 协议。
 """
 
-from typing import List
 
 import aiohttp
 
@@ -18,7 +17,7 @@ from app.embedding.transformers.base import (
 class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
     """OpenAI Embeddings API 适配器"""
 
-    async def embed(self, texts: List[str]) -> EmbeddingResponse:
+    async def embed(self, texts: list[str]) -> EmbeddingResponse:
         """
         调用 OpenAI Embeddings API 进行向量化
 

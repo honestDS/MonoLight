@@ -5,7 +5,7 @@ Embedding Transformer 基类
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -13,13 +13,13 @@ from pydantic import BaseModel, Field
 class EmbeddingResponse(BaseModel):
     """Embedding 标准响应模型"""
 
-    embeddings: List[List[float]] = Field(description="向量列表")
+    embeddings: list[list[float]] = Field(description="向量列表")
     model: str = Field(description="使用的模型标识")
-    usage: Dict[str, Any] = Field(
+    usage: dict[str, Any] = Field(
         default_factory=dict,
         description="使用统计（如 token 数量）",
     )
-    dimensions: Optional[int] = Field(
+    dimensions: int | None = Field(
         default=None,
         description="向量维度",
     )
@@ -43,7 +43,7 @@ class BaseEmbeddingTransformer(ABC):
         self.config = config
 
     @abstractmethod
-    async def embed(self, texts: List[str]) -> EmbeddingResponse:
+    async def embed(self, texts: list[str]) -> EmbeddingResponse:
         """
         批量向量化文本
 
@@ -55,7 +55,7 @@ class BaseEmbeddingTransformer(ABC):
         """
         pass
 
-    async def embed_single(self, text: str) -> List[float]:
+    async def embed_single(self, text: str) -> list[float]:
         """
         单个文本向量化（默认实现）
 

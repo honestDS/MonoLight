@@ -11,10 +11,9 @@ from sqlmodel import (
 )
 
 
-
 class ModelUsage(enum.StrEnum):
-    CHAT = 'CHAT'
-    EMBEDDING = 'EMBEDDING'
+    CHAT = "CHAT"
+    EMBEDDING = "EMBEDDING"
 
 
 class ProviderType(enum.StrEnum):

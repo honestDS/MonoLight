@@ -50,6 +50,19 @@ class LogManager:
             format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] [{file}:{line}]: {message}",
         )
 
+        # 添加专用工具日志
+        tool_log_path = str(Path(abs_log_path).parent / "tools.log")
+        logger.add(
+            tool_log_path,
+            filter=lambda record: "tool_call" in record["extra"] or "tool_result" in record["extra"],
+            level="DEBUG",
+            rotation="10 MB",
+            retention="1 week",
+            encoding="utf-8",
+            enqueue=True,
+            format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] {message}",
+        )
+
         # 拦截标准 logging
         class InterceptHandler(logging.Handler):
             def emit(self, record):
@@ -75,16 +88,20 @@ class LogManager:
         logger.info(f"Log system initialized. Path: {abs_log_path}")
 
     @staticmethod
-    def log_tool_call(turn: int, tool_name: str, command: str):
+    def log_tool_call(turn: int, tool_name: str, command: str, session_id: str = "default"):
         # 记录工具调用日志
         lines = [line.strip() for line in command.splitlines() if line.strip()]
         log_cmd = lines if len(lines) > 1 else command.strip()
-        logger.info(f"Turn {turn} | Tool Call: {tool_name} {{command: {log_cmd}}}")
+        logger.bind(tool_call=True).info(
+            f"Session: {session_id} | Turn {turn} | Tool: {tool_name} | Args: {log_cmd}"
+        )
 
     @staticmethod
-    def log_tool_result(turn: int, result: str):
+    def log_tool_result(turn: int, result: str, session_id: str = "default"):
         # 记录工具执行结果日志
-        logger.info(f"Turn {turn} | Tool Result: {result}")
+        logger.bind(tool_result=True).info(
+            f"Session: {session_id} | Turn {turn} | Result: {result}"
+        )
 
 
 def get_logger(name: str):

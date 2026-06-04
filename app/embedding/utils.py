@@ -5,10 +5,9 @@ Embedding 工具函数
 """
 
 import math
-from typing import List, Tuple
 
 
-def normalize_vector(vector: List[float]) -> List[float]:
+def normalize_vector(vector: list[float]) -> list[float]:
     """
     向量归一化（L2 范数）
 
@@ -24,7 +23,7 @@ def normalize_vector(vector: List[float]) -> List[float]:
     return [x / magnitude for x in vector]
 
 
-def cosine_similarity(vector1: List[float], vector2: List[float]) -> float:
+def cosine_similarity(vector1: list[float], vector2: list[float]) -> float:
     """
     计算两个向量的余弦相似度
 
@@ -55,8 +54,8 @@ def cosine_similarity(vector1: List[float], vector2: List[float]) -> float:
 
 
 def batch_similarity(
-    query_vector: List[float], vectors: List[List[float]]
-) -> List[Tuple[int, float]]:
+    query_vector: list[float], vectors: list[list[float]]
+) -> list[tuple[int, float]]:
     """
     计算查询向量与多个向量的相似度
 
@@ -76,7 +75,7 @@ def batch_similarity(
     return similarities
 
 
-def euclidean_distance(vector1: List[float], vector2: List[float]) -> float:
+def euclidean_distance(vector1: list[float], vector2: list[float]) -> float:
     """
     计算两个向量的欧氏距离
 
@@ -96,7 +95,7 @@ def euclidean_distance(vector1: List[float], vector2: List[float]) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(vector1, vector2)))
 
 
-def dot_product(vector1: List[float], vector2: List[float]) -> float:
+def dot_product(vector1: list[float], vector2: list[float]) -> float:
     """
     计算两个向量的点积
 

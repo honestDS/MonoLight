@@ -1,8 +1,3 @@
-from app.schemas.response import (
-    LLMResponse,
-    LLMChoice,
-    LLMChoiceMessage
-)
 import asyncio
 import json
 import os
@@ -52,7 +47,6 @@ from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
-from app.models.provider import ModelUsage
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -62,9 +56,11 @@ from app.models.profile import (
     Profile,
     ProfileConfig,
 )
+from app.models.provider import ModelUsage
 from app.providers.llm.client import (
     LLMClient,
 )
+from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 LogManager.setup()
 logger = get_logger(__name__)
@@ -142,11 +138,8 @@ class ChatDispatcher:
     ) -> InternalMessage:
         tool_name = tool_call.name
         args = tool_call.arguments
-        cmd_log = (
-            f"[{username}] (Session: {session_id}) Turn {turn} | "
-            f"Tool Call: {tool_name} {{command: {args.get('command', '')}}}"
-        )
-        logger.info(cmd_log)
+
+        LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id)
 
         cmd_result = await ChatDispatcher._audit_tool_call(
             db,
@@ -170,8 +163,8 @@ class ChatDispatcher:
                     {"error": f"Tool {tool_name} not registered"},
                     ensure_ascii=False,
                 )
-        res_log = f"[{username}] (Session: {session_id}) Turn {turn} | Tool Result: {cmd_result}"
-        logger.info(res_log)
+
+        LogManager.log_tool_result(turn, cmd_result, session_id)
 
         return InternalMessage(
             role=MessageRole.TOOL,
@@ -190,7 +183,7 @@ class ChatDispatcher:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
-            
+
             logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
             await ChatDispatcher._save_message(
                 db,
@@ -201,7 +194,7 @@ class ChatDispatcher:
                 message,
                 profile.id if profile.id else -1,
             )
-            
+
             if not profile:
                 raise LLMException(message=ERR_PROFILE_NOT_FOUND)
 
@@ -209,7 +202,7 @@ class ChatDispatcher:
 
             if not profile.provider:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-            
+
             if profile.provider.usage == ModelUsage.EMBEDDING:
                 raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
 
@@ -230,7 +223,7 @@ class ChatDispatcher:
                         content=profile.prompt.content,
                     ),
                 )
-            
+
             # todo...此处应该将知识库信息追加到系统提示词的尾部
 
             tools = ALL_TOOLS_SCHEMAS
@@ -248,7 +241,7 @@ class ChatDispatcher:
             if not profile.provider:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
-                
+
             while current_turn <= max_turns:
                 current_turn += 1
 

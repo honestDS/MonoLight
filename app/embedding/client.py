@@ -4,7 +4,6 @@ Embedding 客户端
 提供统一的向量化调用接口，根据配置动态加载对应的 Transformer。
 """
 
-from typing import List
 
 from app.embedding.config import EmbeddingConfig
 from app.embedding.transformers.base import (
@@ -35,7 +34,7 @@ class EmbeddingClient:
         else:
             raise ValueError(f"不支持的 Embedding Provider: {provider_type}")
 
-    async def embed(self, texts: List[str]) -> EmbeddingResponse:
+    async def embed(self, texts: list[str]) -> EmbeddingResponse:
         """
         批量向量化文本
 
@@ -47,7 +46,7 @@ class EmbeddingClient:
         """
         return await self.transformer.embed(texts)
 
-    async def embed_single(self, text: str) -> List[float]:
+    async def embed_single(self, text: str) -> list[float]:
         """
         单个文本向量化
 

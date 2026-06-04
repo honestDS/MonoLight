@@ -1,22 +1,15 @@
-import uuid
 import time
+import uuid
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.message import MessageRole
 
 from app.adapters.base import BaseChatAdapter
-from app.core.dispatcher import ChatDispatcher
-from app.core.log import get_logger
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR
-
-from app.core.exceptions import (
-    BaseBusinessException
-)
-
-from app.schemas.response import (
-    LLMResponse,
-    LLMChoice,
-    LLMChoiceMessage
-)
+from app.core.dispatcher import ChatDispatcher
+from app.core.exceptions import BaseBusinessException
+from app.core.log import get_logger
+from app.models.message import MessageRole
+from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
 
