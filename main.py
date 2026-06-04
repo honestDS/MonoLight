@@ -1,10 +1,4 @@
-import asyncio
 import os
-import sys
-
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -35,13 +29,6 @@ from app.schemas.response import StandardResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if sys.platform == "win32":
-        try:
-            from asyncio import WindowsProactorEventLoopPolicy
-            asyncio.set_event_loop_policy(WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-
     from app.providers.init_db import init_system_data
 
     async with AsyncSessionLocal() as session:
