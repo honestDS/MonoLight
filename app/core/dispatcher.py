@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.constants import (
+    ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_PROVIDER_NOT_CONFIGURED,
     ERR_PROFILE_NOT_FOUND,
     ERR_PROVIDER_EMBEDDING_ONLY,
@@ -62,6 +63,7 @@ from app.models.provider import ModelUsage
 from app.providers.llm.client import (
     LLMClient,
 )
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 LogManager.setup()
@@ -69,6 +71,26 @@ logger = get_logger(__name__)
 
 
 class ChatDispatcher:
+    @staticmethod
+    async def _fetch_new_user_messages(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        last_id: int,
+    ) -> list[InternalMessage]:
+        """
+        检索并解析新产生的用户消息
+        """
+        raw_msgs = await message_crud.get_new_messages_since_id(
+            db, session_id=session_id, uid=uid, last_id=last_id
+        )
+        # 仅追加用户消息，过滤掉系统自动注入或 AI 的响应（因为 AI 响应已经在循环中处理了）
+        user_msgs = [m for m in raw_msgs if m.role == MessageRole.USER]
+        if not user_msgs:
+            return []
+
+        return parse_db_messages_to_internal(user_msgs)
+
     @staticmethod
     async def dispatch_stream(
         db: AsyncSession,
@@ -121,6 +143,12 @@ class ChatDispatcher:
                     ),
                 )
 
+            # 初始化最后处理的消息 ID
+            last_processed_id = 0
+            for m in messages:
+                if m.id and m.id > last_processed_id:
+                    last_processed_id = m.id
+
             tools = ALL_TOOLS_SCHEMAS
             turn_messages: list[InternalMessage] = []
 
@@ -137,6 +165,19 @@ class ChatDispatcher:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
             while current_turn <= max_turns:
+                # 动态追加用户新消息
+                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(
+                    db, session_id, uid, last_processed_id
+                )
+                if new_user_msgs:
+                    for nm in new_user_msgs:
+                        logger.info(
+                            f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
+                        )
+                        messages.append(nm)
+                        if nm.id and nm.id > last_processed_id:
+                            last_processed_id = nm.id
+
                 current_turn += 1
 
                 # 达到最大轮次时注入收官指令并确保协议合规
@@ -239,9 +280,6 @@ class ChatDispatcher:
 
                 # 空消息拦截逻辑
                 if not final_tool_calls and not final_content.strip():
-                    from app.core.constants import (
-                        ERR_LLM_EMPTY_RESPONSE,
-                    )
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
                 ai_msg = InternalMessage(
@@ -266,6 +304,11 @@ class ChatDispatcher:
                     ai_msg,
                     profile.id,
                 )
+
+                # 更新最后处理 ID 为刚发送的消息（虽然 _save_message 不直接返回 ID，
+                # 但下一轮循环的 _fetch_new_user_messages 会基于此 ID 过滤）
+                # 注意：由于数据库自增 ID 由数据库生成，我们这里无法即时获得，
+                # 但新输入的 USER 消息 ID 肯定大于进入 dispatch 时最大的 ID。
                 if ai_msg.tool_calls:
                     turn_messages.append(ai_msg)
 
@@ -529,6 +572,12 @@ class ChatDispatcher:
 
             # todo...此处应该将知识库信息追加到系统提示词的尾部
 
+            # 初始化最后处理的消息 ID
+            last_processed_id = 0
+            for m in messages:
+                if m.id and m.id > last_processed_id:
+                    last_processed_id = m.id
+
             tools = ALL_TOOLS_SCHEMAS
             turn_messages: list[InternalMessage] = []
 
@@ -544,8 +593,20 @@ class ChatDispatcher:
             if not profile.provider:
                 raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
 
-
             while current_turn <= max_turns:
+                # 动态追加用户新消息
+                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(
+                    db, session_id, uid, last_processed_id
+                )
+                if new_user_msgs:
+                    for nm in new_user_msgs:
+                        logger.info(
+                            f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
+                        )
+                        messages.append(nm)
+                        if nm.id and nm.id > last_processed_id:
+                            last_processed_id = nm.id
+
                 current_turn += 1
 
                 # 达到最大轮次时注入收官指令并确保协议合规
@@ -593,10 +654,6 @@ class ChatDispatcher:
                 )
                 # 空消息拦截逻辑
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
-                    from app.core.constants import (
-                        ERR_LLM_EMPTY_RESPONSE,
-                    )
-
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                 messages.append(ai_msg)
 

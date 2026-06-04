@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -9,12 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
+from app.core.crud.profile import profile_crud
+from app.core.dispatcher import ChatDispatcher
 from app.core.log import (
     LogManager,
     get_logger,
 )
 from app.core.security import get_current_user
-from app.models.message import ChatCompletionRequest, MessageResponse
+from app.models.message import (
+    ChatCompletionRequest,
+    MessageResponse,
+    MessageRole,
+    MessageType,
+)
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
 
@@ -131,6 +140,25 @@ async def chat_websocket(
     await websocket.accept()
     uid = getattr(current_user, "uid", None)
 
+    # 用于追踪当前是否有正在运行的调度任务
+    active_task = None
+
+    async def run_chat(msg, sid):
+        nonlocal active_task
+        try:
+            async for response in ws_chat_adapter.chat(
+                db=db,
+                message=msg,
+                uid=uid,
+                session_id=sid
+            ):
+                await websocket.send_json(response)
+        except Exception as e:
+            logger.error(f"WS task error: {e}")
+            await websocket.send_json({"type": "error", "message": str(e)})
+        finally:
+            active_task = None
+
     try:
         while True:
             # 接收 JSON 消息
@@ -142,14 +170,24 @@ async def chat_websocket(
                 await websocket.send_json({"error": "Message is required"})
                 continue
 
-            # 调用 WebSocket 适配器并以流式逐帧发送响应
-            async for response in ws_chat_adapter.chat(
-                db=db,
-                message=message,
-                uid=uid,
-                session_id=session_id
-            ):
-                await websocket.send_json(response)
+            # 如果当前已有任务在运行，新消息仅需保存到数据库
+            # 正在运行的 ChatDispatcher 循环会通过 _fetch_new_user_messages 感知并追加
+            if active_task and not active_task.done():
+                profile = await profile_crud.get_active(db)
+                await ChatDispatcher._save_message(
+                    db,
+                    session_id,
+                    uid,
+                    MessageRole.USER,
+                    MessageType.TEXT,
+                    message,
+                    profile.id if profile else -1
+                )
+                logger.info(f"Existing active task found for session {session_id}, message saved to DB for dynamic append.")
+            else:
+                # 否则启动新的调度任务
+                active_task = asyncio.create_task(run_chat(message, session_id))
+
     except WebSocketDisconnect:
         # 连接正常关闭
         pass

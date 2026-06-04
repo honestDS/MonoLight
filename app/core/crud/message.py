@@ -45,6 +45,21 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         )
         return result.scalars().all()
 
+    async def get_new_messages_since_id(
+        self, db: AsyncSession, *, session_id: str, uid: str, last_id: int
+    ) -> list[Message]:
+        """
+        获取指定 ID 之后的新消息（通常用于动态追加用户新输入的指令）
+        """
+        result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.id > last_id)
+            .order_by(Message.id.asc())
+        )
+        return result.scalars().all()
+
     async def get_history_paged(self, db: AsyncSession, *, session_id: str,
         uid: str,
         limit: int = 20,

@@ -107,7 +107,6 @@
           <el-input
             v-model="inputMsg" 
             placeholder="输入消息..." 
-            :disabled="loading"
             @keyup.enter="send"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 6 }"
@@ -116,9 +115,8 @@
           />
           <el-button 
             type="primary" 
-            :loading="loading" 
             @click="send" 
-            :disabled="!inputMsg.trim() || loading"
+            :disabled="!inputMsg.trim()"
           >
             发送
           </el-button>

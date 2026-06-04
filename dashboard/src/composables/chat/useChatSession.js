@@ -56,7 +56,7 @@ export function useChatSession() {
    * HTTP 方式发送消息
    */
   const httpSend = async () => {
-    if (!chatState.inputMsg.value.trim() || chatState.loading.value) return
+    if (!chatState.inputMsg.value.trim()) return
     
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
@@ -107,7 +107,7 @@ export function useChatSession() {
    * WebSocket 方式发送消息
    */
   const wsSend = async () => {
-    if (!chatState.inputMsg.value.trim() || chatState.loading.value) return
+    if (!chatState.inputMsg.value.trim()) return
     
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()

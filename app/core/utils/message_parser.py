@@ -42,6 +42,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
 
             parsed_history.append(
                 InternalMessage(
+                    id=msg.id,
                     role=role,
                     content=content,
                     tool_calls=tool_calls,

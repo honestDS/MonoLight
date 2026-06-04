@@ -36,6 +36,7 @@ class InternalToolCall(BaseModel):
 
 
 class InternalMessage(BaseModel):
+    id: int | None = None
     role: MessageRole
     content: str | None = None
     tool_calls: list[InternalToolCall] | None = None
