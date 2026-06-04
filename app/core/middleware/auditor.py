@@ -101,7 +101,9 @@ class AuditMiddleware:
         if not provider:
             return None
 
-        logger.debug(f"Executing security audit for command: {command[:50]}...")
+        logger.bind(session_id=getattr(profile, "id", "unknown")).debug(
+            f"Executing security audit for command: {command[:50]}..."
+        )
         audit_res = await audit_command(
             command, provider.base_url, provider.api_key, cfg.security.audit_model_id
         )

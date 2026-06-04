@@ -55,9 +55,8 @@ class ContextManager:
 
         # 3. 压缩日志记录
         if log_data["is_hard_truncated"]:
-            logger.info(
-                f"Context compressed for session {session_id}. "
-                f"Tokens: {log_data['before']} -> {log_data['after']}"
+            logger.bind(uid=uid, session_id=session_id).info(
+                f"Context compressed. Tokens: {log_data['before']} -> {log_data['after']}"
             )
 
         final_msgs.append(
@@ -155,13 +154,13 @@ class ContextManager:
                         consumed_msg_ids.add(id(mt))
                     i += 1
                 else:
-                    # 如果工具链不完整，为了防止 LLM 报错，必须舍弃掉这个 Assistant 调用
-                    logger.warning(f"Broken tool chain in {session_id}. Required: {required_ids}")
+                    # 如果工具链不完整，为了防止 LLM 报错，必须舍弃掉 this Assistant 调用
+                    logger.bind(session_id=session_id).warning(f"Broken tool chain. Required: {required_ids}")
                     # 此时不添加该 assistant 消息，继续处理下一条
                     i += 1
             elif msg.role == MessageRole.TOOL:
                 # 孤立的工具结果（没有对应的 Assistant 调用），直接舍弃以保持协议合规
-                logger.warning(f"Orphan tool result in {session_id}. ID: {msg.tool_call_id}")
+                logger.bind(session_id=session_id).warning(f"Orphan tool result. ID: {msg.tool_call_id}")
                 i += 1
             else:
                 # 普通消息直接添加

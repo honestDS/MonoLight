@@ -49,6 +49,7 @@ from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -63,10 +64,8 @@ from app.models.provider import ModelUsage
 from app.providers.llm.client import (
     LLMClient,
 )
-from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
-LogManager.setup()
 logger = get_logger(__name__)
 
 
@@ -103,7 +102,9 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
+            logger.bind(uid=uid, session_id=session_id).info(
+                f"[{username}] (Session: {session_id}) User Message: {message}"
+            )
             await ChatDispatcher._save_message(
                 db,
                 session_id,
@@ -171,7 +172,7 @@ class ChatDispatcher:
                 )
                 if new_user_msgs:
                     for nm in new_user_msgs:
-                        logger.info(
+                        logger.bind(uid=uid, session_id=session_id).info(
                             f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
                         )
                         messages.append(nm)
@@ -288,7 +289,7 @@ class ChatDispatcher:
                     tool_calls=final_tool_calls if final_tool_calls else None,
                 )
 
-                logger.info(
+                logger.bind(uid=uid, session_id=session_id).info(
                     f"[{username}] (Session: {session_id}) Turn {current_turn} | "
                     f"LLM Response: {ai_msg.content or '[Tool Call]'}"
                 )
@@ -485,7 +486,9 @@ class ChatDispatcher:
         tool_name = tool_call.name
         args = tool_call.arguments
 
-        LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id)
+        LogManager.log_tool_call(
+            turn, tool_name, json.dumps(args, ensure_ascii=False), session_id, uid
+        )
 
         cmd_result = await ChatDispatcher._audit_tool_call(
             db,
@@ -510,7 +513,7 @@ class ChatDispatcher:
                     ensure_ascii=False,
                 )
 
-        LogManager.log_tool_result(turn, cmd_result, session_id)
+        LogManager.log_tool_result(turn, cmd_result, session_id, uid)
 
         return InternalMessage(
             role=MessageRole.TOOL,
@@ -530,7 +533,9 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.info(f"[{username}] (Session: {session_id}) User Message: {message}")
+            logger.bind(uid=uid, session_id=session_id).info(
+                f"[{username}] (Session: {session_id}) User Message: {message}"
+            )
             await ChatDispatcher._save_message(
                 db,
                 session_id,
@@ -600,7 +605,7 @@ class ChatDispatcher:
                 )
                 if new_user_msgs:
                     for nm in new_user_msgs:
-                        logger.info(
+                        logger.bind(uid=uid, session_id=session_id).info(
                             f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
                         )
                         messages.append(nm)
@@ -648,7 +653,7 @@ class ChatDispatcher:
                 )
 
                 ai_msg = response.message
-                logger.info(
+                logger.bind(uid=uid, session_id=session_id).info(
                     f"[{username}] (Session: {session_id}) Turn {current_turn} | "
                     f"LLM Response: {ai_msg.content or '[Tool Call]'}"
                 )

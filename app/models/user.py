@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import (
     TYPE_CHECKING,
 )
@@ -37,11 +37,12 @@ class User(UserBase, table=True):
     hashed_password: str | None = Field(default=None, max_length=255)
 
     created_at: datetime | None = Field(
-        default=None,
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True)),
     )
     updated_at: datetime | None = Field(
-        default=None, sa_column=Column(DateTime(timezone=True), onupdate=func.now())
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), onupdate=func.now()),
     )
 
     prompts: list["PromptLibrary"] = Relationship(back_populates="user")

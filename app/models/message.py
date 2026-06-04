@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import (
     Any,
@@ -67,7 +67,8 @@ class Message(MessageBase, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field(foreign_key="profile.id")
     created_at: datetime = Field(
-        default_factory=datetime.now, sa_column=Column(DateTime)
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True)),
     )
 
 

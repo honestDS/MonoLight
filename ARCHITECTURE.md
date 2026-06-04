@@ -68,6 +68,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
   - app/core/crud/user.py: 用户账户 CRUD。
   - app/core/crud/profile.py: 模型配置 CRUD。
   - app/core/crud/message.py: 历史消息与会话管理。
+  - app/core/crud/log.py: 系统与审计日志持久化（计划中）。
 
 ### 2.10 前端展现层 (Presentation Layer)
 - dashboard/: 基于 Vue 3 + Element Plus 的管理控制台。提供模型配置可视化、对话测试及系统监控。

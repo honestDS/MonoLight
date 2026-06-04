@@ -1,6 +1,9 @@
+import asyncio
+import json
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -13,6 +16,69 @@ class LogManager:
     def setup(cls, log_path: str = "data/logs/monolight.log", level: str = "INFO"):
         if cls._configured:
             return
+
+        # 设置时区补丁（默认北京时间 +8）
+        tz_offset = int(os.getenv("LOG_TZ_OFFSET", "8"))
+        tz = timezone(timedelta(hours=tz_offset))
+
+        def patch_record(record):
+            record["time"] = record["time"].astimezone(tz)
+
+        logger.configure(patcher=patch_record)
+
+        # 异步数据库写入器
+        async def db_sink(message):
+            try:
+                from app.core.crud.log import system_log_crud
+                from app.models.system_log import SystemLogCreate
+                from app.providers.database import AsyncSessionLocal
+
+                record = message.record
+                # 提取 extra 中的关键字段
+                uid = record["extra"].get("uid")
+                session_id = record["extra"].get("session_id")
+
+                # 序列化 extra
+                extra_data = {k: v for k, v in record["extra"].items() if k not in ["uid", "session_id"]}
+                extra_json = json.dumps(extra_data) if extra_data else None
+
+                log_entry = SystemLogCreate(
+                    level=record["level"].name,
+                    module=record["name"],
+                    message=record["message"],
+                    uid=uid,
+                    session_id=session_id,
+                    extra=extra_json,
+                    created_at=record["time"] # record["time"] 已经是 patch 过的带时区 datetime
+                )
+
+                async with AsyncSessionLocal() as db:
+                    await system_log_crud.create(db, obj_in=log_entry)
+                    await db.commit()
+            except Exception as e:
+                # 避免循环日志
+                sys.stderr.write(f"Error in DB log sink: {str(e)}\n")
+
+        # 封装异步函数供 loguru 使用
+        def sink_wrapper(message):
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    loop.create_task(db_sink(message))
+                else:
+                    # 如果没有运行中的 loop，尝试使用新 loop 运行
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        new_loop.run_until_complete(db_sink(message))
+                    finally:
+                        new_loop.close()
+            except Exception as e:
+                sys.stderr.write(f"Critical error in log sink wrapper: {str(e)}\n")
 
         # 确保工作目录
         os.getcwd()
@@ -63,6 +129,13 @@ class LogManager:
             format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] {message}",
         )
 
+        # 添加数据库 Sink (仅记录 INFO 及以上级别)
+        logger.add(
+            sink_wrapper,
+            level="INFO",
+            enqueue=True, # 确保线程安全
+        )
+
         # 拦截标准 logging
         class InterceptHandler(logging.Handler):
             def emit(self, record):
@@ -85,22 +158,27 @@ class LogManager:
         logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
         cls._configured = True
-        logger.info(f"Log system initialized. Path: {abs_log_path}")
-
-    @staticmethod
-    def log_tool_call(turn: int, tool_name: str, command: str, session_id: str = "default"):
-        # 记录工具调用日志
-        lines = [line.strip() for line in command.splitlines() if line.strip()]
-        log_cmd = lines if len(lines) > 1 else command.strip()
-        logger.bind(tool_call=True).info(
-            f"Session: {session_id} | Turn {turn} | Tool: {tool_name} | Args: {log_cmd}"
+        # 记录启动时的时区信息，方便排查
+        now_aware = datetime.now().astimezone(tz)
+        logger.info(
+            f"Log system initialized. Path: {abs_log_path} | "
+            f"Timezone: {tz} | Time: {now_aware.isoformat()}"
         )
 
     @staticmethod
-    def log_tool_result(turn: int, result: str, session_id: str = "default"):
+    def log_tool_call(turn: int, tool_name: str, command: str, session_id: str = "default", uid: str = None):
+        # 记录工具调用日志
+        lines = [line.strip() for line in command.splitlines() if line.strip()]
+        log_cmd = lines if len(lines) > 1 else command.strip()
+        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(
+            f"Turn {turn} | Tool: {tool_name} | Args: {log_cmd}"
+        )
+
+    @staticmethod
+    def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
-        logger.bind(tool_result=True).info(
-            f"Session: {session_id} | Turn {turn} | Result: {result}"
+        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(
+            f"Turn {turn} | Result: {result}"
         )
 
 

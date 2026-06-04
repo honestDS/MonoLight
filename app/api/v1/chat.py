@@ -14,7 +14,6 @@ from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.log import (
-    LogManager,
     get_logger,
 )
 from app.core.security import get_current_user
@@ -27,7 +26,6 @@ from app.models.message import (
 from app.providers.database import get_db
 from app.schemas.response import StandardResponse
 
-LogManager.setup()
 logger = get_logger(__name__)
 
 
@@ -183,7 +181,9 @@ async def chat_websocket(
                     message,
                     profile.id if profile else -1
                 )
-                logger.info(f"Existing active task found for session {session_id}, message saved to DB for dynamic append.")
+                logger.bind(uid=uid, session_id=session_id).info(
+                    f"Existing active task found for session {session_id}, message saved to DB for dynamic append."
+                )
             else:
                 # 否则启动新的调度任务
                 active_task = asyncio.create_task(run_chat(message, session_id))

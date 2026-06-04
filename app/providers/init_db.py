@@ -7,11 +7,12 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 
+# 强制导入所有模型以注册 Metadata
+import app.models  # noqa
+
 # CRUD Imports
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
-
-# 强制导入所有模型以注册 Metadata
 from app.models.profile import (
     ProfileConfig,
 )

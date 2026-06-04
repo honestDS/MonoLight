@@ -17,14 +17,21 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
 from app.api.v1.providers import router as provider_router
+from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core import constants
 from app.core.exceptions import (
     BaseBusinessException,
     LLMException,
 )
+from app.core.log import LogManager
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
+
+LogManager.setup(
+    log_path=os.getenv("LOG_FILE_PATH", "data/logs/monolight.log"),
+    level=os.getenv("LOG_LEVEL", "INFO"),
+)
 
 
 @asynccontextmanager
@@ -139,6 +146,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(user_router, prefix="/api/v1/admin")
 app.include_router(provider_router, prefix="/api/v1")
+app.include_router(system_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(prompt_router, prefix="/api/v1")
