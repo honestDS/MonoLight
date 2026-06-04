@@ -19,39 +19,58 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 
 ### 2.2 逻辑调度层 (Control Layer)
 - app/core/dispatcher: 核心调度器。负责 Agent 状态管理、工具调用链编排及安全审计决策。
-- app/core/context: 上下文管理器。负责 Token 预估、窗口截断及工具调用状态的序列化与还原。
+- app/core/context: 上下文管理器。负责窗口截断及工具调用状态的序列化与还原。
 - app/core/log: 全局日志系统。支持按照 UID 或会话 ID 进行分级日志记录。
 - app/core/security: 安全防护层。执行 UID 级联数据隔离校验。
 - app/core/middleware/auditor.py: 安全审计逻辑。负责评估代码及指令的潜在风险分值与原因。
 - app/core/exceptions: 异常体系。封装 StandardResponse 友好的业务异常基类。
-- app/core/utils: 工程工具集。核心功能包含 config.py 中的配置泵（Standardization Pump）。
-- app/adapters：外部资源适配层。作为系统与异构外部服务通信的桥梁，负责抹平官方 SDK 或私有客户端协议之间的接口差异，实现外部依赖的透明化接入与标准契约对齐。
+- app/core/utils/config.py: 配置中心。实现配置泵（Standardization Pump）机制。
+- app/core/utils/tokenizer.py: Token 计算工具。基于加权算法进行 Token 预估。
+- app/core/utils/message_parser.py: 消息解析工具。
+- app/adapters: 通信适配层。抹平不同通信协议（如 Web HTTP, WebSocket）与内部调度器之间的差异。
+  - app/adapters/chat_web.py: 常规 HTTP 对话适配。
+  - app/adapters/chat_ws.py: WebSocket 流式对话适配。
 
-### 2.3 协议转换层 (Transformer Layer)
+### 2.3 向量化服务层 (Embedding Layer)
+提供统一的文本向量化能力，支持 RAG 及语义搜索。
+- app/embedding/client.py: 向量化统一客户端。
+- app/embedding/transformers/: 向量化协议转换。支持 OpenAI 远程接口与 Local 本地模型。
+
+### 2.4 协议转换层 (Transformer Layer)
 - app/transformers/base.py: 协议转换抽象基类。定义厂商无关的统一生成接口与编解码契约。
 - app/transformers/openai.py: OpenAI 协议适配实现。负责将 Internal 系列消息模型与 OpenAI 协议进行双向映射。
 
-### 2.4 数据驱动层 (Provider Layer)
+### 2.5 数据驱动层 (Provider Layer)
 - app/providers/llm/client.py: 厂商中立调用客户端。持有 Transformer 注册表，负责根据 Profile 配置动态路由至具体的协议适配器，并执行最终的 InternalResponse 封装。
 - app/providers/database.py: 异步数据库引擎。负责 SQLAlchemy 异步 Engine 的初始化、Session 工厂管理以及基于环境（如 Pytest）的动态数据库连接路由。
 - app/providers/init_db.py: 系统初始化引导。负责物理数据库表的创建（Migration）以及默认 Profile、Prompt 模板的种子数据植入（Seeding）。
 
-### 2.5 领域模型与验证层 (Domain & Schema Layer)
-- app/models/: 基于 SQLModel 的物理实体定义。负责映射数据库表结构、定义字段约束（如 Unique, Index）以及声明实体间的关联关系（Relationship）。
-- app/models/message.py: 系统核心领域模型。定义了跨层通信的 InternalMessage 与 InternalResponse 交换标准。
-- app/schemas/: 基于 Pydantic 的逻辑验证契约。负责 API 输入输出的数据校验、敏感字段过滤（如密码隐藏）及业务配置档（ProfileConfig）的嵌套结构验证。
+### 2.6 领域模型与验证层 (Domain & Schema Layer)
+- app/models/: 基于 SQLModel 的物理实体定义。
+  - app/models/user.py: 用户实体。
+  - app/models/profile.py: 配置档实体。
+  - app/models/prompt.py: 提示词实体。
+  - app/models/provider.py: 供应商实体。
+  - app/models/message.py: 消息与会话实体。定义了 InternalMessage 交换标准。
+- app/schemas/: 基于 Pydantic 的逻辑验证契约。负责 API 输入输出的数据校验、敏感字段过滤及业务配置档（ProfileConfig）的嵌套结构验证。
 - app/schemas/response.py: 统一响应契约。定义了 StandardResponse 标准结构，确保所有 API 输出符合前端预期的分级反馈格式。
 - app/schemas/auth.py: 身份验证契约。专门负责 JWT 签发、令牌解析以及登录请求的数据验证。
 
-### 2.6 资源执行层 (Execution Layer)
+### 2.7 资源执行层 (Execution Layer)
 - app/core/tools/shell.py: Shell 指令原子执行器。负责受控环境下的子进程调用与执行超时控制。
 
-### 2.7 全局配置与常量 (Constants Layer)
-- app/core/constants.py: 统一的消息资产库。定义了系统中所有面向用户的异常消息。
+### 2.8 全局配置与常量 (Constants Layer)
+- app/core/constants.py: 统一的消息资产库。
 - app/core/prompts.py: 系统级提示词模板中心。
 
-### 2.8 核心 CRUD 层
-- app/core/crud: 该层作为业务逻辑与数据持久化之间的缓冲，负责屏蔽复杂的数据库查询细节。
+### 2.9 核心 CRUD 层
+- app/core/crud: 业务逻辑与数据持久化之间的缓冲。
+  - app/core/crud/user.py: 用户账户 CRUD。
+  - app/core/crud/profile.py: 模型配置 CRUD。
+  - app/core/crud/message.py: 历史消息与会话管理。
+
+### 2.10 前端展现层 (Presentation Layer)
+- dashboard/: 基于 Vue 3 + Element Plus 的管理控制台。提供模型配置可视化、对话测试及系统监控。
 
 ## 3. 标准通信规程
 - 通信协议：内部组件通信强制使用 InternalMessage 对象，严禁透传原始字典。
