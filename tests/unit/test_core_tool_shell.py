@@ -83,3 +83,33 @@ async def test_shell_execute_timeout(executor, monkeypatch):
     result = json.loads(result_json)
     assert "Command timed out" in result["error"]
     mock_process.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_shell_execute_python_c(executor):
+    import platform
+    expected_system_info = f"{platform.system()} {platform.release()}"
+
+    # 测试原有黑名单
+    result_json = await executor.execute("python -c 'print(1)'")
+    result = json.loads(result_json)
+    assert result["stdout"] == "不允许使用shell工具执行该命令"
+    assert result["exit_code"] == 1
+    assert result["system_info"] == expected_system_info
+
+    # 测试忽略大小写
+    result_json = await executor.execute("PYTHON -C 'print(1)'")
+    result = json.loads(result_json)
+    assert result["stdout"] == "不允许使用shell工具执行该命令"
+
+    # 测试新增黑名单 powershell (忽略大小写)
+    result_json = await executor.execute("PowerShell -Command 'ls'")
+    result = json.loads(result_json)
+    assert result["stdout"] == "不允许使用shell工具执行该命令"
+
+    # 包含 confirmation prefix 的情况
+    result_json = await executor.execute("__confirm__ python3 -c 'print(1)'")
+    result = json.loads(result_json)
+    assert result["stdout"] == "不允许使用shell工具执行该命令"
+    assert result["exit_code"] == 1
+    assert result["system_info"] == expected_system_info

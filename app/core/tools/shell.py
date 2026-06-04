@@ -15,6 +15,11 @@ from .base import BaseExecutor
 
 class ShellExecutor(BaseExecutor):
     logger = get_logger(__name__)
+    COMMAND_BLACKLIST = [
+        "python -c",
+        "python3 -c",
+        "powershell",
+        ]
 
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
@@ -41,6 +46,20 @@ class ShellExecutor(BaseExecutor):
         # Handle confirmation prefix internally
         if command.startswith(CONFIRMATION_PREFIX):
             command = command.split(" ", 1)[-1]
+
+        for blacklisted in self.COMMAND_BLACKLIST:
+            if blacklisted.lower() in command.lower():
+                import platform
+                system_info = f"{platform.system()} {platform.release()}"
+                return json.dumps(
+                    {
+                        "stdout": f"不允许使用shell工具执行该命令: {blacklisted}",
+                        "stderr": "",
+                        "exit_code": 1,
+                        "system_info": system_info,
+                    },
+                    ensure_ascii=False,
+                )
 
         t_logger = self.logger.bind(tool_call=True)
         # 获取当前循环类型进行诊断
