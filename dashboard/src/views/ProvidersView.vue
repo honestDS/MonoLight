@@ -3,10 +3,14 @@
     <BaseDataTable
       :data="providers"
       :loading="loading"
-      :data-length="providers.length"
+      :total="total"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
       create-text="添加提供商"
       @create="openCreateDialog"
-      @refresh="handleRefresh">
+      @refresh="handleRefresh"
+      @page-change="fetchProviders"
+      @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" label="名称" min-width="120" sortable></el-table-column>
       <el-table-column :resizable="false" prop="provider_type" label="类型" min-width="120" sortable></el-table-column>
@@ -74,6 +78,9 @@ const providers = ref([])
 const providerTypes = ref([])
 const modelUsages = ref([])
 const loading = ref(false)
+const total = ref(0)
+const currentPage = ref(1)
+const pageSize = ref(10)
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const isEdit = ref(false)
@@ -94,8 +101,12 @@ const form = reactive(defaultProviderForm())
 const fetchProviders = async () => {
   loading.value = true
   try {
-    const res = await providerApi.list()
-    providers.value = res.data.data || []
+    const res = await providerApi.list({
+      page: currentPage.value,
+      size: pageSize.value
+    })
+    providers.value = res.data.data.items || []
+    total.value = res.data.data.total || 0
   } catch (err) {
     ElMessage.error(err.message || '获取列表失败')
   } finally {
@@ -120,6 +131,12 @@ const fetchProviderTypes = async () => {
 
 // 刷新列表
 const handleRefresh = () => {
+  currentPage.value = 1
+  fetchProviders()
+}
+
+const handleSizeChange = () => {
+  currentPage.value = 1
   fetchProviders()
 }
 

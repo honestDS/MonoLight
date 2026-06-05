@@ -28,9 +28,13 @@
     <BaseDataTable
       :data="logs"
       :loading="loading"
-      :data-length="logs.length"
+      :total="total"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
       refresh-text="刷新"
-      @refresh="handleRefresh">
+      @refresh="handleRefresh"
+      @page-change="loadLogs"
+      @size-change="handleSizeChange">
       
       <el-table-column :resizable="false" prop="created_at" label="时间" width="200" sortable>
         <template #default="scope">
@@ -96,25 +100,16 @@ const loadLogs = async () => {
   loading.value = true
   try {
     const params = {
-      skip: (currentPage.value - 1) * pageSize.value,
-      limit: pageSize.value,
+      page: currentPage.value,
+      size: pageSize.value,
     }
     if (filters.level) params.level = filters.level
     if (filters.uid) params.uid = filters.uid
     if (filters.sessionId) params.session_id = filters.sessionId
 
     const res = await systemApi.logsHistory(params)
-    logs.value = res.data.data || []
-    
-    // 修复分页逻辑：后端只返回当前页数据，我们需要维护一个相对准确的 total
-    // 如果返回的数据少于 pageSize，说明到了最后一页
-    if (logs.value.length < pageSize.value) {
-      total.value = (currentPage.value - 1) * pageSize.value + logs.value.length
-    } else {
-      // 否则至少还有下一页，估算一个较大的值让分页器可以点击下一页
-      // 这里采用一种常见策略：如果当前页正好满额，假设还有更多
-      total.value = currentPage.value * pageSize.value + pageSize.value + 1 
-    }
+    logs.value = res.data.data.items || []
+    total.value = res.data.data.total || 0
   } catch (err) {
     ElMessage.error(err.message || '获取日志失败')
   } finally {
@@ -140,14 +135,8 @@ const resetFilters = () => {
   loadLogs()
 }
 
-const handleSizeChange = (val) => {
-  pageSize.value = val
+const handleSizeChange = () => {
   currentPage.value = 1
-  loadLogs()
-}
-
-const handleCurrentChange = (val) => {
-  currentPage.value = val
   loadLogs()
 }
 

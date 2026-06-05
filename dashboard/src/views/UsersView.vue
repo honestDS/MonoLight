@@ -3,10 +3,14 @@
     <BaseDataTable
       :data="users"
       :loading="loading"
-      :data-length="users.length"
+      :total="total"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
       create-text="新建用户"
       @create="showDialog('create')"
-      @refresh="handleRefresh">
+      @refresh="handleRefresh"
+      @page-change="loadUsers"
+      @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="username" label="用户名" min-width="120" sortable></el-table-column>
       <el-table-column :resizable="false" label="角色" min-width="100" sortable>
@@ -67,6 +71,9 @@ import { defaultUserForm } from '../constants'
 
 const users = ref([])
 const loading = ref(false)
+const total = ref(0)
+const currentPage = ref(1)
+const pageSize = ref(10)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
@@ -77,8 +84,12 @@ const form = reactive(defaultUserForm())
 const loadUsers = async () => {
   loading.value = true
   try {
-    const res = await adminApi.userList()
-    users.value = res.data.data || []
+    const res = await adminApi.userList({
+      page: currentPage.value,
+      size: pageSize.value
+    })
+    users.value = res.data.data.items || []
+    total.value = res.data.data.total || 0
   } catch (err) {
     ElMessage.error(err.message || '加载列表失败')
   } finally {
@@ -90,6 +101,12 @@ const loadUsers = async () => {
 const { handleDelete } = useDeleteConfirm(adminApi.userDelete, loadUsers)
 
 const handleRefresh = () => {
+  currentPage.value = 1
+  loadUsers()
+}
+
+const handleSizeChange = () => {
+  currentPage.value = 1
   loadUsers()
 }
 

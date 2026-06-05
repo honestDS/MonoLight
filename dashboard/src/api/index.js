@@ -39,7 +39,7 @@ request.interceptors.response.use(
 );
 
 export const adminApi = {
-  userList: () => request.get('/admin/user/list'),
+  userList: (params) => request.get('/admin/user/list', { params }),
   userAdd: (data) => request.post('/admin/user/add', data),
   userUpdate: (data) => request.post('/admin/user/update', data),
   userDelete: (uid) => request.post(`/admin/user/delete?uid=${uid}`)
@@ -69,7 +69,7 @@ export const chatApi = {
 }
 
 export const profileApi = {
-  list: () => request.get('/profiles/list'),
+  list: (params) => request.get('/profiles/list', { params }),
   create: (data) => request.post('/profiles/create', data),
   activate: (id) => request.post(`/profiles/activate?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),
@@ -78,14 +78,14 @@ export const profileApi = {
 }
 
 export const promptApi = {
-  list: () => request.get('/prompts/list'),
+  list: (params) => request.get('/prompts/list', { params }),
   create: (data) => request.post('/prompts/create', data),
   update: (id, data) => request.post(`/prompts/update?prompt_id=${id}`, data),
   delete: (id) => request.post(`/prompts/delete?prompt_id=${id}`)
 }
 
 export const providerApi = {
-  list: () => request.get('/providers/list'),
+  list: (params) => request.get('/providers/list', { params }),
   types: () => request.get('/providers/types'),
   create: (data) => request.post('/providers/create', data),
   get: (id) => request.get(`/providers/get?provider_id=${id}`),

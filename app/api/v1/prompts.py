@@ -18,7 +18,10 @@ from app.models.prompt import (
     PromptUpdate,
 )
 from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
 
 router = APIRouter(
     prefix="/prompts",
@@ -34,11 +37,22 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
 
 
 @router.get("/list", response_model=StandardResponse)
-async def list_prompts(db: AsyncSession = Depends(get_db)):
-    prompts = await prompt_crud.get_multi(db)
-    return StandardResponse.success(
-        data=[PromptResponse.model_validate(p) for p in prompts]
+async def list_prompts(
+    page: int = 1,
+    size: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    prompts = await prompt_crud.get_multi(db, skip=skip, limit=size)
+    total = await prompt_crud.count(db)
+    
+    page_data = PageData(
+        items=[PromptResponse.model_validate(p) for p in prompts],
+        total=total,
+        page=page,
+        size=size,
     )
+    return StandardResponse.success(data=page_data)
 
 
 @router.post("/create", response_model=StandardResponse)

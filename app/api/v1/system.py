@@ -7,7 +7,10 @@ from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
 from app.models.system_log import SystemLogResponse
 from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
 
 logger = get_logger(__name__)
 
@@ -19,19 +22,28 @@ async def get_system_logs(
     level: str | None = Query(None, description="日志级别"),
     uid: str | None = Query(None, description="用户UID"),
     session_id: str | None = Query(None, description="会话ID"),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
 ):
     """
     分页获取系统日志，支持按级别、用户或会话过滤。
     """
+    skip = (page - 1) * size
     logs = await system_log_crud.get_multi_filtered(
-        db, level=level, uid=uid, session_id=session_id, skip=skip, limit=limit
+        db, level=level, uid=uid, session_id=session_id, skip=skip, limit=size
+    )
+    total = await system_log_crud.count_filtered(
+        db, level=level, uid=uid, session_id=session_id
     )
 
-    data = [SystemLogResponse.model_validate(log) for log in logs]
-    return StandardResponse.success(data=data, message="日志获取成功")
+    page_data = PageData(
+        items=[SystemLogResponse.model_validate(log) for log in logs],
+        total=total,
+        page=page,
+        size=size,
+    )
+    return StandardResponse.success(data=page_data, message="日志获取成功")
 
 
 @router.websocket("/logs/ws")

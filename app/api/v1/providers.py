@@ -20,7 +20,10 @@ from app.models.provider import (
     ProviderUpdate,
 )
 from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
 
 router = APIRouter(
     prefix="/providers", tags=["Providers"], dependencies=[Depends(get_current_user)]
@@ -60,11 +63,22 @@ async def get_provider_types():
     )
 
 @router.get("/list", response_model=StandardResponse)
-async def list_providers(db: AsyncSession = Depends(get_db)):
-    providers = await provider_crud.get_multi(db)
-    return StandardResponse.success(
-        data=[ProviderResponse.model_validate(item) for item in providers]
+async def list_providers(
+    page: int = 1,
+    size: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    providers = await provider_crud.get_multi(db, skip=skip, limit=size)
+    total = await provider_crud.count(db)
+    
+    page_data = PageData(
+        items=[ProviderResponse.model_validate(item) for item in providers],
+        total=total,
+        page=page,
+        size=size,
     )
+    return StandardResponse.success(data=page_data)
 
 
 @router.get("/get", response_model=StandardResponse)

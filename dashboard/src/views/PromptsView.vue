@@ -3,10 +3,14 @@
     <BaseDataTable
       :data="prompts"
       :loading="loading"
-      :data-length="prompts.length"
+      :total="total"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
       create-text="新建提示词"
       @create="showDialog('create')"
-      @refresh="handleRefresh">
+      @refresh="handleRefresh"
+      @page-change="loadPrompts"
+      @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" label="名称" min-width="150" sortable></el-table-column>
       <el-table-column :resizable="false" label="内容预览" min-width="300">
@@ -51,6 +55,9 @@ import { getShortContent } from '../utils'
 
 const prompts = ref([])
 const loading = ref(false)
+const total = ref(0)
+const currentPage = ref(1)
+const pageSize = ref(10)
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
@@ -65,8 +72,12 @@ const form = reactive({
 const loadPrompts = async () => {
   loading.value = true
   try {
-    const res = await promptApi.list()
-    prompts.value = res.data.data || []
+    const res = await promptApi.list({
+      page: currentPage.value,
+      size: pageSize.value
+    })
+    prompts.value = res.data.data.items || []
+    total.value = res.data.data.total || 0
   } catch (err) {
     ElMessage.error(err.message || '加载列表失败')
   } finally {
@@ -78,6 +89,12 @@ const loadPrompts = async () => {
 const { handleDelete } = useDeleteConfirm(promptApi.delete, loadPrompts)
 
 const handleRefresh = () => {
+  currentPage.value = 1
+  loadPrompts()
+}
+
+const handleSizeChange = () => {
+  currentPage.value = 1
   loadPrompts()
 }
 

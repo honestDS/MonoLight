@@ -21,21 +21,29 @@
     </div>
 
     <!-- 表格底部信息 -->
-    <div v-if="showFooter || $slots.pagination" class="table-footer">
-      <div v-if="showFooter" class="pagination-info">
+    <div v-if="showFooter" class="table-footer">
+      <div class="pagination-info">
         <slot name="info">
-          <span>显示 1-{{ Math.min(dataLength, pageSize) }} 条，共 {{ dataLength }} 条</span>
+          <span>共 {{ total }} 条</span>
         </slot>
       </div>
-      <div v-if="$slots.pagination" class="pagination-wrapper">
-        <slot name="pagination"></slot>
+      <div class="pagination-wrapper">
+        <el-pagination
+          :current-page="currentPage"
+          :page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          :total="total"
+          @size-change="handleSizeChange"
+          @current-change="handleCurrentChange"
+        />
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-defineProps({
+const props = defineProps({
   data: {
     type: Array,
     default: () => []
@@ -60,17 +68,31 @@ defineProps({
     type: Boolean,
     default: true
   },
-  dataLength: {
+  total: {
     type: Number,
     default: 0
   },
   pageSize: {
     type: Number,
     default: 10
+  },
+  currentPage: {
+    type: Number,
+    default: 1
   }
 })
 
-defineEmits(['create', 'refresh'])
+const emit = defineEmits(['create', 'refresh', 'page-change', 'size-change', 'update:currentPage', 'update:pageSize'])
+
+const handleSizeChange = (val) => {
+  emit('update:pageSize', val)
+  emit('size-change', val)
+}
+
+const handleCurrentChange = (val) => {
+  emit('update:currentPage', val)
+  emit('page-change', val)
+}
 </script>
 
 <style lang="scss" scoped>

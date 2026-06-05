@@ -23,7 +23,10 @@ from app.models.user import (
     UserUpdate,
 )
 from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
 
 router = APIRouter(
     prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)]
@@ -68,11 +71,23 @@ async def add_new_user(
 
 @router.get("/list")
 async def list_all_users(
-    db: AsyncSession = Depends(get_db), admin: dict = Depends(check_admin_privilege)
+    page: int = 1,
+    size: int = 10,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
 ):
-    users = await user_crud.get_multi(db)
+    skip = (page - 1) * size
+    users = await user_crud.get_multi(db, skip=skip, limit=size)
+    total = await user_crud.count(db)
+    
+    page_data = PageData(
+        items=[UserResponse.model_validate(u) for u in users],
+        total=total,
+        page=page,
+        size=size,
+    )
     return StandardResponse.success(
-        data=[UserResponse.model_validate(u) for u in users],
+        data=page_data,
         message=constants.MSG_USER_LIST_SUCCESS,
     )
 

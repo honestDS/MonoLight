@@ -25,8 +25,16 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
     async def get_multi(
         self, db: AsyncSession, *, skip: int = 0, limit: int = 100
     ) -> list[ModelType]:
-        result = await db.execute(select(self.model).offset(skip).limit(limit))
+        result = await db.execute(
+            select(self.model).order_by(self.model.id.desc()).offset(skip).limit(limit)
+        )
         return result.scalars().all()
+
+    async def count(self, db: AsyncSession) -> int:
+        from sqlalchemy import func
+
+        result = await db.execute(select(func.count()).select_from(self.model))
+        return result.scalar()
 
     async def create(
         self,

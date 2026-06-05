@@ -3,10 +3,14 @@
     <BaseDataTable
       :data="profiles"
       :loading="loading"
-      :data-length="profiles.length"
+      :total="total"
+      v-model:current-page="currentPage"
+      v-model:page-size="pageSize"
       create-text="新建配置"
       @create="showDialog('create')"
-      @refresh="handleRefresh">
+      @refresh="handleRefresh"
+      @page-change="loadProfiles"
+      @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" label="配置名称" min-width="120" sortable></el-table-column>
       <el-table-column :resizable="false" prop="provider_name" label="提供商" min-width="120" sortable></el-table-column>
@@ -161,6 +165,9 @@ const profiles = ref([])
 const providers = ref([])
 const prompts = ref([])
 const loading = ref(false)
+const total = ref(0)
+const currentPage = ref(1)
+const pageSize = ref(10)
 const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
@@ -178,8 +185,12 @@ const form = reactive({
 const loadProfiles = async () => {
   loading.value = true
   try {
-    const res = await profileApi.list()
-    profiles.value = res.data.data || []
+    const res = await profileApi.list({
+      page: currentPage.value,
+      size: pageSize.value
+    })
+    profiles.value = res.data.data.items || []
+    total.value = res.data.data.total || 0
   } catch (err) {
     ElMessage.error(err.message || '加载列表失败')
   } finally {
@@ -192,8 +203,8 @@ const { handleDelete } = useDeleteConfirm(profileApi.delete, loadProfiles)
 
 const fetchPrompts = async () => {
   try {
-    const res = await promptApi.list()
-    prompts.value = res.data.data
+    const res = await promptApi.list({ page: 1, size: 1000 })
+    prompts.value = res.data.data.items || []
   } catch (err) {
     ElMessage.error(err.message || '加载提示词库失败')
   }
@@ -201,17 +212,23 @@ const fetchPrompts = async () => {
 
 const fetchProviders = async () => {
   try {
-    const res = await providerApi.list()
-    providers.value = res.data.data
+    const res = await providerApi.list({ page: 1, size: 1000 })
+    providers.value = res.data.data.items || []
   } catch (err) {
     ElMessage.error(err.message || '加载提供商失败')
   }
 }
 
 const handleRefresh = () => {
+  currentPage.value = 1
   loadProfiles()
   fetchProviders()
   fetchPrompts()
+}
+
+const handleSizeChange = () => {
+  currentPage.value = 1
+  loadProfiles()
 }
 
 const handleActivate = async (id) => {

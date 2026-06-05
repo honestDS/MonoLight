@@ -22,7 +22,10 @@ from app.models.profile import (
     ProfileUpdate,
 )
 from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
 
 router = APIRouter(
     prefix="/profiles",
@@ -66,16 +69,31 @@ async def create_profile(
     )
 
 
-@router.get("/list", response_model=StandardResponse[list[ProfileResponse]])
-async def list_profiles(db: AsyncSession = Depends(get_db)):
-    profiles = await profile_crud.get_multi(db)
+@router.get("/list", response_model=StandardResponse)
+async def list_profiles(
+    page: int = 1,
+    size: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    profiles = await profile_crud.get_multi(db, skip=skip, limit=size)
+    total = await profile_crud.count(db)
+    
     results = []
     for p in profiles:
         item = ProfileResponse.model_validate(p)
+        # 预加载了 relations 的话可以直接访问
         if hasattr(p, "provider") and p.provider:
             item.provider_name = p.provider.name
         results.append(item)
-    return StandardResponse.success(data=results)
+    
+    page_data = PageData(
+        items=results,
+        total=total,
+        page=page,
+        size=size,
+    )
+    return StandardResponse.success(data=page_data)
 
 
 @router.post("/activate")

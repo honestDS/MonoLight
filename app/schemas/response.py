@@ -21,6 +21,12 @@ class StandardResponse[T](BaseModel):
     def error(cls, code: int = 500, message: str = "错误"):
         return cls(code=code, message=message, data=None)
 
+class PageData[T](BaseModel):
+    items: list[T]
+    total: int
+    page: int
+    size: int
+
 class LLMChoiceMessage(BaseModel):
     role: str
     content: str
