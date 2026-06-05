@@ -141,19 +141,31 @@ async def chat_websocket(
     # 用于追踪当前是否有正在运行的调度任务
     active_task = None
 
-    async def run_chat(msg, sid):
+    async def run_chat(message_text, session_id):
         nonlocal active_task
         try:
             async for response in ws_chat_adapter.chat(
                 db=db,
-                message=msg,
+                message=message_text,
                 uid=uid,
-                session_id=sid
+                session_id=session_id
             ):
                 await websocket.send_json(response)
-        except Exception as e:
-            logger.error(f"WS task error: {e}")
-            await websocket.send_json({"type": "error", "message": str(e)})
+        except RuntimeError as e:
+            # 拦截断开连接后的发送错误
+            if "websocket.send" in str(e) and "websocket.close" in str(e):
+                logger.bind(uid=uid, session_id=session_id).info("用户已断开连接,调度器终止")
+            else:
+                logger.bind(uid=uid, session_id=session_id).error(f"WS task runtime error: {e}")
+        except asyncio.CancelledError:
+            logger.bind(uid=uid, session_id=session_id).info("用户已断开连接,调度器终止")
+            raise
+        except Exception:
+            logger.bind(uid=uid, session_id=session_id).exception("WS task error")
+            try:
+                await websocket.send_json({"type": "error", "message": "Internal server error"})
+            except:
+                pass
         finally:
             active_task = None
 
@@ -169,7 +181,6 @@ async def chat_websocket(
                 continue
 
             # 如果当前已有任务在运行，新消息仅需保存到数据库
-            # 正在运行的 ChatDispatcher 循环会通过 _fetch_new_user_messages 感知并追加
             if active_task and not active_task.done():
                 profile = await profile_crud.get_active(db)
                 await ChatDispatcher._save_message(
@@ -190,9 +201,19 @@ async def chat_websocket(
 
     except WebSocketDisconnect:
         # 连接正常关闭
-        pass
-    except Exception as e:
+        if active_task and not active_task.done():
+            active_task.cancel()
+    except Exception:
         # 异常处理
-        logger.error("chat/ws error:" + str(e))
-        await websocket.send_json({"error": str(e)})
+        logger.bind(uid=uid).exception("chat/ws error")
+        try:
+            await websocket.send_json({"error": "Internal server error"})
+        except:
+            pass
+        if active_task and not active_task.done():
+            active_task.cancel()
         await websocket.close()
+    finally:
+        # 确保任务被取消
+        if active_task and not active_task.done():
+            active_task.cancel()
