@@ -71,7 +71,7 @@ async def list_providers(
     skip = (page - 1) * size
     providers = await provider_crud.get_multi(db, skip=skip, limit=size)
     total = await provider_crud.count(db)
-    
+
     page_data = PageData(
         items=[ProviderResponse.model_validate(item) for item in providers],
         total=total,

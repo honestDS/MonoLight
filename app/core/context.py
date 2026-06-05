@@ -30,6 +30,7 @@ class ContextManager:
         uid: str,
         profile: Profile,
         current_message: str,
+        before_id: int | None = None,
     ) -> list[InternalMessage]:
         """
         获取经过压缩与对齐后的上下文消息列表。
@@ -39,7 +40,7 @@ class ContextManager:
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
         raw_history = await message_crud.get_history(
-            db, session_id=session_id, uid=uid, limit=5000
+            db, session_id=session_id, uid=uid, limit=5000, before_id=before_id
         )
         parsed_history = parse_db_messages_to_internal(raw_history)
 
@@ -59,9 +60,6 @@ class ContextManager:
                 f"Context compressed. Tokens: {log_data['before']} -> {log_data['after']}"
             )
 
-        final_msgs.append(
-            InternalMessage(role=MessageRole.USER, content=current_message)
-        )
         return final_msgs
 
     @classmethod

@@ -45,7 +45,7 @@ async def list_prompts(
     skip = (page - 1) * size
     prompts = await prompt_crud.get_multi(db, skip=skip, limit=size)
     total = await prompt_crud.count(db)
-    
+
     page_data = PageData(
         items=[PromptResponse.model_validate(p) for p in prompts],
         total=total,

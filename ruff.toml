@@ -1,5 +1,5 @@
 target-version = "py313"
-line-length = 120
+line-length = 320
 
 [lint]
 select = ["E", "F", "I", "UP", "W", "Q"]

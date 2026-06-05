@@ -78,7 +78,7 @@ async def list_profiles(
     skip = (page - 1) * size
     profiles = await profile_crud.get_multi(db, skip=skip, limit=size)
     total = await profile_crud.count(db)
-    
+
     results = []
     for p in profiles:
         item = ProfileResponse.model_validate(p)
@@ -86,7 +86,7 @@ async def list_profiles(
         if hasattr(p, "provider") and p.provider:
             item.provider_name = p.provider.name
         results.append(item)
-    
+
     page_data = PageData(
         items=results,
         total=total,

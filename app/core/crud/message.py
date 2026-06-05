@@ -31,18 +31,27 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.scalars().all()
 
     async def get_history(
-        self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 100
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        limit: int = 100,
+        before_id: int | None = None,
     ) -> list[Message]:
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
-        result = await db.execute(
+        stmt = (
             select(Message)
             .where(Message.session_id == session_id)
             .where(Message.uid == uid)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
         )
+        if before_id is not None:
+            stmt = stmt.where(Message.id < before_id)
+
+        stmt = stmt.order_by(Message.created_at.desc()).limit(limit)
+        result = await db.execute(stmt)
         return result.scalars().all()
 
     async def get_new_messages_since_id(

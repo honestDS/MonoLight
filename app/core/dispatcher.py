@@ -20,6 +20,9 @@ from app.core.constants import (
 from app.core.context import (
     ContextManager,
 )
+from app.core.crud.active_session import (
+    active_session_crud,
+)
 from app.core.crud.message import (
     message_crud,
 )
@@ -121,7 +124,7 @@ class ChatDispatcher:
         检索并解析新产生的用户消息
         """
         raw_msgs = await message_crud.get_new_messages_since_id(db, session_id=session_id, uid=uid, last_id=last_id)
-        # 仅追加用户消息，过滤掉系统自动注入或 AI 的响应（因为 AI 响应已经在循环中处理了）
+        # 仅追加用户消息，过滤掉系统自动注入或 AI 的响应
         user_msgs = [m for m in raw_msgs if m.role == MessageRole.USER]
         if not user_msgs:
             return []
@@ -137,8 +140,8 @@ class ChatDispatcher:
         msg_type: MessageType,
         content: Any,
         profile_id: int,
-    ):
-        await message_crud.create(
+    ) -> InternalMessage:
+        db_obj = await message_crud.create(
             db,
             obj_in={
                 "session_id": session_id,
@@ -165,6 +168,12 @@ class ChatDispatcher:
                 ),
                 "profile_id": profile_id,
             },
+        )
+        return InternalMessage(
+            id=db_obj.id,
+            role=role,
+            content=db_obj.content,
+            created_at=db_obj.created_at.timestamp(),
         )
 
     @staticmethod
@@ -245,208 +254,184 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] User Message: {message}"
+                f"[{username}] 用户消息: {message}"
             )
-            await ChatDispatcher._save_message(
+
+            # 1. 初始保存消息
+            initial_msg = await ChatDispatcher._save_message(
                 db,
                 session_id,
                 uid,
                 MessageRole.USER,
                 MessageType.TEXT,
                 message,
-                profile.id if profile.id else -1,
+                profile.id if profile and profile.id else -1,
             )
 
-            if not profile:
-                raise LLMException(message=ERR_PROFILE_NOT_FOUND)
-
-            cfg = ProfileConfig.model_validate(profile.configs)
-
-            if not profile.provider:
-                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-
-            if profile.provider.usage == ModelUsage.EMBEDDING:
-                raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
-
-            messages = await ContextManager.get_messages(
-                db,
-                session_id,
-                uid,
-                profile,
-                message,
-            )
-
-            messages = ChatDispatcher._inject_system_prompt(profile, messages)
-
-            # 初始化最后处理的消息 ID
-            last_processed_id = 0
-            for m in messages:
-                if m.id and m.id > last_processed_id:
-                    last_processed_id = m.id
-
-            tools = ALL_TOOLS_SCHEMAS
+            last_processed_id = initial_msg.id
+            final_ai_content = ""
             turn_messages: list[InternalMessage] = []
+            is_first_iter = True
 
-            (
-                max_turns,
-                current_turn,
-                final_ai_content,
-            ) = (
-                cfg.tool.max_turns,
-                0,
-                "",
-            )
-            if not profile.provider:
-                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+            # 2. 分布式会话状态机
+            while True:
+                await active_session_crud.cleanup_expired_locks(db)
+                lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
-            while current_turn <= max_turns:
-                # 动态追加用户新消息
-                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
-                if new_user_msgs:
-                    for nm in new_user_msgs:
-                        logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] Appending new user message: {nm.content}"
-                        )
-                        messages.append(nm)
-                        if nm.id and nm.id > last_processed_id:
-                            last_processed_id = nm.id
-
-                current_turn += 1
-
-                # 达到最大轮次时注入收官指令并确保协议合规
-                if current_turn == max_turns:
-                    summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
-                    notice_msg = InternalMessage(
-                        role=MessageRole.USER,
-                        content=summary_notice,
+                if not lock_acquired:
+                    logger.bind(uid=uid, session_id=session_id).info(
+                        f"【调度器/非流】会话 {session_id} 已有活跃调度器，当前请求进入队列。"
                     )
-                    messages.append(notice_msg)
-                    # 持久化注入的指令到数据库以保持审计一致性
-                    await ChatDispatcher._save_message(
+                    return LLMResponse(
+                        choices=[
+                            LLMChoice(
+                                message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content="消息已接收，正在处理中..."),
+                                finish_reason="queued",
+                                created_at=time.time(),
+                            )
+                        ],
+                        history=[],
+                    ).model_dump()
+
+                try:
+                    if not profile:
+                        raise LLMException(message=ERR_PROFILE_NOT_FOUND)
+
+                    cfg = ProfileConfig.model_validate(profile.configs)
+
+                    if not profile.provider:
+                        raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+
+                    if profile.provider.usage == ModelUsage.EMBEDDING:
+                        raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+
+                    # 获取上下文
+                    # 第一轮必须锚定在当前消息，确保上下文一致性
+                    # 随后的重入轮次（如果有新消息追加）则加载全部历史以包含上一轮产生的响应
+                    messages = await ContextManager.get_messages(
                         db,
                         session_id,
                         uid,
-                        MessageRole.USER,
-                        MessageType.TEXT,
-                        summary_notice,
-                        profile.id,
+                        profile,
+                        message,
+                        before_id=initial_msg.id if is_first_iter else None,
                     )
+                    if is_first_iter:
+                        messages.append(initial_msg)
+                    messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
-                    current_tools = None
-                else:
-                    current_tools = tools
+                    seen_ids = {m.id for m in messages if m.id is not None}
 
-                response = await LLMClient.generate(
-                    api_key=profile.provider.api_key,
-                    base_url=profile.provider.base_url,
-                    model_id=cfg.provider.model_id,
-                    messages=messages,
-                    temperature=cfg.provider.temperature,
-                    max_tokens=cfg.provider.max_tokens,
-                    tools=current_tools,
-                    protocol=getattr(
-                        profile.provider,
-                        "protocol",
-                        "openai",
-                    ),
-                )
+                    # 重新锚定 last_processed_id 确保不遗漏在此期间通过其他渠道进入的消息
+                    for m in messages:
+                        if m.id and m.id > last_processed_id:
+                            last_processed_id = m.id
 
-                ai_msg = response.message
-                logger.bind(uid=uid, session_id=session_id).info(
-                    f"[{username}] Turn {current_turn} | "
-                    f"LLM Response: {ai_msg.content or '[Tool Call]'}"
-                )
-                # 空消息拦截逻辑
-                if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
-                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-                messages.append(ai_msg)
+                    tools = ALL_TOOLS_SCHEMAS
+                    max_turns = cfg.tool.max_turns
+                    current_turn = 0
 
-                await ChatDispatcher._save_message(
-                    db,
-                    session_id,
-                    uid,
-                    MessageRole.ASSISTANT,
-                    MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
-                    ai_msg,
-                    profile.id,
-                )
-                if ai_msg.tool_calls:
-                    turn_messages.append(ai_msg)
+                    while current_turn <= max_turns:
+                        # 检查新指令
+                        new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                        if new_user_msgs:
+                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】检测到 {len(new_user_msgs)} 条追加消息，重置轮次计数。")
+                            current_turn = 0 # 重置轮次限制
+                            for nm in new_user_msgs:
+                                if nm.id is not None:
+                                    # 无论是否见过，都必须推进 last_processed_id 防止重复拉取
+                                    if nm.id > last_processed_id:
+                                        last_processed_id = nm.id
 
-                if not ai_msg.tool_calls:
-                    final_ai_content = ai_msg.content
-                    break
+                                    if nm.id in seen_ids:
+                                        continue
 
-                if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                    error_msg = json.dumps(
-                        {
-                            "error": "parallel_limit_exceeded",
-                            "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(
-                                requested=len(ai_msg.tool_calls),
-                                limit=cfg.tool.max_parallel_tools,
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
+                                    messages.append(nm)
+                                    seen_ids.add(nm.id)
 
-                    for tool_call in ai_msg.tool_calls:
-                        tool_res = InternalMessage(
-                            role=MessageRole.TOOL,
-                            tool_call_id=tool_call.id,
-                            content=error_msg,
+                        current_turn += 1
+
+                        if current_turn == max_turns:
+                            summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
+                            notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
+                            messages.append(notice_msg)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+                            current_tools = None
+                        else:
+                            current_tools = tools
+
+                        response = await LLMClient.generate(
+                            api_key=profile.provider.api_key,
+                            base_url=profile.provider.base_url,
+                            model_id=cfg.provider.model_id,
+                            messages=messages,
+                            temperature=cfg.provider.temperature,
+                            max_tokens=cfg.provider.max_tokens,
+                            tools=current_tools,
+                            protocol=getattr(profile.provider, "protocol", "openai"),
                         )
-                        messages.append(tool_res)
+
+                        ai_msg = response.message
+                        logger.bind(uid=uid, session_id=session_id).info(
+                            f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}"
+                        )
+
+                        if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+                            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+
+                        messages.append(ai_msg)
+                        turn_messages.append(ai_msg) # 记录到增量历史
+
                         await ChatDispatcher._save_message(
                             db,
                             session_id,
                             uid,
-                            MessageRole.TOOL,
-                            MessageType.TOOL_RESULT,
-                            tool_res,
+                            MessageRole.ASSISTANT,
+                            MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
+                            ai_msg,
                             profile.id,
                         )
-                    continue
 
-                tasks = [
-                    ChatDispatcher._process_single_tool(
-                        tc,
-                        db,
-                        profile,
-                        cfg,
-                        messages,
-                        username,
-                        session_id,
-                        current_turn,
-                        uid,
-                    )
-                    for tc in ai_msg.tool_calls
-                ]
+                        if not ai_msg.tool_calls:
+                            final_ai_content = ai_msg.content
+                            new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                            if not new_user_msgs:
+                                break
+                            continue
 
-                tool_responses = await asyncio.gather(*tasks)
+                        # 并行工具调用处理
+                        if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
+                            error_msg = json.dumps({"error": "parallel_limit_exceeded", "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools)}, ensure_ascii=False)
+                            for tool_call in ai_msg.tool_calls:
+                                tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
+                                messages.append(tool_res)
+                                turn_messages.append(tool_res)
+                                await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            continue
 
-                for tool_res in tool_responses:
-                    messages.append(tool_res)
-                    await ChatDispatcher._save_message(
-                        db,
-                        session_id,
-                        uid,
-                        MessageRole.TOOL,
-                        MessageType.TOOL_RESULT,
-                        tool_res,
-                        profile.id,
-                    )
-                    turn_messages.append(tool_res)
+                        tasks = [ChatDispatcher._process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
+                        tool_responses = await asyncio.gather(*tasks)
+
+                        for tool_res in tool_responses:
+                            messages.append(tool_res)
+                            turn_messages.append(tool_res)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+
+                finally:
+                    await active_session_crud.release_lock(db, session_id)
+                    is_first_iter = False
+
+                # 锁释放后的“捕获检查”：防止在释放锁的瞬间有新消息到达
+                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                if not new_user_msgs:
+                    break
+                # 如果发现新消息，while True 会继续，重新竞争锁并进入下一轮处理
 
             return LLMResponse(
-                choices=[
-                    LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content),
-                        finish_reason=True,
-                        created_at=time.time(),
-                    )
-                ],
+                choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
                 history=[m.model_dump(exclude_none=True) for m in turn_messages],
             ).model_dump()
+
         except BaseBusinessException:
             raise
         except Exception as e:
@@ -466,303 +451,197 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] User Message: {message}"
+                f"[{username}] 用户消息: {message}"
             )
-            await ChatDispatcher._save_message(
+
+            # 1. 初始保存消息
+            initial_msg = await ChatDispatcher._save_message(
                 db,
                 session_id,
                 uid,
                 MessageRole.USER,
                 MessageType.TEXT,
                 message,
-                profile.id if profile.id else -1,
+                profile.id if profile and profile.id else -1,
             )
 
-            if not profile:
-                raise LLMException(message=ERR_PROFILE_NOT_FOUND)
-
-            cfg = ProfileConfig.model_validate(profile.configs)
-
-            if not profile.provider:
-                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-
-            if profile.provider.usage == ModelUsage.EMBEDDING:
-                raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
-
-            messages = await ContextManager.get_messages(
-                db,
-                session_id,
-                uid,
-                profile,
-                message,
-            )
-
-            messages = ChatDispatcher._inject_system_prompt(profile, messages)
-
-            # 初始化最后处理的消息 ID
-            last_processed_id = 0
-            for m in messages:
-                if m.id and m.id > last_processed_id:
-                    last_processed_id = m.id
-
-            tools = ALL_TOOLS_SCHEMAS
+            last_processed_id = initial_msg.id
             turn_messages: list[InternalMessage] = []
+            is_first_iter = True
 
-            (
-                max_turns,
-                current_turn,
-                _final_ai_content,
-            ) = (
-                cfg.tool.max_turns,
-                0,
-                "",
-            )
-            if not profile.provider:
-                raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+            # 2. 分布式会话状态机
+            while True:
+                await active_session_crud.cleanup_expired_locks(db)
+                lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
-            while current_turn <= max_turns:
-                # 动态追加用户新消息
-                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
-                if new_user_msgs:
-                    for nm in new_user_msgs:
-                        logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] Appending new user message: {nm.content}"
-                        )
-                        messages.append(nm)
-                        if nm.id and nm.id > last_processed_id:
-                            last_processed_id = nm.id
-
-                current_turn += 1
-
-                # 达到最大轮次时注入收官指令并确保协议合规
-                if current_turn == max_turns:
-                    summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
-                    notice_msg = InternalMessage(
-                        role=MessageRole.USER,
-                        content=summary_notice,
+                if not lock_acquired:
+                    logger.bind(uid=uid, session_id=session_id).info(
+                        f"会话 {session_id} 已有活跃调度器，当前请求进入队列。"
                     )
-                    messages.append(notice_msg)
-                    # 持久化注入的指令到数据库以保持审计一致性
-                    await ChatDispatcher._save_message(
+                    yield {"type": "content", "content": "消息已接收，正在处理中...", "turn": 0}
+                    yield {"type": "done", "session_id": session_id, "history": []}
+                    return
+
+                try:
+                    if not profile:
+                        raise LLMException(message=ERR_PROFILE_NOT_FOUND)
+
+                    cfg = ProfileConfig.model_validate(profile.configs)
+
+                    if not profile.provider:
+                        raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+
+                    if profile.provider.usage == ModelUsage.EMBEDDING:
+                        raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+
+                    # 获取上下文
+                    messages = await ContextManager.get_messages(
                         db,
                         session_id,
                         uid,
-                        MessageRole.USER,
-                        MessageType.TEXT,
-                        summary_notice,
-                        profile.id,
+                        profile,
+                        message,
+                        before_id=initial_msg.id if is_first_iter else None,
                     )
+                    if is_first_iter:
+                        messages.append(initial_msg)
+                    messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
-                    current_tools = None
-                else:
-                    current_tools = tools
+                    seen_ids = {m.id for m in messages if m.id is not None}
+                    for m in messages:
+                        if m.id and m.id > last_processed_id:
+                            last_processed_id = m.id
 
-                # 用于拼接当前轮次的工具调用和文本
-                current_tool_calls_map = {}  # index -> {id, name, arguments_chunks}
-                current_content_chunks = []
+                    tools = ALL_TOOLS_SCHEMAS
+                    max_turns = cfg.tool.max_turns
+                    current_turn = 0
 
-                async for chunk in LLMClient.generate_stream(
-                    api_key=profile.provider.api_key,
-                    base_url=profile.provider.base_url,
-                    model_id=cfg.provider.model_id,
-                    messages=messages,
-                    temperature=cfg.provider.temperature,
-                    max_tokens=cfg.provider.max_tokens,
-                    tools=current_tools,
-                    protocol=getattr(
-                        profile.provider,
-                        "protocol",
-                        "openai",
-                    ),
-                ):
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
+                    while current_turn <= max_turns:
+                        # 检查新指令
+                        new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                        if new_user_msgs:
+                            current_turn = 0
+                            for nm in new_user_msgs:
+                                if nm.id is not None:
+                                    # 推进 ID
+                                    if nm.id > last_processed_id:
+                                        last_processed_id = nm.id
 
-                    # 1. 处理文本内容增量
-                    content = delta.get("content")
-                    if content:
-                        current_content_chunks.append(content)
-                        yield {
-                            "type": "content",
-                            "content": content,
-                            "turn": current_turn,
-                        }
+                                    if nm.id in seen_ids:
+                                        continue
 
-                    # 2. 处理工具调用增量
-                    tool_calls = delta.get("tool_calls")
-                    if tool_calls:
-                        for tc in tool_calls:
-                            idx = tc.get("index", 0)
-                            if idx not in current_tool_calls_map:
-                                current_tool_calls_map[idx] = {
-                                    "id": "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if tc.get("id"):
-                                current_tool_calls_map[idx]["id"] = tc.get("id")
-                            if tc.get("function", {}).get("name"):
-                                current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
-                            if tc.get("function", {}).get("arguments"):
-                                current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+                                    messages.append(nm)
+                                    seen_ids.add(nm.id)
 
-                # 流结束，整理最终 AI 响应
-                final_content = "".join(current_content_chunks)
-                final_tool_calls = []
-                for idx, tc_data in sorted(current_tool_calls_map.items()):
-                    if tc_data.get("name"):
-                        args_dict = {}
-                        if tc_data.get("arguments"):
-                            try:
-                                args_dict = json.loads(tc_data.get("arguments"))
-                            except Exception as parse_err:
-                                logger.bind(uid=uid, session_id=session_id).warning(
-                                    "Failed to parse arguments json: %s, error: %s",
-                                    tc_data.get("arguments"),
-                                    parse_err,
-                                )
-                        final_tool_calls.append(
-                            InternalToolCall(
-                                id=tc_data.get("id") or f"call_{idx}",
-                                name=tc_data.get("name"),
-                                arguments=args_dict,
-                            )
+                        current_turn += 1
+
+                        if current_turn == max_turns:
+                            summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
+                            notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
+                            messages.append(notice_msg)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+                            current_tools = None
+                        else:
+                            current_tools = tools
+
+                        current_tool_calls_map = {}
+                        current_content_chunks = []
+
+                        async for chunk in LLMClient.generate_stream(
+                            api_key=profile.provider.api_key,
+                            base_url=profile.provider.base_url,
+                            model_id=cfg.provider.model_id,
+                            messages=messages,
+                            temperature=cfg.provider.temperature,
+                            max_tokens=cfg.provider.max_tokens,
+                            tools=current_tools,
+                            protocol=getattr(profile.provider, "protocol", "openai"),
+                        ):
+                            choices = chunk.get("choices", [])
+                            if not choices: continue
+                            choice = choices[0]
+                            delta = choice.get("delta", {})
+
+                            content = delta.get("content")
+                            if content:
+                                current_content_chunks.append(content)
+                                yield {"type": "content", "content": content, "turn": current_turn}
+
+                            tool_calls = delta.get("tool_calls")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    idx = tc.get("index", 0)
+                                    if idx not in current_tool_calls_map:
+                                        current_tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                                    if tc.get("id"): current_tool_calls_map[idx]["id"] = tc.get("id")
+                                    if tc.get("function", {}).get("name"): current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
+                                    if tc.get("function", {}).get("arguments"): current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+
+                        final_content = "".join(current_content_chunks)
+                        final_tool_calls = []
+                        for idx, tc_data in sorted(current_tool_calls_map.items()):
+                            if tc_data.get("name"):
+                                args_dict = {}
+                                if tc_data.get("arguments"):
+                                    try: args_dict = json.loads(tc_data.get("arguments"))
+                                    except Exception: pass
+                                final_tool_calls.append(InternalToolCall(id=tc_data.get("id") or f"call_{idx}", name=tc_data.get("name"), arguments=args_dict))
+
+                        if not final_tool_calls and not final_content.strip():
+                            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+
+                        ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
+
+                        logger.bind(uid=uid, session_id=session_id).info(
+                            f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}"
                         )
 
-                # 空消息拦截逻辑
-                if not final_tool_calls and not final_content.strip():
-                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                        messages.append(ai_msg)
+                        turn_messages.append(ai_msg)
 
-                ai_msg = InternalMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=final_content if final_content else None,
-                    tool_calls=final_tool_calls if final_tool_calls else None,
-                )
+                        await ChatDispatcher._save_message(db, session_id, uid, MessageRole.ASSISTANT, MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT, ai_msg, profile.id)
 
-                logger.bind(uid=uid, session_id=session_id).info(
-                    f"[{username}] Turn {current_turn} | "
-                    f"LLM Response: {ai_msg.content or '[Tool Call]'}"
-                )
+                        if not ai_msg.tool_calls:
+                            new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                            if not new_user_msgs:
+                                break
+                            continue
 
-                messages.append(ai_msg)
+                        if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
+                            error_msg = json.dumps({"error": "parallel_limit_exceeded", "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools)}, ensure_ascii=False)
+                            for tool_call in ai_msg.tool_calls:
+                                tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
+                                messages.append(tool_res)
+                                turn_messages.append(tool_res)
+                                await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            continue
 
-                await ChatDispatcher._save_message(
-                    db,
-                    session_id,
-                    uid,
-                    MessageRole.ASSISTANT,
-                    MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
-                    ai_msg,
-                    profile.id,
-                )
+                        for tc in ai_msg.tool_calls:
+                            yield {"type": "tool_start", "name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id}
 
-                # 更新最后处理 ID 为刚发送的消息（虽然 _save_message 不直接返回 ID，
-                # 但下一轮循环的 _fetch_new_user_messages 会基于此 ID 过滤）
-                # 注意：由于数据库自增 ID 由数据库生成，我们这里无法即时获得，
-                # 但新输入的 USER 消息 ID 肯定大于进入 dispatch 时最大的 ID。
-                if ai_msg.tool_calls:
-                    turn_messages.append(ai_msg)
+                        tasks = [ChatDispatcher._process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
+                        tool_responses = await asyncio.gather(*tasks)
 
-                if not ai_msg.tool_calls:
-                    _final_ai_content = ai_msg.content
+                        for tool_res in tool_responses:
+                            messages.append(tool_res)
+                            turn_messages.append(tool_res)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            tool_name = next((tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), "unknown")
+                            yield {"type": "tool_end", "name": tool_name, "result": tool_res.content, "tool_call_id": tool_res.tool_call_id}
+
+                finally:
+                    await active_session_crud.release_lock(db, session_id)
+                    is_first_iter = False
+
+                # 锁释放后的“捕获检查”
+                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                if not new_user_msgs:
                     break
 
-                if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                    error_msg = json.dumps(
-                        {
-                            "error": "parallel_limit_exceeded",
-                            "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(
-                                requested=len(ai_msg.tool_calls),
-                                limit=cfg.tool.max_parallel_tools,
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
+            yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages]}
 
-                    for tool_call in ai_msg.tool_calls:
-                        tool_res = InternalMessage(
-                            role=MessageRole.TOOL,
-                            tool_call_id=tool_call.id,
-                            content=error_msg,
-                        )
-                        messages.append(tool_res)
-                        await ChatDispatcher._save_message(
-                            db,
-                            session_id,
-                            uid,
-                            MessageRole.TOOL,
-                            MessageType.TOOL_RESULT,
-                            tool_res,
-                            profile.id,
-                        )
-                    continue
-
-                # 实时推送每个工具执行的开始
-                for tc in ai_msg.tool_calls:
-                    yield {
-                        "type": "tool_start",
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                        "tool_call_id": tc.id,
-                    }
-
-                tasks = [
-                    ChatDispatcher._process_single_tool(
-                        tc,
-                        db,
-                        profile,
-                        cfg,
-                        messages,
-                        username,
-                        session_id,
-                        current_turn,
-                        uid,
-                    )
-                    for tc in ai_msg.tool_calls
-                ]
-
-                tool_responses = await asyncio.gather(*tasks)
-
-                for tool_res in tool_responses:
-                    messages.append(tool_res)
-                    await ChatDispatcher._save_message(
-                        db,
-                        session_id,
-                        uid,
-                        MessageRole.TOOL,
-                        MessageType.TOOL_RESULT,
-                        tool_res,
-                        profile.id,
-                    )
-                    turn_messages.append(tool_res)
-                    # 实时推送工具执行的结束与结果
-                    tool_name = next(
-                        (tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id),
-                        "unknown",
-                    )
-                    yield {
-                        "type": "tool_end",
-                        "name": tool_name,
-                        "result": tool_res.content,
-                        "tool_call_id": tool_res.tool_call_id,
-                    }
-
-            yield {
-                "type": "done",
-                "session_id": session_id,
-                "history": [m.model_dump(exclude_none=True) for m in turn_messages],
-            }
         except BaseBusinessException as bbe:
-            yield {
-                "type": "error",
-                "message": bbe.message,
-            }
+            yield {"type": "error", "message": bbe.message}
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Stream Error")
-            yield {
-                "type": "error",
-                "message": str(e),
-            }
+            yield {"type": "error", "message": str(e)}

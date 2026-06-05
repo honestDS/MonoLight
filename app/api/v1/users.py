@@ -79,7 +79,7 @@ async def list_all_users(
     skip = (page - 1) * size
     users = await user_crud.get_multi(db, skip=skip, limit=size)
     total = await user_crud.count(db)
-    
+
     page_data = PageData(
         items=[UserResponse.model_validate(u) for u in users],
         total=total,

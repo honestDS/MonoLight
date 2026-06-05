@@ -11,6 +11,6 @@ def get_local_time() -> datetime:
         offset = int(os.getenv("LOG_TZ_OFFSET", "8"))
     except (ValueError, TypeError):
         offset = 8
-    
+
     tz = timezone(timedelta(hours=offset))
     return datetime.now(tz)

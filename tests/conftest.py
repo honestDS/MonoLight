@@ -3,10 +3,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel as Base
 
 from app.models.profile import Profile
 from app.models.provider import ModelProvider
-from sqlmodel import SQLModel as Base
 
 
 @pytest.fixture(scope="session", autouse=True)

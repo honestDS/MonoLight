@@ -44,7 +44,7 @@ class CRUDSystemLog(CRUDBase[SystemLog, SystemLogCreate, SystemLogCreate]):
             stmt = stmt.where(SystemLog.uid == uid)
         if session_id:
             stmt = stmt.where(SystemLog.session_id == session_id)
-        
+
         result = await db.execute(stmt)
         return result.scalar()
 

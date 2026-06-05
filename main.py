@@ -28,6 +28,7 @@ from app.core.log import LogManager
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.core.utils.dt import get_local_time
