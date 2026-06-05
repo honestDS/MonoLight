@@ -28,18 +28,26 @@ from app.core.log import LogManager
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
 
-LogManager.setup(
-    log_path=os.getenv("LOG_FILE_PATH", "data/logs/monolight.log"),
-    level=os.getenv("LOG_LEVEL", "INFO"),
-)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.utils.dt import get_local_time
     from app.providers.init_db import init_system_data
 
     async with AsyncSessionLocal() as session:
         await init_system_data(session)
+
+    # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
+    now_aware = get_local_time()
+    LogManager.setup(
+        log_path=os.getenv("LOG_FILE_PATH", "data/logs/monolight.log"),
+        level=os.getenv("LOG_LEVEL", "INFO"),
+    )
+    from app.core.log import get_logger
+
+    get_logger("app.core.log").info(
+        f"Log system initialized. Path: {os.getenv('LOG_FILE_PATH', 'data/logs/monolight.log')} | Time: {now_aware.isoformat()}"
+    )
+
     yield
 
 

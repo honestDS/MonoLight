@@ -12,7 +12,9 @@ export const routeNameMap = {
   '/users': '用户管理',
   '/profiles': '系统配置',
   '/providers': '系统配置',
-  '/prompts': '系统配置'
+  '/prompts': '系统配置',
+  '/logs/realtime': '系统日志',
+  '/logs/history': '系统日志'
 }
 
 // 默认配置结构（用于 ProfilesView.vue）

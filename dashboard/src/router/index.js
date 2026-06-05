@@ -6,7 +6,9 @@ const routes = [
   { path: '/profiles', component: () => import('../views/ProfilesView.vue') },
   { path: '/prompts', component: () => import('../views/PromptsView.vue') },
   { path: '/providers', component: () => import('../views/ProvidersView.vue') },
-  { path: '/users', component: () => import('../views/UsersView.vue') }
+  { path: '/users', component: () => import('../views/UsersView.vue') },
+  { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },
+  { path: '/logs/history', component: () => import('../views/HistoryLogs.vue') }
 ]
 
 const router = createRouter({

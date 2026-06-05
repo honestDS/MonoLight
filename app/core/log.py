@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -19,13 +18,39 @@ class LogManager:
         if cls._configured:
             return
 
-        # 设置时区补丁
-        def patch_record(record):
-            # 直接使用工具函数获取带时区的当前时间并替换记录时间
-            # record["time"] 是 loguru 生成的，包含微秒，astimezone 会保留精度
-            record["time"] = get_local_time()
+        # 异步 WebSocket 推送器
+        async def ws_sink(message):
+            try:
+                from app.core.log_broadcaster import log_broadcaster
 
-        logger.configure(patcher=patch_record)
+                record = message.record
+                uid = record["extra"].get("uid")
+                session_id = record["extra"].get("session_id")
+
+                # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
+                # 排除 name, uid, session_id，因为它们已经有专门的字段
+                extra_data = {
+                    k: v
+                    for k, v in record["extra"].items()
+                    if k not in ["name", "uid", "session_id"]
+                }
+
+                # 使用系统本地时间戳推送给前端
+                local_now = get_local_time()
+                # 优先使用 extra 中的 name 作为 module
+                module_name = record["extra"].get("name") or record["name"]
+                log_entry = {
+                    "timestamp": local_now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "level": record["level"].name,
+                    "module": module_name,
+                    "message": record["message"],
+                    "uid": uid,
+                    "session_id": session_id,
+                    "extra": extra_data,
+                }
+                await log_broadcaster.broadcast(log_entry)
+            except Exception as e:
+                sys.stderr.write(f"Error in WS log sink: {str(e)}\n")
 
         # 异步数据库写入器
         async def db_sink(message):
@@ -39,29 +64,40 @@ class LogManager:
                 uid = record["extra"].get("uid")
                 session_id = record["extra"].get("session_id")
 
-                # 序列化 extra
-                extra_data = {k: v for k, v in record["extra"].items() if k not in ["uid", "session_id"]}
-                extra_json = json.dumps(extra_data) if extra_data else None
+                # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
+                # 排除 name, uid, session_id，因为它们已经有专门的列
+                extra_data = {
+                    k: v
+                    for k, v in record["extra"].items()
+                    if k not in ["name", "uid", "session_id"]
+                }
+                extra_json = json.dumps(extra_data, default=str) if extra_data else None
+
+                # 优先使用 extra 中的 name 作为 module
+                module_name = record["extra"].get("name") or record["name"]
 
                 log_entry = SystemLogCreate(
                     level=record["level"].name,
-                    module=record["name"],
+                    module=module_name,
                     message=record["message"],
                     uid=uid,
                     session_id=session_id,
                     extra=extra_json,
-                    created_at=record["time"] # record["time"] 已经是 patch 过的带时区 datetime
+                    created_at=get_local_time(),  # 显式使用包含时区的本地时间写入数据库
                 )
 
+                # 使用全新的 session 处理，规避并发下的 session 冲突与关闭异常
                 async with AsyncSessionLocal() as db:
                     await system_log_crud.create(db, obj_in=log_entry)
-                    await db.commit()
             except Exception as e:
-                # 避免循环日志
-                sys.stderr.write(f"Error in DB log sink: {str(e)}\n")
+                # 避免循环日志并打印完整堆栈异常
+                import traceback
 
-        # 封装异步函数供 loguru 使用
-        def sink_wrapper(message):
+                sys.stderr.write(f"Error in DB log sink: {str(e)}\n")
+                traceback.print_exc(file=sys.stderr)
+
+        # 封装异步函数供 loguru 使用 (DB)
+        def db_sink_wrapper(message):
             try:
                 try:
                     loop = asyncio.get_running_loop()
@@ -70,16 +106,21 @@ class LogManager:
 
                 if loop and loop.is_running():
                     loop.create_task(db_sink(message))
-                else:
-                    # 如果没有运行中的 loop，尝试使用新 loop 运行
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        new_loop.run_until_complete(db_sink(message))
-                    finally:
-                        new_loop.close()
             except Exception as e:
-                sys.stderr.write(f"Critical error in log sink wrapper: {str(e)}\n")
+                sys.stderr.write(f"Critical error in DB log sink wrapper: {str(e)}\n")
+
+        # 封装异步函数供 loguru 使用 (WS)
+        def ws_sink_wrapper(message):
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    loop.create_task(ws_sink(message))
+            except Exception as e:
+                sys.stderr.write(f"Critical error in WS log sink wrapper: {str(e)}\n")
 
         # 确保工作目录
         os.getcwd()
@@ -131,10 +172,18 @@ class LogManager:
         )
 
         # 添加数据库 Sink (仅记录 INFO 及以上级别)
+        # 注意：此处必须 enqueue=False，否则会在无事件循环 of 线程运行导致异步任务丢失
         logger.add(
-            sink_wrapper,
+            db_sink_wrapper,
             level="INFO",
-            enqueue=True, # 确保线程安全
+            enqueue=False,
+        )
+
+        # 添加 WebSocket Sink (记录全量级别以支持前端实时调试)
+        logger.add(
+            ws_sink_wrapper,
+            level="DEBUG",
+            enqueue=False,
         )
 
         # 拦截标准 logging
@@ -146,25 +195,15 @@ class LogManager:
                     level = record.levelno
 
                 frame, depth = logging.currentframe(), 2
-                while (
-                    frame is not None and frame.f_code.co_filename == logging.__file__
-                ):
+                while frame is not None and frame.f_code.co_filename == logging.__file__:
                     frame = frame.f_back
                     depth += 1
 
-                logger.opt(depth=depth, exception=record.exc_info).log(
-                    level, record.getMessage()
-                )
+                logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
         logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
         cls._configured = True
-        # 记录启动时的信息，方便排查
-        now_aware = get_local_time()
-        logger.info(
-            f"Log system initialized. Path: {abs_log_path} | "
-            f"Time: {now_aware.isoformat()}"
-        )
 
     @staticmethod
     def log_tool_call(turn: int, tool_name: str, command: str, session_id: str = "default", uid: str = None):
@@ -178,9 +217,7 @@ class LogManager:
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
-        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(
-            f"Turn {turn} | Result: {result}"
-        )
+        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(f"Turn {turn} | Result: {result}")
 
 
 def get_logger(name: str):

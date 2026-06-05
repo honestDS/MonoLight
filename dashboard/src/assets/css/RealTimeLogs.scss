@@ -1,0 +1,109 @@
+body.is-terminal-page {
+  .app-main {
+    padding: 0 !important;
+  }
+}
+
+.terminal-view {
+  height: calc(100% - 47px);
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  overflow: hidden;
+}
+
+.terminal-toolbar {
+  height: 35px;
+  background: #2d2d2d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid #3c3c3c;
+  user-select: none;
+}
+
+.toolbar-left .terminal-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #969696;
+  background: #1e1e1e;
+  height: 35px;
+  padding: 0 16px;
+  border-top: 1px solid #007acc;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  .control-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    .label { font-size: 12px; color: #858585; }
+  }
+  .toolbar-btn {
+    padding: 0; color: #858585; font-size: 12px;
+    display: flex; align-items: center; gap: 4px;
+    &:hover { color: #cccccc; }
+    &.delete:hover { color: #f44336; }
+  }
+}
+
+.terminal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  background: #1e1e1e;
+  line-height: 1.5;
+
+  &::-webkit-scrollbar { width: 10px; }
+  &::-webkit-scrollbar-track { background: transparent; }
+  &::-webkit-scrollbar-thumb { background: #474747; &:hover { background: #5a5a5a; } }
+}
+
+.empty-state {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 16px; color: #555; font-size: 14px;
+}
+
+.log-item {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 4px;
+  word-break: break-all;
+  white-space: pre-wrap; /* 核心：保持文本流中的换行和格式 */
+  
+  &:hover { background: rgba(255, 255, 255, 0.02); }
+
+  /* 全部元素变为 inline 风格，取消分列 */
+  .txt-time { color: #6a9955; margin-right: 8px; }
+  .txt-level { color: #569cd6; font-weight: bold; margin-right: 8px; }
+  .txt-module { color: #4ec9b0; margin-right: 5px; }
+  .txt-sep { color: #858585; margin-right: 8px; }
+  .txt-message { color: #d4d4d4; }
+
+  /* 次级文本信息 */
+  .txt-sub-info {
+    color: #666;
+    font-size: 12px;
+  }
+
+  /* 级别配色微调 */
+  &.warning, &.warn {
+    .txt-level, .txt-message { color: #dcdcaa; }
+  }
+  &.error, &.critical {
+    .txt-level, .txt-message { color: #f44747; }
+  }
+  &.debug {
+    .txt-level, .txt-message { color: #808080; }
+  }
+}

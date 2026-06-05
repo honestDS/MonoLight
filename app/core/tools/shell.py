@@ -54,7 +54,7 @@ class ShellExecutor(BaseExecutor):
             if blacklisted.lower() in command.lower():
                 return json.dumps(
                     {
-                        "stdout": f"不允许使用shell工具执行该命令: {blacklisted}",
+                        "stdout": f"不允许使用shell工具执行该命令: {blacklisted},禁止命令列表: {self.COMMAND_BLACKLIST}",
                         "stderr": "",
                         "exit_code": 1,
                         "system_info": system_info,

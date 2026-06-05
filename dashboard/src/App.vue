@@ -36,6 +36,17 @@
               <span>提示词管理</span>
             </el-menu-item>
           </el-sub-menu>
+          <el-sub-menu index="/logs">
+            <template #title>
+              <span>系统日志</span>
+            </template>
+            <el-menu-item index="/logs/realtime">
+              <span>实时日志</span>
+            </el-menu-item>
+            <el-menu-item index="/logs/history">
+              <span>历史日志</span>
+            </el-menu-item>
+          </el-sub-menu>
         </el-menu>
         <div class="sidebar-footer">
           <el-menu

@@ -93,4 +93,15 @@ export const providerApi = {
   delete: (id) => request.post(`/providers/delete?provider_id=${id}`)
 }
 
+export const systemApi = {
+  // 获取历史系统日志
+  logsHistory: (params) => request.get('/system/logs', { params }),
+  // 系统日志实时 WS 接口
+  createLogsWebSocket: (token) => {
+    const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}`
+    console.log('System Logs WebSocket connecting to:', wsUrl)
+    return new WebSocket(wsUrl)
+  }
+}
+
 export default request

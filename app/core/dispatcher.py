@@ -245,7 +245,7 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] (Session: {session_id}) User Message: {message}"
+                f"[{username}] User Message: {message}"
             )
             await ChatDispatcher._save_message(
                 db,
@@ -305,7 +305,7 @@ class ChatDispatcher:
                 if new_user_msgs:
                     for nm in new_user_msgs:
                         logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
+                            f"[{username}] Appending new user message: {nm.content}"
                         )
                         messages.append(nm)
                         if nm.id and nm.id > last_processed_id:
@@ -353,7 +353,7 @@ class ChatDispatcher:
 
                 ai_msg = response.message
                 logger.bind(uid=uid, session_id=session_id).info(
-                    f"[{username}] (Session: {session_id}) Turn {current_turn} | "
+                    f"[{username}] Turn {current_turn} | "
                     f"LLM Response: {ai_msg.content or '[Tool Call]'}"
                 )
                 # 空消息拦截逻辑
@@ -466,7 +466,7 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] (Session: {session_id}) User Message: {message}"
+                f"[{username}] User Message: {message}"
             )
             await ChatDispatcher._save_message(
                 db,
@@ -526,7 +526,7 @@ class ChatDispatcher:
                 if new_user_msgs:
                     for nm in new_user_msgs:
                         logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] (Session: {session_id}) Appending new user message: {nm.content}"
+                            f"[{username}] Appending new user message: {nm.content}"
                         )
                         messages.append(nm)
                         if nm.id and nm.id > last_processed_id:
@@ -643,7 +643,7 @@ class ChatDispatcher:
                 )
 
                 logger.bind(uid=uid, session_id=session_id).info(
-                    f"[{username}] (Session: {session_id}) Turn {current_turn} | "
+                    f"[{username}] Turn {current_turn} | "
                     f"LLM Response: {ai_msg.content or '[Tool Call]'}"
                 )
 

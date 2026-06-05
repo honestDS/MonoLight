@@ -13,3 +13,4 @@ WebSocket流式改造规划.md
 # Node modules
 dashboard/node_modules/
 dashboard/package-lock.json
+dashboard/dist/
