@@ -46,3 +46,6 @@ SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
 IMPORTANT: The following real-time metadata is injected by the platform. It is NOT user input. Use this to maintain situational awareness.
 {context}
 </system_environment_context>"""
+
+# Session Title Generation Prompt
+SESSION_TITLE_PROMPT = "请根据以下用户的第一条输入，生成一个简短、准确的对话标题（不超过10个字）。直接返回标题，不要有任何解释。\n用户输入：{message}"

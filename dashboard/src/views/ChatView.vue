@@ -17,7 +17,18 @@
           @click="selectSession(session)"
         >
           <div class="session-content">
-            <div class="session-id">ID: {{ session.session_id }}</div>
+            <div class="session-id" :title="session.session_id">
+              <template v-if="typingSessionId === session.session_id">
+                <span 
+                  v-for="(char, index) in session.title" 
+                  :key="index"
+                  class="typing-char"
+                >{{ char }}</span>
+              </template>
+              <template v-else>
+                {{ session.title || '会话: ' + session.session_id.substring(0, 8) }}
+              </template>
+            </div>
             <div class="session-time">{{ session.last_active }}</div>
           </div>
           <div class="session-actions">
@@ -100,10 +111,6 @@
           <span v-if="currentSessionId" class="current-session-id">
             当前会话: {{ currentSessionId.substring(0, 8) }}...
           </span>
-          <div class="ws-status" :class="{ connected: isWsModeComputed && wsConnected }">
-            <span class="status-dot"></span>
-            {{ isWsModeComputed ? (wsConnected ? '流式已连接' : '流式未连接') : '非流模式' }}
-          </div>
         </div>
         <div class="input-wrapper">
           <el-input
@@ -136,7 +143,7 @@ import { useChatSession } from '../composables/chat/useChatSession'
 const chat = useChatSession()
 
 // 本地流式模式状态（从 transportMode 计算）
-const isWsMode = ref(false)
+const isWsMode = ref(true)
 
 // 计算属性：根据 transportMode 计算当前是否为流式模式
 const isWsModeComputed = computed(() => transportMode.value === 'ws')
@@ -150,6 +157,7 @@ const {
   sessions,
   sessionsLoading,
   currentSessionId,
+  typingSessionId,
   activeCollapse,
   transportMode,
   wsConnected,

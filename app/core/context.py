@@ -57,7 +57,7 @@ class ContextManager:
         # 3. 压缩日志记录
         if log_data["is_hard_truncated"]:
             logger.bind(uid=uid, session_id=session_id).info(
-                f"Context compressed. Tokens: {log_data['before']} -> {log_data['after']}"
+                f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']}"
             )
 
         return final_msgs

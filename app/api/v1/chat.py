@@ -6,6 +6,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import web_chat_adapter
@@ -13,6 +14,8 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
+from app.core.utils.session import generate_session_title
+from app.models.profile import ProfileConfig
 from app.core.log import (
     get_logger,
 )
@@ -71,6 +74,7 @@ async def get_user_sessions(
             "session_id": row[0],
             "last_active": row[1].strftime("%Y-%m-%d %H:%M:%S") if row[1] else None,
             "username": row[3],
+            "title": row[4],
         }
         for row in sessions
     ]
@@ -100,13 +104,45 @@ async def delete_session(
     )
 
 
+class SessionTitleGenerateRequest(BaseModel):
+    session_id: str
+    first_message: str
+
+
+@router.post("/sessions/generate-title")
+async def generate_title(
+    request: SessionTitleGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    profile = await profile_crud.get_active(db)
+    if not profile or not profile.provider:
+        return StandardResponse.error(message="未配置有效的模型提供商")
+
+    cfg = ProfileConfig.model_validate(profile.configs)
+
+    title = await generate_session_title(
+        uid=uid,
+        session_id=request.session_id,
+        first_message=request.first_message,
+        api_key=profile.provider.api_key,
+        base_url=profile.provider.base_url,
+        model_id=cfg.provider.model_id,
+        protocol=getattr(profile.provider, "protocol", "openai"),
+        max_tokens=cfg.provider.max_tokens,
+    )
+
+    return StandardResponse.success(data={"title": title}, message="标题生成成功")
+
+
 @router.get("/sessions/history")
 async def get_session_history(
     session_id: str,
     page: int = 1,
     size: int = 20,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
     offset = (page - 1) * size

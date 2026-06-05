@@ -66,6 +66,8 @@ export const chatApi = {
   deleteSession: (sessionId) => request.post(`/chat/sessions/delete?session_id=${sessionId}`),
   // 获取会话历史记录
   sessionsHistory: (sessionId, page = 1, size = 20) => request.get(`/chat/sessions/history?session_id=${sessionId}&page=${page}&size=${size}`),
+  // 异步生成会话标题
+  generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
 }
 
 export const profileApi = {

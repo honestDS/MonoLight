@@ -11,7 +11,7 @@ export function useChatTransport() {
   // ==================== 通信模式管理 ====================
   
   // 通信模式: 'http' - 普通HTTP模式, 'ws' - WebSocket流式模式
-  const transportMode = ref('http')  // 默认使用HTTP模式
+  const transportMode = ref('ws')  // 默认使用流式模式
   const wsConnected = ref(false)     // WebSocket连接状态
   let currentThinkingId = null
   

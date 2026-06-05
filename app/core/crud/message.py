@@ -91,17 +91,21 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
     async def get_user_sessions(
         self, db: AsyncSession, uid: str = None, is_admin: bool = False
     ) -> list[Any]:
+        from app.models.session import ChatSession
         stmt = select(
             Message.session_id,
             func.max(Message.created_at).label("last_active"),
             Message.uid,
             User.username,
-        ).join(User, Message.uid == User.uid)
+            ChatSession.title,
+        ).join(User, Message.uid == User.uid).join(
+            ChatSession, Message.session_id == ChatSession.session_id, isouter=True
+        )
 
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
 
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username).order_by(
+        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title).order_by(
             desc("last_active")
         )
         result = await db.execute(stmt)

@@ -87,13 +87,18 @@ export function useChatSession() {
         isNewSession = true
         await messageProcessor.handleNewSession(
           sessionManager.sessions,
-          (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect,false),
+          (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
           thinkingId,
           sessionManager.sessionCreating
         )
       }
 
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
+
+      // 如果是新会话，异步请求生成标题
+      if (isNewSession && sessionManager.currentSessionId.value) {
+        sessionManager.updateSessionTitle(sessionManager.currentSessionId.value, text)
+      }
       nextTick(() => chatState.scrollToBottom())
     } catch (err) {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
@@ -148,8 +153,9 @@ export function useChatSession() {
         ElMessage.error(errorMessage || '流式对话过程出错')
       },
       onComplete: (data, thinkingId) => {
+        const isNewSession = !sessionManager.currentSessionId.value
         // 处理新会话
-        if (!sessionManager.currentSessionId.value) {
+        if (isNewSession) {
           messageProcessor.handleNewSession(
             sessionManager.sessions,
             (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
@@ -158,6 +164,12 @@ export function useChatSession() {
             sessionManager.sessionCreating
           )
         }
+
+        // 如果是新会话，异步请求生成标题
+        if (isNewSession && data.session_id) {
+          sessionManager.updateSessionTitle(data.session_id, text)
+        }
+
         // 清理 thinking 占位符
         messageProcessor.cleanupThinkingMessage(chatState.messages)
       },
@@ -196,7 +208,7 @@ export function useChatSession() {
    * 新建会话
    */
   const createNewSession = () => {    
-    transport.setTransportMode('http', transport.disconnectWebSocket)
+    transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
@@ -251,6 +263,7 @@ export function useChatSession() {
     sessions: sessionManager.sessions,
     sessionsLoading: sessionManager.sessionsLoading,
     currentSessionId: sessionManager.currentSessionId,
+    typingSessionId: sessionManager.typingSessionId,
     activeCollapse: sessionManager.activeCollapse,
     hasMore: sessionManager.hasMore,
     sessionCreating: sessionManager.sessionCreating,

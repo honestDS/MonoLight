@@ -15,6 +15,7 @@ export function useSessionManager() {
   const sessions = ref([])
   const sessionsLoading = ref(false)
   const currentSessionId = ref(null)
+  const typingSessionId = ref(null)
 
   // 折叠面板状态
   const activeCollapse = ref([])
@@ -159,11 +160,57 @@ export function useSessionManager() {
     return loadedPageCount >= 2 ? (hasMore.value = false, false) : hasMore.value
   }
 
+  /**
+   * 异步请求生成并更新会话标题
+   * @param {string} sessionId - 会话ID
+   * @param {string} firstMessage - 第一条消息内容
+   */
+  const updateSessionTitle = async (sessionId, firstMessage) => {
+    if (!sessionId || !firstMessage) return
+    
+    try {
+      const res = await chatApi.generateTitle({
+        session_id: sessionId,
+        first_message: firstMessage
+      })
+      
+      const newTitle = res.data?.data?.title
+      if (newTitle) {
+        // 更新本地会话列表中的标题
+        const sessionIdx = sessions.value.findIndex(s => s.session_id === sessionId)
+        if (sessionIdx !== -1) {
+          // 如果是正在进行的会话，启用打字机效果
+          const session = sessions.value[sessionIdx]
+          
+          // 逐字更新逻辑
+          typingSessionId.value = sessionId
+          const targetTitle = newTitle
+          session.title = '' // 先清空，准备打字机效果
+          
+          let i = 0
+          const timer = setInterval(() => {
+            if (i < targetTitle.length) {
+              session.title += targetTitle[i]
+              i++
+            } else {
+              clearInterval(timer)
+              typingSessionId.value = null
+            }
+          }, 100) // 每100ms出一个字
+        }
+      }
+    } catch (err) {
+      console.error('Failed to generate session title:', err)
+      typingSessionId.value = null
+    }
+  }
+
   return {
     // 状态
     sessions,
     sessionsLoading,
     currentSessionId,
+    typingSessionId,
     activeCollapse,
     hasMore,
     historyLoading,
@@ -177,6 +224,7 @@ export function useSessionManager() {
     loadSessionHistory,
     getSortedSessions,
     resetPagination,
-    checkHasMore
+    checkHasMore,
+    updateSessionTitle
   }
 }

@@ -65,6 +65,12 @@
         font-size: 11px;
         color: #909399;
       }
+
+      .typing-char {
+        display: inline-block;
+        animation: title-char-appear 0.8s ease forwards;
+        will-change: color, opacity;
+      }
     }
 
     .session-actions {
@@ -252,35 +258,6 @@
         color: #909399;
         flex-shrink: 0;
       }
-
-      // WS 状态指示器
-      .ws-status {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 4px 10px;
-        border-radius: 4px;
-        font-size: 12px;
-        background: #f4f4f5;
-        color: #909399;
-
-        .status-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: #c0c4cc;
-        }
-
-        &.connected {
-          background: #f0f9eb;
-          color: #67c23a;
-
-          .status-dot {
-            background: #67c23a;
-            animation: pulse 2s infinite;
-          }
-        }
-      }
     }
 
     .input-wrapper {
@@ -304,6 +281,25 @@
         height: 48px;
       }
     }
+  }
+}
+
+@keyframes title-char-appear {
+  0% {
+    color: #409eff;
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateX(-2px);
+  }
+  30% {
+    color: #409eff;
+    opacity: 1;
+    filter: blur(0);
+    transform: translateX(0);
+  }
+  100% {
+    color: #303133;
+    opacity: 1;
   }
 }
 
@@ -378,15 +374,3 @@
   }
 }
 
-// 连接状态脉冲动画
-@keyframes pulse {
-  0% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-  100% {
-    opacity: 1;
-  }
-}
