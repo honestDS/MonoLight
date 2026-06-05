@@ -16,3 +16,4 @@ sqlmodel
 pytest
 pytest-asyncio
 httpx
+psutil

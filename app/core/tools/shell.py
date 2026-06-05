@@ -7,6 +7,7 @@ import sys
 from app.core.crud.profile import profile_crud
 from app.core.log import get_logger
 from app.core.prompts import CONFIRMATION_PREFIX
+from app.core.utils.system import get_full_system_context
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
@@ -19,7 +20,7 @@ class ShellExecutor(BaseExecutor):
         "python -c",
         "python3 -c",
         "powershell",
-        ]
+    ]
 
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
@@ -47,8 +48,7 @@ class ShellExecutor(BaseExecutor):
         if command.startswith(CONFIRMATION_PREFIX):
             command = command.split(" ", 1)[-1]
 
-        import platform
-        system_info = f"{platform.system()} {platform.release()}"
+        system_info = get_full_system_context()
 
         for blacklisted in self.COMMAND_BLACKLIST:
             if blacklisted.lower() in command.lower():
@@ -116,9 +116,7 @@ class ShellExecutor(BaseExecutor):
                 env=os.environ.copy(),
             )
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=profile_timeout
-                )
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
                 out = stdout.decode("utf-8", errors="replace")
                 err = stderr.decode("utf-8", errors="replace")
 

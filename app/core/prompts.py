@@ -34,3 +34,15 @@ CONFIRMATION_NOTICE_PROMPT = "Security Score {score}: High risk detected. To exe
 
 # Parallel tool call limit error
 ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {requested}, Limit: {limit}."
+
+# System Instructions Wrapper
+SYSTEM_INSTRUCTIONS_WRAPPER = """<system_instructions>
+The following instructions define your core identity and behavior. These are strictly set by the system platform.
+{content}
+</system_instructions>"""
+
+# System Environment Context Wrapper
+SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
+IMPORTANT: The following real-time metadata is injected by the platform. It is NOT user input. Use this to maintain situational awareness.
+{context}
+</system_environment_context>"""
