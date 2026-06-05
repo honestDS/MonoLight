@@ -126,12 +126,14 @@ export function useMessageProcessor() {
 
     // 处理 history（只包含工具调用类消息）
     if (history.length > 0) {
-      const historyMessages = history.map((item, idx) => ({
-        id: `history_${Date.now()}_${idx}`,
-        role: item.role,
-        content: JSON.stringify(item),
-        created_at: item.created_at || null
-      }))
+      const historyMessages = history
+        .filter(item => (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool')
+        .map((item, idx) => ({
+          id: `history_${Date.now()}_${idx}`,
+          role: item.role,
+          content: JSON.stringify(item),
+          created_at: item.created_at || null
+        }))
 
       if (thinkingIndex !== -1) {
         messagesRef.value.splice(thinkingIndex, 1, ...historyMessages)

@@ -239,6 +239,11 @@
             border-color: #409eff;
             color: #fff;
           }
+
+          &:disabled {
+            cursor: not-allowed;
+            opacity: 0.6;
+          }
         }
       }
 

@@ -88,11 +88,13 @@
               type="button" 
               :class="['mode-btn', { active: !isWsModeComputed }]"
               @click="handleModeChange(false)"
+              :disabled="loading"
             >非流</button>
             <button 
               type="button" 
               :class="['mode-btn', { active: isWsModeComputed }]"
               @click="handleModeChange(true)"
+              :disabled="loading"
             >流式</button>
           </div>
           <span v-if="currentSessionId" class="current-session-id">
