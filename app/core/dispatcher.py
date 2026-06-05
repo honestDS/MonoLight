@@ -266,7 +266,7 @@ class ChatDispatcher:
                             try:
                                 args_dict = json.loads(tc_data.get("arguments"))
                             except Exception as parse_err:
-                                logger.warning(
+                                logger.bind(uid=uid, session_id=session_id).warning(
                                     "Failed to parse arguments json: %s, error: %s",
                                     tc_data.get("arguments"),
                                     parse_err,
@@ -408,7 +408,7 @@ class ChatDispatcher:
                 "message": bbe.message,
             }
         except Exception as e:
-            logger.exception("Dispatcher Stream Error")
+            logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Stream Error")
             yield {
                 "type": "error",
                 "message": str(e),
@@ -751,5 +751,5 @@ class ChatDispatcher:
         except BaseBusinessException:
             raise
         except Exception as e:
-            logger.exception("Dispatcher Error")
+            logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Error")
             raise ServerException(message=str(e))

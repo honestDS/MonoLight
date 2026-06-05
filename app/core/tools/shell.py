@@ -43,7 +43,7 @@ class ShellExecutor(BaseExecutor):
         return 30.0
 
     async def execute(self, command: str) -> str:
-        # Handle confirmation prefix internally
+        # 删除可能存在的确认前缀
         if command.startswith(CONFIRMATION_PREFIX):
             command = command.split(" ", 1)[-1]
 
@@ -66,7 +66,6 @@ class ShellExecutor(BaseExecutor):
         # 获取当前循环类型进行诊断
         loop = asyncio.get_running_loop()
         loop_type = type(loop).__name__
-        t_logger.info(f"[{self.uid}] Loop Type: {loop_type} | Executing command: {command}")
 
         # 强制使用数据库配置的超时
         profile_timeout = await self._get_profile_timeout()
@@ -90,18 +89,6 @@ class ShellExecutor(BaseExecutor):
 
                 result = await loop.run_in_executor(None, run_sync)
 
-                t_logger.bind(tool_result=True).info(
-                    f"[{self.uid}] Sync exit code: {result.returncode}"
-                )
-                if result.stdout.strip():
-                    t_logger.bind(tool_result=True).debug(
-                        f"[{self.uid}] STDOUT: {result.stdout[:500]}{'...' if len(result.stdout) > 500 else ''}"
-                    )
-                if result.stderr.strip():
-                    t_logger.bind(tool_result=True).warning(
-                        f"[{self.uid}] STDERR: {result.stderr[:500]}{'...' if len(result.stderr) > 500 else ''}"
-                    )
-
                 return json.dumps(
                     {
                         "stdout": result.stdout,
@@ -112,15 +99,11 @@ class ShellExecutor(BaseExecutor):
                     ensure_ascii=False,
                 )
             except subprocess.TimeoutExpired:
-                t_logger.error(
-                    f"[{self.uid}] Sync command timed out after {profile_timeout}s system_info: {system_info}"
-                )
                 return json.dumps(
                     {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
             except Exception as e:
-                t_logger.exception(f"[{self.uid}] Sync fallback failed")
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         # 正常的异步处理（Linux 或已正确配置的 Windows）
@@ -139,16 +122,6 @@ class ShellExecutor(BaseExecutor):
                 out = stdout.decode("utf-8", errors="replace")
                 err = stderr.decode("utf-8", errors="replace")
 
-                t_logger.bind(tool_result=True).info(
-                    f"[{self.uid}] Command exit code: {process.returncode}"
-                )
-                if out.strip():
-                    out_msg = f"[{self.uid}] STDOUT: {out[:500]}{'...' if len(out) > 500 else ''}"
-                    t_logger.bind(tool_result=True).debug(out_msg)
-                if err.strip():
-                    err_msg = f"[{self.uid}] STDERR: {err[:500]}{'...' if len(err) > 500 else ''}"
-                    t_logger.bind(tool_result=True).warning(err_msg)
-
                 return json.dumps(
                     {
                         "stdout": out,
@@ -161,15 +134,11 @@ class ShellExecutor(BaseExecutor):
             except TimeoutError:
                 if process:
                     process.kill()
-                t_logger.error(
-                    f"[{self.uid}] Command timed_out after {profile_timeout}s system_info: {system_info}"
-                )
                 return json.dumps(
                     {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
         except Exception as e:
-            t_logger.exception(f"[{self.uid}] Failed to execute command")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
