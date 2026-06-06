@@ -206,6 +206,8 @@ export function useChatSession() {
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
+    // 切换会话时重置加载状态，解除模式锁定
+    chatState.loading.value = false
   }
 
   /**
@@ -216,6 +218,8 @@ export function useChatSession() {
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
+    // 新建会话时重置加载状态，解除模式锁定
+    chatState.loading.value = false
   }
 
   // ==================== 滚动事件 ====================

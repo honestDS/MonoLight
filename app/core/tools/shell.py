@@ -31,6 +31,17 @@ class ShellExecutor(BaseExecutor):
         if not self.user_temp_dir.exists():
             self.user_temp_dir.mkdir(parents=True, exist_ok=True)
 
+    def _safe_decode(self, data: bytes) -> str:
+        """尝试多种编码解码字节流，解决 Windows 下的乱码问题"""
+        if not data:
+            return ""
+        for encoding in ["utf-8", "gbk", "cp936"]:
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return data.decode("utf-8", errors="replace")
+
     async def _get_profile_timeout(self) -> float:
         """从已激活的 Profile 中获取超时配置"""
         try:
@@ -80,19 +91,18 @@ class ShellExecutor(BaseExecutor):
                         command,
                         shell=True,
                         capture_output=True,
-                        text=True,
+                        text=False,
                         cwd=str(self.user_temp_dir),
                         env=os.environ.copy(),
                         timeout=profile_timeout,
-                        errors="replace",
                     )
 
                 result = await loop.run_in_executor(None, run_sync)
 
                 return json.dumps(
                     {
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
+                        "stdout": self._safe_decode(result.stdout),
+                        "stderr": self._safe_decode(result.stderr),
                         "exit_code": result.returncode,
                         "system_info": system_info,
                     },
@@ -117,8 +127,8 @@ class ShellExecutor(BaseExecutor):
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
-                out = stdout.decode("utf-8", errors="replace")
-                err = stderr.decode("utf-8", errors="replace")
+                out = self._safe_decode(stdout)
+                err = self._safe_decode(stderr)
 
                 return json.dumps(
                     {
