@@ -18,13 +18,11 @@ class ModelUsage(enum.StrEnum):
 
 class ProviderType(enum.StrEnum):
     OPENAI = "OPENAI"
-    #GEMINI = "GEMINI"
+    # GEMINI = "GEMINI"
 
 
 class ProviderBase(SQLModel):
-    name: str = Field(
-        index=True, unique=True, nullable=False, min_length=1, max_length=100
-    )
+    name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
     provider_type: ProviderType = Field(nullable=False)
     usage: ModelUsage = Field(default=ModelUsage.CHAT, nullable=False)
     api_key: str = Field(nullable=False, min_length=1)

@@ -51,15 +51,11 @@ from app.core.prompts import (
     SYSTEM_CONTEXT_WRAPPER,
     SYSTEM_INSTRUCTIONS_WRAPPER,
 )
-from datetime import timedelta
-
 from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
-from app.core.utils.dt import get_local_time
 from app.core.utils.message_assembler import MessageAssembler
-from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.system import get_full_system_context
 from app.models.message import (
     InternalMessage,
@@ -155,7 +151,7 @@ class ChatDispatcher:
 
         # 返回合并后的单条 InternalMessage
         combined_msg = InternalMessage(
-            id=msg_ids[-1] if msg_ids else None, # 使用最后一条的 ID
+            id=msg_ids[-1] if msg_ids else None,  # 使用最后一条的 ID
             role=MessageRole.USER,
             content="\n".join(merged_content) if merged_content else None,
             attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
@@ -205,7 +201,7 @@ class ChatDispatcher:
             "profile_id": profile_id,
             "is_processed": is_processed,
         }
-        
+
         db_obj = await message_crud.create(
             db,
             obj_in=obj_in_data,
@@ -296,9 +292,7 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
-            )
+            logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
 
             # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
             initial_msg_obj = InternalMessage(
@@ -306,16 +300,7 @@ class ChatDispatcher:
                 content=message,
                 attachments=attachments,
             )
-            initial_msg = await ChatDispatcher._save_message(
-                db,
-                session_id,
-                uid,
-                MessageRole.USER,
-                MessageType.TEXT,
-                initial_msg_obj,
-                profile.id if profile and profile.id else -1,
-                is_processed=False
-            )
+            initial_msg = await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile and profile.id else -1, is_processed=False)
 
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []
@@ -327,9 +312,7 @@ class ChatDispatcher:
                 lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
                 if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(
-                        f"【调度器/非流】会话 {session_id} 已有活跃调度器，当前请求进入队列。"
-                    )
+                    logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】会话 {session_id} 已有活跃调度器，当前请求进入队列。")
                     return LLMResponse(
                         choices=[
                             LLMChoice(
@@ -349,11 +332,7 @@ class ChatDispatcher:
 
                     if is_first_iter:
                         # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
-                        await db.execute(
-                            update(Message)
-                            .where(Message.id == initial_msg.id)
-                            .values(is_processed=True)
-                        )
+                        await db.execute(update(Message).where(Message.id == initial_msg.id).values(is_processed=True))
                         await db.commit()
 
                     if not profile.provider:
@@ -379,12 +358,12 @@ class ChatDispatcher:
                     # 动态组装含有附件的多模态消息
                     for idx, m in enumerate(messages):
                         if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
-                            is_history = (idx != len(messages) - 1)
+                            is_history = idx != len(messages) - 1
                             messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
 
                     messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
-                    seen_ids = {m.id for m in messages if m.id is not None}
+                    {m.id for m in messages if m.id is not None}
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -394,12 +373,12 @@ class ChatDispatcher:
                         # 检查新指令并合并
                         new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
-                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
-                            current_turn = 0 # 重置轮次限制
+                            logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
+                            current_turn = 0  # 重置轮次限制
                             for nm_idx, nm in enumerate(new_user_msgs):
                                 # 确保追加的用户消息中的附件也被正确组装
                                 if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False # 合并后的单条必然是最后一条
+                                    is_history = False  # 合并后的单条必然是最后一条
                                     assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
                                     messages.append(assembled_nm)
                                 else:
@@ -428,15 +407,13 @@ class ChatDispatcher:
                         )
 
                         ai_msg = response.message
-                        logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}"
-                        )
+                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}")
 
                         if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
                         messages.append(ai_msg)
-                        turn_messages.append(ai_msg) # 记录到增量历史
+                        turn_messages.append(ai_msg)  # 记录到增量历史
 
                         await ChatDispatcher._save_message(
                             db,
@@ -454,8 +431,8 @@ class ChatDispatcher:
                             new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
-                            
-                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
+
+                            logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
                             for nm_idx, nm in enumerate(new_user_msgs):
                                 if nm.attachments or isinstance(nm.content, list):
                                     is_history = False
@@ -463,7 +440,7 @@ class ChatDispatcher:
                                     messages.append(assembled_nm)
                                 else:
                                     messages.append(nm)
-                            
+
                             current_turn = 0
                             continue
 
@@ -520,9 +497,7 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
-            )
+            logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
 
             # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
             initial_msg_obj = InternalMessage(
@@ -530,20 +505,10 @@ class ChatDispatcher:
                 content=message,
                 attachments=attachments,
             )
-            initial_msg = await ChatDispatcher._save_message(
-                db,
-                session_id,
-                uid,
-                MessageRole.USER,
-                MessageType.TEXT,
-                initial_msg_obj,
-                profile.id if profile and profile.id else -1,
-                is_processed=False
-            )
+            initial_msg = await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile and profile.id else -1, is_processed=False)
 
             turn_messages: list[InternalMessage] = []
             is_first_iter = True
-            has_output_in_this_dispatch = False
 
             # 2. 分布式会话状态机
             while True:
@@ -551,9 +516,7 @@ class ChatDispatcher:
                 lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
                 if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(
-                        f"【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。"
-                    )
+                    logger.bind(uid=uid, session_id=session_id).info(f"【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。")
                     yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued", "request_id": request_id}
                     yield {"type": "done", "session_id": session_id, "history": [], "request_id": request_id}
                     return
@@ -566,11 +529,7 @@ class ChatDispatcher:
 
                     if is_first_iter:
                         # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
-                        await db.execute(
-                            update(Message)
-                            .where(Message.id == initial_msg.id)
-                            .values(is_processed=True)
-                        )
+                        await db.execute(update(Message).where(Message.id == initial_msg.id).values(is_processed=True))
                         await db.commit()
 
                     if not profile.provider:
@@ -594,7 +553,7 @@ class ChatDispatcher:
                     # 动态组装含有附件的多模态消息
                     for idx, m in enumerate(messages):
                         if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
-                            is_history = (idx != len(messages) - 1)
+                            is_history = idx != len(messages) - 1
                             messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
 
                     messages = ChatDispatcher._inject_system_prompt(profile, messages)
@@ -611,7 +570,7 @@ class ChatDispatcher:
                             for nm_idx, nm in enumerate(new_user_msgs):
                                 # 确保追加的用户消息中的附件也被正确组装
                                 if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False # 合并后的单条必然是最后一条
+                                    is_history = False  # 合并后的单条必然是最后一条
                                     assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
                                     messages.append(assembled_nm)
                                 else:
@@ -630,6 +589,7 @@ class ChatDispatcher:
                         current_tool_calls_map = {}
                         current_content_chunks = []
                         import uuid
+
                         response_id = str(uuid.uuid4())
 
                         async for chunk in LLMClient.generate_stream(
@@ -643,7 +603,8 @@ class ChatDispatcher:
                             protocol=getattr(profile.provider, "protocol", "openai"),
                         ):
                             choices = chunk.get("choices", [])
-                            if not choices: continue
+                            if not choices:
+                                continue
                             choice = choices[0]
                             delta = choice.get("delta", {})
 
@@ -651,7 +612,6 @@ class ChatDispatcher:
                             if content:
                                 current_content_chunks.append(content)
                                 yield {"type": "content", "content": content, "turn": current_turn, "response_id": response_id, "request_id": request_id}
-                                has_output_in_this_dispatch = True
 
                             tool_calls = delta.get("tool_calls")
                             if tool_calls:
@@ -659,9 +619,12 @@ class ChatDispatcher:
                                     idx = tc.get("index", 0)
                                     if idx not in current_tool_calls_map:
                                         current_tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                                    if tc.get("id"): current_tool_calls_map[idx]["id"] = tc.get("id")
-                                    if tc.get("function", {}).get("name"): current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
-                                    if tc.get("function", {}).get("arguments"): current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+                                    if tc.get("id"):
+                                        current_tool_calls_map[idx]["id"] = tc.get("id")
+                                    if tc.get("function", {}).get("name"):
+                                        current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
+                                    if tc.get("function", {}).get("arguments"):
+                                        current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
 
                         final_content = "".join(current_content_chunks)
                         final_tool_calls = []
@@ -669,8 +632,10 @@ class ChatDispatcher:
                             if tc_data.get("name"):
                                 args_dict = {}
                                 if tc_data.get("arguments"):
-                                    try: args_dict = json.loads(tc_data.get("arguments"))
-                                    except Exception: pass
+                                    try:
+                                        args_dict = json.loads(tc_data.get("arguments"))
+                                    except Exception:
+                                        pass
                                 final_tool_calls.append(InternalToolCall(id=tc_data.get("id") or f"call_{idx}", name=tc_data.get("name"), arguments=args_dict))
 
                         if not final_tool_calls and not final_content.strip():
@@ -678,9 +643,7 @@ class ChatDispatcher:
 
                         ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
 
-                        logger.bind(uid=uid, session_id=session_id).info(
-                            f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}"
-                        )
+                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}")
 
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
@@ -691,7 +654,7 @@ class ChatDispatcher:
                             new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
-                            
+
                             for nm_idx, nm in enumerate(new_user_msgs):
                                 if nm.attachments or isinstance(nm.content, list):
                                     is_history = False
@@ -699,7 +662,7 @@ class ChatDispatcher:
                                     messages.append(assembled_nm)
                                 else:
                                     messages.append(nm)
-                            
+
                             current_turn = 0
                             continue
 

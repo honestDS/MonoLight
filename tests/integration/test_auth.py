@@ -18,13 +18,9 @@ async def setup_db():
 
 @pytest.mark.asyncio
 async def test_auth_management_flow():
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         # --- 422 类型错误验证：登录参数不是字符串 ---
-        r_login_type = await ac.post(
-            "/api/v1/auth/login", json={"username": 123, "password": ["secret"]}
-        )
+        r_login_type = await ac.post("/api/v1/auth/login", json={"username": 123, "password": ["secret"]})
         assert r_login_type.status_code == 422
 
         # 1. 正常流：正确 Token 重置
@@ -34,7 +30,5 @@ async def test_auth_management_flow():
         )
 
         # 2. 正常流：登录获取 Token
-        r_login_ok = await ac.post(
-            "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
-        )
+        r_login_ok = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin"})
         assert r_login_ok.status_code == 200

@@ -19,12 +19,8 @@ def setup_test_env():
 @pytest.fixture(autouse=True)
 def block_real_shell(monkeypatch):
     """【最终物理防线】全局自动执行：严禁任何测试调用真实 Shell 接口"""
-    forbidden = MagicMock(
-        side_effect=RuntimeError("REAL_SHELL_FORBIDDEN_GLOBALLY_IN_TESTS")
-    )
-    monkeypatch.setattr(
-        "app.core.tools.shell.asyncio.create_subprocess_shell", forbidden
-    )
+    forbidden = MagicMock(side_effect=RuntimeError("REAL_SHELL_FORBIDDEN_GLOBALLY_IN_TESTS"))
+    monkeypatch.setattr("app.core.tools.shell.asyncio.create_subprocess_shell", forbidden)
     monkeypatch.setattr("app.core.tools.shell.asyncio.wait_for", forbidden)
 
 

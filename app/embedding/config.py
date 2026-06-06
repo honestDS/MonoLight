@@ -4,7 +4,6 @@ Embedding 配置模型
 定义 Embedding 模块的配置结构，支持从环境变量加载。
 """
 
-
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -67,21 +66,13 @@ class EmbeddingSettings(BaseSettings):
     """从环境变量加载 Embedding 配置"""
 
     embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
-    embedding_model_id: str = Field(
-        default="text-embedding-3-small", alias="EMBEDDING_MODEL_ID"
-    )
+    embedding_model_id: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL_ID")
     embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")
-    embedding_base_url: str | None = Field(
-        default=None, alias="EMBEDDING_BASE_URL"
-    )
+    embedding_base_url: str | None = Field(default=None, alias="EMBEDDING_BASE_URL")
     embedding_batch_size: int = Field(default=100, alias="EMBEDDING_BATCH_SIZE")
-    embedding_dimensions: int | None = Field(
-        default=None, alias="EMBEDDING_DIMENSIONS"
-    )
+    embedding_dimensions: int | None = Field(default=None, alias="EMBEDDING_DIMENSIONS")
     embedding_timeout: int = Field(default=30, alias="EMBEDDING_TIMEOUT")
-    embedding_model_cache_dir: str | None = Field(
-        default=None, alias="EMBEDDING_MODEL_CACHE_DIR"
-    )
+    embedding_model_cache_dir: str | None = Field(default=None, alias="EMBEDDING_MODEL_CACHE_DIR")
 
     class Config:
         env_file = ".env"

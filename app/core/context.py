@@ -39,9 +39,7 @@ class ContextManager:
         limit_tokens = cfg.other.context_window_k * 1024
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
-        raw_history = await message_crud.get_history(
-            db, session_id=session_id, uid=uid, limit=5000, before_id=before_id
-        )
+        raw_history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=5000, before_id=before_id)
         parsed_history = parse_db_messages_to_internal(raw_history)
 
         # 2. 策略分发
@@ -56,9 +54,7 @@ class ContextManager:
 
         # 3. 压缩日志记录
         if log_data["is_hard_truncated"]:
-            logger.bind(uid=uid, session_id=session_id).info(
-                f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']}"
-            )
+            logger.bind(uid=uid, session_id=session_id).info(f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']}")
 
         return final_msgs
 
@@ -80,9 +76,7 @@ class ContextManager:
 
         # 反向装载（从新到旧）
         for msg in parsed_history:
-            msg_str = (
-                json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
-            )
+            msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
             msg_tokens = estimate_tokens(msg_str)
 
             if current_total + msg_tokens > limit_tokens:
@@ -165,13 +159,10 @@ class ContextManager:
                 audited_msgs.append(msg)
                 i += 1
 
-
         # 计算压缩后的 Token 数
         final_history_tokens = 0
         for fm in audited_msgs:
-            fm_str = (
-                json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
-            )
+            fm_str = json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
             final_history_tokens += estimate_tokens(fm_str)
 
         is_hard_truncated or (len(audited_msgs) < len(parsed_history))

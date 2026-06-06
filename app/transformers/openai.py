@@ -32,9 +32,7 @@ class OpenAITransformer(BaseTransformer):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         **kwargs,
-    ) -> dict[
-        str, Any
-    ]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
+    ) -> dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -59,9 +57,7 @@ class OpenAITransformer(BaseTransformer):
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(
-                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
-                        )
+                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
                     return json.loads(txt)
         except Exception as e:
             logger.error(f"OpenAI Driver Error: {str(e)}")
@@ -95,7 +91,7 @@ class OpenAITransformer(BaseTransformer):
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
 
-        #logger.debug(f"[OpenAITransformer - Stream] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
+        # logger.debug(f"[OpenAITransformer - Stream] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         try:
@@ -103,9 +99,7 @@ class OpenAITransformer(BaseTransformer):
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status != 200:
                         txt = await resp.text()
-                        raise LLMException(
-                            f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}"
-                        )
+                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
 
                     buffer = ""
                     async for line in resp.content.iter_any():
@@ -131,10 +125,9 @@ class OpenAITransformer(BaseTransformer):
             raise LLMException(str(e))
 
     @classmethod
-    def to_provider(
-        cls, internal_messages: list[InternalMessage], **kwargs
-    ) -> list[dict[str, Any]]:
-        from app.models.message import TextPart, ImagePart, FilePart
+    def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
+        from app.models.message import FilePart, ImagePart, TextPart
+
         provider_msgs = []
         for msg in internal_messages:
             if isinstance(msg.content, list):
@@ -144,10 +137,7 @@ class OpenAITransformer(BaseTransformer):
                     if isinstance(part, TextPart) or getattr(part, "type", None) == "text":
                         content.append({"type": "text", "text": getattr(part, "text", "")})
                     elif isinstance(part, ImagePart) or getattr(part, "type", None) == "image_url":
-                        content.append({
-                            "type": "image_url",
-                            "image_url": {"url": getattr(part, "image_url", {}).get("url", "")}
-                        })
+                        content.append({"type": "image_url", "image_url": {"url": getattr(part, "image_url", {}).get("url", "")}})
                     elif isinstance(part, FilePart) or getattr(part, "type", None) == "file":
                         # OpenAI 当前不支持直接传递任意文件，转为文本描述给上下文
                         content.append({"type": "text", "text": f"[Attached File: {getattr(part, 'path', '')}]"})
@@ -157,7 +147,7 @@ class OpenAITransformer(BaseTransformer):
                 item = {"role": msg.role.value, "content": content}
             else:
                 item = {"role": msg.role.value, "content": msg.content}
-            
+
             if msg.tool_calls:
                 item["tool_calls"] = [
                     {

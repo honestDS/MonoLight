@@ -37,9 +37,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
         raise AuthException(constants.ERR_USER_NOT_FOUND_OR_DISABLED)
 
     try:
-        if not user.hashed_password or not verify_password(
-            request.password, user.hashed_password
-        ):
+        if not user.hashed_password or not verify_password(request.password, user.hashed_password):
             raise AuthException(constants.ERR_INVALID_CREDENTIALS)
     except ValueError as e:
         raise ParameterException(str(e))
@@ -52,9 +50,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
 
 
 @router.post("/reset_admin")
-async def reset_admin_account(
-    request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)
-):
+async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)):
     env_reset_token = os.getenv("ADMIN_RESET_TOKEN")
     if not env_reset_token or request.reset_token != env_reset_token:
         raise AuthException("无效或未配置重置 Token。")

@@ -53,9 +53,7 @@ def cosine_similarity(vector1: list[float], vector2: list[float]) -> float:
     return dot_product / (magnitude1 * magnitude2)
 
 
-def batch_similarity(
-    query_vector: list[float], vectors: list[list[float]]
-) -> list[tuple[int, float]]:
+def batch_similarity(query_vector: list[float], vectors: list[list[float]]) -> list[tuple[int, float]]:
     """
     计算查询向量与多个向量的相似度
 

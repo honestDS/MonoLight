@@ -73,17 +73,11 @@ class UserCreate(SQLModel):
             raise ValueError("password must not exceed 72 bytes")
         return v
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {"username": "new_user_01", "password": "secure_pass_123"}
-        }
-    )
+    model_config = ConfigDict(json_schema_extra={"example": {"username": "new_user_01", "password": "secure_pass_123"}})
 
 
 class UserUpdate(SQLModel):
-    uid: str = PydanticField(
-        ..., description="用户UID", json_schema_extra={"example": "uuid_hex_string"}
-    )
+    uid: str = PydanticField(..., description="用户UID", json_schema_extra={"example": "uuid_hex_string"})
     username: str | None = PydanticField(
         None,
         min_length=3,

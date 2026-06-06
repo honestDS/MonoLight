@@ -4,7 +4,6 @@ Embedding 客户端
 提供统一的向量化调用接口，根据配置动态加载对应的 Transformer。
 """
 
-
 from app.embedding.config import EmbeddingConfig
 from app.embedding.transformers.base import (
     BaseEmbeddingTransformer,

@@ -1,5 +1,4 @@
 import time
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -14,6 +13,7 @@ from app.models.message import MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
+
 
 class WebSocketChatAdapter(BaseChatAdapter):
     async def chat(
@@ -38,27 +38,10 @@ class WebSocketChatAdapter(BaseChatAdapter):
             ):
                 yield chunk
         except BaseBusinessException as e:
-            yield LLMResponse(
-                choices=[
-                    LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message),
-                        finish_reason=True,
-                        created_at=time.time()
-                    )
-                ],
-                history=[]
-            ).model_dump()
+            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message), finish_reason=True, created_at=time.time())], history=[]).model_dump()
         except Exception as e:
             logger.exception(f"Unexpected error in WebSocketChatAdapter: {str(e)}")
-            yield LLMResponse(
-                choices=[
-                    LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR),
-                        finish_reason=True,
-                        created_at=time.time()
-                    )
-                ],
-                history=[]
-            ).model_dump()
+            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR), finish_reason=True, created_at=time.time())], history=[]).model_dump()
+
 
 ws_chat_adapter = WebSocketChatAdapter()

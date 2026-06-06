@@ -25,9 +25,7 @@ from app.schemas.response import (
     StandardResponse,
 )
 
-router = APIRouter(
-    prefix="/providers", tags=["Providers"], dependencies=[Depends(get_current_user)]
-)
+router = APIRouter(prefix="/providers", tags=["Providers"], dependencies=[Depends(get_current_user)])
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -45,7 +43,7 @@ async def create_provider(
     if await provider_crud.get_by_name(db, provider_in.name):
         raise ParameterException(constants.ERR_PROVIDER_NAME_EXISTS)
 
-    provider_in.is_active = True # 该参数暂不允许设置
+    provider_in.is_active = True  # 该参数暂不允许设置
     db_obj = await provider_crud.create(db, obj_in=provider_in)
     return StandardResponse.success(
         data=ProviderResponse.model_validate(db_obj),
@@ -61,6 +59,7 @@ async def get_provider_types():
             "model_usages": [e.value for e in ModelUsage],
         }
     )
+
 
 @router.get("/list", response_model=StandardResponse)
 async def list_providers(

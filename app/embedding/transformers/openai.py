@@ -4,7 +4,6 @@ OpenAI Embedding Transformer
 适配 OpenAI Embeddings API 协议。
 """
 
-
 import aiohttp
 
 from app.core.exceptions import LLMException
@@ -58,9 +57,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        raise LLMException(
-                            f"OpenAI Embeddings API 调用失败 [{resp.status}]: {error_text}"
-                        )
+                        raise LLMException(f"OpenAI Embeddings API 调用失败 [{resp.status}]: {error_text}")
 
                     data = await resp.json()
 

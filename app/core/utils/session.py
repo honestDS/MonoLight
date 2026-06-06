@@ -6,6 +6,7 @@ from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
 
+
 async def generate_session_title(
     uid: str,
     session_id: str,
@@ -25,12 +26,7 @@ async def generate_session_title(
             return "无标题"
 
         # 构造起名专用消息列表
-        messages = [
-            InternalMessage(
-                role=MessageRole.USER,
-                content=SESSION_TITLE_PROMPT.format(message=first_message)
-            )
-        ]
+        messages = [InternalMessage(role=MessageRole.USER, content=SESSION_TITLE_PROMPT.format(message=first_message))]
 
         # 调用 LLM 生成标题
         response = await LLMClient.generate(
@@ -38,7 +34,7 @@ async def generate_session_title(
             base_url=base_url,
             model_id=model_id,
             messages=messages,
-            temperature=0.3, # 较低随机性以获得更准确的标题
+            temperature=0.3,  # 较低随机性以获得更准确的标题
             max_tokens=max_tokens,
             protocol=protocol,
         )
@@ -53,13 +49,9 @@ async def generate_session_title(
 
             # 这里的 db 需要重新获取，因为是异步任务
             from app.providers.database import AsyncSessionLocal
+
             async with AsyncSessionLocal() as db:
-                await session_crud.create_or_update_title(
-                    db=db,
-                    session_id=session_id,
-                    uid=uid,
-                    title=title
-                )
+                await session_crud.create_or_update_title(db=db, session_id=session_id, uid=uid, title=title)
             return title
 
         return None

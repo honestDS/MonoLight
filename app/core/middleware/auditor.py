@@ -15,17 +15,11 @@ from app.providers.llm.client import LLMClient
 logger = get_logger(__name__)
 
 
-
-
-async def audit_command(
-    command: str, provider_url: str, api_key: str, model_id: str
-) -> dict[str, Any] | None:
+async def audit_command(command: str, provider_url: str, api_key: str, model_id: str) -> dict[str, Any] | None:
     try:
         messages = [
             InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_PROMPT),
-            InternalMessage(
-                role=MessageRole.USER, content=f"Command to analyze: {command}"
-            ),
+            InternalMessage(role=MessageRole.USER, content=f"Command to analyze: {command}"),
         ]
 
         result = await LLMClient.generate(
@@ -55,11 +49,12 @@ async def audit_command(
         logger.error(f"Audit Exception: {e}")
         return None
 
+
 class AuditMiddleware:
     @staticmethod
     def verify_token(command: str) -> tuple[bool, str]:
         if command.startswith(CONFIRMATION_PREFIX):
-            parts = command[len(CONFIRMATION_PREFIX):].split(" ", 1)
+            parts = command[len(CONFIRMATION_PREFIX) :].split(" ", 1)
             if len(parts) == 2:
                 token, real_cmd = parts[0], parts[1]
                 audit_cmd_stripped = real_cmd.strip()
@@ -72,9 +67,7 @@ class AuditMiddleware:
         return False, command
 
     @staticmethod
-    async def audit(
-        db, profile, cfg, tool_name: str, args: dict
-    ) -> str | None:
+    async def audit(db, profile, cfg, tool_name: str, args: dict) -> str | None:
         from app.core.crud.provider import provider_crud
         from app.core.tools import get_registered_tool_names
 
@@ -89,7 +82,7 @@ class AuditMiddleware:
 
         # Handle downgraded command if verification failed but prefix was present
         if original_command.startswith(CONFIRMATION_PREFIX):
-             command = original_command.split(" ", 1)[-1].strip()
+            command = original_command.split(" ", 1)[-1].strip()
 
         if cfg.security.audit_threshold == 0:
             return None
@@ -101,35 +94,19 @@ class AuditMiddleware:
         if not provider:
             return None
 
-        audit_res = await audit_command(
-            command, provider.base_url, provider.api_key, cfg.security.audit_model_id
-        )
+        audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id)
 
         if audit_res is None:
-            return json.dumps(
-                {"error": "audit_system_failure", "reason": "Security Audit System is currently unavailable."},
-                ensure_ascii=False
-            )
+            return json.dumps({"error": "audit_system_failure", "reason": "Security Audit System is currently unavailable."}, ensure_ascii=False)
 
         score = audit_res.get("score", 10)
         audit_res.get("reason", "Unknown")
 
         if score >= 8:
-            return json.dumps(
-                {"error": "Security Blocked", "reason": f"High risk score {score}: Security Blocked"},
-                ensure_ascii=False
-            )
+            return json.dumps({"error": "Security Blocked", "reason": f"High risk score {score}: Security Blocked"}, ensure_ascii=False)
 
         if score >= cfg.security.audit_threshold:
             cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
             dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"
-            return json.dumps(
-                {
-                    "error": "confirmation_required",
-                    "reason": CONFIRMATION_NOTICE_PROMPT.format(score=score, dynamic_token=dynamic_token),
-                    "risky_command": command,
-                    "dynamic_token": dynamic_token
-                },
-                ensure_ascii=False
-            )
+            return json.dumps({"error": "confirmation_required", "reason": CONFIRMATION_NOTICE_PROMPT.format(score=score, dynamic_token=dynamic_token), "risky_command": command, "dynamic_token": dynamic_token}, ensure_ascii=False)
         return None

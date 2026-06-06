@@ -25,9 +25,7 @@ if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     DATABASE_URL = f"sqlite+aiosqlite:///{temp_db}"
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine, class_=AsyncSession, expire_on_commit=False
-)
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def get_db():

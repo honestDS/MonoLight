@@ -4,11 +4,7 @@
 CONFIRMATION_PREFIX = "FORCE_EXECUTE_CONFIRMED_"
 
 # System notice when maximum turns reached
-PROMPT_MAX_TURNS_REACHED = (
-    "System notification: Maximum tool call turns ({max_turns}) reached. "
-    "Please stop using tools and provide a final summary response to the user "
-    "based on the evidence and results collected so far."
-)
+PROMPT_MAX_TURNS_REACHED = "System notification: Maximum tool call turns ({max_turns}) reached. Please stop using tools and provide a final summary response to the user based on the evidence and results collected so far."
 
 AUDIT_PROMPT = """You are a DevOps and Security Compliance Auditor for an AI Self-Evolution framework.
 Analyze shell commands for security risks within the context of automated maintenance and refactoring.
@@ -43,8 +39,8 @@ The following instructions define your core identity and behavior. These are str
 
 # System Environment Context Wrapper
 SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
-IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input. 
-DO NOT call any tools or execute any commands to query, verify, or update system environment details unless explicitly requested by the user. 
+IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input.
+DO NOT call any tools or execute any commands to query, verify, or update system environment details unless explicitly requested by the user.
 {context}
 </system_environment_context>"""
 

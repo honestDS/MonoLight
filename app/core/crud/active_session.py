@@ -42,4 +42,5 @@ class CRUDActiveSession(CRUDBase[ActiveSession, ActiveSession, ActiveSession]):
         await db.execute(stmt)
         await db.commit()
 
+
 active_session_crud = CRUDActiveSession(ActiveSession)

@@ -29,11 +29,7 @@ class LogManager:
 
                 # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
                 # 排除 name, uid, session_id，因为它们已经有专门的字段
-                extra_data = {
-                    k: v
-                    for k, v in record["extra"].items()
-                    if k not in ["name", "uid", "session_id"]
-                }
+                extra_data = {k: v for k, v in record["extra"].items() if k not in ["name", "uid", "session_id"]}
 
                 # 使用系统本地时间戳推送给前端
                 local_now = get_local_time()
@@ -66,11 +62,7 @@ class LogManager:
 
                 # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
                 # 排除 name, uid, session_id，因为它们已经有专门的列
-                extra_data = {
-                    k: v
-                    for k, v in record["extra"].items()
-                    if k not in ["name", "uid", "session_id"]
-                }
+                extra_data = {k: v for k, v in record["extra"].items() if k not in ["name", "uid", "session_id"]}
                 extra_json = json.dumps(extra_data, default=str) if extra_data else None
 
                 # 优先使用 extra 中的 name 作为 module
@@ -140,10 +132,7 @@ class LogManager:
             sys.stdout,
             level=level,
             colorize=True,
-            format=(
-                "<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> "
-                "<level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"
-            ),
+            format=("<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"),
         )
 
         # 添加文件输出 (自动滚动)
@@ -210,9 +199,7 @@ class LogManager:
         # 记录工具调用日志
         lines = [line.strip() for line in command.splitlines() if line.strip()]
         log_cmd = lines if len(lines) > 1 else command.strip()
-        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(
-            f"Turn {turn} | Tool: {tool_name} | Args: {log_cmd}"
-        )
+        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(f"Turn {turn} | Tool: {tool_name} | Args: {log_cmd}")
 
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):

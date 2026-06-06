@@ -38,9 +38,7 @@ async def test_get_messages_basic(mock_profile):
     mock_result.scalars.return_value.all.return_value = [msg2, msg1]
     db.execute.return_value = mock_result
 
-    messages = await ContextManager.get_messages(
-        db, "s1", "u1", mock_profile, "current"
-    )
+    messages = await ContextManager.get_messages(db, "s1", "u1", mock_profile, "current")
 
     assert len(messages) == 3
     assert messages[0].role == MessageRole.USER
@@ -62,8 +60,6 @@ async def test_get_messages_token_limit(mock_profile):
     mock_result.scalars.return_value.all.return_value = [long_msg]
     db.execute.return_value = mock_result
 
-    messages = await ContextManager.get_messages(
-        db, "s1", "u1", mock_profile, "current"
-    )
+    messages = await ContextManager.get_messages(db, "s1", "u1", mock_profile, "current")
     assert len(messages) == 1
     assert messages[0].content == "current"

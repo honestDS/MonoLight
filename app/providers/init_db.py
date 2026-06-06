@@ -72,26 +72,16 @@ async def sync_database_schema():
 
                     # 构造 ALTER 语句
                     if dialect_name == "mysql":
-                        alter_query = (
-                        f"ALTER TABLE `{table_name}` ADD `{column.name}` "
-                        f"{col_type_compiled}{default_clause}"
-                    )
+                        alter_query = f"ALTER TABLE `{table_name}` ADD `{column.name}` {col_type_compiled}{default_clause}"
                     else:
-                        alter_query = (
-                        f"ALTER TABLE {table_name} ADD COLUMN {column.name} "
-                        f"{col_type_compiled}{default_clause}"
-                    )
+                        alter_query = f"ALTER TABLE {table_name} ADD COLUMN {column.name} {col_type_compiled}{default_clause}"
 
                     try:
                         await conn.execute(text(alter_query))
                         await conn.commit()
-                        logger.info(
-                            f"SCHEMA_SYNC: Table {table_name} added column {column.name}"
-                        )
+                        logger.info(f"SCHEMA_SYNC: Table {table_name} added column {column.name}")
                     except Exception as e:
-                        logger.error(
-                            f"SCHEMA_SYNC_ERR: Failed to add {column.name} to {table_name}: {e}"
-                        )
+                        logger.error(f"SCHEMA_SYNC_ERR: Failed to add {column.name} to {table_name}: {e}")
 
 
 def merge_configs(base: dict, target: dict) -> dict:
@@ -122,18 +112,14 @@ async def init_system_data(session: AsyncSession):
 
     prompt_obj = await prompt_crud.get_by_name(session, name="default")
     if not prompt_obj:
-        prompt_obj = await prompt_crud.create(
-            session, obj_in={"name": "default", "content": "", "uid": None}
-        )
+        prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": None})
 
     all_profiles = await profile_crud.get_multi(session, limit=100)
 
     for profile in all_profiles:
         current_configs = profile.configs or {}
         updated_configs = merge_configs(latest_default_configs, current_configs)
-        await profile_crud.update(
-            session, db_obj=profile, obj_in={"configs": updated_configs}
-        )
+        await profile_crud.update(session, db_obj=profile, obj_in={"configs": updated_configs})
 
     if not all_profiles:
         await profile_crud.create(

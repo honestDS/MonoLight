@@ -30,12 +30,8 @@ if TYPE_CHECKING:
 class ProviderConfig(BaseModel):
     """LLM 提供商核心参数配置"""
 
-    model_id: str = PydanticField(
-        ..., min_length=1, description="模型唯一标识符，如 gpt-4o"
-    )
-    temperature: float = PydanticField(
-        0.7, ge=0, le=2.0, description="采样温度，控制生成内容的随机性"
-    )
+    model_id: str = PydanticField(..., min_length=1, description="模型唯一标识符，如 gpt-4o")
+    temperature: float = PydanticField(0.7, ge=0, le=2.0, description="采样温度，控制生成内容的随机性")
     top_p: float = PydanticField(1.0, ge=0, le=1.0, description="核采样阈值")
     max_tokens: int = PydanticField(2048, ge=0, description="单次生成最大 Token 数量")
     multimodal: bool = PydanticField(False, description="启用多模态支持")
@@ -44,37 +40,23 @@ class ProviderConfig(BaseModel):
 class SecurityConfig(BaseModel):
     """安全审计系统参数配置"""
 
-    audit_provider_id: int | None = PydanticField(
-        None, gt=0, description="执行安全审计的提供商 ID"
-    )
-    audit_model_id: str | None = PydanticField(
-        None, description="用于审计的具体模型 ID"
-    )
-    audit_threshold: int = PydanticField(
-        5, ge=0, le=7, description="触发审计拦截的风险评分阈值（0-7）"
-    )
+    audit_provider_id: int | None = PydanticField(None, gt=0, description="执行安全审计的提供商 ID")
+    audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
+    audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发审计拦截的风险评分阈值（0-7）")
 
 
 class ToolConfig(BaseModel):
     """Agent 工具调用参数配置"""
 
-    shell_timeout: float = PydanticField(
-        30.0, gt=0, description="Shell 指令执行的超时时间（秒）"
-    )
-    max_parallel_tools: int = PydanticField(
-        5, ge=1, le=20, description="允许的最大并行工具调用数量"
-    )
-    max_turns: int = PydanticField(
-        5, ge=1, le=20, description="允许的最大连续工具调用轮数"
-    )
+    shell_timeout: float = PydanticField(30.0, gt=0, description="Shell 指令执行的超时时间（秒）")
+    max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
+    max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
 
 
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
-    context_window_k: int = PydanticField(
-        4, ge=1, description="短期上下文关联的历史消息轮数"
-    )
+    context_window_k: int = PydanticField(4, ge=1, description="短期上下文关联的历史消息轮数")
 
 
 class ProfileConfig(BaseModel):
@@ -125,9 +107,7 @@ PROFILE_EXAMPLE = {
 class ProfileBase(SQLModel):
     """Profile 基础模型，包含 OpenAPI 示例文档"""
 
-    name: str = Field(
-        index=True, unique=True, nullable=False, min_length=1, max_length=100
-    )
+    name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
     provider_id: int = Field(foreign_key="provider.id", ge=-1)
     prompt_id: int | None = Field(default=None, foreign_key="prompt.id", gt=0)
     configs: dict[str, Any] = Field(
@@ -173,4 +153,3 @@ class ProfileResponse(ProfileBase):
     is_active: bool
     provider_name: str | None = None
     model_config = ConfigDict(from_attributes=True)
-

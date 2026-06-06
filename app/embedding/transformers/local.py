@@ -4,7 +4,6 @@ Local Embedding Transformer
 基于 sentence-transformers 的本地模型适配器。
 """
 
-
 from app.core.exceptions import ServerException
 from app.embedding.transformers.base import (
     BaseEmbeddingTransformer,
@@ -25,15 +24,11 @@ class LocalEmbeddingTransformer(BaseEmbeddingTransformer):
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
-            raise ServerException(
-                "sentence-transformers 库未安装，请运行: pip install sentence-transformers"
-            )
+            raise ServerException("sentence-transformers 库未安装，请运行: pip install sentence-transformers")
 
         try:
             cache_folder = self.config.model_cache_dir or None
-            self.model = SentenceTransformer(
-                self.config.model_id, cache_folder=cache_folder
-            )
+            self.model = SentenceTransformer(self.config.model_id, cache_folder=cache_folder)
         except Exception as e:
             raise ServerException(f"加载本地 Embedding 模型失败: {str(e)}")
 

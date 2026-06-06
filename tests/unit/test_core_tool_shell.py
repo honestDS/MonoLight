@@ -88,6 +88,7 @@ async def test_shell_execute_timeout(executor, monkeypatch):
 @pytest.mark.asyncio
 async def test_shell_execute_python_c(executor):
     import platform
+
     expected_system_info = f"{platform.system()} {platform.release()}"
 
     # 测试原有黑名单

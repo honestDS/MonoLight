@@ -1,4 +1,3 @@
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -12,9 +11,7 @@ from app.models.provider import (
 
 class CRUDProvider(CRUDBase[ModelProvider, ProviderCreate, ProviderUpdate]):
     async def get_by_name(self, db: AsyncSession, name: str) -> ModelProvider | None:
-        result = await db.execute(
-            select(ModelProvider).where(ModelProvider.name == name)
-        )
+        result = await db.execute(select(ModelProvider).where(ModelProvider.name == name))
         return result.scalars().first()
 
 

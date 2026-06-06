@@ -1,6 +1,4 @@
 import time
-import uuid
-
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +12,7 @@ from app.models.message import MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
+
 
 class WebChatAdapter(BaseChatAdapter):
     async def chat(
@@ -36,27 +35,10 @@ class WebChatAdapter(BaseChatAdapter):
             )
             return llm_response
         except BaseBusinessException as e:
-            return LLMResponse(
-                choices=[
-                    LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message),
-                        finish_reason="error",
-                        created_at=time.time()
-                    )
-                ],
-                history=[]
-            ).model_dump()
+            return LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message), finish_reason="error", created_at=time.time())], history=[]).model_dump()
         except Exception as e:
             logger.exception(f"Unexpected error in WebChatAdapter: {str(e)}")
-            return LLMResponse(
-                choices=[
-                    LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR),
-                        finish_reason="error",
-                        created_at=time.time()
-                    )
-                ],
-                history=[]
-            ).model_dump()
+            return LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR), finish_reason="error", created_at=time.time())], history=[]).model_dump()
+
 
 web_chat_adapter = WebChatAdapter()

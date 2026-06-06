@@ -16,9 +16,7 @@ async def test_audit_command_success():
         ),
         model="m1",
     )
-    with patch(
-        "app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_resp)
-    ):
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_resp)):
         result = await audit_command("ls", "url", "key", "m1")
         assert result["score"] == 2
 
@@ -30,8 +28,6 @@ async def test_audit_command_markdown_json_success():
         message=InternalMessage(role=MessageRole.ASSISTANT, content=mock_content),
         model="m1",
     )
-    with patch(
-        "app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_resp)
-    ):
+    with patch("app.providers.llm.client.LLMClient.generate", AsyncMock(return_value=mock_resp)):
         result = await audit_command("ls", "url", "key", "m1")
         assert result["score"] == 0

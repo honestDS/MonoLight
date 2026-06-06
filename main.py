@@ -46,14 +46,13 @@ async def lifespan(app: FastAPI):
     )
     from app.core.log import get_logger
 
-    get_logger("app.core.log").info(
-        f"Log system initialized. Path: {os.getenv('LOG_FILE_PATH', 'data/logs/monolight.log')} | Time: {now_aware.isoformat()}"
-    )
+    get_logger("app.core.log").info(f"Log system initialized. Path: {os.getenv('LOG_FILE_PATH', 'data/logs/monolight.log')} | Time: {now_aware.isoformat()}")
 
     yield
 
 
 app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
+
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -67,9 +66,7 @@ async def favicon():
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     return JSONResponse(
         status_code=500,
-        content=StandardResponse.error(
-            code=500, message=constants.ERR_DB_OPERATION_FAILED
-        ).model_dump(),
+        content=StandardResponse.error(code=500, message=constants.ERR_DB_OPERATION_FAILED).model_dump(),
     )
 
 
@@ -95,9 +92,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
     return JSONResponse(
         status_code=422,
-        content=StandardResponse.error(
-            code=422, message=f"{constants.ERR_VALIDATION_FAILED}: " + " | ".join(error_msgs)
-        ).model_dump(),
+        content=StandardResponse.error(code=422, message=f"{constants.ERR_VALIDATION_FAILED}: " + " | ".join(error_msgs)).model_dump(),
     )
 
 
@@ -138,9 +133,7 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
 async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
-        content=StandardResponse.error(
-            code=500, message=constants.ERR_INTERNAL_SERVER_ERROR + ": " + str(exc)
-        ).model_dump(),
+        content=StandardResponse.error(code=500, message=constants.ERR_INTERNAL_SERVER_ERROR + ": " + str(exc)).model_dump(),
     )
 
 

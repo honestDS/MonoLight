@@ -115,6 +115,7 @@ class MessageResponse(MessageBase):
         if isinstance(v, str):
             try:
                 import json
+
                 parsed = json.loads(v)
                 if isinstance(parsed, (list, dict)):
                     return parsed

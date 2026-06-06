@@ -54,8 +54,6 @@ async def test_audit_tool_call_blocked(mock_profile):
         "app.core.dispatcher.audit_command",
         AsyncMock(return_value={"score": 9, "reason": "danger"}),
     ):
-        res_json = await ChatDispatcher._audit_tool_call(
-            db, mock_profile, "execute_shell", {"command": "rm -rf /"}, []
-        )
+        res_json = await ChatDispatcher._audit_tool_call(db, mock_profile, "execute_shell", {"command": "rm -rf /"}, [])
         res = json.loads(res_json)
         assert res["error"] == "Security Blocked"

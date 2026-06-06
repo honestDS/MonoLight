@@ -24,9 +24,7 @@ if TYPE_CHECKING:
 
 class PromptBase(SQLModel):
     # Allow empty string in base to maintain compatibility with legacy database records
-    name: str = Field(
-        index=True, unique=True, nullable=False, min_length=1, max_length=100
-    )
+    name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
     content: str = Field(nullable=False)
 
 

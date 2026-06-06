@@ -22,12 +22,8 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
         result = await db.execute(select(self.model).where(self.model.id == id))
         return result.scalars().first()
 
-    async def get_multi(
-        self, db: AsyncSession, *, skip: int = 0, limit: int = 100
-    ) -> list[ModelType]:
-        result = await db.execute(
-            select(self.model).order_by(self.model.id.desc()).offset(skip).limit(limit)
-        )
+    async def get_multi(self, db: AsyncSession, *, skip: int = 0, limit: int = 100) -> list[ModelType]:
+        result = await db.execute(select(self.model).order_by(self.model.id.desc()).offset(skip).limit(limit))
         return result.scalars().all()
 
     async def count(self, db: AsyncSession) -> int:

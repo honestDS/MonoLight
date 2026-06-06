@@ -18,16 +18,12 @@ async def setup_db():
 
 @pytest.mark.asyncio
 async def test_prompts_management_full_flow():
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         await ac.post(
             "/api/v1/auth/reset_admin",
             json={"reset_token": "ed126d6c5a4ea6bf33774214633d2a16"},
         )
-        login_resp = await ac.post(
-            "/api/v1/auth/login", json={"username": "admin", "password": "admin"}
-        )
+        login_resp = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin"})
         token = login_resp.json()["data"]["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 

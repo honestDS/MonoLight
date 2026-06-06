@@ -28,9 +28,7 @@ from app.schemas.response import (
     StandardResponse,
 )
 
-router = APIRouter(
-    prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)]
-)
+router = APIRouter(prefix="/user", tags=["User Management"], dependencies=[Depends(get_current_user)])
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -55,18 +53,14 @@ async def add_new_user(
             obj_in=user_in,
             update_dict={
                 "uid": generated_uid,
-                "hashed_password": get_password_hash(user_in.password)
-                if user_in.password
-                else None,
+                "hashed_password": get_password_hash(user_in.password) if user_in.password else None,
                 "is_superuser": False,
             },
         )
     except ValueError as e:
         raise ParameterException(str(e))
 
-    return StandardResponse.success(
-        data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED
-    )
+    return StandardResponse.success(data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED)
 
 
 @router.get("/list")
@@ -106,9 +100,7 @@ async def update_user(
         is_renaming = user_in.username and user_in.username != user.username
         is_deactivating = user_in.is_active is False
         if is_renaming or is_deactivating:
-            raise ParameterException(
-                "超级管理员账户受核心保护，严禁执行禁用或改名操作。"
-            )
+            raise ParameterException("超级管理员账户受核心保护，严禁执行禁用或改名操作。")
 
     update_dict = {}
     if user_in.password:
@@ -124,9 +116,7 @@ async def update_user(
         update_dict["username"] = user_in.username
 
     user = await user_crud.update(db, db_obj=user, obj_in=update_dict)
-    return StandardResponse.success(
-        data=UserResponse.model_validate(user), message=constants.MSG_USER_UPDATED
-    )
+    return StandardResponse.success(data=UserResponse.model_validate(user), message=constants.MSG_USER_UPDATED)
 
 
 @router.post("/delete")

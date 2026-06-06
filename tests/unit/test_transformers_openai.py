@@ -15,9 +15,7 @@ def test_openai_to_provider():
     assert len(provider_msgs) == 1
     assert provider_msgs[0]["role"] == "assistant"
     assert "tool_calls" in provider_msgs[0]
-    assert json.loads(provider_msgs[0]["tool_calls"][0]["function"]["arguments"]) == {
-        "a": 1
-    }
+    assert json.loads(provider_msgs[0]["tool_calls"][0]["function"]["arguments"]) == {"a": 1}
 
 
 def test_openai_from_provider():

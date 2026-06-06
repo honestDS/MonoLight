@@ -1,16 +1,16 @@
 import os
 import shutil
 import uuid
-from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 
 from app.core.security import get_current_user
 
 router = APIRouter()
 
 TEMP_DIR = os.path.join(os.getcwd(), "temp")
+
 
 @router.post("/upload")
 async def upload_file(
@@ -46,6 +46,7 @@ async def upload_file(
 
     return {"path": absolute_path, "filename": file.filename, "session_id": session_id}
 
+
 @router.get("/download")
 async def download_file(path: str):
     """
@@ -56,5 +57,5 @@ async def download_file(path: str):
         raise HTTPException(status_code=404, detail="File not found")
     filename = os.path.basename(path)
     # 去除 uuid 前缀以显示原始文件名 (8位uuid + _)
-    display_name = filename[9:] if len(filename) > 9 and filename[8] == '_' else filename
+    display_name = filename[9:] if len(filename) > 9 and filename[8] == "_" else filename
     return FileResponse(path, filename=display_name)

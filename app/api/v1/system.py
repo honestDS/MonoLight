@@ -30,12 +30,8 @@ async def get_system_logs(
     分页获取系统日志，支持按级别、用户或会话过滤。
     """
     skip = (page - 1) * size
-    logs = await system_log_crud.get_multi_filtered(
-        db, level=level, uid=uid, session_id=session_id, skip=skip, limit=size
-    )
-    total = await system_log_crud.count_filtered(
-        db, level=level, uid=uid, session_id=session_id
-    )
+    logs = await system_log_crud.get_multi_filtered(db, level=level, uid=uid, session_id=session_id, skip=skip, limit=size)
+    total = await system_log_crud.count_filtered(db, level=level, uid=uid, session_id=session_id)
 
     page_data = PageData(
         items=[SystemLogResponse.model_validate(log) for log in logs],

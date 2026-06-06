@@ -16,18 +16,18 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
-from app.core.utils.session import generate_session_title
-from app.models.profile import ProfileConfig
 from app.core.log import (
     get_logger,
 )
 from app.core.security import get_current_user
+from app.core.utils.session import generate_session_title
 from app.models.message import (
     ChatCompletionRequest,
     MessageResponse,
     MessageRole,
     MessageType,
 )
+from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal, get_db
 from app.schemas.response import (
     LLMChoice,
@@ -39,11 +39,7 @@ from app.schemas.response import (
 logger = get_logger(__name__)
 
 
-router = APIRouter(
-    prefix="/chat",
-    tags=["Chat"],
-    dependencies=[Depends(get_current_user)]
-)
+router = APIRouter(prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("/completions")
@@ -79,17 +75,10 @@ async def chat_completions(
 
 
 @router.get("/sessions/list")
-async def get_user_sessions(
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
+async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
-    sessions = await message_crud.get_user_sessions(
-        db,
-        uid=uid,
-        is_admin=is_admin
-    )
+    sessions = await message_crud.get_user_sessions(db, uid=uid, is_admin=is_admin)
 
     data = [
         {
@@ -111,19 +100,12 @@ async def delete_session(
 ):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
-    row_count = await message_crud.remove_session(
-        db,
-        session_id=session_id,
-        uid=uid,
-        is_admin=is_admin
-    )
+    row_count = await message_crud.remove_session(db, session_id=session_id, uid=uid, is_admin=is_admin)
 
     if row_count == 0:
         return StandardResponse.success(message="会话未找到或已删除")
 
-    return StandardResponse.success(
-        message=f"已成功清理会话 {session_id} 的全部历史记录"
-    )
+    return StandardResponse.success(message=f"已成功清理会话 {session_id} 的全部历史记录")
 
 
 class SessionTitleGenerateRequest(BaseModel):
@@ -168,13 +150,7 @@ async def get_session_history(
 ):
     uid = getattr(current_user, "uid", None)
     offset = (page - 1) * size
-    messages = await message_crud.get_history_paged(
-        db,
-        session_id=session_id,
-        uid=uid,
-        limit=size,
-        offset=offset
-    )
+    messages = await message_crud.get_history_paged(db, session_id=session_id, uid=uid, limit=size, offset=offset)
 
     # 倒序取出，正序返回
     messages.reverse()
@@ -225,7 +201,7 @@ async def chat_websocket(
             logger.bind(uid=uid, session_id=session_id).exception("WS task error")
             try:
                 await websocket.send_json({"type": "error", "message": "Internal server error"})
-            except:
+            except Exception:
                 pass
         finally:
             active_task = None
@@ -250,7 +226,7 @@ async def chat_websocket(
                     current_session_id = str(uuid.uuid4())
                     # 立即推送给前端，确保其能同步状态
                     await websocket.send_json({"type": "session_id", "session_id": current_session_id})
-                
+
                 # 使用当前确定的 ID（无论是刚生成的还是之前正在用的）
                 session_id = current_session_id
             else:
@@ -260,6 +236,7 @@ async def chat_websocket(
             # 如果当前已有任务在运行，新消息仅需保存到数据库
             if active_task and not active_task.done():
                 from app.models.message import InternalMessage
+
                 async with AsyncSessionLocal() as db:
                     profile = await profile_crud.get_active(db)
                     initial_msg_obj = InternalMessage(
@@ -267,19 +244,8 @@ async def chat_websocket(
                         content=message,
                         attachments=attachments,
                     )
-                    await ChatDispatcher._save_message(
-                        db,
-                        session_id,
-                        uid,
-                        MessageRole.USER,
-                        MessageType.TEXT,
-                        initial_msg_obj,
-                        profile.id if profile else -1,
-                        is_processed=False
-                    )
-                logger.bind(uid=uid, session_id=session_id).info(
-                    f"Existing active task found for session {session_id}, message saved to DB for dynamic append."
-                )
+                    await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile else -1, is_processed=False)
+                logger.bind(uid=uid, session_id=session_id).info(f"Existing active task found for session {session_id}, message saved to DB for dynamic append.")
             else:
                 # 否则启动新的调度任务
                 active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -293,7 +259,7 @@ async def chat_websocket(
         logger.bind(uid=uid).exception("chat/ws error")
         try:
             await websocket.send_json({"error": "Internal server error"})
-        except:
+        except Exception:
             pass
         if active_task and not active_task.done():
             active_task.cancel()
