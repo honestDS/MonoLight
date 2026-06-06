@@ -168,39 +168,58 @@ export function useSessionManager() {
   const updateSessionTitle = async (sessionId, firstMessage) => {
     if (!sessionId || !firstMessage) return
     
+    // 格式化当前时间为 YYYY-MM-DD HH:mm:ss (与后端保持一致)
+    const now = new Date()
+    const lastActive = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+
     try {
       const res = await chatApi.generateTitle({
         session_id: sessionId,
         first_message: firstMessage
       })
       
-      const newTitle = res.data?.data?.title
-      if (newTitle) {
-        // 更新本地会话列表中的标题
-        const sessionIdx = sessions.value.findIndex(s => s.session_id === sessionId)
-        if (sessionIdx !== -1) {
-          // 如果是正在进行的会话，启用打字机效果
-          const session = sessions.value[sessionIdx]
-          
-          // 逐字更新逻辑
-          typingSessionId.value = sessionId
-          const targetTitle = newTitle
-          session.title = '' // 先清空，准备打字机效果
-          
-          let i = 0
-          const timer = setInterval(() => {
-            if (i < targetTitle.length) {
-              session.title += targetTitle[i]
-              i++
-            } else {
-              clearInterval(timer)
-              typingSessionId.value = null
-            }
-          }, 100) // 每100ms出一个字
+      const newTitle = res.data?.data?.title || '新会话'
+      
+      // 更新本地会话列表中的标题
+      let sessionIdx = sessions.value.findIndex(s => s.session_id === sessionId)
+      
+      // 如果在列表中找不到（新会话），则立即插入初始项
+      if (sessionIdx === -1) {
+        const newSession = {
+          session_id: sessionId,
+          title: '',
+          last_active: lastActive
         }
+        sessions.value.unshift(newSession)
+        sessionIdx = 0
       }
+
+      // 执行打字机效果
+      const session = sessions.value[sessionIdx]
+      typingSessionId.value = sessionId
+      const targetTitle = newTitle
+      session.title = ''
+      
+      let i = 0
+      const timer = setInterval(() => {
+        if (i < targetTitle.length) {
+          session.title += targetTitle[i]
+          i++
+        } else {
+          clearInterval(timer)
+          typingSessionId.value = null
+        }
+      }, 100)
     } catch (err) {
       console.error('Failed to generate session title:', err)
+      // 出错兜底：确保会话项至少存在于列表中
+      if (sessions.value.findIndex(s => s.session_id === sessionId) === -1) {
+        sessions.value.unshift({
+          session_id: sessionId,
+          title: '新会话',
+          last_active: lastActive
+        })
+      }
       typingSessionId.value = null
     }
   }

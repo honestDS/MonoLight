@@ -19,15 +19,16 @@ class WebChatAdapter(BaseChatAdapter):
         db: AsyncSession,
         message: str,
         uid: str,
-        session_id: str = None
+        session_id: str
     ):
-        actual_session_id = session_id or str(uuid.uuid4())
+        if not session_id:
+            raise BaseBusinessException(message="session_id is required")
         try:
             llm_response = await ChatDispatcher.dispatch(
                 db=db,
                 message=message,
                 uid=uid,
-                session_id=actual_session_id,
+                session_id=session_id,
             )
             return llm_response
         except BaseBusinessException as e:

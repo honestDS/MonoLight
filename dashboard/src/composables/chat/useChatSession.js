@@ -61,6 +61,9 @@ export function useChatSession() {
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
     
+    // 移除已有的 thinking 占位（如果存在）
+    messageProcessor.cleanupThinkingMessage(chatState.messages)
+
     // 添加用户消息
     chatState.addMessage({
       id: userMsgId,
@@ -73,32 +76,39 @@ export function useChatSession() {
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
-    const thinkingId = Date.now() + 1
+    const thinkingId = userMsgId + 1
     chatState.addMessage({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
 
+    await performHttpSend(text, thinkingId)
+  }
+
+  /**
+   * 实际执行 HTTP 请求（支持自动二次请求）
+   */
+  const performHttpSend = async (text, thinkingId) => {
     try {
       const response = await transport.httpSend({
         message: text,
         sessionId: sessionManager.currentSessionId.value
       })
 
-      let isNewSession = false
-      if (!sessionManager.currentSessionId.value) {
-        isNewSession = true
-        await messageProcessor.handleNewSession(
-          sessionManager.sessions,
-          (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
-          thinkingId,
-          sessionManager.sessionCreating
-        )
+      // 处理后端生成的 UUID (新建会话模式)
+      if (response.choices?.[0]?.finish_reason === 'new_session') {
+        const newId = response.choices[0].message.content
+        console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
+        
+        // 1. 设置当前会话 ID (静默选择)
+        sessionManager.selectSession({ session_id: newId, title: '新会话' }, null, false, false)
+        
+        // 2. 收到 ID 后立即调用标题生成
+        sessionManager.updateSessionTitle(newId, text)
+        
+        // 3. 自动发起第二次真实请求
+        return performHttpSend(text, thinkingId)
       }
 
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
 
-      // 如果是新会话，异步请求生成标题
-      if (isNewSession && sessionManager.currentSessionId.value) {
-        sessionManager.updateSessionTitle(sessionManager.currentSessionId.value, text)
-      }
       nextTick(() => chatState.scrollToBottom())
     } catch (err) {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
@@ -116,7 +126,9 @@ export function useChatSession() {
     
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
-    transport.setCurrentThinkingId(userMsgId + 1)
+    
+    // 移除已有的 thinking 占位（如果存在），确保始终只有一个且在最新消息下
+    messageProcessor.cleanupThinkingMessage(chatState.messages)
     
     // 添加用户消息
     chatState.addMessage({ 
@@ -130,17 +142,19 @@ export function useChatSession() {
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
     
-    // 添加 thinking 消息
+    const thinkingId = userMsgId + 1
+    transport.setCurrentThinkingId(thinkingId)
+    // 添加新的 thinking 消息
     chatState.addMessage({ 
-      id: transport.getCurrentThinkingId(), 
+      id: thinkingId, 
       role: 'thinking', 
       content: 'Thinking...' 
     })
     
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
-      onContent: (text, turn, thinkingId) => {
-        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId)
+      onContent: (text, turn, thinkingId, finishReason) => {
+        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason)
       },
       onToolStart: (toolCall) => {
         messageProcessor.processStreamToolStart(chatState.messages, toolCall)
@@ -152,24 +166,14 @@ export function useChatSession() {
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
         ElMessage.error(errorMessage || '流式对话过程出错')
       },
+      onSessionId: (newSessionId) => {
+        console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
+        // 1. 更新本地状态（静默同步）
+        sessionManager.selectSession({ session_id: newSessionId, title: '新会话' }, null, false, false)
+        // 2. 收到 ID 后立即调用标题生成
+        sessionManager.updateSessionTitle(newSessionId, text)
+      },
       onComplete: (data, thinkingId) => {
-        const isNewSession = !sessionManager.currentSessionId.value
-        // 处理新会话
-        if (isNewSession) {
-          messageProcessor.handleNewSession(
-            sessionManager.sessions,
-            (session, dc, disconnect) => sessionManager.selectSession(session, dc, disconnect, false),
-            thinkingId,
-            false,
-            sessionManager.sessionCreating
-          )
-        }
-
-        // 如果是新会话，异步请求生成标题
-        if (isNewSession && data.session_id) {
-          sessionManager.updateSessionTitle(data.session_id, text)
-        }
-
         // 清理 thinking 占位符
         messageProcessor.cleanupThinkingMessage(chatState.messages)
       },

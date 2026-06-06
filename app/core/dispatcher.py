@@ -285,7 +285,7 @@ class ChatDispatcher:
                     return LLMResponse(
                         choices=[
                             LLMChoice(
-                                message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content="消息已接收，正在处理中..."),
+                                message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=""),
                                 finish_reason="queued",
                                 created_at=time.time(),
                             )
@@ -355,7 +355,7 @@ class ChatDispatcher:
                             summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                             notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
                             messages.append(notice_msg)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+                            # await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
                             current_tools = None
                         else:
                             current_tools = tools
@@ -468,6 +468,7 @@ class ChatDispatcher:
             last_processed_id = initial_msg.id
             turn_messages: list[InternalMessage] = []
             is_first_iter = True
+            has_output_in_this_dispatch = False
 
             # 2. 分布式会话状态机
             while True:
@@ -476,9 +477,9 @@ class ChatDispatcher:
 
                 if not lock_acquired:
                     logger.bind(uid=uid, session_id=session_id).info(
-                        f"会话 {session_id} 已有活跃调度器，当前请求进入队列。"
+                        f"【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。"
                     )
-                    yield {"type": "content", "content": "消息已接收，正在处理中...", "turn": 0}
+                    yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued"}
                     yield {"type": "done", "session_id": session_id, "history": []}
                     return
 
@@ -539,7 +540,7 @@ class ChatDispatcher:
                             summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                             notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
                             messages.append(notice_msg)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
+                            # await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
                             current_tools = None
                         else:
                             current_tools = tools
@@ -564,8 +565,11 @@ class ChatDispatcher:
 
                             content = delta.get("content")
                             if content:
+                                if has_output_in_this_dispatch and not current_content_chunks:
+                                    content = "\n" + content
                                 current_content_chunks.append(content)
                                 yield {"type": "content", "content": content, "turn": current_turn}
+                                has_output_in_this_dispatch = True
 
                             tool_calls = delta.get("tool_calls")
                             if tool_calls:

@@ -21,15 +21,16 @@ class WebSocketChatAdapter(BaseChatAdapter):
         db: AsyncSession,
         message: str,
         uid: str,
-        session_id: str = None
+        session_id: str
     ) -> AsyncGenerator[dict[str, Any]]:
-        actual_session_id = session_id or str(uuid.uuid4())
+        if not session_id:
+            raise BaseBusinessException(message="session_id is required")
         try:
             async for chunk in ChatDispatcher.dispatch_stream(
                 db=db,
                 message=message,
                 uid=uid,
-                session_id=actual_session_id,
+                session_id=session_id,
             ):
                 yield chunk
         except BaseBusinessException as e:

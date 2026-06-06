@@ -37,11 +37,12 @@ export function useChatTransport() {
    * @param {Function} options.onToolCall - 工具调用处理回调
    * @param {Function} options.onResponse - AI 响应处理回调
    * @param {Function} options.onComplete - 完成处理回调
+   * @param {Function} options.onSessionId - 会话 ID 同步回调
    * @param {Function} options.scrollToBottom - 滚动到底部回调
    * @param {Function} options.setLoading - 设置 loading 状态回调
    */
   const handleWsMessage = (data, options = {}) => {
-    const { onContent, onToolStart, onToolEnd, onComplete, onError, scrollToBottom, setLoading } = options
+    const { onContent, onToolStart, onToolEnd, onComplete, onError, onSessionId, scrollToBottom, setLoading } = options
 
     // 忽略心跳响应
     if (data.type === 'pong' || data.type === 'ping') return
@@ -51,7 +52,7 @@ export function useChatTransport() {
     // 1. 处理增量文本推送
     if (type === 'content') {
       if (onContent) {
-        onContent(data.content, data.turn, currentThinkingId)
+        onContent(data.content, data.turn, currentThinkingId, data.finish_reason)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -103,7 +104,15 @@ export function useChatTransport() {
       return
     }
 
-    // 5. 处理异常通知
+    // 5. 处理会话 ID 同步
+    if (type === 'session_id') {
+      if (onSessionId) {
+        onSessionId(data.session_id)
+      }
+      return
+    }
+
+    // 6. 处理异常通知
     if (type === 'error') {
       console.error('WebSocket业务错误:', data.message)
       if (onError) {

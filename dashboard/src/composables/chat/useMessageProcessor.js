@@ -13,12 +13,15 @@ export function useMessageProcessor() {
   /**
    * 处理流式的增量文本推送事件
    */
-  const processStreamContent = (messagesRef, text, turn, thinkingId) => {
-    // 移除 thinking 占位符
-    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
-    if (thinkingIndex !== -1) {
-      messagesRef.value.splice(thinkingIndex, 1)
+  const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason) => {
+    // 识别排队状态：基于 finish_reason 进行精准拦截
+    if (finishReason === 'queued') {
+      cleanupThinkingMessage(messagesRef)
+      return
     }
+
+    // 流式输出开始：移除 thinking 占位符
+    cleanupThinkingMessage(messagesRef)
 
     // 寻找最近一条且属于当前 turn 的 assistant 消息
     // 注意：如果上一条是 tool 或 user 消息，代表是新的 assistant 输出，应该新建一条
@@ -27,7 +30,8 @@ export function useMessageProcessor() {
       lastMsg.content += text
       // 强制触发 Vue 数组的深层响应更新
       messagesRef.value[messagesRef.value.length - 1] = { ...lastMsg }
-    } else {
+    }
+    else {
       messagesRef.value.push({
         id: thinkingId || Date.now(),
         role: 'assistant',
@@ -42,11 +46,8 @@ export function useMessageProcessor() {
    * 处理流式下的工具调用开始（推送 tool_call 占位）
    */
   const processStreamToolStart = (messagesRef, toolCall) => {
-    // 移除 thinking 占位符
-    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
-    if (thinkingIndex !== -1) {
-      messagesRef.value.splice(thinkingIndex, 1)
-    }
+    // 工具调用开始：移除 thinking 占位符
+    cleanupThinkingMessage(messagesRef)
 
     // 匹配后端 InternalMessage Pydantic 模型的序列化结构：
     // tool_calls 是 InternalToolCall 列表，含有 id, name, arguments，直属，无 function 包装
@@ -92,10 +93,7 @@ export function useMessageProcessor() {
    */
   const processStreamError = (messagesRef, errorMessage, thinkingId) => {
     // 清理 thinking 占位符
-    const thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
-    if (thinkingIndex !== -1) {
-      messagesRef.value.splice(thinkingIndex, 1)
-    }
+    cleanupThinkingMessage(messagesRef)
 
     messagesRef.value.push({
       id: thinkingId || Date.now(),
@@ -113,41 +111,43 @@ export function useMessageProcessor() {
    * @param {Function} scrollToBottom - 滚动到底部回调
    */
   const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
+    
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
     const aiCreatedAt = response.choices?.[0]?.created_at || null
     const role = response.choices?.[0]?.message?.role || ''
+    const finishReason = response.choices?.[0]?.finish_reason
 
-    // 清理 thinking 占位符（先精确匹配，再模糊匹配）
-    let thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId)
-    if (thinkingIndex === -1) {
-      thinkingIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
+    // 识别排队状态：后端返回 finish_reason 为 queued 时内容为空
+    if (finishReason === 'queued') {
+      cleanupThinkingMessage(messagesRef)
+      return
     }
 
-    // 处理 history（只包含工具调用类消息）
+    // 处理 AI 响应前：清理 thinking 占位符
+    cleanupThinkingMessage(messagesRef)
+
+    // 处理 history
     if (history.length > 0) {
       const historyMessages = history
-        .filter(item => (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool')
-        .map((item, idx) => ({
-          id: `history_${Date.now()}_${idx}`,
-          role: item.role,
-          content: JSON.stringify(item),
-          created_at: item.created_at || null
-        }))
+        .map((item, idx) => {
+          const isToolRelated = (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool'
+          return {
+            id: `history_${Date.now()}_${idx}`,
+            role: item.role,
+            content: isToolRelated ? JSON.stringify(item) : item.content,
+            created_at: item.created_at || null
+          }
+        })
+        // 过滤掉最后一条 assistant 消息，因为它会在后面单独处理
+        .filter((item, idx) => {
+          if (idx === history.length - 1 && item.role === 'assistant' && !isToolCall({ content: item.content })) {
+             return false
+          }
+          return true
+        })
 
-      if (thinkingIndex !== -1) {
-        messagesRef.value.splice(thinkingIndex, 1, ...historyMessages)
-      } else {
-        messagesRef.value.push(...historyMessages)
-      }
-    } else if (thinkingIndex !== -1) {
-      messagesRef.value.splice(thinkingIndex, 1)
-    } else {
-      console.warn('未找到 Thinking 占位符，尝试清理残留消息')
-      const residualIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
-      if (residualIndex !== -1) {
-        messagesRef.value.splice(residualIndex, 1)
-      }
+      messagesRef.value.push(...historyMessages)
     }
 
     // 处理 AI 响应，使用工具函数判断 role

@@ -1,4 +1,6 @@
 import asyncio
+import time
+import uuid
 
 from fastapi import (
     APIRouter,
@@ -26,8 +28,13 @@ from app.models.message import (
     MessageRole,
     MessageType,
 )
-from app.providers.database import get_db
-from app.schemas.response import StandardResponse
+from app.providers.database import AsyncSessionLocal, get_db
+from app.schemas.response import (
+    LLMChoice,
+    LLMChoiceMessage,
+    LLMResponse,
+    StandardResponse,
+)
 
 logger = get_logger(__name__)
 
@@ -46,6 +53,20 @@ async def chat_completions(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+
+    # 如果 session_id 为空，直接生成并返回，由前端发起二次请求
+    if not request.session_id:
+        new_session_id = str(uuid.uuid4())
+        return LLMResponse(
+            choices=[
+                LLMChoice(
+                    message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=new_session_id),
+                    finish_reason="new_session",
+                    created_at=time.time(),
+                )
+            ],
+            history=[],
+        ).model_dump()
 
     # 使用适配器处理对话请求
     return await web_chat_adapter.chat(
@@ -164,7 +185,6 @@ async def get_session_history(
 @router.websocket("/ws")
 async def chat_websocket(
     websocket: WebSocket,
-    db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -176,17 +196,19 @@ async def chat_websocket(
 
     # 用于追踪当前是否有正在运行的调度任务
     active_task = None
+    current_session_id = None
 
     async def run_chat(message_text, session_id):
         nonlocal active_task
         try:
-            async for response in ws_chat_adapter.chat(
-                db=db,
-                message=message_text,
-                uid=uid,
-                session_id=session_id
-            ):
-                await websocket.send_json(response)
+            async with AsyncSessionLocal() as db:
+                async for response in ws_chat_adapter.chat(
+                    db=db,
+                    message=message_text,
+                    uid=uid,
+                    session_id=session_id
+                ):
+                    await websocket.send_json(response)
         except RuntimeError as e:
             # 拦截断开连接后的发送错误
             if "websocket.send" in str(e) and "websocket.close" in str(e):
@@ -216,18 +238,33 @@ async def chat_websocket(
                 await websocket.send_json({"error": "Message is required"})
                 continue
 
+            # 会话 ID 生成与解析逻辑
+            if not session_id:
+                # 如果没有活跃任务，或者上次任务已结束，且收到 null，则视为开启新会话
+                if not active_task or active_task.done():
+                    current_session_id = str(uuid.uuid4())
+                    # 立即推送给前端，确保其能同步状态
+                    await websocket.send_json({"type": "session_id", "session_id": current_session_id})
+                
+                # 使用当前确定的 ID（无论是刚生成的还是之前正在用的）
+                session_id = current_session_id
+            else:
+                # 前端明确传了 ID，则更新当前上下文 ID
+                current_session_id = session_id
+
             # 如果当前已有任务在运行，新消息仅需保存到数据库
             if active_task and not active_task.done():
-                profile = await profile_crud.get_active(db)
-                await ChatDispatcher._save_message(
-                    db,
-                    session_id,
-                    uid,
-                    MessageRole.USER,
-                    MessageType.TEXT,
-                    message,
-                    profile.id if profile else -1
-                )
+                async with AsyncSessionLocal() as db:
+                    profile = await profile_crud.get_active(db)
+                    await ChatDispatcher._save_message(
+                        db,
+                        session_id,
+                        uid,
+                        MessageRole.USER,
+                        MessageType.TEXT,
+                        message,
+                        profile.id if profile else -1
+                    )
                 logger.bind(uid=uid, session_id=session_id).info(
                     f"Existing active task found for session {session_id}, message saved to DB for dynamic append."
                 )
