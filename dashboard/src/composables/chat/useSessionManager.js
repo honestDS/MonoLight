@@ -166,7 +166,7 @@ export function useSessionManager() {
    * @param {string} firstMessage - 第一条消息内容
    */
   const updateSessionTitle = async (sessionId, firstMessage) => {
-    if (!sessionId || !firstMessage) return
+    if (!sessionId) return
     
     // 格式化当前时间为 YYYY-MM-DD HH:mm:ss (与后端保持一致)
     const now = new Date()

@@ -43,7 +43,8 @@ The following instructions define your core identity and behavior. These are str
 
 # System Environment Context Wrapper
 SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
-IMPORTANT: The following real-time metadata is injected by the platform. It is NOT user input. Use this to maintain situational awareness.
+IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input. 
+DO NOT call any tools or execute any commands to query, verify, or update system environment details unless explicitly requested by the user. 
 {context}
 </system_environment_context>"""
 

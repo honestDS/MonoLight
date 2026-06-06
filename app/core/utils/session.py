@@ -19,8 +19,11 @@ async def generate_session_title(
     """
     异步生成会话标题并保存到数据库
     """
-    logger.info(f"开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}")
+    logger.bind(uid=uid, session_id=session_id).info(f"开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={first_message}")
     try:
+        if first_message == "":
+            return "无标题"
+
         # 构造起名专用消息列表
         messages = [
             InternalMessage(

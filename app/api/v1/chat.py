@@ -239,8 +239,8 @@ async def chat_websocket(
             attachments = data.get("attachments")
             request_id = data.get("request_id")
 
-            if not message:
-                await websocket.send_json({"error": "Message is required"})
+            if not message and not attachments:
+                await websocket.send_json({"error": "Message or attachments is required"})
                 continue
 
             # 会话 ID 生成与解析逻辑

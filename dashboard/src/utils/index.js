@@ -102,10 +102,10 @@ export const getToolResultName = (msg) => {
   try {
     const content = msg.content
     if (typeof content === 'object' && content !== null) {
-      return content.tool_call_id ? `ID: ${content.tool_call_id.substring(0, 8)}` : '工具返回'
+      return content.tool_call_id ? `ID: ${content.tool_call_id.substring(0, 20) + '...'}` : '工具返回'
     }
     const parsed = JSON.parse(content)
-    return parsed.tool_call_id ? `ID: ${parsed.tool_call_id.substring(0, 8)}` : '工具返回'
+    return parsed.tool_call_id ? `ID: ${parsed.tool_call_id.substring(0, 20) + '...'}` : '工具返回'
   } catch {
     return '工具返回'
   }
