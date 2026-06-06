@@ -44,7 +44,6 @@ class OpenAITransformer(BaseTransformer):
             "stream": False,
         }
 
-        logger.debug(f"[OpenAITransformer - Generate] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
@@ -90,8 +89,6 @@ class OpenAITransformer(BaseTransformer):
             payload["tool_choice"] = tool_choice
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
-
-        # logger.debug(f"[OpenAITransformer - Stream] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         try:

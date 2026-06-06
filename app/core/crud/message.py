@@ -47,7 +47,13 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         获取未处理的新消息（通常用于动态追加用户新输入的指令）
         """
-        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(not Message.is_processed).order_by(Message.created_at.asc()))
+        result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.is_processed == False)
+            .order_by(Message.created_at.asc())
+        )
         return result.scalars().all()
 
     async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> list[Message]:
