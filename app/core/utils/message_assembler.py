@@ -5,12 +5,13 @@ import os
 
 from PIL import Image
 
+from app.core.log import get_logger
 from app.models.message import FilePart, ImagePart, InternalMessage, TextPart
 
 # 屏蔽 Pillow 库的 DEBUG 日志输出，防止刷屏
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MessageAssembler:
@@ -34,7 +35,7 @@ class MessageAssembler:
                 return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
             # 否则进行尺寸和质量压缩
-            logger.info(f"Image {path} size ({file_size_kb:.2f}KB) exceeds limit, compressing...")
+            logger.bind().info(f"图片 {path} 大小 ({file_size_kb:.2f}KB) 超过限制，正在压缩...")
 
             # 缩放系数
             scale_factor = (max_size_kb / file_size_kb) ** 0.5
@@ -51,13 +52,12 @@ class MessageAssembler:
             img.save(buffer, format="JPEG", quality=80, optimize=True)
 
             final_size = len(buffer.getvalue()) / 1024
-            logger.info(f"Image compressed to {new_width}x{new_height}, new size: {final_size:.2f}KB")
+            logger.bind().info(f"图片已压缩至 {new_width}x{new_height}，新大小: {final_size:.2f}KB")
 
             return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     @staticmethod
     def assemble(message: InternalMessage, multimodal_enabled: bool = False, is_history: bool = False) -> InternalMessage:
-        logger.info(f"MessageAssembler triggered for msg {message.id}. attachments: {message.attachments}, multimodal: {multimodal_enabled}, is_history: {is_history}")
 
         if not message.attachments and isinstance(message.content, str):
             return message
@@ -71,11 +71,10 @@ class MessageAssembler:
         if message.attachments:
             for attachment in message.attachments:
                 ext = os.path.splitext(attachment)[1].lower()
-                logger.info(f"Processing attachment: {attachment}, ext: {ext}")
                 if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
                     if is_history:
                         # 对于历史消息，为节省 Token 直接以文本占位符发送
-                        content_parts.append(TextPart(text="[历史图片]"))
+                        content_parts.append(TextPart(text="[系统提示,此处不是用户说的话][历史图片][系统提示结束]"))
                     elif multimodal_enabled:
                         try:
                             # If it's a local path
@@ -91,10 +90,10 @@ class MessageAssembler:
                             else:
                                 content_parts.append(TextPart(text=f"[图片丢失: {attachment}]"))
                         except Exception as e:
-                            logger.error(f"Failed to process image {attachment}: {e}")
-                            content_parts.append(TextPart(text=f"[图片处理失败: {attachment}]"))
+                            logger.bind().error(f"处理图片 {attachment} 失败: {e}")
+                            content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][图片处理失败: {attachment}][系统提示结束]"))
                     else:
-                        content_parts.append(TextPart(text=f"[未开启多模态无法解析图片: {attachment}]"))
+                        content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启多模态无法解析图片: {attachment}][系统提示结束]"))
                 else:
                     # Non-image file
                     content_parts.append(FilePart(path=attachment))

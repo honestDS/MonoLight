@@ -22,6 +22,7 @@ async def generate_session_title(
     """
     logger.bind(uid=uid, session_id=session_id).info(f"开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={first_message}")
     try:
+        first_message = first_message.strip()
         if first_message == "":
             return "无标题"
 

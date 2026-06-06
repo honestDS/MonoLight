@@ -191,14 +191,14 @@ async def chat_websocket(
         except RuntimeError as e:
             # 拦截断开连接后的发送错误
             if "websocket.send" in str(e) and "websocket.close" in str(e):
-                logger.bind(uid=uid, session_id=session_id).info("用户已断开连接,调度器终止")
+                logger.bind(uid=uid, session_id=session_id).info("用户已断开连接，调度器终止")
             else:
-                logger.bind(uid=uid, session_id=session_id).error(f"WS task runtime error: {e}")
+                logger.bind(uid=uid, session_id=session_id).error(f"WebSocket 任务运行时错误: {e}")
         except asyncio.CancelledError:
-            logger.bind(uid=uid, session_id=session_id).info("用户已断开连接,调度器终止")
+            logger.bind(uid=uid, session_id=session_id).info("用户已断开连接，调度器终止")
             raise
         except Exception:
-            logger.bind(uid=uid, session_id=session_id).exception("WS task error")
+            logger.bind(uid=uid, session_id=session_id).exception("WebSocket 任务发生异常")
             try:
                 await websocket.send_json({"type": "error", "message": "Internal server error"})
             except Exception:
@@ -245,7 +245,7 @@ async def chat_websocket(
                         attachments=attachments,
                     )
                     await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile else -1, is_processed=False)
-                logger.bind(uid=uid, session_id=session_id).info(f"Existing active task found for session {session_id}, message saved to DB for dynamic append.")
+                logger.bind(uid=uid, session_id=session_id).info(f"会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。")
             else:
                 # 否则启动新的调度任务
                 active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -256,7 +256,7 @@ async def chat_websocket(
             active_task.cancel()
     except Exception:
         # 异常处理
-        logger.bind(uid=uid).exception("chat/ws error")
+        logger.bind(uid=uid).exception("聊天 WebSocket 发生异常")
         try:
             await websocket.send_json({"error": "Internal server error"})
         except Exception:
