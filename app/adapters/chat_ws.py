@@ -23,6 +23,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
         uid: str,
         session_id: str,
         attachments: list[str] | None = None,
+        request_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         if not session_id:
             raise BaseBusinessException(message="session_id is required")
@@ -33,6 +34,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 uid=uid,
                 session_id=session_id,
                 attachments=attachments,
+                request_id=request_id,
             ):
                 yield chunk
         except BaseBusinessException as e:

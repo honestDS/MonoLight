@@ -19,6 +19,13 @@ export function useChatState() {
    * @param {Object} msg - 消息对象
    */
   const addMessage = (msg) => {
+    if (msg && msg.role !== 'thinking') {
+      const firstThinkingIdx = messages.value.findIndex(m => m.role === 'thinking')
+      if (firstThinkingIdx !== -1) {
+        messages.value.splice(firstThinkingIdx, 0, msg)
+        return
+      }
+    }
     messages.value.push(msg)
   }
 

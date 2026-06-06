@@ -54,18 +54,18 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().all()
 
-    async def get_new_messages_since_id(
-        self, db: AsyncSession, *, session_id: str, uid: str, last_id: int
+    async def get_unprocessed_messages(
+        self, db: AsyncSession, *, session_id: str, uid: str
     ) -> list[Message]:
         """
-        获取指定 ID 之后的新消息（通常用于动态追加用户新输入的指令）
+        获取未处理的新消息（通常用于动态追加用户新输入的指令）
         """
         result = await db.execute(
             select(Message)
             .where(Message.session_id == session_id)
             .where(Message.uid == uid)
-            .where(Message.id > last_id)
-            .order_by(Message.id.asc())
+            .where(Message.is_processed == False)
+            .order_by(Message.created_at.asc())
         )
         return result.scalars().all()
 

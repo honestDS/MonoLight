@@ -64,9 +64,9 @@ export function useChatSession() {
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
     
-    // 移除已有的 thinking 占位（如果存在）
+    // 统一渲染顺序：清理之前的 thinking 占位，确保 AI 响应紧跟最新消息（与流式行为一致）
     messageProcessor.cleanupThinkingMessage(chatState.messages)
-
+    
     // 添加用户消息
     const attachmentsToSent = attachments.value.map(a => a.path)
     chatState.addMessage({
@@ -121,7 +121,11 @@ export function useChatSession() {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       ElMessage.error(err.message || '发送失败')
     } finally {
-      chatState.loading.value = false
+      // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
+      const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
+      if (!hasThinking) {
+        chatState.loading.value = false
+      }
     }
   }
 
@@ -134,26 +138,30 @@ export function useChatSession() {
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
     
-    // 移除已有的 thinking 占位（如果存在），确保始终只有一个且在最新消息下
+    // 清理之前的 thinking 占位，保持只有一个 thinking 标签
     messageProcessor.cleanupThinkingMessage(chatState.messages)
     
-    // 添加用户消息
+    // 使用更可靠的 ID 防止极速点击下的冲突
+    const thinkingId = `thinking_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
+    // request_id 使用唯一的标识符
+    const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
+
+    // 添加用户消息并绑定 request_id
     const attachmentsToSent = attachments.value.map(a => a.path)
     chatState.addMessage({ 
       id: userMsgId, 
       role: 'user', 
       content: text, 
       attachments: attachmentsToSent,
-      created_at: Date.now() / 1000 
+      created_at: Date.now() / 1000,
+      request_id: requestId
     })
     
     chatState.inputMsg.value = ''
     attachments.value = []
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
-    
-    const thinkingId = userMsgId + 1
-    transport.setCurrentThinkingId(thinkingId)
+
     // 添加新的 thinking 消息
     chatState.addMessage({ 
       id: thinkingId, 
@@ -163,16 +171,17 @@ export function useChatSession() {
     
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
-      onContent: (text, turn, thinkingId, finishReason) => {
-        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason)
+      thinkingId,
+      onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam) => {
+        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason, responseId, requestIdParam)
       },
-      onToolStart: (toolCall) => {
-        messageProcessor.processStreamToolStart(chatState.messages, toolCall)
+      onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam) => {
+        messageProcessor.processStreamToolStart(chatState.messages, toolCall, thinkingId, responseId, requestIdParam)
       },
-      onToolEnd: (toolEnd) => {
-        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd)
+      onToolEnd: (toolEnd, responseId, requestIdParam) => {
+        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam)
       },
-      onError: (errorMessage, thinkingId) => {
+      onError: (errorMessage, thinkingIdParam, requestIdParam) => {
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
         ElMessage.error(errorMessage || '流式对话过程出错')
       },
@@ -183,9 +192,9 @@ export function useChatSession() {
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newSessionId, text)
       },
-      onComplete: (data, thinkingId) => {
-        // 清理 thinking 占位符
-        messageProcessor.cleanupThinkingMessage(chatState.messages)
+      onComplete: (data, thinkingIdParam, requestIdParam) => {
+        // 精确清理对应的 thinking 占位符
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       },
       scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
       setLoading: (val) => { chatState.loading.value = val }
@@ -196,6 +205,7 @@ export function useChatSession() {
         message: text,
         sessionId: sessionManager.currentSessionId.value,
         attachments: attachmentsToSent,
+        requestId,
         callbacks
       })
     } catch (e) {

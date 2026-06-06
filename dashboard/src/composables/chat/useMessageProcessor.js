@@ -13,44 +13,104 @@ export function useMessageProcessor() {
   /**
    * 处理流式的增量文本推送事件
    */
-  const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason) => {
-    // 识别排队状态：基于 finish_reason 进行精准拦截
+  const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason, responseId, requestId) => {
+    // 识别排队状态
     if (finishReason === 'queued') {
-      cleanupThinkingMessage(messagesRef)
+      removeThinkingMessage(messagesRef, thinkingId)
       return
     }
 
-    // 流式输出开始：移除 thinking 占位符
-    cleanupThinkingMessage(messagesRef)
-
-    // 寻找最近一条且属于当前 turn 的 assistant 消息
-    // 注意：如果上一条是 tool 或 user 消息，代表是新的 assistant 输出，应该新建一条
-    const lastMsg = messagesRef.value[messagesRef.value.length - 1]
-    if (lastMsg && lastMsg.role === 'assistant' && lastMsg.turn === turn) {
-      lastMsg.content += text
-      // 强制触发 Vue 数组的深层响应更新
-      messagesRef.value[messagesRef.value.length - 1] = { ...lastMsg }
+    // 1. 优先寻找已绑定 responseId 的消息进行增量追加
+    let targetIdx = -1
+    if (responseId) {
+      targetIdx = messagesRef.value.findIndex(m => m.response_id === responseId && m.role === 'assistant')
     }
-    else {
-      messagesRef.value.push({
+
+    if (targetIdx !== -1) {
+      const targetMsg = messagesRef.value[targetIdx]
+      // 只有在非工具调用且 role 是 assistant 时才追加文字
+      if (targetMsg.role === 'assistant' && !isToolCall(targetMsg)) {
+        targetMsg.content = (targetMsg.content || '') + text
+        messagesRef.value[targetIdx] = { ...targetMsg }
+        return
+      }
+    }
+
+    // 2. 索取机制：若未绑定，寻找与当前请求绑定的 Thinking 占位符进行转换
+    let thinkingIdx = -1
+    if (thinkingId) {
+      // 必须精确匹配当前请求的 thinkingId，绝不抢占其他并发请求的占位符
+      thinkingIdx = messagesRef.value.findIndex(m => m.id === thinkingId && m.role === 'thinking')
+    }
+
+    // 若精准匹配未找到，且存在任何 thinking 占位符，兜底匹配最后一个占位符以支持用户连续发送时的流式追加
+    if (thinkingIdx === -1) {
+      thinkingIdx = messagesRef.value.findLastIndex(m => m.role === 'thinking')
+    }
+
+    if (thinkingIdx !== -1) {
+      // 转换：Thinking -> Assistant 并绑定 responseId 和 requestId
+      messagesRef.value[thinkingIdx] = {
         id: thinkingId || Date.now(),
         role: 'assistant',
         content: text,
         turn: turn,
+        response_id: responseId,
+        request_id: requestId,
         created_at: Date.now() / 1000
-      })
+      }
+      return
+    }
+
+    // 3. 跨 Turn 增入：如果是新一轮的 Turn（responseId 变化），且由于没有 Thinking 占位符，
+    // 我们应该将新消息插入到当前请求最新的一条相关消息（如 Tool 结果）之后，而不是去抢占其他请求的占位符
+    if (requestId) {
+      // 寻找该请求的最后一条消息位置，以便将新 Turn 消息插入到它后面
+      let lastRelatedIdx = -1
+      for (let i = messagesRef.value.length - 1; i >= 0; i--) {
+        const m = messagesRef.value[i]
+        if (m.request_id === requestId || (m.role === 'tool' && m.id && String(m.id).includes(requestId))) {
+          lastRelatedIdx = i
+          break
+        }
+      }
+      
+      if (lastRelatedIdx !== -1) {
+        messagesRef.value.splice(lastRelatedIdx + 1, 0, {
+          id: `assistant_${Date.now()}`,
+          role: 'assistant',
+          content: text,
+          turn: turn,
+          response_id: responseId,
+          request_id: requestId,
+          created_at: Date.now() / 1000
+        })
+        return
+      }
+    }
+
+    // 4. 兜底：直接追加新消息到末尾（如果有 thinking 消息，插在第一个 thinking 之前，保证 thinking 在最末尾）
+    const newMsg = {
+      id: thinkingId || Date.now(),
+      role: 'assistant',
+      content: text,
+      turn: turn,
+      response_id: responseId,
+      request_id: requestId,
+      created_at: Date.now() / 1000
+    }
+    const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (firstThinkingIdx !== -1) {
+      messagesRef.value.splice(firstThinkingIdx, 0, newMsg)
+    } else {
+      messagesRef.value.push(newMsg)
     }
   }
 
   /**
    * 处理流式下的工具调用开始（推送 tool_call 占位）
    */
-  const processStreamToolStart = (messagesRef, toolCall) => {
-    // 工具调用开始：移除 thinking 占位符
-    cleanupThinkingMessage(messagesRef)
-
-    // 匹配后端 InternalMessage Pydantic 模型的序列化结构：
-    // tool_calls 是 InternalToolCall 列表，含有 id, name, arguments，直属，无 function 包装
+  const processStreamToolStart = (messagesRef, toolCall, thinkingId, responseId, requestId) => {
     const contentObj = {
       role: 'assistant',
       tool_calls: [{
@@ -60,74 +120,116 @@ export function useMessageProcessor() {
       }]
     }
 
-    messagesRef.value.push({
+    const newMsg = {
       id: `tool_call_${toolCall.id || Date.now()}`,
       role: 'assistant', 
       content: JSON.stringify(contentObj),
+      response_id: responseId,
+      request_id: requestId,
       created_at: Date.now() / 1000
-    })
+    }
+
+    // 1. 优先替换匹配当前请求的占位符
+    let thinkingIdx = -1
+    if (thinkingId) {
+      thinkingIdx = messagesRef.value.findIndex(m => m.id === thinkingId && m.role === 'thinking')
+    }
+
+    // 若精准匹配未找到，且存在任何 thinking 占位符，兜底匹配最后一个占位符以支持用户连续发送时的流式追加
+    if (thinkingIdx === -1) {
+      thinkingIdx = messagesRef.value.findLastIndex(m => m.role === 'thinking')
+    }
+
+    if (thinkingIdx !== -1) {
+      messagesRef.value[thinkingIdx] = newMsg
+      return
+    }
+
+    // 2. 跨 Turn 新建：如果是新 Turn 的工具调用且无占位符，插入到该请求最近的消息后面
+    if (requestId) {
+      let lastRelatedIdx = -1
+      for (let i = messagesRef.value.length - 1; i >= 0; i--) {
+        if (messagesRef.value[i].request_id === requestId) {
+          lastRelatedIdx = i
+          break
+        }
+      }
+      if (lastRelatedIdx !== -1) {
+        messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+        return
+      }
+    }
+
+    // 3. 兜底追加
+    const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (firstThinkingIdx !== -1) {
+      messagesRef.value.splice(firstThinkingIdx, 0, newMsg)
+    } else {
+      messagesRef.value.push(newMsg)
+    }
   }
 
   /**
    * 处理流式下的工具调用结束（推送 tool 返回结果）
    */
-  const processStreamToolEnd = (messagesRef, toolEnd) => {
-    // 匹配后端 InternalMessage Pydantic 模型的序列化结构：
-    // 含有 role, tool_call_id, content
+  const processStreamToolEnd = (messagesRef, toolEnd, responseId, requestId) => {
     const contentObj = {
       role: 'tool',
       tool_call_id: toolEnd.tool_call_id,
       content: toolEnd.result
     }
 
-    messagesRef.value.push({
+    // 将工具返回结果与 requestId 关联
+    const newMsg = {
       id: `tool_res_${toolEnd.tool_call_id || Date.now()}`,
       role: 'tool',
       content: JSON.stringify(contentObj),
+      response_id: responseId,
+      request_id: requestId,
       created_at: Date.now() / 1000
-    })
+    }
+    const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (firstThinkingIdx !== -1) {
+      messagesRef.value.splice(firstThinkingIdx, 0, newMsg)
+    } else {
+      messagesRef.value.push(newMsg)
+    }
   }
 
   /**
    * 处理流式下的业务错误事件
    */
   const processStreamError = (messagesRef, errorMessage, thinkingId) => {
-    // 清理 thinking 占位符
-    cleanupThinkingMessage(messagesRef)
+    removeThinkingMessage(messagesRef, thinkingId)
 
-    messagesRef.value.push({
+    const newMsg = {
       id: thinkingId || Date.now(),
       role: 'err',
       content: errorMessage,
       created_at: Date.now() / 1000
-    })
+    }
+    const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
+    if (firstThinkingIdx !== -1) {
+      messagesRef.value.splice(firstThinkingIdx, 0, newMsg)
+    } else {
+      messagesRef.value.push(newMsg)
+    }
   }
   
   /**
    * 处理完整的 AI 响应消息（WS 和 HTTP 共用）
-   * @param {Object} messagesRef - 消息列表 ref
-   * @param {Object} response - API 响应数据
-   * @param {number|string} thinkingId - thinking 消息 ID
-   * @param {Function} scrollToBottom - 滚动到底部回调
    */
   const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
-    
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
     const aiCreatedAt = response.choices?.[0]?.created_at || null
     const role = response.choices?.[0]?.message?.role || ''
     const finishReason = response.choices?.[0]?.finish_reason
 
-    // 识别排队状态：后端返回 finish_reason 为 queued 时内容为空
-    if (finishReason === 'queued') {
-      cleanupThinkingMessage(messagesRef)
-      return
-    }
+    if (finishReason === 'queued') return
 
-    // 处理 AI 响应前：清理 thinking 占位符
-    cleanupThinkingMessage(messagesRef)
+    const aiMessagesToInsert = []
 
-    // 处理 history
     if (history.length > 0) {
       const historyMessages = history
         .map((item, idx) => {
@@ -139,7 +241,6 @@ export function useMessageProcessor() {
             created_at: item.created_at || null
           }
         })
-        // 过滤掉最后一条 assistant 消息，因为它会在后面单独处理
         .filter((item, idx) => {
           if (idx === history.length - 1 && item.role === 'assistant' && !isToolCall({ content: item.content })) {
              return false
@@ -147,35 +248,23 @@ export function useMessageProcessor() {
           return true
         })
 
-      messagesRef.value.push(...historyMessages)
+      aiMessagesToInsert.push(...historyMessages)
     }
 
-    // 处理 AI 响应，使用工具函数判断 role
     const tempMsg = { content: aiContent }
+    let finalAiMsg = null
 
     if (isToolResult(tempMsg)) {
-      messagesRef.value.push({
-        id: thinkingId,
-        role: 'tool',
-        content: aiContent,
-        created_at: aiCreatedAt
-      })
+      finalAiMsg = { id: thinkingId || Date.now(), role: 'tool', content: aiContent, created_at: aiCreatedAt }
     } else if (isToolCall(tempMsg)) {
-      messagesRef.value.push({
-        id: thinkingId,
-        role: 'assistant',
-        content: aiContent,
-        created_at: aiCreatedAt
-      })
+      finalAiMsg = { id: thinkingId || Date.now(), role: 'assistant', content: aiContent, created_at: aiCreatedAt }
     } else {
-      messagesRef.value.push({
-        id: thinkingId,
-        role: role,
-        content: aiContent,
-        created_at: aiCreatedAt
-      })
+      finalAiMsg = { id: thinkingId || Date.now(), role: role, content: aiContent, created_at: aiCreatedAt }
     }
 
+    aiMessagesToInsert.push(finalAiMsg)
+    _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId)
+    
     if (scrollToBottom) {
       nextTick(() => scrollToBottom())
     }
@@ -183,22 +272,13 @@ export function useMessageProcessor() {
 
   /**
    * 处理工具调用消息
-   * @param {Object} messagesRef - 消息列表 ref
-   * @param {Object} toolCall - 工具调用对象
-   * @param {Function} scrollToBottom - 滚动到底部回调
    */
   const handleToolCallMessage = (messagesRef, toolCall, scrollToBottom) => {
     const lastMsg = messagesRef.value[messagesRef.value.length - 1]
     if (lastMsg && lastMsg.role === 'tool_call') {
-      // 追加到现有工具调用
       lastMsg.content = { ...lastMsg.content, ...toolCall }
     } else {
-      // 新建工具调用消息
-      messagesRef.value.push({
-        id: Date.now(),
-        role: 'tool_call',
-        content: toolCall
-      })
+      messagesRef.value.push({ id: Date.now(), role: 'tool_call', content: toolCall })
     }
     if (scrollToBottom) {
       nextTick(() => scrollToBottom())
@@ -207,13 +287,8 @@ export function useMessageProcessor() {
 
   /**
    * 处理新会话创建
-   * @param {Object} sessionsRef - 会话列表 ref
-   * @param {Function} selectSession - 选择会话回调
-   * @param {number|string} thinkingId - thinking 消息 ID
-   * @param {boolean} disconnect - 是否断开连接
    */
   const handleNewSession = async (sessionsRef, selectSession, thinkingId, disconnect = true) => {
-    // 重新加载会话列表
     const res = await chatApi.sessionsList()
     sessionsRef.value = res.data.data || []
     
@@ -228,61 +303,64 @@ export function useMessageProcessor() {
 
   /**
    * 清理残留 thinking 消息
-   * @param {Object} messagesRef - 消息列表 ref
    */
   const cleanupThinkingMessage = (messagesRef) => {
-    const thinkingMsgIndex = messagesRef.value.findIndex(m => m.role === 'thinking')
-    if (thinkingMsgIndex !== -1) {
-      messagesRef.value.splice(thinkingMsgIndex, 1)
+    for (let i = messagesRef.value.length - 1; i >= 0; i--) {
+      if (messagesRef.value[i].role === 'thinking') {
+        messagesRef.value.splice(i, 1)
+      }
     }
   }
 
   /**
    * 添加用户消息
-   * @param {Object} messagesRef - 消息列表 ref
-   * @param {string} content - 消息内容
-   * @returns {number} 生成的消息 ID
    */
   const addUserMessage = (messagesRef, content) => {
     const userMsgId = Date.now()
-    messagesRef.value.push({
-      id: userMsgId,
-      role: 'user',
-      content: content,
-      created_at: Date.now() / 1000
-    })
+    messagesRef.value.push({ id: userMsgId, role: 'user', content: content, created_at: Date.now() / 1000 })
     return userMsgId
   }
 
   /**
    * 添加 thinking 占位符消息
-   * @param {Object} messagesRef - 消息列表 ref
-   * @returns {number} 生成的消息 ID
    */
   const addThinkingMessage = (messagesRef) => {
     const thinkingId = Date.now() + 1
-    messagesRef.value.push({
-      id: thinkingId,
-      role: 'thinking',
-      content: 'Thinking...'
-    })
+    messagesRef.value.push({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
     return thinkingId
   }
 
   /**
    * 移除 thinking 占位符消息
-   * @param {Object} messagesRef - 消息列表 ref
-   * @param {number|string} thinkingId - thinking 消息 ID
    */
   const removeThinkingMessage = (messagesRef, thinkingId) => {
-    const thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId)
+    const thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId && m.role === 'thinking')
     if (thinkingIndex !== -1) {
       messagesRef.value.splice(thinkingIndex, 1)
     }
   }
 
+  /**
+   * 内部方法：按位置插入 AI 消息
+   */
+  const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId) => {
+    if (!aiMessages || aiMessages.length === 0) return
+    let insertAt = -1
+    if (thinkingId) {
+      insertAt = messagesRef.value.findIndex(m => m.id === thinkingId)
+    }
+    if (insertAt === -1) {
+      insertAt = messagesRef.value.findIndex(m => m.role === 'thinking')
+    }
+
+    if (insertAt !== -1) {
+      messagesRef.value.splice(insertAt, 1, ...aiMessages)
+    } else {
+      messagesRef.value.push(...aiMessages)
+    }
+  }
+
   return {
-    // 方法
     processStreamContent,
     processStreamToolStart,
     processStreamToolEnd,

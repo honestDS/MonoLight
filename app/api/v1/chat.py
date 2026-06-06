@@ -199,7 +199,7 @@ async def chat_websocket(
     active_task = None
     current_session_id = None
 
-    async def run_chat(message_text, session_id, attachments=None):
+    async def run_chat(message_text, session_id, attachments=None, request_id=None):
         nonlocal active_task
         try:
             async with AsyncSessionLocal() as db:
@@ -209,6 +209,7 @@ async def chat_websocket(
                     uid=uid,
                     session_id=session_id,
                     attachments=attachments,
+                    request_id=request_id,
                 ):
                     await websocket.send_json(response)
         except RuntimeError as e:
@@ -236,6 +237,7 @@ async def chat_websocket(
             message = data.get("message")
             session_id = data.get("session_id")
             attachments = data.get("attachments")
+            request_id = data.get("request_id")
 
             if not message:
                 await websocket.send_json({"error": "Message is required"})
@@ -272,14 +274,15 @@ async def chat_websocket(
                         MessageRole.USER,
                         MessageType.TEXT,
                         initial_msg_obj,
-                        profile.id if profile else -1
+                        profile.id if profile else -1,
+                        is_processed=False
                     )
                 logger.bind(uid=uid, session_id=session_id).info(
                     f"Existing active task found for session {session_id}, message saved to DB for dynamic append."
                 )
             else:
                 # 否则启动新的调度任务
-                active_task = asyncio.create_task(run_chat(message, session_id, attachments))
+                active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
 
     except WebSocketDisconnect:
         # 连接正常关闭

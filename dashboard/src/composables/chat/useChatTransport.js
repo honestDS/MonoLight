@@ -13,18 +13,25 @@ export function useChatTransport() {
   // 通信模式: 'http' - 普通HTTP模式, 'ws' - WebSocket流式模式
   const transportMode = ref('ws')  // 默认使用流式模式
   const wsConnected = ref(false)     // WebSocket连接状态
-  let currentThinkingId = null
   
   // WebSocket 管理
   const wsManager = useWebSocket()
 
-  // 存储当前活跃的流式回调
-  let activeCallbacks = null
+  // 并发请求回调映射管理: requestId -> callbacks
+  const callbacksMap = new Map()
 
-  // 注册唯一持久的消息分发器，解决连接重用时回调失效问题
+  // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
-    if (activeCallbacks) {
-      handleWsMessage(data, activeCallbacks)
+    const requestId = data.request_id || 'default'
+    const callbacks = callbacksMap.get(requestId)
+    if (callbacks) {
+      handleWsMessage(data, callbacks)
+    } else if (data.type === 'session_id') {
+      // 会话 ID 同步等全局事件处理（若未带 requestId，尝试分发给所有活跃请求或第一个）
+      const firstCallbacks = callbacksMap.values().next().value
+      if (firstCallbacks) {
+        handleWsMessage(data, firstCallbacks)
+      }
     }
   })
 
@@ -32,27 +39,31 @@ export function useChatTransport() {
   
   /**
    * 处理 WebSocket 消息
-   * @param {Object} data - WebSocket 消息数据
-   * @param {Object} options - 处理选项
-   * @param {Function} options.onToolCall - 工具调用处理回调
-   * @param {Function} options.onResponse - AI 响应处理回调
-   * @param {Function} options.onComplete - 完成处理回调
-   * @param {Function} options.onSessionId - 会话 ID 同步回调
-   * @param {Function} options.scrollToBottom - 滚动到底部回调
-   * @param {Function} options.setLoading - 设置 loading 状态回调
    */
   const handleWsMessage = (data, options = {}) => {
-    const { onContent, onToolStart, onToolEnd, onComplete, onError, onSessionId, scrollToBottom, setLoading } = options
+    const { 
+      onContent, 
+      onToolStart, 
+      onToolEnd, 
+      onComplete, 
+      onError, 
+      onSessionId, 
+      scrollToBottom, 
+      setLoading, 
+      thinkingId,
+      requestId: currentRequestId
+    } = options
 
     // 忽略心跳响应
     if (data.type === 'pong' || data.type === 'ping') return
 
     const type = data.type
+    const requestId = data.request_id || currentRequestId
 
     // 1. 处理增量文本推送
     if (type === 'content') {
       if (onContent) {
-        onContent(data.content, data.turn, currentThinkingId, data.finish_reason)
+        onContent(data.content, data.turn, thinkingId, data.finish_reason, data.response_id, requestId)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -65,9 +76,9 @@ export function useChatTransport() {
       if (onToolStart) {
         onToolStart({
           id: data.tool_call_id,
-          name: data.name, // 后端推送的 key 是 name，非 tool_name
+          name: data.name,
           arguments: data.arguments
-        })
+        }, thinkingId, data.response_id, requestId)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -80,9 +91,9 @@ export function useChatTransport() {
       if (onToolEnd) {
         onToolEnd({
           tool_call_id: data.tool_call_id,
-          name: data.name, // 后端推送的 key 是 name，非 tool_name
+          name: data.name,
           result: data.result
-        })
+        }, data.response_id, requestId)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -93,13 +104,16 @@ export function useChatTransport() {
     // 4. 处理对话结束
     if (type === 'done') {
       if (onComplete) {
-        onComplete(data, currentThinkingId)
+        onComplete(data, thinkingId, requestId)
       }
       if (setLoading) {
         setLoading(false)
       }
       if (scrollToBottom) {
         scrollToBottom()
+      }
+      if (requestId) {
+        callbacksMap.delete(requestId)
       }
       return
     }
@@ -116,15 +130,18 @@ export function useChatTransport() {
     if (type === 'error') {
       console.error('WebSocket业务错误:', data.message)
       if (onError) {
-        onError(data.message, currentThinkingId)
+        onError(data.message, thinkingId, requestId)
       }
       if (setLoading) {
         setLoading(false)
       }
+      if (requestId) {
+        callbacksMap.delete(requestId)
+      }
       return
     }
 
-    // 兼容老的数据结构（如异常直接以 LLMResponse 格式返回）
+    // 7. 兼容逻辑处理（LLMResponse 格式）
     if (data.choices && Array.isArray(data.choices)) {
       const choice = data.choices[0]
       if (!choice) return
@@ -132,29 +149,19 @@ export function useChatTransport() {
       const content = choice.message?.content || ''
       const finishReason = choice.finish_reason
 
-      // 异常角色
       if (choice.message?.role === 'err') {
-        if (onError) {
-          onError(content, currentThinkingId)
-        }
-        if (setLoading) {
-          setLoading(false)
-        }
+        if (onError) onError(content, thinkingId, requestId)
+        if (setLoading) setLoading(false)
+        if (requestId) callbacksMap.delete(requestId)
         return
       }
 
       if (finishReason) {
-        if (onComplete) {
-          onComplete(data, currentThinkingId)
-        }
-        if (setLoading) {
-          setLoading(false)
-        }
-        if (scrollToBottom) {
-          scrollToBottom()
-        }
+        if (onComplete) onComplete(data, thinkingId, requestId)
+        if (setLoading) setLoading(false)
+        if (scrollToBottom) scrollToBottom()
+        if (requestId) callbacksMap.delete(requestId)
       }
-      return
     }
   }
 
@@ -164,17 +171,11 @@ export function useChatTransport() {
   const disconnectWebSocket = () => {
     wsManager.disconnect()
     wsConnected.value = false
+    callbacksMap.clear()
   }
 
   // ==================== 发送方法 ====================
   
-  /**
-   * HTTP 方式发送消息
-   * @param {Object} options - 发送选项
-   * @param {string} options.message - 消息内容
-   * @param {string|null} options.sessionId - 会话 ID
-   * @returns {Promise<Object>} API 响应
-   */
   const httpSend = async ({ message, sessionId, attachments }) => {
     const res = await chatApi.completions({
       message,
@@ -185,25 +186,15 @@ export function useChatTransport() {
     return res.data
   }
 
-  /**
-   * WebSocket 方式发送消息 (懒连接)
-   * @param {Object} options - 发送选项
-   * @param {string} options.message - 消息内容
-   * @param {string|null} options.sessionId - 会话 ID
-   * @param {Array<string>|null} options.attachments - 附件列表
-   * @param {Object} options.callbacks - 流式事件处理回调对象
-   * @returns {Promise<boolean>} 是否发送成功
-   */
-  const wsSend = async ({ message, sessionId, attachments, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
     const token = localStorage.getItem('token')
-    if (!token) {
-      throw new Error('未登录')
+    if (!token) throw new Error('未登录')
+    
+    const finalCallbacks = { ...callbacks, requestId }
+    if (requestId) {
+      callbacksMap.set(requestId, finalCallbacks)
     }
     
-    // 更新最新消息的回调引用
-    activeCallbacks = callbacks
-    
-    // 懒连接：只有在发送消息时才会尝试连接WebSocket
     if (!wsManager.isConnected.value) {
       try {
         await wsManager.connect(token)
@@ -211,32 +202,28 @@ export function useChatTransport() {
       } catch (e) {
         console.error('WebSocket连接失败:', e)
         ElMessage.error('WebSocket 连接失败，将使用 HTTP 模式')
-        // 回退到HTTP模式
         transportMode.value = 'http'
+        if (requestId) callbacksMap.delete(requestId)
         return false
       }
     }
     
-    // 通过 WebSocket 发送
     const wsData = {
       type: 'chat',
       message,
       session_id: sessionId || null,
-      attachments: attachments || null
+      attachments: attachments || null,
+      request_id: requestId
     }
     
     if (!wsManager.sendMessage(wsData)) {
       ElMessage.error('WebSocket 消息发送失败')
+      if (requestId) callbacksMap.delete(requestId)
       return false
     }
     return true
   }
 
-  /**
-   * 根据当前通信模式发送消息
-   * @param {Object} options - 发送选项
-   * @returns {Promise} 发送结果
-   */
   const send = async (options) => {
     if (transportMode.value === 'ws') {
       return wsSend(options)
@@ -245,71 +232,42 @@ export function useChatTransport() {
     }
   }
 
-  /**
-   * 切换通信模式
-   * @param {string} mode - 通信模式，'http' 或 'ws'
-   * @param {Function} disconnectCallback - 断开连接回调
-   */
   const setTransportMode = async (mode, disconnectCallback = null) => {
     if (mode === 'ws' && transportMode.value !== 'ws') {
-      // 切换到WebSocket模式（懒连接，稍后发送消息时才连接）
       transportMode.value = mode
     } else if (mode === 'http' && transportMode.value !== 'http') {
-      // 切换到HTTP模式，先断开WebSocket（如果已连接）
       if (wsConnected.value) {
-        if (disconnectCallback) {
-          disconnectCallback()
-        } else {
-          disconnectWebSocket()
-        }
+        if (disconnectCallback) disconnectCallback()
+        else disconnectWebSocket()
       }
       transportMode.value = mode
     }
   }
 
-  /**
-   * 获取当前 thinking ID
-   * @returns {number} thinking ID
-   */
-  const getCurrentThinkingId = () => currentThinkingId
-
-  /**
-   * 设置当前 thinking ID
-   * @param {number} id - thinking ID
-   */
-  const setCurrentThinkingId = (id) => {
-    currentThinkingId = id
-  }
-
-  /**
-   * 初始化 WebSocket
-   * @returns {Promise} 连接结果
-   */
   const initWebSocket = async () => {
     const token = localStorage.getItem('token')
     if (token) {
-      await wsManager.connect(token)
-      wsConnected.value = true
-      return true
+      try {
+        await wsManager.connect(token)
+        wsConnected.value = true
+        return true
+      } catch (e) {
+        console.error('Init WS failed:', e)
+        return false
+      }
     }
     return false
   }
 
   return {
-    // 状态
     transportMode,
     wsConnected,
-    // 方法
-    handleWsMessage,
     disconnectWebSocket,
     httpSend,
     wsSend,
     send,
     setTransportMode,
-    getCurrentThinkingId,
-    setCurrentThinkingId,
     initWebSocket,
-    // WebSocket 管理器（供外部使用）
     wsManager
   }
 }

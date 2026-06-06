@@ -45,6 +45,8 @@ class OpenAITransformer(BaseTransformer):
             "temperature": temperature,
             "stream": False,
         }
+
+        logger.debug(f"[OpenAITransformer - Generate] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
@@ -177,18 +179,27 @@ class OpenAITransformer(BaseTransformer):
     def from_provider(cls, provider_response: Any) -> InternalMessage:
         choice = provider_response["choices"][0]["message"]
         tool_calls = None
-        if "tool_calls" in choice:
-            tool_calls = [
-                InternalToolCall(
-                    id=tc["id"],
-                    name=tc["function"]["name"],
-                    arguments=json.loads(tc["function"]["arguments"]),
-                )
-                for tc in choice["tool_calls"]
-            ]
+        if "tool_calls" in choice and choice["tool_calls"] is not None:
+            tool_calls = []
+            for tc in choice["tool_calls"]:
+                try:
+                    args = tc["function"]["arguments"]
+                    if isinstance(args, str):
+                        parsed_args = json.loads(args) if args.strip() else {}
+                    else:
+                        parsed_args = args if isinstance(args, dict) else {}
+                    tool_calls.append(
+                        InternalToolCall(
+                            id=tc["id"],
+                            name=tc["function"]["name"],
+                            arguments=parsed_args,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to parse tool call arguments: {tc}, error: {e}")
 
         return InternalMessage(
             role=MessageRole.ASSISTANT,
             content=choice.get("content"),
-            tool_calls=tool_calls,
+            tool_calls=tool_calls if tool_calls else None,
         )

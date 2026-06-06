@@ -7,6 +7,7 @@ from typing import (
     Any,
 )
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
@@ -50,16 +51,20 @@ from app.core.prompts import (
     SYSTEM_CONTEXT_WRAPPER,
     SYSTEM_INSTRUCTIONS_WRAPPER,
 )
+from datetime import timedelta
+
 from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
+from app.core.utils.dt import get_local_time
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.system import get_full_system_context
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
+    Message,
     MessageRole,
     MessageType,
 )
@@ -115,22 +120,47 @@ class ChatDispatcher:
         return messages
 
     @staticmethod
-    async def _fetch_new_user_messages(
+    async def _fetch_and_merge_new_user_messages(
         db: AsyncSession,
         session_id: str,
         uid: str,
-        last_id: int,
     ) -> list[InternalMessage]:
         """
-        检索并解析新产生的用户消息
+        检索并合并未处理的新产生用户消息
         """
-        raw_msgs = await message_crud.get_new_messages_since_id(db, session_id=session_id, uid=uid, last_id=last_id)
-        # 仅追加用户消息，过滤掉系统自动注入或 AI 的响应
+        raw_msgs = await message_crud.get_unprocessed_messages(db, session_id=session_id, uid=uid)
+        # 仅处理未标记的用户消息
         user_msgs = [m for m in raw_msgs if m.role == MessageRole.USER]
         if not user_msgs:
             return []
 
-        return parse_db_messages_to_internal(user_msgs)
+        # 获取数据库记录的ID集合以便更新
+        msg_ids = [m.id for m in user_msgs if m.id is not None]
+
+        # 合并内容与附件
+        merged_content = []
+        merged_attachments = []
+        for m in user_msgs:
+            if m.content:
+                merged_content.append(str(m.content).strip())
+            if m.attachments:
+                merged_attachments.extend(m.attachments)
+
+        # 标记为已处理 (通过 ORM 对象属性更新方式)
+        if user_msgs:
+            for m in user_msgs:
+                m.is_processed = True
+                db.add(m)
+            await db.commit()
+
+        # 返回合并后的单条 InternalMessage
+        combined_msg = InternalMessage(
+            id=msg_ids[-1] if msg_ids else None, # 使用最后一条的 ID
+            role=MessageRole.USER,
+            content="\n".join(merged_content) if merged_content else None,
+            attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
+        )
+        return [combined_msg]
 
     @staticmethod
     async def _save_message(
@@ -141,40 +171,44 @@ class ChatDispatcher:
         msg_type: MessageType,
         content: Any,
         profile_id: int,
+        is_processed: bool = True,
     ) -> InternalMessage:
         # Determine attachments and final content payload
         attachments_to_save = None
         if hasattr(content, "attachments"):
             attachments_to_save = content.attachments
 
+        obj_in_data = {
+            "session_id": session_id,
+            "uid": uid,
+            "role": role,
+            "type": msg_type,
+            "content": (
+                content.content
+                if (
+                    msg_type == MessageType.TEXT
+                    and hasattr(
+                        content,
+                        "content",
+                    )
+                )
+                else (
+                    content.model_dump_json(exclude_none=True)
+                    if hasattr(
+                        content,
+                        "model_dump_json",
+                    )
+                    else str(content)
+                )
+            ),
+            "attachments": attachments_to_save,
+            "profile_id": profile_id,
+            "is_processed": is_processed,
+        }
+        
         db_obj = await message_crud.create(
             db,
-            obj_in={
-                "session_id": session_id,
-                "uid": uid,
-                "role": role,
-                "type": msg_type,
-                "content": (
-                    content.content
-                    if (
-                        msg_type == MessageType.TEXT
-                        and hasattr(
-                            content,
-                            "content",
-                        )
-                    )
-                    else (
-                        content.model_dump_json(exclude_none=True)
-                        if hasattr(
-                            content,
-                            "model_dump_json",
-                        )
-                        else str(content)
-                    )
-                ),
-                "attachments": attachments_to_save,
-                "profile_id": profile_id,
-            },
+            obj_in=obj_in_data,
         )
         return InternalMessage(
             id=db_obj.id,
@@ -266,7 +300,7 @@ class ChatDispatcher:
                 f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
             )
 
-            # 1. 初始保存消息
+            # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
             initial_msg_obj = InternalMessage(
                 role=MessageRole.USER,
                 content=message,
@@ -280,9 +314,9 @@ class ChatDispatcher:
                 MessageType.TEXT,
                 initial_msg_obj,
                 profile.id if profile and profile.id else -1,
+                is_processed=False
             )
 
-            last_processed_id = initial_msg.id
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []
             is_first_iter = True
@@ -312,6 +346,15 @@ class ChatDispatcher:
                         raise LLMException(message=ERR_PROFILE_NOT_FOUND)
 
                     cfg = ProfileConfig.model_validate(profile.configs)
+
+                    if is_first_iter:
+                        # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
+                        await db.execute(
+                            update(Message)
+                            .where(Message.id == initial_msg.id)
+                            .values(is_processed=True)
+                        )
+                        await db.commit()
 
                     if not profile.provider:
                         raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
@@ -343,32 +386,24 @@ class ChatDispatcher:
 
                     seen_ids = {m.id for m in messages if m.id is not None}
 
-                    # 重新锚定 last_processed_id 确保不遗漏在此期间通过其他渠道进入的消息
-                    for m in messages:
-                        if m.id and m.id > last_processed_id:
-                            last_processed_id = m.id
-
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
                     while current_turn <= max_turns:
-                        # 检查新指令
-                        new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                        # 检查新指令并合并
+                        new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
-                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】检测到 {len(new_user_msgs)} 条追加消息，重置轮次计数。")
+                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
                             current_turn = 0 # 重置轮次限制
-                            for nm in new_user_msgs:
-                                if nm.id is not None:
-                                    # 无论是否见过，都必须推进 last_processed_id 防止重复拉取
-                                    if nm.id > last_processed_id:
-                                        last_processed_id = nm.id
-
-                                    if nm.id in seen_ids:
-                                        continue
-
+                            for nm_idx, nm in enumerate(new_user_msgs):
+                                # 确保追加的用户消息中的附件也被正确组装
+                                if nm.attachments or isinstance(nm.content, list):
+                                    is_history = False # 合并后的单条必然是最后一条
+                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
+                                    messages.append(assembled_nm)
+                                else:
                                     messages.append(nm)
-                                    seen_ids.add(nm.id)
 
                         current_turn += 1
 
@@ -411,13 +446,25 @@ class ChatDispatcher:
                             MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
                             ai_msg,
                             profile.id,
+                            is_processed=True,
                         )
 
                         if not ai_msg.tool_calls:
                             final_ai_content = ai_msg.content
-                            new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                            new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
+                            
+                            logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
+                            for nm_idx, nm in enumerate(new_user_msgs):
+                                if nm.attachments or isinstance(nm.content, list):
+                                    is_history = False
+                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
+                                    messages.append(assembled_nm)
+                                else:
+                                    messages.append(nm)
+                            
+                            current_turn = 0
                             continue
 
                         # 并行工具调用处理
@@ -436,14 +483,14 @@ class ChatDispatcher:
                         for tool_res in tool_responses:
                             messages.append(tool_res)
                             turn_messages.append(tool_res)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id, is_processed=True)
 
                 finally:
                     await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
                 # 锁释放后的“捕获检查”：防止在释放锁的瞬间有新消息到达
-                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break
                 # 如果发现新消息，while True 会继续，重新竞争锁并进入下一轮处理
@@ -466,6 +513,7 @@ class ChatDispatcher:
         uid: str,
         session_id: str = "default",
         attachments: list[str] | None = None,
+        request_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -476,7 +524,7 @@ class ChatDispatcher:
                 f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
             )
 
-            # 1. 初始保存消息
+            # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
             initial_msg_obj = InternalMessage(
                 role=MessageRole.USER,
                 content=message,
@@ -490,9 +538,9 @@ class ChatDispatcher:
                 MessageType.TEXT,
                 initial_msg_obj,
                 profile.id if profile and profile.id else -1,
+                is_processed=False
             )
 
-            last_processed_id = initial_msg.id
             turn_messages: list[InternalMessage] = []
             is_first_iter = True
             has_output_in_this_dispatch = False
@@ -506,8 +554,8 @@ class ChatDispatcher:
                     logger.bind(uid=uid, session_id=session_id).info(
                         f"【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。"
                     )
-                    yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued"}
-                    yield {"type": "done", "session_id": session_id, "history": []}
+                    yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued", "request_id": request_id}
+                    yield {"type": "done", "session_id": session_id, "history": [], "request_id": request_id}
                     return
 
                 try:
@@ -515,6 +563,15 @@ class ChatDispatcher:
                         raise LLMException(message=ERR_PROFILE_NOT_FOUND)
 
                     cfg = ProfileConfig.model_validate(profile.configs)
+
+                    if is_first_iter:
+                        # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
+                        await db.execute(
+                            update(Message)
+                            .where(Message.id == initial_msg.id)
+                            .values(is_processed=True)
+                        )
+                        await db.commit()
 
                     if not profile.provider:
                         raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
@@ -542,31 +599,23 @@ class ChatDispatcher:
 
                     messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
-                    seen_ids = {m.id for m in messages if m.id is not None}
-                    for m in messages:
-                        if m.id and m.id > last_processed_id:
-                            last_processed_id = m.id
-
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
                     while current_turn <= max_turns:
-                        # 检查新指令
-                        new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                        # 检查新指令并合并
+                        new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
                             current_turn = 0
-                            for nm in new_user_msgs:
-                                if nm.id is not None:
-                                    # 推进 ID
-                                    if nm.id > last_processed_id:
-                                        last_processed_id = nm.id
-
-                                    if nm.id in seen_ids:
-                                        continue
-
+                            for nm_idx, nm in enumerate(new_user_msgs):
+                                # 确保追加的用户消息中的附件也被正确组装
+                                if nm.attachments or isinstance(nm.content, list):
+                                    is_history = False # 合并后的单条必然是最后一条
+                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
+                                    messages.append(assembled_nm)
+                                else:
                                     messages.append(nm)
-                                    seen_ids.add(nm.id)
 
                         current_turn += 1
 
@@ -580,6 +629,8 @@ class ChatDispatcher:
 
                         current_tool_calls_map = {}
                         current_content_chunks = []
+                        import uuid
+                        response_id = str(uuid.uuid4())
 
                         async for chunk in LLMClient.generate_stream(
                             api_key=profile.provider.api_key,
@@ -598,10 +649,8 @@ class ChatDispatcher:
 
                             content = delta.get("content")
                             if content:
-                                if has_output_in_this_dispatch and not current_content_chunks:
-                                    content = "\n" + content
                                 current_content_chunks.append(content)
-                                yield {"type": "content", "content": content, "turn": current_turn}
+                                yield {"type": "content", "content": content, "turn": current_turn, "response_id": response_id, "request_id": request_id}
                                 has_output_in_this_dispatch = True
 
                             tool_calls = delta.get("tool_calls")
@@ -636,12 +685,22 @@ class ChatDispatcher:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        await ChatDispatcher._save_message(db, session_id, uid, MessageRole.ASSISTANT, MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT, ai_msg, profile.id)
+                        await ChatDispatcher._save_message(db, session_id, uid, MessageRole.ASSISTANT, MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT, ai_msg, profile.id, is_processed=True)
 
                         if not ai_msg.tool_calls:
-                            new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                            new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
+                            
+                            for nm_idx, nm in enumerate(new_user_msgs):
+                                if nm.attachments or isinstance(nm.content, list):
+                                    is_history = False
+                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
+                                    messages.append(assembled_nm)
+                                else:
+                                    messages.append(nm)
+                            
+                            current_turn = 0
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
@@ -654,7 +713,7 @@ class ChatDispatcher:
                             continue
 
                         for tc in ai_msg.tool_calls:
-                            yield {"type": "tool_start", "name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id}
+                            yield {"type": "tool_start", "name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id, "response_id": response_id, "request_id": request_id}
 
                         tasks = [ChatDispatcher._process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
@@ -662,23 +721,23 @@ class ChatDispatcher:
                         for tool_res in tool_responses:
                             messages.append(tool_res)
                             turn_messages.append(tool_res)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id, is_processed=True)
                             tool_name = next((tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), "unknown")
-                            yield {"type": "tool_end", "name": tool_name, "result": tool_res.content, "tool_call_id": tool_res.tool_call_id}
+                            yield {"type": "tool_end", "name": tool_name, "result": tool_res.content, "tool_call_id": tool_res.tool_call_id, "response_id": response_id, "request_id": request_id}
 
                 finally:
                     await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
                 # 锁释放后的“捕获检查”
-                new_user_msgs = await ChatDispatcher._fetch_new_user_messages(db, session_id, uid, last_processed_id)
+                new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break
 
-            yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages]}
+            yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages], "request_id": request_id}
 
         except BaseBusinessException as bbe:
-            yield {"type": "error", "message": bbe.message}
+            yield {"type": "error", "message": bbe.message, "request_id": request_id}
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Stream Error")
-            yield {"type": "error", "message": str(e)}
+            yield {"type": "error", "message": str(e), "request_id": request_id}

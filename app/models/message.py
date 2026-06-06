@@ -85,6 +85,7 @@ class MessageBase(SQLModel):
     type: MessageType = Field(default=MessageType.TEXT, max_length=20)
     content: str | None = Field(default=None)
     attachments: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    is_processed: bool = Field(default=False)
 
 
 class Message(MessageBase, table=True):

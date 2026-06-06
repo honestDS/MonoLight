@@ -28,9 +28,9 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 try:
                     parsed = json.loads(content)
                     if isinstance(parsed, dict):
-                        if "tool_calls" in parsed:
+                        if "tool_calls" in parsed and parsed["tool_calls"] is not None:
                             tool_calls = [
-                                InternalToolCall(**tc) for tc in parsed["tool_calls"]
+                                InternalToolCall(**tc) for tc in parsed["tool_calls"] if tc is not None
                             ]
                             content = parsed.get("content")
                         if "tool_call_id" in parsed:
