@@ -407,7 +407,7 @@ class ChatDispatcher:
                         )
 
                         ai_msg = response.message
-                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}")
+                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
 
                         if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
@@ -480,7 +480,7 @@ class ChatDispatcher:
         except BaseBusinessException:
             raise
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Error")
+            logger.bind(uid=uid, session_id=session_id).exception("调度器错误")
             raise ServerException(message=str(e))
 
     @staticmethod
@@ -643,7 +643,7 @@ class ChatDispatcher:
 
                         ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
 
-                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] Turn {current_turn} | LLM Response: {ai_msg.content or '[Tool Call]'}")
+                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
 
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
@@ -702,5 +702,5 @@ class ChatDispatcher:
         except BaseBusinessException as bbe:
             yield {"type": "error", "message": bbe.message, "request_id": request_id}
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).exception("Dispatcher Stream Error")
+            logger.bind(uid=uid, session_id=session_id).exception("流式调度器错误")
             yield {"type": "error", "message": str(e), "request_id": request_id}
