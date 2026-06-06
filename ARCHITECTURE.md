@@ -16,6 +16,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/api/v1/profile.py: 模型配置档的 CRUD 与状态切换。
 - app/api/v1/providers.py: 模型供应商元数据管理。
 - app/api/v1/prompts.py: 提示词资产库维护。
+- app/api/v1/files.py: 文件上传与下载管理，支持基于 Session 的临时存储。
 - app/api/v1/system.py: 系统监控。支持运行状态获取与系统日志的实时 WebSocket 推送。
 
 ### 2.2 逻辑调度层 (Control Layer)
@@ -30,16 +31,20 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
   - config.py: 配置中心。实现配置泵（Standardization Pump）机制。
   - tokenizer.py: Token 计算工具。基于加权算法进行 Token 预估。
   - message_parser.py: 消息解析工具。
+  - message_assembler.py: 消息装配工具。支持多模态及工具调用消息的标准化封装。
   - dt.py: 时区感知的时间处理工具，支持自定义偏移量。
   - session.py: 会话增强工具。支持基于 LLM 自动生成会话摘要标题。
   - system.py: 系统环境探测工具。获取 CPU、内存、OS 等元数据供 Agent 上下文参考。
 - app/adapters: 通信适配层。抹平不同通信协议（如 Web HTTP, WebSocket）与内部调度器之间的差异。
+  - app/adapters/base.py: 适配器抽象基类。
   - app/adapters/chat_web.py: 常规 HTTP 对话适配。
   - app/adapters/chat_ws.py: WebSocket 流式对话适配。
 
 ### 2.3 向量化服务层 (Embedding Layer)
 提供统一的文本向量化能力，支持 RAG 及语义搜索。
 - app/embedding/client.py: 向量化统一客户端。
+- app/embedding/config.py: 向量化模块独立配置管理。
+- app/embedding/utils.py: 向量化通用工具类。
 - app/embedding/transformers/: 向量化协议转换。
   - base.py: 向量化转换抽象基类。
   - openai.py: 远程 OpenAI Embedding 协议适配。
@@ -71,6 +76,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/core/tools/: 外部资源调用工具链。
   - base.py: 原子工具抽象基类。定义了工具执行的标准接口与环境隔离规范。
   - shell.py: Shell 指令执行器。负责受控环境下的子进程调用与执行超时控制。
+  - file_writer.py: 受控文件写入器。支持在安全隔离的临时目录内进行文件操作。
 
 ### 2.8 全局配置与常量 (Constants Layer)
 - app/core/constants.py: 统一的消息资产库。
@@ -78,6 +84,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 
 ### 2.9 核心 CRUD 层
 - app/core/crud: 业务逻辑与数据持久化之间的缓冲，采用 Repository 模式。
+  - base.py: CRUD 抽象基类，封装通用异步数据库操作。
   - user.py: 用户账户管理。
   - profile.py: 模型配置档管理。
   - prompt.py: 提示词资产管理。
