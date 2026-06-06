@@ -175,10 +175,11 @@ export function useChatTransport() {
    * @param {string|null} options.sessionId - 会话 ID
    * @returns {Promise<Object>} API 响应
    */
-  const httpSend = async ({ message, sessionId }) => {
+  const httpSend = async ({ message, sessionId, attachments }) => {
     const res = await chatApi.completions({
       message,
       session_id: sessionId || null,
+      attachments: attachments || null,
       stream: false
     })
     return res.data
@@ -189,10 +190,11 @@ export function useChatTransport() {
    * @param {Object} options - 发送选项
    * @param {string} options.message - 消息内容
    * @param {string|null} options.sessionId - 会话 ID
+   * @param {Array<string>|null} options.attachments - 附件列表
    * @param {Object} options.callbacks - 流式事件处理回调对象
    * @returns {Promise<boolean>} 是否发送成功
    */
-  const wsSend = async ({ message, sessionId, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) {
       throw new Error('未登录')
@@ -219,7 +221,8 @@ export function useChatTransport() {
     const wsData = {
       type: 'chat',
       message,
-      session_id: sessionId || null
+      session_id: sessionId || null,
+      attachments: attachments || null
     }
     
     if (!wsManager.sendMessage(wsData)) {

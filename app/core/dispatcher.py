@@ -54,6 +54,7 @@ from app.core.tools import (
     ALL_TOOLS_SCHEMAS,
     TOOL_EXECUTOR_MAP,
 )
+from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.system import get_full_system_context
 from app.models.message import (
@@ -141,6 +142,11 @@ class ChatDispatcher:
         content: Any,
         profile_id: int,
     ) -> InternalMessage:
+        # Determine attachments and final content payload
+        attachments_to_save = None
+        if hasattr(content, "attachments"):
+            attachments_to_save = content.attachments
+
         db_obj = await message_crud.create(
             db,
             obj_in={
@@ -166,6 +172,7 @@ class ChatDispatcher:
                         else str(content)
                     )
                 ),
+                "attachments": attachments_to_save,
                 "profile_id": profile_id,
             },
         )
@@ -173,6 +180,7 @@ class ChatDispatcher:
             id=db_obj.id,
             role=role,
             content=db_obj.content,
+            attachments=db_obj.attachments,
             created_at=db_obj.created_at.timestamp(),
         )
 
@@ -244,9 +252,10 @@ class ChatDispatcher:
     @staticmethod
     async def dispatch(
         db: AsyncSession,
-        message: str,
+        message: str | list[dict[str, Any]],
         uid: str,
         session_id: str = "default",
+        attachments: list[str] | None = None,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -254,17 +263,22 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] 用户消息: {message}"
+                f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
             )
 
             # 1. 初始保存消息
+            initial_msg_obj = InternalMessage(
+                role=MessageRole.USER,
+                content=message,
+                attachments=attachments,
+            )
             initial_msg = await ChatDispatcher._save_message(
                 db,
                 session_id,
                 uid,
                 MessageRole.USER,
                 MessageType.TEXT,
-                message,
+                initial_msg_obj,
                 profile.id if profile and profile.id else -1,
             )
 
@@ -318,6 +332,13 @@ class ChatDispatcher:
                     )
                     if is_first_iter:
                         messages.append(initial_msg)
+
+                    # 动态组装含有附件的多模态消息
+                    for idx, m in enumerate(messages):
+                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+                            is_history = (idx != len(messages) - 1)
+                            messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
+
                     messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
                     seen_ids = {m.id for m in messages if m.id is not None}
@@ -441,9 +462,10 @@ class ChatDispatcher:
     @staticmethod
     async def dispatch_stream(
         db: AsyncSession,
-        message: str,
+        message: str | list[dict[str, Any]],
         uid: str,
         session_id: str = "default",
+        attachments: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -451,17 +473,22 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(
-                f"[{username}] 用户消息: {message}"
+                f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}"
             )
 
             # 1. 初始保存消息
+            initial_msg_obj = InternalMessage(
+                role=MessageRole.USER,
+                content=message,
+                attachments=attachments,
+            )
             initial_msg = await ChatDispatcher._save_message(
                 db,
                 session_id,
                 uid,
                 MessageRole.USER,
                 MessageType.TEXT,
-                message,
+                initial_msg_obj,
                 profile.id if profile and profile.id else -1,
             )
 
@@ -506,6 +533,13 @@ class ChatDispatcher:
                     )
                     if is_first_iter:
                         messages.append(initial_msg)
+
+                    # 动态组装含有附件的多模态消息
+                    for idx, m in enumerate(messages):
+                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+                            is_history = (idx != len(messages) - 1)
+                            messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
+
                     messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
                     seen_ids = {m.id for m in messages if m.id is not None}
@@ -540,7 +574,6 @@ class ChatDispatcher:
                             summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                             notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
                             messages.append(notice_msg)
-                            # await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
                             current_tools = None
                         else:
                             current_tools = tools

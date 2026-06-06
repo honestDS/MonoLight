@@ -3,11 +3,13 @@ from datetime import datetime
 from enum import StrEnum
 from typing import (
     Any,
+    Literal,
 )
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic import Field as PyField
 from sqlmodel import (
+    JSON,
     Column,
     DateTime,
     Field,
@@ -31,6 +33,25 @@ class MessageType(StrEnum):
     TOOL_RESULT = "tool_result"
 
 
+class MessagePart(BaseModel):
+    type: str
+
+
+class TextPart(MessagePart):
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImagePart(MessagePart):
+    type: Literal["image_url"] = "image_url"
+    image_url: dict[str, str]
+
+
+class FilePart(MessagePart):
+    type: Literal["file"] = "file"
+    path: str
+
+
 class InternalToolCall(BaseModel):
     id: str
     name: str
@@ -40,9 +61,10 @@ class InternalToolCall(BaseModel):
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
-    content: str | None = None
+    content: str | list[TextPart | ImagePart | FilePart | MessagePart] | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
+    attachments: list[str] | None = None
     created_at: float = PyField(default_factory=lambda: time.time())
 
 
@@ -62,6 +84,7 @@ class MessageBase(SQLModel):
     role: MessageRole = Field(max_length=20)
     type: MessageType = Field(default=MessageType.TEXT, max_length=20)
     content: str | None = Field(default=None)
+    attachments: list[str] | None = Field(default=None, sa_column=Column(JSON))
 
 
 class Message(MessageBase, table=True):
@@ -82,7 +105,21 @@ class MessageResponse(MessageBase):
     id: int
     profile_id: int
     created_at: Any
+    content: str | list[Any] | dict[str, Any] | None = None
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def parse_content(cls, v):
+        if isinstance(v, str):
+            try:
+                import json
+                parsed = json.loads(v)
+                if isinstance(parsed, (list, dict)):
+                    return parsed
+            except Exception:
+                pass
+        return v
 
     @field_validator("created_at", mode="before")
     @classmethod
@@ -93,6 +130,7 @@ class MessageResponse(MessageBase):
 
 
 class ChatCompletionRequest(BaseModel):
-    message: str
+    message: str | list[TextPart | ImagePart | FilePart | MessagePart]
+    attachments: list[str] | None = None
     session_id: str | None = None
     stream: bool | None = False

@@ -73,7 +73,8 @@ async def chat_completions(
         db=db,
         message=request.message,
         uid=uid,
-        session_id=request.session_id
+        session_id=request.session_id,
+        attachments=request.attachments,
     )
 
 
@@ -198,7 +199,7 @@ async def chat_websocket(
     active_task = None
     current_session_id = None
 
-    async def run_chat(message_text, session_id):
+    async def run_chat(message_text, session_id, attachments=None):
         nonlocal active_task
         try:
             async with AsyncSessionLocal() as db:
@@ -206,7 +207,8 @@ async def chat_websocket(
                     db=db,
                     message=message_text,
                     uid=uid,
-                    session_id=session_id
+                    session_id=session_id,
+                    attachments=attachments,
                 ):
                     await websocket.send_json(response)
         except RuntimeError as e:
@@ -233,6 +235,7 @@ async def chat_websocket(
             data = await websocket.receive_json()
             message = data.get("message")
             session_id = data.get("session_id")
+            attachments = data.get("attachments")
 
             if not message:
                 await websocket.send_json({"error": "Message is required"})
@@ -254,15 +257,21 @@ async def chat_websocket(
 
             # 如果当前已有任务在运行，新消息仅需保存到数据库
             if active_task and not active_task.done():
+                from app.models.message import InternalMessage
                 async with AsyncSessionLocal() as db:
                     profile = await profile_crud.get_active(db)
+                    initial_msg_obj = InternalMessage(
+                        role=MessageRole.USER,
+                        content=message,
+                        attachments=attachments,
+                    )
                     await ChatDispatcher._save_message(
                         db,
                         session_id,
                         uid,
                         MessageRole.USER,
                         MessageType.TEXT,
-                        message,
+                        initial_msg_obj,
                         profile.id if profile else -1
                     )
                 logger.bind(uid=uid, session_id=session_id).info(
@@ -270,7 +279,7 @@ async def chat_websocket(
                 )
             else:
                 # 否则启动新的调度任务
-                active_task = asyncio.create_task(run_chat(message, session_id))
+                active_task = asyncio.create_task(run_chat(message, session_id, attachments))
 
     except WebSocketDisconnect:
         # 连接正常关闭

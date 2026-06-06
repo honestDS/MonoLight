@@ -12,6 +12,7 @@ python-multipart
 loguru
 sqlalchemy
 sqlmodel
+Pillow
 
 pytest
 pytest-asyncio

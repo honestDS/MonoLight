@@ -39,12 +39,20 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                 except json.JSONDecodeError:
                     # 鲁棒性退避：解析失败按原样呈现
                     pass
+            elif m_type == MessageType.TEXT and content.startswith("[") and content.endswith("]"):
+                try:
+                    parsed_content = json.loads(content)
+                    if isinstance(parsed_content, list):
+                        content = parsed_content
+                except json.JSONDecodeError:
+                    pass
 
             parsed_history.append(
                 InternalMessage(
                     id=msg.id,
                     role=role,
                     content=content,
+                    attachments=msg.attachments,
                     tool_calls=tool_calls,
                     tool_call_id=tool_call_id,
                 )

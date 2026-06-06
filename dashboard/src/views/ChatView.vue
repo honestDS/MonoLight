@@ -84,7 +84,45 @@
               <div class="message-header">
                 <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
               </div>
-              <div class="content">{{ msg.content }}</div>
+              
+              <!-- 附件渲染区 -->
+              <div class="message-attachments" v-if="msg.attachments && msg.attachments.length > 0">
+                <div v-for="(att, idx) in msg.attachments" :key="idx" class="message-attachment-item">
+                  <template v-if="isImageFile(att)">
+                    <el-image 
+                      :src="fileApi.getDownloadUrl(att)" 
+                      :preview-src-list="[fileApi.getDownloadUrl(att)]"
+                      :hide-on-click-modal="true"
+                      class="msg-attachment-image"
+                      @load="handleImageLoad"
+                    ></el-image>
+                  </template>
+                  <template v-else>
+                    <a :href="fileApi.getDownloadUrl(att)" target="_blank" class="msg-attachment-file">
+                      <img src="@/assets/svg/document.svg" class="icon-document" />
+                      <span class="file-name" :title="getFilename(att)">{{ getFilename(att) }}</span>
+                    </a>
+                  </template>
+                </div>
+              </div>
+
+              <!-- 消息主体内容 -->
+              <div class="content" v-if="typeof msg.content === 'string' && msg.content.trim()">{{ msg.content }}</div>
+              <div class="content" v-else-if="Array.isArray(msg.content)">
+                <div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
+                  <div v-if="part.type === 'text'" class="text-part">{{ part.text }}</div>
+                  <div v-else-if="part.type === 'image_url'" class="image-part">
+                    <el-image 
+                      :src="part.image_url.url" 
+                      :preview-src-list="[part.image_url.url]"
+                      :hide-on-click-modal="true"
+                      class="msg-image"
+                      @load="handleImageLoad"
+                    ></el-image>
+                  </div>
+                  <div v-else class="text-part">{{ JSON.stringify(part) }}</div>
+                </div>
+              </div>
             </template>
           </div>
         </template>
@@ -94,6 +132,20 @@
           <el-button type="primary" @click="createNewSession" class="new-session-btn">
             <i class="el-icon-plus"></i> 新建会话
           </el-button>
+          
+          <!-- 上传按钮移到模式选择之前 -->
+          <div class="upload-trigger-btn">
+            <el-upload
+              action=""
+              :http-request="handleUpload"
+              :show-file-list="false"
+              multiple
+              :before-upload="() => true"
+            >
+              <el-button title="上传图片/附件">上传图片/附件</el-button>
+            </el-upload>
+          </div>
+
           <div class="mode-selector">
             <button 
               type="button" 
@@ -108,27 +160,54 @@
               :disabled="loading"
             >流式</button>
           </div>
-          <span v-if="currentSessionId" class="current-session-id">
-            当前会话: {{ currentSessionId.substring(0, 8) }}...
-          </span>
         </div>
         <div class="input-wrapper">
-          <el-input
-            v-model="inputMsg" 
-            placeholder="输入消息..." 
-            @keyup.enter="send"
-            type="textarea"
-            :autosize="{ minRows: 2, maxRows: 6 }"
-            class="chat-input"
-            :resize="'none'"
-          />
-          <el-button 
-            type="primary" 
-            @click="send" 
-            :disabled="!inputMsg.trim()"
-          >
-            发送
-          </el-button>
+          <div class="input-controls">
+            <div class="chat-input-box">
+              <!-- 自定义附件展示区域（取代 el-upload 原生列表） -->
+              <div class="upload-container" v-show="uploadFileList.length > 0">
+                <div class="custom-upload-list">
+                  <div class="custom-upload-item" v-for="file in uploadFileList" :key="file.uid">
+                    <el-image 
+                      v-if="file.url"
+                      class="custom-upload-img" 
+                      :src="file.url" 
+                      fit="contain"
+                      :preview-src-list="[file.url]"
+                      :hide-on-click-modal="true"
+                    />
+                    <div v-else class="custom-upload-file">
+                      <img src="@/assets/svg/document.svg" class="icon-document-large" />
+                      <span class="file-name" :title="file.name">{{ file.name }}</span>
+                    </div>
+                    <!-- 右上角删除按钮 -->
+                    <div class="custom-upload-remove" @click="handleRemoveCustomFile(file)">
+                      <img src="@/assets/svg/close.svg" class="icon-close" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <el-input
+                v-model="inputMsg" 
+                placeholder="输入消息或粘贴截图..." 
+                @keyup.enter="send"
+                @paste="handlePaste"
+                type="textarea"
+                :autosize="{ minRows: 2, maxRows: 6 }"
+                class="chat-input"
+                :resize="'none'"
+              />
+            </div>
+
+            <el-button 
+              type="primary" 
+              @click="send" 
+              :disabled="!inputMsg.trim() && attachments.length === 0"
+            >
+              发送
+            </el-button>
+          </div>
         </div>
       </div>
     </div>
@@ -139,6 +218,8 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElCollapse, ElCollapseItem } from 'element-plus'
 import { useChatSession } from '../composables/chat/useChatSession'
+import { ElMessage } from 'element-plus'
+import { fileApi } from '../api'
 
 const chat = useChatSession()
 
@@ -161,7 +242,8 @@ const {
   activeCollapse,
   transportMode,
   wsConnected,
-  sessionCreating
+  sessionCreating,
+  attachments
 } = chat
 
 // 解构方法
@@ -170,7 +252,7 @@ const {
   handleDeleteSession,
   selectSession,
   createNewSession,
-  send,
+  send: originalSend,
   setTransportMode,
   disconnectWebSocket,
   formatTimestamp,
@@ -184,10 +266,136 @@ const {
   handleScroll
 } = chat
 
+// 解决图片异步加载导致滚动定位不准的问题
+const handleImageLoad = () => {
+  if (messageList.value) {
+    messageList.value.scrollTo({
+      top: messageList.value.scrollHeight,
+      behavior: 'smooth'
+    })
+  }
+}
+
+// 拦截发送，发送完成后清空列表
+const send = async () => {
+  // 如果是非流模式，直接清空 uploadFileList，因为 originalSend 是异步等待的
+  // 附件数据在 originalSend 调用前已经被取走（chatState.inputMsg / attachments）
+  // 原始发送中 attachments.value 也会立刻被清空
+  const promise = originalSend()
+  uploadFileList.value = []
+  await promise
+}
+
 // 通信模式切换
 const handleModeChange = async (val) => {
   isWsMode.value = val
   await setTransportMode(val ? 'ws' : 'http')
+}
+
+// 上传组件文件列表状态绑定
+const uploadFileList = ref([])
+
+// 附件上传处理
+const handleUpload = async (options) => {
+  const { file, onSuccess, onError } = options
+  
+  try {
+    // 允许 session_id 为空，由后端分配未绑定的临时目录
+    const res = await fileApi.upload(file, currentSessionId.value || '')
+    
+    // 维护后端真实路径
+    attachments.value.push({
+      uid: file.uid, // 用于和 el-upload 的 file_list 关联
+      name: res.data?.filename || file.name,
+      path: res.data?.path
+    })
+    
+    // 通知 el-upload 组件该文件上传成功
+    if (onSuccess) onSuccess(res.data)
+      
+    // 将文件添加到 el-upload 维护的文件列表中（如果是通过独立按钮触发的话需要手动 push）
+    const isImage = file.type.startsWith('image/')
+    const newFileItem = {
+      uid: file.uid,
+      name: file.name,
+      status: 'success',
+      url: isImage ? URL.createObjectURL(file) : '' // 仅图片生成本地预览图 URL
+    }
+    
+    // 防止重复添加（el-upload 自身的 picture-card 也会触发 push，这里做去重）
+    const exists = uploadFileList.value.find(f => f.uid === file.uid)
+    if (!exists) {
+      uploadFileList.value.push(newFileItem)
+    }
+
+    ElMessage.success('附件上传成功')
+  } catch (error) {
+    if (onError) onError(error)
+    ElMessage.error(error.message || '上传失败')
+  }
+}
+
+const handleRemoveCustomFile = (file) => {
+  // 根据 uid 找到并移除对应的附件数据
+  const attIndex = attachments.value.findIndex(a => a.uid === file.uid)
+  if (attIndex !== -1) {
+    attachments.value.splice(attIndex, 1)
+  }
+  // 从上传列表中移除
+  const listIndex = uploadFileList.value.findIndex(f => f.uid === file.uid)
+  if (listIndex !== -1) {
+    uploadFileList.value.splice(listIndex, 1)
+  }
+}
+
+// 处理粘贴上传
+const handlePaste = (e) => {
+  const clipboardData = e.clipboardData || window.clipboardData
+  if (!clipboardData) return
+  
+  const items = clipboardData.items
+  if (!items) return
+
+  let hasFile = false
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'file') {
+      const file = items[i].getAsFile()
+      if (file) {
+        // 拦截文件夹：如果是文件夹，在部分浏览器中其 size 为 0 或 type 为空，通常通过 webkitGetAsEntry 区分
+        const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+        if (entry && entry.isDirectory) {
+          continue; // 拒绝并忽略文件夹的粘贴
+        }
+
+        hasFile = true
+        // 如果没有名字，通常是截图，给个默认名字
+        if (file.name === 'image.png' || !file.name) {
+          Object.defineProperty(file, 'name', {
+            writable: true,
+            value: `screenshot_${Date.now()}.png`
+          })
+        }
+        // 复用 handleUpload 处理，手动指定一个临时 uid
+        file.uid = Date.now() + i
+        handleUpload({ file })
+      }
+    }
+  }
+}
+
+// 判断是否为图片文件
+const isImageFile = (path) => {
+  if (!path) return false
+  const ext = path.split('.').pop().toLowerCase()
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)
+}
+
+// 提取文件名
+const getFilename = (path) => {
+  if (!path) return '未知文件'
+  const name = path.split(/[/\\]/).pop()
+  // 去除 8位uuid_ 前缀
+  return name.length > 9 && name[8] === '_' ? name.substring(9) : name
 }
 
 // 消息角色映射到CSS类名的辅助函数

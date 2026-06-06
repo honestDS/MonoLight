@@ -84,8 +84,8 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
-                  <el-form-item label="启用流式输出">
-                    <el-switch v-model="form.configs.provider.stream"></el-switch>
+                  <el-form-item label="启用多模态支持">
+                    <el-switch v-model="form.configs.provider.multimodal"></el-switch>
                   </el-form-item>
                 </el-col>
               </el-row>

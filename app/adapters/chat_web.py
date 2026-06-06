@@ -1,6 +1,8 @@
 import time
 import uuid
 
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
@@ -17,9 +19,10 @@ class WebChatAdapter(BaseChatAdapter):
     async def chat(
         self,
         db: AsyncSession,
-        message: str,
+        message: str | list[dict[str, Any]],
         uid: str,
-        session_id: str
+        session_id: str,
+        attachments: list[str] | None = None,
     ):
         if not session_id:
             raise BaseBusinessException(message="session_id is required")
@@ -29,6 +32,7 @@ class WebChatAdapter(BaseChatAdapter):
                 message=message,
                 uid=uid,
                 session_id=session_id,
+                attachments=attachments,
             )
             return llm_response
         except BaseBusinessException as e:

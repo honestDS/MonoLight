@@ -106,4 +106,20 @@ export const systemApi = {
   }
 }
 
+export const fileApi = {
+  upload: (file, session_id) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (session_id) {
+      formData.append('session_id', session_id)
+    }
+    return request.post('/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  getDownloadUrl: (path) => {
+    return `http://127.0.0.1:8001/api/v1/download?path=${encodeURIComponent(path)}`
+  }
+}
+
 export default request

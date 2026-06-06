@@ -3,7 +3,7 @@
  * 组合消息状态、会话管理、通信层、消息处理等模块
  * 保持与原有 API 兼容
  */
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
@@ -13,9 +13,12 @@ import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArgument
 
 export function useChatSession() {
   // ==================== 组合各模块 ====================
-  
+
   // 1. 消息状态
   const chatState = useChatState()
+  
+  // 新增附件状态
+  const attachments = ref([])
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
@@ -56,7 +59,7 @@ export function useChatSession() {
    * HTTP 方式发送消息
    */
   const httpSend = async () => {
-    if (!chatState.inputMsg.value.trim()) return
+    if (!chatState.inputMsg.value.trim() && attachments.value.length === 0) return
     
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
@@ -65,31 +68,35 @@ export function useChatSession() {
     messageProcessor.cleanupThinkingMessage(chatState.messages)
 
     // 添加用户消息
+    const attachmentsToSent = attachments.value.map(a => a.path)
     chatState.addMessage({
       id: userMsgId,
       role: 'user',
       content: text,
+      attachments: attachmentsToSent,
       created_at: Date.now() / 1000
     })
     
     chatState.inputMsg.value = ''
+    attachments.value = []
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
     const thinkingId = userMsgId + 1
     chatState.addMessage({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
 
-    await performHttpSend(text, thinkingId)
+    await performHttpSend(text, thinkingId, attachmentsToSent)
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, thinkingId) => {
+  const performHttpSend = async (text, thinkingId, attachmentsToSent = []) => {
     try {
       const response = await transport.httpSend({
         message: text,
-        sessionId: sessionManager.currentSessionId.value
+        sessionId: sessionManager.currentSessionId.value,
+        attachments: attachmentsToSent
       })
 
       // 处理后端生成的 UUID (新建会话模式)
@@ -104,7 +111,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, thinkingId)
+        return performHttpSend(text, thinkingId, attachmentsToSent)
       }
 
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
@@ -122,7 +129,7 @@ export function useChatSession() {
    * WebSocket 方式发送消息
    */
   const wsSend = async () => {
-    if (!chatState.inputMsg.value.trim()) return
+    if (!chatState.inputMsg.value.trim() && attachments.value.length === 0) return
     
     const text = chatState.inputMsg.value
     const userMsgId = Date.now()
@@ -131,14 +138,17 @@ export function useChatSession() {
     messageProcessor.cleanupThinkingMessage(chatState.messages)
     
     // 添加用户消息
+    const attachmentsToSent = attachments.value.map(a => a.path)
     chatState.addMessage({ 
       id: userMsgId, 
       role: 'user', 
       content: text, 
+      attachments: attachmentsToSent,
       created_at: Date.now() / 1000 
     })
     
     chatState.inputMsg.value = ''
+    attachments.value = []
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
     
@@ -185,6 +195,7 @@ export function useChatSession() {
       await transport.wsSend({
         message: text,
         sessionId: sessionManager.currentSessionId.value,
+        attachments: attachmentsToSent,
         callbacks
       })
     } catch (e) {
@@ -267,6 +278,9 @@ export function useChatSession() {
     loading: chatState.loading,
     messageList: chatState.messageList,
     
+    // 新增附件状态导出
+    attachments,
+
     // 状态 - 会话相关
     sessions: sessionManager.sessions,
     sessionsLoading: sessionManager.sessionsLoading,

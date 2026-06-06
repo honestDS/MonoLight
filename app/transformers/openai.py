@@ -93,6 +93,8 @@ class OpenAITransformer(BaseTransformer):
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
 
+        #logger.debug(f"[OpenAITransformer - Stream] Raw payload sent to LLM: {json.dumps(payload, ensure_ascii=False)}")
+
         url = f"{base_url.rstrip('/')}/chat/completions"
         try:
             async with aiohttp.ClientSession() as session:
@@ -130,9 +132,30 @@ class OpenAITransformer(BaseTransformer):
     def to_provider(
         cls, internal_messages: list[InternalMessage], **kwargs
     ) -> list[dict[str, Any]]:
+        from app.models.message import TextPart, ImagePart, FilePart
         provider_msgs = []
         for msg in internal_messages:
-            item = {"role": msg.role.value, "content": msg.content}
+            if isinstance(msg.content, list):
+                # 转换 InternalMessage content 列表 为 OpenAI 官方多模态格式
+                content = []
+                for part in msg.content:
+                    if isinstance(part, TextPart) or getattr(part, "type", None) == "text":
+                        content.append({"type": "text", "text": getattr(part, "text", "")})
+                    elif isinstance(part, ImagePart) or getattr(part, "type", None) == "image_url":
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": getattr(part, "image_url", {}).get("url", "")}
+                        })
+                    elif isinstance(part, FilePart) or getattr(part, "type", None) == "file":
+                        # OpenAI 当前不支持直接传递任意文件，转为文本描述给上下文
+                        content.append({"type": "text", "text": f"[Attached File: {getattr(part, 'path', '')}]"})
+                    else:
+                        # 对于未知 part 尝试调用 model_dump 或回退保留
+                        content.append(part.model_dump() if hasattr(part, "model_dump") else part)
+                item = {"role": msg.role.value, "content": content}
+            else:
+                item = {"role": msg.role.value, "content": msg.content}
+            
             if msg.tool_calls:
                 item["tool_calls"] = [
                     {

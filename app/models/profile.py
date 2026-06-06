@@ -38,7 +38,7 @@ class ProviderConfig(BaseModel):
     )
     top_p: float = PydanticField(1.0, ge=0, le=1.0, description="核采样阈值")
     max_tokens: int = PydanticField(2048, ge=0, description="单次生成最大 Token 数量")
-    stream: bool = PydanticField(False, description="是否开启流式输出")
+    multimodal: bool = PydanticField(False, description="启用多模态支持")
 
 
 class SecurityConfig(BaseModel):
@@ -90,7 +90,7 @@ class ProfileConfig(BaseModel):
     def data_pump(cls, data: Any) -> Any:
         """数据泵：将扁平或非标准的字典数据映射到结构化的嵌套配置模型中"""
         schema_map = {
-            "provider": ["model_id", "temperature", "top_p", "max_tokens", "stream"],
+            "provider": ["model_id", "temperature", "top_p", "max_tokens", "multimodal"],
             "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
             "tool": ["shell_timeout", "max_parallel_tools", "max_turns"],
             "other": ["context_window_k"],
@@ -109,7 +109,7 @@ PROFILE_EXAMPLE = {
             "temperature": 0.7,
             "top_p": 1,
             "max_tokens": 0,
-            "stream": False,
+            "multimodal": False,
         },
         "security": {
             "audit_provider_id": 1,
