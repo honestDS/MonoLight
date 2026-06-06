@@ -28,6 +28,8 @@ Output ONLY a valid JSON: {"score": int, "reason": "string"}"""
 
 CONFIRMATION_NOTICE_PROMPT = "Security Score {score}: High risk detected. To execute this EXACT command, you MUST re-send it with the unique verification prefix: {dynamic_token} [COMMAND]"
 
+FILE_WRITE_CONFIRMATION_PROMPT = "Security Score {score}: High risk detected in file write operation. To proceed, you MUST re-call this tool and prepend the verification token to the 'content' argument: {dynamic_token} [ORIGINAL_CONTENT]"
+
 # Parallel tool call limit error
 ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {requested}, Limit: {limit}."
 

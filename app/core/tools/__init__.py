@@ -1,13 +1,16 @@
+from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
 
 # Tool Registry
 ALL_TOOLS_SCHEMAS = [
     SHELL_TOOL_SCHEMA,
+    FILE_WRITER_TOOL_SCHEMA,
 ]
 
 # Tool Executor Mapping
 TOOL_EXECUTOR_MAP = {
     SHELL_TOOL_SCHEMA["function"]["name"]: ShellExecutor,
+    FILE_WRITER_TOOL_SCHEMA["function"]["name"]: FileWriterExecutor,
 }
 
 

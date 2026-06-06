@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
@@ -215,6 +216,163 @@ class ChatDispatcher:
         )
 
     @staticmethod
+    def _validate_profile_and_cfg(profile: Profile) -> ProfileConfig:
+        if not profile:
+            raise LLMException(message=ERR_PROFILE_NOT_FOUND)
+
+        cfg = ProfileConfig.model_validate(profile.configs)
+
+        if not profile.provider:
+            raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+
+        if profile.provider.usage == ModelUsage.EMBEDDING:
+            raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+
+        return cfg
+
+    @staticmethod
+    async def _save_initial_message(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        profile: Profile,
+        message: Any,
+        attachments: list[str] | None,
+    ) -> InternalMessage:
+        # 初始保存消息 (设置 is_processed=False，锁获取后才标记 True)
+        initial_msg_obj = InternalMessage(
+            role=MessageRole.USER,
+            content=message,
+            attachments=attachments,
+        )
+        return await ChatDispatcher._save_message(
+            db,
+            session_id,
+            uid,
+            MessageRole.USER,
+            MessageType.TEXT,
+            initial_msg_obj,
+            profile.id if profile and profile.id else -1,
+            is_processed=False,
+        )
+
+    @staticmethod
+    async def _prepare_messages(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        profile: Profile,
+        cfg: ProfileConfig,
+        initial_msg: InternalMessage,
+        message: Any,
+        is_first_iter: bool,
+    ) -> list[InternalMessage]:
+        # 获取上下文
+        # 第一轮必须锚定在当前消息，确保上下文一致性
+        # 随后的重入轮次（如果有新消息追加）则加载全部历史以包含上一轮产生的响应
+        messages = await ContextManager.get_messages(
+            db,
+            session_id,
+            uid,
+            profile,
+            message,
+            before_id=initial_msg.id if is_first_iter else None,
+        )
+        if is_first_iter:
+            messages.append(initial_msg)
+
+        # 动态组装含有附件的多模态消息
+        for idx, m in enumerate(messages):
+            if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+                is_history = idx != len(messages) - 1
+                messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
+
+        return ChatDispatcher._inject_system_prompt(profile, messages)
+
+    @staticmethod
+    def _append_new_user_messages(
+        cfg: ProfileConfig,
+        messages: list[InternalMessage],
+        new_user_msgs: list[InternalMessage],
+    ):
+        for nm in new_user_msgs:
+            # 确保追加的用户消息中的附件也被正确组装
+            if nm.attachments or isinstance(nm.content, list):
+                assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, False)
+                messages.append(assembled_nm)
+            else:
+                messages.append(nm)
+
+    @staticmethod
+    async def _handle_parallel_tool_limit(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        profile: Profile,
+        cfg: ProfileConfig,
+        ai_msg: InternalMessage,
+        messages: list[InternalMessage],
+        turn_messages: list[InternalMessage],
+    ):
+        error_msg = json.dumps(
+            {
+                "error": "parallel_limit_exceeded",
+                "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(
+                    requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools
+                ),
+            },
+            ensure_ascii=False,
+        )
+        for tool_call in ai_msg.tool_calls:
+            tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
+            messages.append(tool_res)
+            turn_messages.append(tool_res)
+            await ChatDispatcher._save_message(
+                db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id
+            )
+
+    @staticmethod
+    async def _mark_initial_message_processed(db: AsyncSession, initial_msg_id: int):
+        # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
+        await db.execute(update(Message).where(Message.id == initial_msg_id).values(is_processed=True))
+        await db.commit()
+
+    @staticmethod
+    async def _save_assistant_message(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        profile_id: int,
+        ai_msg: InternalMessage,
+    ):
+        await ChatDispatcher._save_message(
+            db,
+            session_id,
+            uid,
+            MessageRole.ASSISTANT,
+            MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
+            ai_msg,
+            profile_id,
+            is_processed=True,
+        )
+
+    @staticmethod
+    async def _save_tool_response(
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        profile_id: int,
+        tool_res: InternalMessage,
+        messages: list[InternalMessage],
+        turn_messages: list[InternalMessage],
+    ):
+        messages.append(tool_res)
+        turn_messages.append(tool_res)
+        await ChatDispatcher._save_message(
+            db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile_id, is_processed=True
+        )
+
+    @staticmethod
     async def _audit_tool_call(
         db,
         profile,
@@ -222,6 +380,8 @@ class ChatDispatcher:
         tool_name,
         args,
         messages=None,
+        session_id: str = None,
+        uid: str = None,
     ) -> str | None:
         return await AuditMiddleware.audit(
             db,
@@ -229,6 +389,8 @@ class ChatDispatcher:
             cfg,
             tool_name,
             args,
+            session_id=session_id,
+            uid=uid,
         )
 
     @staticmethod
@@ -255,6 +417,8 @@ class ChatDispatcher:
             tool_name,
             args,
             messages,
+            session_id=session_id,
+            uid=uid,
         )
 
         if cmd_result is None:
@@ -294,13 +458,8 @@ class ChatDispatcher:
 
             logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
 
-            # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
-            initial_msg_obj = InternalMessage(
-                role=MessageRole.USER,
-                content=message,
-                attachments=attachments,
-            )
-            initial_msg = await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile and profile.id else -1, is_processed=False)
+            # 1. 初始保存消息
+            initial_msg = await ChatDispatcher._save_initial_message(db, session_id, uid, profile, message, attachments)
 
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []
@@ -325,45 +484,14 @@ class ChatDispatcher:
                     ).model_dump()
 
                 try:
-                    if not profile:
-                        raise LLMException(message=ERR_PROFILE_NOT_FOUND)
-
-                    cfg = ProfileConfig.model_validate(profile.configs)
+                    cfg = ChatDispatcher._validate_profile_and_cfg(profile)
 
                     if is_first_iter:
-                        # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
-                        await db.execute(update(Message).where(Message.id == initial_msg.id).values(is_processed=True))
-                        await db.commit()
+                        await ChatDispatcher._mark_initial_message_processed(db, initial_msg.id)
 
-                    if not profile.provider:
-                        raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-
-                    if profile.provider.usage == ModelUsage.EMBEDDING:
-                        raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
-
-                    # 获取上下文
-                    # 第一轮必须锚定在当前消息，确保上下文一致性
-                    # 随后的重入轮次（如果有新消息追加）则加载全部历史以包含上一轮产生的响应
-                    messages = await ContextManager.get_messages(
-                        db,
-                        session_id,
-                        uid,
-                        profile,
-                        message,
-                        before_id=initial_msg.id if is_first_iter else None,
+                    messages = await ChatDispatcher._prepare_messages(
+                        db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter
                     )
-                    if is_first_iter:
-                        messages.append(initial_msg)
-
-                    # 动态组装含有附件的多模态消息
-                    for idx, m in enumerate(messages):
-                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
-                            is_history = idx != len(messages) - 1
-                            messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
-
-                    messages = ChatDispatcher._inject_system_prompt(profile, messages)
-
-                    {m.id for m in messages if m.id is not None}
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -375,14 +503,7 @@ class ChatDispatcher:
                         if new_user_msgs:
                             logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
                             current_turn = 0  # 重置轮次限制
-                            for nm_idx, nm in enumerate(new_user_msgs):
-                                # 确保追加的用户消息中的附件也被正确组装
-                                if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False  # 合并后的单条必然是最后一条
-                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
-                                    messages.append(assembled_nm)
-                                else:
-                                    messages.append(nm)
+                            ChatDispatcher._append_new_user_messages(cfg, messages, new_user_msgs)
 
                         current_turn += 1
 
@@ -390,7 +511,6 @@ class ChatDispatcher:
                             summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
                             notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
                             messages.append(notice_msg)
-                            # await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, summary_notice, profile.id)
                             current_tools = None
                         else:
                             current_tools = tools
@@ -415,16 +535,7 @@ class ChatDispatcher:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)  # 记录到增量历史
 
-                        await ChatDispatcher._save_message(
-                            db,
-                            session_id,
-                            uid,
-                            MessageRole.ASSISTANT,
-                            MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT,
-                            ai_msg,
-                            profile.id,
-                            is_processed=True,
-                        )
+                        await ChatDispatcher._save_assistant_message(db, session_id, uid, profile.id, ai_msg)
 
                         if not ai_msg.tool_calls:
                             final_ai_content = ai_msg.content
@@ -433,34 +544,23 @@ class ChatDispatcher:
                                 break
 
                             logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
-                            for nm_idx, nm in enumerate(new_user_msgs):
-                                if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False
-                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
-                                    messages.append(assembled_nm)
-                                else:
-                                    messages.append(nm)
+                            ChatDispatcher._append_new_user_messages(cfg, messages, new_user_msgs)
 
                             current_turn = 0
                             continue
 
                         # 并行工具调用处理
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            error_msg = json.dumps({"error": "parallel_limit_exceeded", "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools)}, ensure_ascii=False)
-                            for tool_call in ai_msg.tool_calls:
-                                tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
-                                messages.append(tool_res)
-                                turn_messages.append(tool_res)
-                                await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            await ChatDispatcher._handle_parallel_tool_limit(
+                                db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages
+                            )
                             continue
 
                         tasks = [ChatDispatcher._process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:
-                            messages.append(tool_res)
-                            turn_messages.append(tool_res)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id, is_processed=True)
+                            await ChatDispatcher._save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
 
                 finally:
                     await active_session_crud.release_lock(db, session_id)
@@ -499,13 +599,8 @@ class ChatDispatcher:
 
             logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
 
-            # 1. 初始保存消息 (设置 is_processed=True，因为首条消息会被立即处理)
-            initial_msg_obj = InternalMessage(
-                role=MessageRole.USER,
-                content=message,
-                attachments=attachments,
-            )
-            initial_msg = await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile and profile.id else -1, is_processed=False)
+            # 1. 初始保存消息
+            initial_msg = await ChatDispatcher._save_initial_message(db, session_id, uid, profile, message, attachments)
 
             turn_messages: list[InternalMessage] = []
             is_first_iter = True
@@ -522,41 +617,14 @@ class ChatDispatcher:
                     return
 
                 try:
-                    if not profile:
-                        raise LLMException(message=ERR_PROFILE_NOT_FOUND)
-
-                    cfg = ProfileConfig.model_validate(profile.configs)
+                    cfg = ChatDispatcher._validate_profile_and_cfg(profile)
 
                     if is_first_iter:
-                        # 核心修复：拿到锁后才标记初始消息已处理，确保若进入队列，消息仍能被活跃调度器捡起
-                        await db.execute(update(Message).where(Message.id == initial_msg.id).values(is_processed=True))
-                        await db.commit()
+                        await ChatDispatcher._mark_initial_message_processed(db, initial_msg.id)
 
-                    if not profile.provider:
-                        raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-
-                    if profile.provider.usage == ModelUsage.EMBEDDING:
-                        raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
-
-                    # 获取上下文
-                    messages = await ContextManager.get_messages(
-                        db,
-                        session_id,
-                        uid,
-                        profile,
-                        message,
-                        before_id=initial_msg.id if is_first_iter else None,
+                    messages = await ChatDispatcher._prepare_messages(
+                        db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter
                     )
-                    if is_first_iter:
-                        messages.append(initial_msg)
-
-                    # 动态组装含有附件的多模态消息
-                    for idx, m in enumerate(messages):
-                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
-                            is_history = idx != len(messages) - 1
-                            messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
-
-                    messages = ChatDispatcher._inject_system_prompt(profile, messages)
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -567,14 +635,7 @@ class ChatDispatcher:
                         new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
                             current_turn = 0
-                            for nm_idx, nm in enumerate(new_user_msgs):
-                                # 确保追加的用户消息中的附件也被正确组装
-                                if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False  # 合并后的单条必然是最后一条
-                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
-                                    messages.append(assembled_nm)
-                                else:
-                                    messages.append(nm)
+                            ChatDispatcher._append_new_user_messages(cfg, messages, new_user_msgs)
 
                         current_turn += 1
 
@@ -588,7 +649,6 @@ class ChatDispatcher:
 
                         current_tool_calls_map = {}
                         current_content_chunks = []
-                        import uuid
 
                         response_id = str(uuid.uuid4())
 
@@ -648,31 +708,21 @@ class ChatDispatcher:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        await ChatDispatcher._save_message(db, session_id, uid, MessageRole.ASSISTANT, MessageType.TOOL_CALL if ai_msg.tool_calls else MessageType.TEXT, ai_msg, profile.id, is_processed=True)
+                        await ChatDispatcher._save_assistant_message(db, session_id, uid, profile.id, ai_msg)
 
                         if not ai_msg.tool_calls:
                             new_user_msgs = await ChatDispatcher._fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
 
-                            for nm_idx, nm in enumerate(new_user_msgs):
-                                if nm.attachments or isinstance(nm.content, list):
-                                    is_history = False
-                                    assembled_nm = MessageAssembler.assemble(nm, cfg.provider.multimodal, is_history)
-                                    messages.append(assembled_nm)
-                                else:
-                                    messages.append(nm)
-
+                            ChatDispatcher._append_new_user_messages(cfg, messages, new_user_msgs)
                             current_turn = 0
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            error_msg = json.dumps({"error": "parallel_limit_exceeded", "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools)}, ensure_ascii=False)
-                            for tool_call in ai_msg.tool_calls:
-                                tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
-                                messages.append(tool_res)
-                                turn_messages.append(tool_res)
-                                await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+                            await ChatDispatcher._handle_parallel_tool_limit(
+                                db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages
+                            )
                             continue
 
                         for tc in ai_msg.tool_calls:
@@ -682,9 +732,7 @@ class ChatDispatcher:
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:
-                            messages.append(tool_res)
-                            turn_messages.append(tool_res)
-                            await ChatDispatcher._save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id, is_processed=True)
+                            await ChatDispatcher._save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
                             tool_name = next((tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), "unknown")
                             yield {"type": "tool_end", "name": tool_name, "result": tool_res.content, "tool_call_id": tool_res.tool_call_id, "response_id": response_id, "request_id": request_id}
 

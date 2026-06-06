@@ -166,4 +166,13 @@ if __name__ == "__main__":
     if not port_env:
         raise ValueError("APP_PORT must be set in .env file")
     port = int(port_env)
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    # 限制监控目录为 app 目录，从而排除 temp 和其他非代码目录
+    # 同时保留 reload_excludes 作为双重保险，并规范路径格式
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True,
+        reload_dirs=["app"],
+        reload_excludes=["temp", "data", "*.log"],
+    )

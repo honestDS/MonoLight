@@ -17,8 +17,6 @@ from .base import BaseExecutor
 class ShellExecutor(BaseExecutor):
     logger = get_logger(__name__)
     COMMAND_BLACKLIST = [
-        "python -c",
-        "python3 -c",
         "powershell",
     ]
 
