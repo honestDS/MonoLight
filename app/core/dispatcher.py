@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.constants import (
+    ERR_CHAT_PROVIDER_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
 from app.core.crud.active_session import (
@@ -102,7 +103,7 @@ class ChatDispatcher:
                     ).model_dump()
 
                 try:
-                    cfg = validate_profile_and_cfg(profile)
+                    cfg = await validate_profile_and_cfg(db, profile)
 
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
@@ -112,7 +113,7 @@ class ChatDispatcher:
                     from app.core.crud.provider import provider_crud
                     chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
                     if not chat_provider:
-                        raise LLMException(message="对话模型提供商未找到")
+                        raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -237,7 +238,7 @@ class ChatDispatcher:
                     return
 
                 try:
-                    cfg = validate_profile_and_cfg(profile)
+                    cfg = await validate_profile_and_cfg(db, profile)
 
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
@@ -247,7 +248,7 @@ class ChatDispatcher:
                     from app.core.crud.provider import provider_crud
                     chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
                     if not chat_provider:
-                        raise LLMException(message="对话模型提供商未找到")
+                        raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns

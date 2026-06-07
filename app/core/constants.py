@@ -52,6 +52,7 @@ ERR_DELETE_ACTIVE_PROFILE = "不能删除当前已激活的配置"
 # 错误类消息 - 提供商业务
 ERR_PROVIDER_NOT_FOUND = "模型提供商不存在"
 ERR_PROVIDER_NAME_EXISTS = "该提供商名称已存在"
+ERR_CHAT_PROVIDER_NOT_FOUND = "对话模型提供商未找到"
 
 # 错误类消息 - 提示词业务
 ERR_PROMPT_NOT_FOUND = "提示词模板不存在"
