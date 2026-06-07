@@ -447,8 +447,5 @@ onUnmounted(() => {
 </script>
 
 <style lang="scss">
-@import "@/assets/css/chat.scss";
-.el-collapse{
-  max-width: 100% ;
-}
+@import "@/assets/css/ChatView.scss";
 </style>
