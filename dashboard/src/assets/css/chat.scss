@@ -82,12 +82,13 @@
       .delete-icon {
         color: #F56C6C;
         cursor: pointer;
-        font-size: 12px;
-        padding: 2px 6px;
-        border-radius: 2px;
+        font-size: 16px;
+        padding: 4px;
+        border-radius: 4px;
 
         &:hover {
           background: #fef0f0;
+          color: #f56c6c;
         }
       }
     }

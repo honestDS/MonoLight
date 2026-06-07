@@ -32,7 +32,7 @@
             <div class="session-time">{{ session.last_active }}</div>
           </div>
           <div class="session-actions">
-            <span class="delete-icon" @click.stop="handleDeleteSession(session.session_id)">删</span>
+            <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
           </div>
         </div>
         <div v-if="sessions.length === 0 && !sessionsLoading" class="empty-tip">
