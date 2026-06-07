@@ -13,6 +13,7 @@ loguru
 sqlalchemy
 sqlmodel
 Pillow
+firecrawl-py # 搜索引擎 网页解析引擎
 
 pytest
 pytest-asyncio
