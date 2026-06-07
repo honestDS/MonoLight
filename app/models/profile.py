@@ -35,6 +35,7 @@ class ProviderConfig(BaseModel):
     top_p: float = PydanticField(1.0, ge=0, le=1.0, description="核采样阈值")
     max_tokens: int = PydanticField(2048, ge=0, description="单次生成最大 Token 数量")
     multimodal: bool = PydanticField(False, description="启用多模态支持")
+    context_window_k: int = PydanticField(4, ge=1, description="短期上下文关联的历史消息轮数")
 
 
 class SecurityConfig(BaseModel):
@@ -56,7 +57,7 @@ class ToolConfig(BaseModel):
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
-    context_window_k: int = PydanticField(4, ge=1, description="短期上下文关联的历史消息轮数")
+    pass
 
 
 class ProfileConfig(BaseModel):
@@ -72,10 +73,17 @@ class ProfileConfig(BaseModel):
     def data_pump(cls, data: Any) -> Any:
         """数据泵：将扁平或非标准的字典数据映射到结构化的嵌套配置模型中"""
         schema_map = {
-            "provider": ["model_id", "temperature", "top_p", "max_tokens", "multimodal"],
+            "provider": [
+                "model_id",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "multimodal",
+                "context_window_k",
+            ],
             "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
             "tool": ["shell_timeout", "max_parallel_tools", "max_turns"],
-            "other": ["context_window_k"],
+            "other": [],
         }
         return standardize_config(data, schema_map)
 
@@ -92,6 +100,7 @@ PROFILE_EXAMPLE = {
             "top_p": 1,
             "max_tokens": 0,
             "multimodal": False,
+            "context_window_k": 1024,
         },
         "security": {
             "audit_provider_id": 1,
@@ -99,7 +108,7 @@ PROFILE_EXAMPLE = {
             "audit_threshold": 5,
         },
         "tool": {"shell_timeout": 30, "max_parallel_tools": 5, "max_turns": 5},
-        "other": {"context_window_k": 1024},
+        "other": {},
     },
 }
 

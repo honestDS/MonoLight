@@ -19,10 +19,17 @@ export const routeNameMap = {
 
 // 默认配置结构（用于 ProfilesView.vue）
 export const defaultProfileConfigs = () => ({
-  provider: { model_id: '', temperature: 0.7, top_p: 1.0, max_tokens: 2048, multimodal: false },
+  provider: {
+    model_id: '',
+    temperature: 0.7,
+    top_p: 1.0,
+    max_tokens: 2048,
+    multimodal: false,
+    context_window_k: 4,
+  },
   security: { audit_provider_id: null, audit_model_id: null, audit_threshold: 5 },
   tool: { shell_timeout: 30, max_parallel_tools: 5, max_turns: 5 },
-  other: { context_window_k: 4 }
+  other: {},
 })
 
 // 默认提供商表单

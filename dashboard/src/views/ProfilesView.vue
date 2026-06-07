@@ -79,7 +79,7 @@
               </el-row>
               <el-row :gutter="20">
                 <el-col :span="12">
-                  <el-form-item label="最大 Token">
+                  <el-form-item label="最大输出 Token">
                     <el-input-number v-model="form.configs.provider.max_tokens" :min="0" class="full-width-input"></el-input-number>
                   </el-form-item>
                 </el-col>
@@ -89,6 +89,10 @@
                   </el-form-item>
                 </el-col>
               </el-row>
+              <el-form-item label="上下文限制 K">
+                <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
+                <div class="help-text mt-5">关联短期上下文的历史消息轮数</div>
+              </el-form-item>
             </div>
           </el-tab-pane>
 
@@ -136,10 +140,7 @@
           <!-- 其他设置 -->
           <el-tab-pane label="其他设置" name="other">
             <div class="tab-pane-content">
-              <el-form-item label="上下文限制 K">
-                <el-input-number v-model="form.configs.other.context_window_k" :min="1" class="full-width-input"></el-input-number>
-                <div class="help-text mt-5">关联短期上下文的历史消息轮数</div>
-              </el-form-item>
+              <div class="help-text">暂无其他配置项</div>
             </div>
           </el-tab-pane>
         </el-tabs>

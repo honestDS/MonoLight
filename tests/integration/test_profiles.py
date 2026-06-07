@@ -51,6 +51,7 @@ async def test_profile_management_full_flow():
                     "top_p": 1.0,
                     "max_tokens": 2048,
                     "stream": False,
+                    "context_window_k": 4,
                 },
                 "security": {
                     "audit_threshold": 5,
@@ -58,7 +59,7 @@ async def test_profile_management_full_flow():
                     "audit_model_id": "gpt-3.5-turbo",
                 },
                 "tool": {"shell_timeout": 30.0},
-                "other": {"context_window_k": 4},
+                "other": {},
             },
         }
         resp = await ac.post("/api/v1/profiles/create", json=profile_data, headers=headers)
