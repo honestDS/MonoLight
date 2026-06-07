@@ -117,12 +117,8 @@
           <!-- 工具设置 -->
           <el-tab-pane label="工具设置" name="tool">
             <div class="tab-pane-content">
+              <el-divider content-position="left"><span class="gray-divider-text">调度与并行控制</span></el-divider>
               <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item label="Shell 超时(s)">
-                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
                 <el-col :span="12">
                   <el-form-item label="最大并行数">
                     <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input"></el-input-number>
@@ -131,6 +127,29 @@
                 <el-col :span="12">
                   <el-form-item label="最大连续轮数">
                     <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input"></el-input-number>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+
+              <el-divider content-position="left"><span class="gray-divider-text">Shell 工具配置</span></el-divider>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="Shell 超时(s)">
+                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input"></el-input-number>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+
+              <el-divider content-position="left"><span class="gray-divider-text">Firecrawl 配置</span></el-divider>
+              <el-row :gutter="20">
+                <el-col :span="24">
+                  <el-form-item label="API Key">
+                    <el-input v-model="form.configs.tool.firecrawl_api_key" placeholder="用于网页搜索/抓取的 Firecrawl API Key" show-password></el-input>
+                    <div class="help-text mt-5">
+                      用于网页搜索和抓取功能。请前往 
+                      <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" :underline="false">Firecrawl 官网</el-link> 
+                      注册并获取您的 API Key。
+                    </div>
                   </el-form-item>
                 </el-col>
               </el-row>
@@ -298,5 +317,5 @@ onMounted(() => {
 </script>
 
 <style lang="scss">
-@import "@/assets/css/common.scss";
+@import "@/assets/css/ProfilesView.scss";
 </style>

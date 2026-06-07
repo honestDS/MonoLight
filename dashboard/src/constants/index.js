@@ -28,7 +28,7 @@ export const defaultProfileConfigs = () => ({
     context_window_k: 4,
   },
   security: { audit_provider_id: null, audit_model_id: null, audit_threshold: 5 },
-  tool: { shell_timeout: 30, max_parallel_tools: 5, max_turns: 5 },
+  tool: { shell_timeout: 30, max_parallel_tools: 5, max_turns: 5, firecrawl_api_key: '' },
   other: {},
 })
 

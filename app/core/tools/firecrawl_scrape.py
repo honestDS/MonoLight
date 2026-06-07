@@ -6,8 +6,14 @@ from app.core.utils.system import get_full_system_context
 class FirecrawlScrapeExecutor(BaseExecutor):
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
-        # 实际使用中应该从配置或环境变量获取 API KEY
-        self.app = FirecrawlApp(api_key="fc-da9f2b6f111d40809498e26d4e2ee8e8")
+        self._app = None
+
+    @property
+    def app(self):
+        if self._app is None:
+            api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
+            self._app = FirecrawlApp(api_key=api_key or "")
+        return self._app
 
     async def execute(self, url: str, formats: list = ["markdown"], **kwargs) -> str:
         """
@@ -18,6 +24,16 @@ class FirecrawlScrapeExecutor(BaseExecutor):
         :param kwargs: 其他高级抓取选项，如 mobile, wait_for, only_main_content 等
         """
         system_info = get_full_system_context()
+
+        # 显式检查 API Key
+        api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
+        
+        if not api_key:
+            return json.dumps({
+                "error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。",
+                "system_info": system_info
+            }, ensure_ascii=False)
+
         try:
             self.logger.info(f"[{self.uid}] Firecrawl scraping: {url} (formats={formats}, options={kwargs})")
             
@@ -36,8 +52,12 @@ class FirecrawlScrapeExecutor(BaseExecutor):
 
         except Exception as e:
             self.logger.error(f"[{self.uid}] Firecrawl scrape failed: {e}")
+            error_msg = str(e)
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                error_msg = "Firecrawl API Key 认证失败或已失效。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 检查并更新您的 API Key。"
+            
             return json.dumps({
-                "error": str(e),
+                "error": error_msg,
                 "system_info": system_info
             }, ensure_ascii=False)
 

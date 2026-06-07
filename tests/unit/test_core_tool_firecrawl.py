@@ -17,6 +17,9 @@ async def test_firecrawl_search_success():
         
         # 在 patch 之后创建 executor
         executor = FirecrawlSearchExecutor(project_root="/tmp/monobot_test", uid="test_user")
+        # 模拟已配置 API Key
+        executor.cfg = MagicMock()
+        executor.cfg.tool.firecrawl_api_key = "test_key"
         
         result_json = await executor.execute(query="17173", limit=3, location="China")
         result = json.loads(result_json)
@@ -37,6 +40,8 @@ async def test_firecrawl_search_failure():
         mock_app_instance.search.side_effect = Exception("API Error")
         
         executor = FirecrawlSearchExecutor(project_root="/tmp/monobot_test", uid="test_user")
+        executor.cfg = MagicMock()
+        executor.cfg.tool.firecrawl_api_key = "test_key"
         
         result_json = await executor.execute(query="test query")
         result = json.loads(result_json)
@@ -56,6 +61,8 @@ async def test_firecrawl_scrape_success():
         mock_app_instance.scrape_url.return_value = mock_response
         
         executor = FirecrawlScrapeExecutor(project_root="/tmp/monobot_test", uid="test_user")
+        executor.cfg = MagicMock()
+        executor.cfg.tool.firecrawl_api_key = "test_key"
         
         result_json = await executor.execute(url="https://www.17173.com", formats=["markdown"], mobile=True)
         result = json.loads(result_json)
@@ -71,9 +78,41 @@ async def test_firecrawl_scrape_failure():
         mock_app_instance.scrape_url.side_effect = Exception("Scrape Error")
         
         executor = FirecrawlScrapeExecutor(project_root="/tmp/monobot_test", uid="test_user")
+        executor.cfg = MagicMock()
+        executor.cfg.tool.firecrawl_api_key = "test_key"
         
         result_json = await executor.execute(url="https://www.17173.com")
         result = json.loads(result_json)
         
         assert "error" in result
         assert result["error"] == "Scrape Error"
+
+@pytest.mark.asyncio
+async def test_firecrawl_no_api_key():
+    # 测试缺失 API Key 的情况
+    executor = FirecrawlSearchExecutor(project_root="/tmp/monobot_test", uid="test_user")
+    executor.cfg = MagicMock()
+    executor.cfg.tool.firecrawl_api_key = None
+    
+    result_json = await executor.execute(query="test")
+    result = json.loads(result_json)
+    
+    assert "error" in result
+    assert "API Key 未配置" in result["error"]
+
+@pytest.mark.asyncio
+async def test_firecrawl_auth_failure():
+    # 测试认证失败的情况
+    with patch("app.core.tools.firecrawl_search.FirecrawlApp") as MockApp:
+        mock_app_instance = MockApp.return_value
+        mock_app_instance.search.side_effect = Exception("401 Unauthorized: Invalid API Key")
+        
+        executor = FirecrawlSearchExecutor(project_root="/tmp/monobot_test", uid="test_user")
+        executor.cfg = MagicMock()
+        executor.cfg.tool.firecrawl_api_key = "wrong_key"
+        
+        result_json = await executor.execute(query="test")
+        result = json.loads(result_json)
+        
+        assert "error" in result
+        assert "认证失败或已失效" in result["error"]

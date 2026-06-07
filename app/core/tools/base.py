@@ -9,6 +9,10 @@ class BaseExecutor(abc.ABC):
         self.project_root = Path(project_root)
         self.uid = uid
         self.logger = get_logger(self.__class__.__name__)
+        self.cfg = None
+
+    def set_config(self, cfg):
+        self.cfg = cfg
 
     @abc.abstractmethod
     async def execute(self, **kwargs) -> str:

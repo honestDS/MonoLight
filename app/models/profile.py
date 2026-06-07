@@ -52,6 +52,7 @@ class ToolConfig(BaseModel):
     shell_timeout: float = PydanticField(30.0, gt=0, description="Shell 指令执行的超时时间（秒）")
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
+    firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
 
 
 class OtherConfig(BaseModel):
@@ -82,7 +83,7 @@ class ProfileConfig(BaseModel):
                 "context_window_k",
             ],
             "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
-            "tool": ["shell_timeout", "max_parallel_tools", "max_turns"],
+            "tool": ["shell_timeout", "max_parallel_tools", "max_turns", "firecrawl_api_key"],
             "other": [],
         }
         return standardize_config(data, schema_map)
@@ -107,7 +108,12 @@ PROFILE_EXAMPLE = {
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
         },
-        "tool": {"shell_timeout": 30, "max_parallel_tools": 5, "max_turns": 5},
+        "tool": {
+            "shell_timeout": 30,
+            "max_parallel_tools": 5,
+            "max_turns": 5,
+            "firecrawl_api_key": "fc-da9f2b6f111d40809498e26d4e2ee8e8",
+        },
         "other": {},
     },
 }

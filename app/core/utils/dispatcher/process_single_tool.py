@@ -59,6 +59,10 @@ async def process_single_tool(
                 project_root=os.getcwd(),
                 uid=uid,
             )
+            # 传递配置给 Executor
+            if hasattr(instance, "set_config"):
+                instance.set_config(cfg)
+
             cmd_result = await instance.execute(**args)
         else:
             cmd_result = json.dumps(
