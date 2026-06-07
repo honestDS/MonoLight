@@ -48,7 +48,7 @@
           <p>请选择左侧会话或新建会话开始聊天</p>
         </div>
         <template v-else>
-          <div v-for="msg in messages" :key="msg.id" :class="['message-item', getMessageClass(msg.role)]">
+          <div v-for="msg in messages" :key="msg.id" :class="['message-item', getMessageClass(msg.role), { 'queued': msg.status === 'queued' }]">
             <!-- 普通消息或工具调用消息 -->
             <template v-if="isToolCall(msg)">
               <div class="message-header">
@@ -217,7 +217,6 @@
 
               <div class="action-btn-container">
                 <el-button 
-                  v-if="!loading"
                   type="primary" 
                   @click="send" 
                   :disabled="!inputMsg.trim() && attachments.length === 0"
@@ -225,15 +224,6 @@
                   circle
                 >
                   <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
-                </el-button>
-                <el-button
-                  v-else
-                  type="danger"
-                  @click="abortSend"
-                  class="action-btn"
-                  circle
-                >
-                  <el-icon><VideoPause /></el-icon>
                 </el-button>
               </div>
             </div>
@@ -368,7 +358,6 @@ const {
   selectSession,
   createNewSession,
   send: originalSend,
-  abortSend,
   setTransportMode,
   disconnectWebSocket,
   formatTimestamp,
@@ -394,9 +383,25 @@ const handleImageLoad = () => {
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
-  // 如果是非流模式，直接清空 uploadFileList，因为 originalSend 是异步等待的
-  // 附件数据在 originalSend 调用前已经被取走（chatState.inputMsg / attachments）
-  // 原始发送中 attachments.value 也会立刻被清空
+  if (loading.value) {
+    // LLM响应中，加入前端队列并显示临时消息
+    const tempMsg = inputMsg.value
+    const tempAttachments = [...attachments.value]
+    
+    // 如果没有内容直接返回
+    if (!tempMsg.trim() && tempAttachments.length === 0) return
+    
+    // 清空输入框和附件
+    inputMsg.value = ''
+    uploadFileList.value = []
+    attachments.value = []
+    
+    // 加入队列
+    chat.enqueueMessage(tempMsg, tempAttachments)
+    return
+  }
+
+  // 正常发送
   const promise = originalSend()
   uploadFileList.value = []
   await promise

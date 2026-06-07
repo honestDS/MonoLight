@@ -198,12 +198,6 @@ export function useChatTransport() {
     return res.data
   }
 
-  const wsSendAbort = () => {
-    if (wsManager.isConnected.value) {
-      wsManager.sendMessage({ action: 'abort' })
-    }
-  }
-
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) throw new Error('未登录')

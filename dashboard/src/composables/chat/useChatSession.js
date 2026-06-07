@@ -3,7 +3,7 @@
  * 组合消息状态、会话管理、通信层、消息处理等模块
  * 保持与原有 API 兼容
  */
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
@@ -48,41 +48,101 @@ export function useChatSession() {
 
   // ==================== 核心发送方法 ====================
   
+  // 消息队列
+  const messageQueue = ref([])
+  
+  /**
+   * 将消息加入队列并显示在界面上
+   */
+  const enqueueMessage = (text, attachments = []) => {
+    const userMsgId = Date.now() + Math.random()
+    
+    // 添加用户消息到界面，增加排队标记
+    const attachmentsToSent = attachments.map(a => a.path)
+    chatState.addMessage({
+      id: userMsgId,
+      role: 'user',
+      content: text,
+      attachments: attachmentsToSent,
+      created_at: Date.now() / 1000,
+      status: 'queued' // 自定义状态，可选用于样式展示
+    })
+    
+    nextTick(() => chatState.scrollToBottom())
+    
+    messageQueue.value.push({ text, attachments: attachmentsToSent, messageId: userMsgId })
+  }
+
+  /**
+   * 处理队列中的下一条消息
+   */
+  const processQueue = async () => {
+    if (messageQueue.value.length === 0 || chatState.loading.value) return
+    
+    const nextMsg = messageQueue.value.shift()
+    if (!nextMsg) return
+    
+    // 发送队列中的消息
+    if (transport.transportMode.value === 'ws') {
+      await wsSend(nextMsg.text, nextMsg.attachments, nextMsg.messageId)
+    } else {
+      await httpSend(nextMsg.text, nextMsg.attachments, nextMsg.messageId)
+    }
+  }
+
+  /**
+   * 监听 loading 状态，完成后处理队列
+   */
+  watch(() => chatState.loading.value, (isLoading) => {
+    if (!isLoading && messageQueue.value.length > 0) {
+      processQueue()
+    }
+  })
+
   /**
    * 发送消息（统一入口）
    */
   const send = async () => {
     if (transport.transportMode.value === 'ws') {
-      return wsSend()
+      return wsSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
     } else {
-      return httpSend()
+      return httpSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
     }
   }
 
   /**
    * HTTP 方式发送消息
    */
-  const httpSend = async () => {
-    if (!chatState.inputMsg.value.trim() && attachments.value.length === 0) return
+  const httpSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    const text = textParam !== null ? textParam : chatState.inputMsg.value
+    const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
     
-    const text = chatState.inputMsg.value
-    const userMsgId = Date.now()
+    if (!text.trim() && attachmentsToSent.length === 0) return
+    
+    const userMsgId = existingMsgId || Date.now()
     
     // 统一渲染顺序：清理之前的 thinking 占位，确保 AI 响应紧跟最新消息（与流式行为一致）
     messageProcessor.cleanupThinkingMessage(chatState.messages)
     
-    // 添加用户消息
-    const attachmentsToSent = attachments.value.map(a => a.path)
-    chatState.addMessage({
-      id: userMsgId,
-      role: 'user',
-      content: text,
-      attachments: attachmentsToSent,
-      created_at: Date.now() / 1000
-    })
-    
-    chatState.inputMsg.value = ''
-    attachments.value = []
+    // 如果没有现成的消息 ID（非队列来的），则添加用户消息
+    if (!existingMsgId) {
+      chatState.addMessage({
+        id: userMsgId,
+        role: 'user',
+        content: text,
+        attachments: attachmentsToSent,
+        created_at: Date.now() / 1000
+      })
+      
+      chatState.inputMsg.value = ''
+      attachments.value = []
+    } else {
+      // 移除可能存在的队列标记
+      const msg = chatState.messages.value.find(m => m.id === existingMsgId)
+      if (msg) {
+        delete msg.status
+      }
+    }
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
@@ -141,11 +201,13 @@ export function useChatSession() {
   /**
    * WebSocket 方式发送消息
    */
-  const wsSend = async () => {
-    if (!chatState.inputMsg.value.trim() && attachments.value.length === 0) return
+  const wsSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    const text = textParam !== null ? textParam : chatState.inputMsg.value
+    const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
     
-    const text = chatState.inputMsg.value
-    const userMsgId = Date.now()
+    if (!text.trim() && attachmentsToSent.length === 0) return
+    
+    const userMsgId = existingMsgId || Date.now()
     
     // 清理之前的 thinking 占位，保持只有一个 thinking 标签
     messageProcessor.cleanupThinkingMessage(chatState.messages)
@@ -155,19 +217,27 @@ export function useChatSession() {
     // request_id 使用唯一的标识符
     const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
 
-    // 添加用户消息并绑定 request_id
-    const attachmentsToSent = attachments.value.map(a => a.path)
-    chatState.addMessage({ 
-      id: userMsgId, 
-      role: 'user', 
-      content: text, 
-      attachments: attachmentsToSent,
-      created_at: Date.now() / 1000,
-      request_id: requestId
-    })
-    
-    chatState.inputMsg.value = ''
-    attachments.value = []
+    // 如果没有现成的消息 ID（非队列来的），则添加用户消息
+    if (!existingMsgId) {
+      chatState.addMessage({ 
+        id: userMsgId, 
+        role: 'user', 
+        content: text, 
+        attachments: attachmentsToSent,
+        created_at: Date.now() / 1000,
+        request_id: requestId
+      })
+      
+      chatState.inputMsg.value = ''
+      attachments.value = []
+    } else {
+      // 移除可能存在的队列标记并更新 request_id
+      const msg = chatState.messages.value.find(m => m.id === existingMsgId)
+      if (msg) {
+        delete msg.status
+        msg.request_id = requestId
+      }
+    }
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
@@ -348,6 +418,7 @@ export function useChatSession() {
     inputMsg: chatState.inputMsg,
     loading: chatState.loading,
     messageList: chatState.messageList,
+    messageQueue,
     
     // 新增附件状态导出
     attachments,
@@ -374,7 +445,7 @@ export function useChatSession() {
     
     // 方法 - 发送
     send,
-    abortSend: transport.wsSendAbort,
+    enqueueMessage,
     httpSend,
     wsSend,
     initWebSocket: transport.initWebSocket,

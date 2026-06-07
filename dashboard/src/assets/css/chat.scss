@@ -186,6 +186,11 @@
       flex-direction: column;      
       margin-bottom: 16px;
       max-width: 80%;
+      transition: opacity 0.3s;
+
+      &.queued {
+        opacity: 0.5;
+      }
 
       &.user {
         align-items: flex-end;
