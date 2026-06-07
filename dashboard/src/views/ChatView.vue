@@ -60,7 +60,7 @@
                     <span class="tool-call-title">工具调用: {{ getToolName(msg) }}</span>
                   </template>
                   <div class="tool-call-content">
-                    <pre>{{ getToolArguments(msg) }}</pre>
+                    <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolArguments(msg)" :max-height="300" />
                   </div>
                 </el-collapse-item>
               </el-collapse>
@@ -75,7 +75,7 @@
                     <span class="tool-result-title">工具返回: {{ getToolResultName(msg) }}</span>
                   </template>
                   <div class="tool-result-content">
-                    <pre>{{ getToolResultContent(msg) }}</pre>
+                    <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolResultContent(msg)" :max-height="300" />
                   </div>
                 </el-collapse-item>
               </el-collapse>
@@ -215,8 +215,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { ElCollapse, ElCollapseItem } from 'element-plus'
+import VirtualizedCode from '../components/VirtualizedCode.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { ElMessage } from 'element-plus'
 import { fileApi } from '../api'
@@ -245,6 +246,28 @@ const {
   sessionCreating,
   attachments
 } = chat
+
+// 用于管理 VirtualizedCode 的引用
+const codeRefs = new Map()
+const setCodeRef = (id, el) => {
+  if (el) {
+    codeRefs.set(id, el)
+  } else {
+    codeRefs.delete(id)
+  }
+}
+
+// 监听折叠面板状态变化，当收起时重置 limit
+watch(activeCollapse, (newVal, oldVal) => {
+  // 找出被移除的 id (即被收起的面板)
+  const closedIds = oldVal.filter(id => !newVal.includes(id))
+  closedIds.forEach(id => {
+    const ref = codeRefs.get(id)
+    if (ref && typeof ref.reset === 'function') {
+      ref.reset()
+    }
+  })
+}, { deep: true })
 
 // 解构方法
 const {
@@ -425,4 +448,7 @@ onUnmounted(() => {
 
 <style lang="scss">
 @import "@/assets/css/chat.scss";
+.el-collapse{
+  max-width: 100% ;
+}
 </style>
