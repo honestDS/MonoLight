@@ -107,7 +107,8 @@
               </div>
 
               <!-- 消息主体内容 -->
-              <div class="content" v-if="typeof msg.content === 'string' && msg.content.trim()">{{ msg.content }}</div>
+              <div class="content markdown-body" v-if="typeof msg.content === 'string' && msg.content.trim() && currentSessionEnableMarkdown" v-html="renderMarkdown(msg.content)"></div>
+              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof msg.content === 'string' && msg.content.trim() && !currentSessionEnableMarkdown">{{ msg.content }}</div>
               <div class="content" v-else-if="Array.isArray(msg.content)">
                 <div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
                   <div v-if="part.type === 'text'" class="text-part">{{ part.text }}</div>
@@ -144,6 +145,21 @@
             >
               <el-button title="上传图片/附件">上传图片/附件</el-button>
             </el-upload>
+          </div>
+
+          <div class="mode-selector">
+            <button 
+              type="button" 
+              :class="['mode-btn', { active: !currentSessionEnableMarkdown }]"
+              @click="toggleMarkdown(false)"
+              :disabled="loading"
+            >纯文本</button>
+            <button 
+              type="button" 
+              :class="['mode-btn', { active: currentSessionEnableMarkdown }]"
+              @click="toggleMarkdown(true)"
+              :disabled="loading"
+            >MD渲染</button>
           </div>
 
           <div class="mode-selector">
@@ -220,9 +236,71 @@ import { ElCollapse, ElCollapseItem } from 'element-plus'
 import VirtualizedCode from '../components/VirtualizedCode.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { ElMessage } from 'element-plus'
-import { fileApi } from '../api'
+import { fileApi, chatApi } from '../api'
+
+import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js'
+import 'highlight.js/styles/github.css'
+import 'github-markdown-css/github-markdown.css'
+
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  typographer: true,
+  highlight: function (str, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return '<pre class="hljs"><code>' +
+               hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
+               '</code></pre>'
+      } catch (__) {}
+    }
+    return '<pre class="hljs"><code>' + md.utils.escapeHtml(str) + '</code></pre>'
+  }
+})
+
+const renderMarkdown = (text) => {
+  return md.render(text || '')
+}
 
 const chat = useChatSession()
+
+// 获取当前会话的 Markdown 开关状态
+const currentSessionEnableMarkdown = computed({
+  get() {
+    if (!currentSessionId.value) return chat.enableMarkdownDefault.value
+    const session = sessions.value.find(s => s.session_id === currentSessionId.value)
+    return session ? session.enable_markdown : false
+  },
+  set(val) {
+    if (!currentSessionId.value) {
+      chat.enableMarkdownDefault.value = val
+      return
+    }
+    const session = sessions.value.find(s => s.session_id === currentSessionId.value)
+    if (session) {
+      session.enable_markdown = val
+    }
+  }
+})
+
+// 切换 Markdown 状态
+const toggleMarkdown = async (val) => {
+  // 先更新本地状态
+  currentSessionEnableMarkdown.value = val
+  
+  if (!currentSessionId.value) {
+    return
+  }
+  
+  try {
+    await chatApi.updateSessionSetting(currentSessionId.value, val)
+  } catch (error) {
+    ElMessage.error(error.message || '设置失败')
+    // 回退状态
+    currentSessionEnableMarkdown.value = !val
+  }
+}
 
 // 本地流式模式状态（从 transportMode 计算）
 const isWsMode = ref(true)

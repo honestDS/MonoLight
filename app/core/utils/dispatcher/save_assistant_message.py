@@ -17,6 +17,15 @@ async def save_assistant_message(
     profile_id: int,
     ai_msg: InternalMessage,
 ):
+    from app.core.crud.session import session_crud
+    from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
+
+    session = await session_crud.get_by_session_id(db, session_id)
+    enable_markdown = session.enable_markdown if session else False
+
+    # 清洗 Markdown 标记
+    ai_msg = process_markdown_response(ai_msg, enable_markdown)
+
     await save_message(
         db,
         session_id,

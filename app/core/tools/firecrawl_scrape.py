@@ -33,10 +33,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
         api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
 
         if not api_key:
-            return json.dumps({
-                "error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。",
-                "system_info": system_info
-            }, ensure_ascii=False)
+            return json.dumps({"error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。", "system_info": system_info}, ensure_ascii=False)
 
         try:
             self.logger.info(f"[{self.uid}] Firecrawl scraping: {url} (formats={formats}, options={kwargs})")
@@ -47,12 +44,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             # SDK 返回的是 Pydantic 模型 (Document)，需要转换为字典才能 JSON 序列化
             doc_dict = doc.model_dump() if hasattr(doc, "model_dump") else doc
 
-            return json.dumps({
-                "status": "success",
-                "url": url,
-                "data": doc_dict,
-                "system_info": system_info
-            }, ensure_ascii=False)
+            return json.dumps({"status": "success", "url": url, "data": doc_dict, "system_info": system_info}, ensure_ascii=False)
 
         except Exception as e:
             self.logger.error(f"[{self.uid}] Firecrawl scrape failed: {e}")
@@ -60,10 +52,8 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             if "401" in error_msg or "Unauthorized" in error_msg:
                 error_msg = "Firecrawl API Key 认证失败或已失效。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 检查并更新您的 API Key。"
 
-            return json.dumps({
-                "error": error_msg,
-                "system_info": system_info
-            }, ensure_ascii=False)
+            return json.dumps({"error": error_msg, "system_info": system_info}, ensure_ascii=False)
+
 
 FIRECRAWL_SCRAPE_TOOL_SCHEMA = {
     "type": "function",
@@ -77,30 +67,10 @@ FIRECRAWL_SCRAPE_TOOL_SCHEMA = {
                     "type": "string",
                     "description": "The URL of the web page to scrape.",
                 },
-                "formats": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["markdown", "html", "raw_html", "screenshot", "links"]
-                    },
-                    "description": "The formats to return the content in.",
-                    "default": ["markdown"]
-                },
-                "only_main_content": {
-                    "type": "boolean",
-                    "description": "Only return the main content of the page. Excludes headers, footers, etc.",
-                    "default": True
-                },
-                "mobile": {
-                    "type": "boolean",
-                    "description": "Emulate a mobile device.",
-                    "default": False
-                },
-                "wait_for": {
-                    "type": "integer",
-                    "description": "Wait for a specified amount of time in milliseconds before scraping.",
-                    "default": 0
-                }
+                "formats": {"type": "array", "items": {"type": "string", "enum": ["markdown", "html", "raw_html", "screenshot", "links"]}, "description": "The formats to return the content in.", "default": ["markdown"]},
+                "only_main_content": {"type": "boolean", "description": "Only return the main content of the page. Excludes headers, footers, etc.", "default": True},
+                "mobile": {"type": "boolean", "description": "Emulate a mobile device.", "default": False},
+                "wait_for": {"type": "integer", "description": "Wait for a specified amount of time in milliseconds before scraping.", "default": 0},
             },
             "required": ["url"],
         },

@@ -47,13 +47,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         获取未处理的新消息（通常用于动态追加用户新输入的指令）
         """
-        result = await db.execute(
-            select(Message)
-            .where(Message.session_id == session_id)
-            .where(Message.uid == uid)
-            .where(not Message.is_processed)
-            .order_by(Message.created_at.asc())
-        )
+        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(not Message.is_processed).order_by(Message.created_at.asc()))
         return result.scalars().all()
 
     async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> list[Message]:
@@ -74,6 +68,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 Message.uid,
                 User.username,
                 ChatSession.title,
+                ChatSession.enable_markdown,
             )
             .join(User, Message.uid == User.uid)
             .join(ChatSession, Message.session_id == ChatSession.session_id, isouter=True)
@@ -82,7 +77,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
 
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title).order_by(desc("last_active"))
+        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown).order_by(desc("last_active"))
         result = await db.execute(stmt)
         return result.all()
 

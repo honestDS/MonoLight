@@ -82,10 +82,11 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
 
     data = [
         {
-            "session_id": row[0],
-            "last_active": row[1].strftime("%Y-%m-%d %H:%M:%S") if row[1] else None,
-            "username": row[3],
-            "title": row[4],
+            "session_id": row.session_id,
+            "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
+            "username": row.username,
+            "title": row.title,
+            "enable_markdown": row.enable_markdown,
         }
         for row in sessions
     ]
@@ -106,6 +107,35 @@ async def delete_session(
         return StandardResponse.success(message="会话未找到或已删除")
 
     return StandardResponse.success(message=f"已成功清理会话 {session_id} 的全部历史记录")
+
+
+class SessionSettingRequest(BaseModel):
+    session_id: str
+    enable_markdown: bool
+
+
+@router.post("/sessions/setting")
+async def update_session_setting(
+    request: SessionSettingRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.core.crud.session import session_crud
+
+    uid = getattr(current_user, "uid", None)
+    is_admin = getattr(current_user, "is_superuser", False)
+
+    session = await session_crud.get_by_session_id(db, request.session_id)
+    if not session:
+        return StandardResponse.error(message="会话未找到")
+
+    if not is_admin and session.uid != uid:
+        return StandardResponse.error(message="无权操作此会话")
+
+    session.enable_markdown = request.enable_markdown
+    await db.commit()
+
+    return StandardResponse.success(message="会话设置已更新")
 
 
 class SessionTitleGenerateRequest(BaseModel):

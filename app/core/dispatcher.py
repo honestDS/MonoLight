@@ -107,9 +107,7 @@ class ChatDispatcher:
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
 
-                    messages = await prepare_messages(
-                        db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter
-                    )
+                    messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -153,6 +151,7 @@ class ChatDispatcher:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)  # 记录到增量历史
 
+                        # save_assistant_message 内部会对 ai_msg 引用进行 Markdown 洗理，因此其 content 会被更新
                         await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
 
                         if not ai_msg.tool_calls:
@@ -169,9 +168,7 @@ class ChatDispatcher:
 
                         # 并行工具调用处理
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            await handle_parallel_tool_limit(
-                                db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages
-                            )
+                            await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
 
                         tasks = [process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
@@ -240,9 +237,7 @@ class ChatDispatcher:
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
 
-                    messages = await prepare_messages(
-                        db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter
-                    )
+                    messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
@@ -338,9 +333,7 @@ class ChatDispatcher:
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            await handle_parallel_tool_limit(
-                                db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages
-                            )
+                            await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
 
                         for tc in ai_msg.tool_calls:

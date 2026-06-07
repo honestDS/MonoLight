@@ -38,10 +38,7 @@ class FileWriterExecutor(BaseExecutor):
             # 确保文件路径在用户临时目录内，防止路径穿越攻击
             target_path = (self.user_temp_dir / file_path).resolve()
             if not str(target_path).startswith(str(self.user_temp_dir.resolve())):
-                return json.dumps({
-                    "error": "非法的文件路径：必须在临时目录内。",
-                    "system_info": system_info
-                }, ensure_ascii=False)
+                return json.dumps({"error": "非法的文件路径：必须在临时目录内。", "system_info": system_info}, ensure_ascii=False)
 
             # 确保父目录存在
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,20 +51,12 @@ class FileWriterExecutor(BaseExecutor):
 
             self.logger.info(f"[{self.uid}] File {'appended' if append else 'written'}: {file_path}")
 
-            return json.dumps({
-                "status": "success",
-                "file_path": file_path,
-                "bytes_written": len(content.encode(encoding)),
-                "mode": "append" if append else "write",
-                "system_info": system_info
-            }, ensure_ascii=False)
+            return json.dumps({"status": "success", "file_path": file_path, "bytes_written": len(content.encode(encoding)), "mode": "append" if append else "write", "system_info": system_info}, ensure_ascii=False)
 
         except Exception as e:
             self.logger.error(f"[{self.uid}] Failed to write file {file_path}: {e}")
-            return json.dumps({
-                "error": str(e),
-                "system_info": system_info
-            }, ensure_ascii=False)
+            return json.dumps({"error": str(e), "system_info": system_info}, ensure_ascii=False)
+
 
 FILE_WRITER_TOOL_SCHEMA = {
     "type": "function",
@@ -85,11 +74,7 @@ FILE_WRITER_TOOL_SCHEMA = {
                     "type": "string",
                     "description": "The multi-line content to be written to the file.",
                 },
-                "append": {
-                    "type": "boolean",
-                    "description": "If true, appends content to the end of the file. If false (default), overwrites the file.",
-                    "default": False
-                }
+                "append": {"type": "boolean", "description": "If true, appends content to the end of the file. If false (default), overwrites the file.", "default": False},
             },
             "required": ["file_path", "content"],
         },

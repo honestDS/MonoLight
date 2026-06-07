@@ -20,9 +20,7 @@ from app.providers.llm.client import LLMClient
 logger = get_logger(__name__)
 
 
-async def audit_command(
-    command: str, provider_url: str, api_key: str, model_id: str, session_id: str = None, uid: str = None
-) -> dict[str, Any] | None:
+async def audit_command(command: str, provider_url: str, api_key: str, model_id: str, session_id: str = None, uid: str = None) -> dict[str, Any] | None:
     try:
         messages = [
             InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_PROMPT),
@@ -81,21 +79,15 @@ class AuditMiddleware:
         if token:
             expected_token = hashlib.sha256(real_cmd.strip().encode()).hexdigest()[:12]
             if token == expected_token:
-                logger.bind(uid=uid, session_id=session_id, security=True).info(
-                    f"Dynamic token verification passed for command: {real_cmd[:30]}..."
-                )
+                logger.bind(uid=uid, session_id=session_id, security=True).info(f"Dynamic token verification passed for command: {real_cmd[:30]}...")
                 return True, real_cmd
             else:
-                logger.bind(uid=uid, session_id=session_id, security=True).warning(
-                    f"Token mismatch! Expected: {expected_token}, Got: {token}"
-                )
+                logger.bind(uid=uid, session_id=session_id, security=True).warning(f"Token mismatch! Expected: {expected_token}, Got: {token}")
                 return False, real_cmd
         return None, command
 
     @staticmethod
-    async def audit(
-        db, profile, cfg, tool_name: str, args: dict, session_id: str = None, uid: str = None
-    ) -> str | None:
+    async def audit(db, profile, cfg, tool_name: str, args: dict, session_id: str = None, uid: str = None) -> str | None:
         from app.core.crud.provider import provider_crud
         from app.core.tools import get_registered_tool_names
 
@@ -133,14 +125,10 @@ class AuditMiddleware:
 
             if provided_token:
                 if provided_token == expected_token:
-                    logger.bind(uid=uid, session_id=session_id, security=True).info(
-                        f"Dynamic token verification passed for write_file: {clean_path}"
-                    )
+                    logger.bind(uid=uid, session_id=session_id, security=True).info(f"Dynamic token verification passed for write_file: {clean_path}")
                     is_any_verified = True
                 else:
-                    logger.bind(uid=uid, session_id=session_id, security=True).warning(
-                        f"Token mismatch for write_file! Expected: {expected_token}, Got: {provided_token}"
-                    )
+                    logger.bind(uid=uid, session_id=session_id, security=True).warning(f"Token mismatch for write_file! Expected: {expected_token}, Got: {provided_token}")
                     is_any_verified = False
             else:
                 is_any_verified = None
@@ -171,9 +159,7 @@ class AuditMiddleware:
         if not provider:
             return None
 
-        audit_res = await audit_command(
-            command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid
-        )
+        audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid)
 
         if audit_res is None:
             return json.dumps(
@@ -185,9 +171,7 @@ class AuditMiddleware:
         audit_res.get("reason", "Unknown")
 
         if score >= 8:
-            return json.dumps(
-                {"error": "Security Blocked", "reason": f"High risk score {score}: Security Blocked"}, ensure_ascii=False
-            )
+            return json.dumps({"error": "Security Blocked", "reason": f"High risk score {score}: Security Blocked"}, ensure_ascii=False)
 
         if score >= cfg.security.audit_threshold:
             cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]

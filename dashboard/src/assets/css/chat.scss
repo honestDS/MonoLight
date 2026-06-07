@@ -241,6 +241,19 @@
         border-radius: 8px;
         word-break: break-word;
         white-space: pre-wrap;
+        
+        &.markdown-body {
+          white-space: normal; // Markdown 需要正常的换行解析
+          
+          p, ul, ol, li, pre, blockquote {
+            margin-top: 0;
+            margin-bottom: 8px;
+          }
+          
+          p:last-child, ul:last-child, ol:last-child {
+            margin-bottom: 0;
+          }
+        }
 
         .message-part {
           margin-bottom: 8px;

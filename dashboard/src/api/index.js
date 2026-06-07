@@ -68,6 +68,8 @@ export const chatApi = {
   sessionsHistory: (sessionId, page = 1, size = 20) => request.get(`/chat/sessions/history?session_id=${sessionId}&page=${page}&size=${size}`),
   // 异步生成会话标题
   generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
+  // 更新会话设置
+  updateSessionSetting: (sessionId, enableMarkdown) => request.post('/chat/sessions/setting', { session_id: sessionId, enable_markdown: enableMarkdown }),
 }
 
 export const profileApi = {

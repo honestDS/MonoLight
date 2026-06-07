@@ -10,6 +10,7 @@ import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
 import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolResultName, getToolResultContent, getMessageTimestamp } from '../../utils'
+import { chatApi } from '../../api'
 
 export function useChatSession() {
   // ==================== 组合各模块 ====================
@@ -19,6 +20,9 @@ export function useChatSession() {
   
   // 新增附件状态
   const attachments = ref([])
+  
+  // 默认 Markdown 开关状态（用于未选择会话时）
+  const enableMarkdownDefault = ref(false)
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
@@ -105,7 +109,12 @@ export function useChatSession() {
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
         // 1. 设置当前会话 ID (静默选择)
-        sessionManager.selectSession({ session_id: newId, title: '新会话' }, null, false, false)
+        sessionManager.selectSession({ session_id: newId, title: '新会话', enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        
+        // 同步新建会话的 Markdown 设置
+        if (enableMarkdownDefault.value) {
+          chatApi.updateSessionSetting(newId, true).catch(() => {})
+        }
         
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newId, text)
@@ -188,13 +197,41 @@ export function useChatSession() {
       onSessionId: (newSessionId) => {
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
-        sessionManager.selectSession({ session_id: newSessionId, title: '新会话' }, null, false, false)
+        sessionManager.selectSession({ session_id: newSessionId, title: '新会话', enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        
+        // 同步新建会话的 Markdown 设置
+        if (enableMarkdownDefault.value) {
+          chatApi.updateSessionSetting(newSessionId, true).catch(() => {})
+        }
+        
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newSessionId, text)
       },
       onComplete: (data, thinkingIdParam, requestIdParam) => {
         // 精确清理对应的 thinking 占位符
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+        
+        // 尝试从 history 中提取最后一条消息覆盖当前流式消息，以显示后端清洗后的格式（如剥离 Markdown）
+        if (data && data.history && data.history.length > 0) {
+          const lastHistoryMsg = data.history[data.history.length - 1]
+          if (lastHistoryMsg && lastHistoryMsg.role === 'assistant' && lastHistoryMsg.content) {
+             // 强制更新引用，确保视图响应
+             const newMessages = [...chatState.messages.value]
+             const targetIdx = newMessages.findIndex(m => m.role === 'assistant' && !m.tool_calls && m.request_id === requestIdParam)
+             
+             if (targetIdx !== -1) {
+               newMessages[targetIdx] = { ...newMessages[targetIdx], content: lastHistoryMsg.content }
+               chatState.messages.value = newMessages
+             } else {
+                // 如果没有带有 request_id 的普通内容消息，则找最后一个 assistant
+                const lastIdx = newMessages.map(m => m.role).lastIndexOf('assistant')
+                if (lastIdx !== -1 && !newMessages[lastIdx].tool_calls) {
+                  newMessages[lastIdx] = { ...newMessages[lastIdx], content: lastHistoryMsg.content }
+                  chatState.messages.value = newMessages
+                }
+             }
+          }
+        }
       },
       scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
       setLoading: (val) => { chatState.loading.value = val }
@@ -290,6 +327,7 @@ export function useChatSession() {
     
     // 新增附件状态导出
     attachments,
+    enableMarkdownDefault,
 
     // 状态 - 会话相关
     sessions: sessionManager.sessions,

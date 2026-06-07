@@ -32,9 +32,7 @@ async def handle_parallel_tool_limit(
     error_msg = json.dumps(
         {
             "error": "parallel_limit_exceeded",
-            "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(
-                requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools
-            ),
+            "message": ERR_PARALLEL_LIMIT_EXCEEDED.format(requested=len(ai_msg.tool_calls), limit=cfg.tool.max_parallel_tools),
         },
         ensure_ascii=False,
     )
@@ -42,6 +40,4 @@ async def handle_parallel_tool_limit(
         tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
         messages.append(tool_res)
         turn_messages.append(tool_res)
-        await save_message(
-            db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id
-        )
+        await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)

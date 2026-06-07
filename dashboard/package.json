@@ -7,14 +7,17 @@
     "build": "vue-cli-service build"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
     "axios": "1.6.0",
     "core-js": "^3.8.3",
     "element-plus": "^2.4.1",
-    "@element-plus/icons-vue": "^2.3.1",
-    "vue": "^3.2.13",
-    "vue-router": "^4.0.0",
+    "github-markdown-css": "^5.9.0",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.2.0",
     "pinia": "^2.1.0",
-    "vue-i18n": "^9.0.0"
+    "vue": "^3.2.13",
+    "vue-i18n": "^9.0.0",
+    "vue-router": "^4.0.0"
   },
   "devDependencies": {
     "@vue/cli-plugin-babel": "~5.0.0",

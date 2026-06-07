@@ -21,6 +21,4 @@ async def save_tool_response(
 ):
     messages.append(tool_res)
     turn_messages.append(tool_res)
-    await save_message(
-        db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile_id, is_processed=True
-    )
+    await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile_id, is_processed=True)
