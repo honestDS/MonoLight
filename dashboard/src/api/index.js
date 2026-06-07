@@ -94,7 +94,8 @@ export const providerApi = {
   create: (data) => request.post('/providers/create', data),
   get: (id) => request.get(`/providers/get?provider_id=${id}`),
   update: (id, data) => request.post(`/providers/update?provider_id=${id}`, data),
-  delete: (id) => request.post(`/providers/delete?provider_id=${id}`)
+  delete: (id) => request.post(`/providers/delete?provider_id=${id}`),
+  testEmbeddingDimension: (providerId, modelId) => request.post(`/providers/test-embedding-dimension?provider_id=${providerId}&model_id=${encodeURIComponent(modelId)}`)
 }
 
 export const systemApi = {

@@ -126,7 +126,6 @@ async def init_system_data(session: AsyncSession):
             session,
             obj_in={
                 "name": "default",
-                "provider_id": -1,
                 "prompt_id": prompt_obj.id,
                 "configs": latest_default_configs,
                 "is_active": True,

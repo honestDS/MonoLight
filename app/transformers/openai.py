@@ -121,6 +121,42 @@ class OpenAITransformer(BaseTransformer):
             logger.error(f"OpenAI Stream Driver Error: {str(e)}")
             raise LLMException(str(e))
 
+    async def get_embeddings(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_texts: str | list[str],
+        **kwargs,
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": model_id,
+            "input": input_texts,
+        }
+        if "dimensions" in kwargs:
+            payload["dimensions"] = kwargs["dimensions"]
+        if "encoding_format" in kwargs:
+            payload["encoding_format"] = kwargs["encoding_format"]
+        if "user" in kwargs:
+            payload["user"] = kwargs["user"]
+
+        url = f"{base_url.rstrip('/')}/embeddings"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    txt = await resp.text()
+                    if resp.status != 200:
+                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                    return json.loads(txt)
+        except Exception as e:
+            logger.error(f"OpenAI Embeddings Driver Error: {str(e)}")
+            raise LLMException(str(e))
+
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
         from app.models.message import FilePart, ImagePart, TextPart

@@ -46,11 +46,6 @@
               <el-form-item label="配置名称">
                 <el-input v-model="form.name" placeholder="唯一配置名称"></el-input>
               </el-form-item>
-              <el-form-item label="模型提供商">
-                <el-select v-model="form.provider_id" placeholder="选择提供商" class="full-width-input">
-                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
-              </el-form-item>
               <el-form-item label="关联提示词库">
                 <el-select v-model="form.prompt_id" placeholder="可选关联提示词" clearable class="full-width-input">
                   <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
@@ -62,6 +57,12 @@
           <!-- 模型设置 -->
           <el-tab-pane label="模型设置" name="model">
             <div class="tab-pane-content">
+              <el-divider content-position="left"><span class="gray-divider-text">对话模型</span></el-divider>
+              <el-form-item label="提供商">
+                <el-select v-model="form.configs.provider.provider_id" placeholder="选择提供商" class="full-width-input">
+                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+              </el-form-item>
               <el-form-item label="模型 ID">
                 <el-input v-model="form.configs.provider.model_id" placeholder="如 gpt-4o"></el-input>
               </el-form-item>
@@ -92,6 +93,23 @@
               <el-form-item label="上下文限制 K">
                 <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
                 <div class="help-text mt-5">关联短期上下文的历史消息轮数</div>
+              </el-form-item>
+
+              <el-divider content-position="left"><span class="gray-divider-text">嵌入模型</span></el-divider>
+              <el-form-item label="提供商">
+                <el-select v-model="form.configs.provider.embedding_provider_id" placeholder="选择向量提供商 (可选)" clearable class="full-width-input">
+                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="向量模型 ID">
+                <el-input v-model="form.configs.provider.embedding_model_id" placeholder="可选，用于知识库的专属模型如 text-embedding-3-small"></el-input>
+              </el-form-item>
+              <el-form-item label="向量输出维度">
+                <div style="display: flex; gap: 10px; width: 100%;">
+                  <el-input-number v-model="form.configs.provider.embedding_dimensions" :min="1" :step="1" placeholder="如 1024 (可选)" style="flex: 1;"></el-input-number>
+                  <el-button type="primary" @click="handleDetectDimension" :loading="detectingDimension" :disabled="!form.configs.provider.embedding_provider_id || !form.configs.provider.embedding_model_id">自动检测</el-button>
+                </div>
+                <div class="help-text mt-5">部分模型支持动态指定返回向量的维度，留空则使用默认值。可点击“自动检测”发包测试以自动填入该模型的默认维度。</div>
               </el-form-item>
             </div>
           </el-tab-pane>
@@ -192,11 +210,11 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
+const detectingDimension = ref(false)
 
 const form = reactive({
   id: null,
   name: '',
-  provider_id: null,
   prompt_id: null,
   configs: defaultProfileConfigs()
 })
@@ -251,6 +269,23 @@ const handleSizeChange = () => {
   loadProfiles()
 }
 
+const handleDetectDimension = async () => {
+  if (!form.configs.provider.embedding_provider_id || !form.configs.provider.embedding_model_id) {
+    return ElMessage.warning('请先选择向量模型提供商并填写向量模型 ID')
+  }
+  detectingDimension.value = true
+  try {
+    const res = await providerApi.testEmbeddingDimension(form.configs.provider.embedding_provider_id, form.configs.provider.embedding_model_id)
+    const dim = res.data.data.dimension
+    form.configs.provider.embedding_dimensions = dim
+    ElMessage.success(res.data.message || `检测成功，维度已设为: ${dim}`)
+  } catch (err) {
+    ElMessage.error(err.message || '检测失败，请检查配置信息或模型是否支持')
+  } finally {
+    detectingDimension.value = false
+  }
+}
+
 const handleActivate = async (id) => {
   try {
     const res = await profileApi.activate(id)
@@ -267,7 +302,6 @@ const showDialog = (type, row = null) => {
   if (type === 'edit' && row) {
     form.id = row.id
     form.name = row.name
-    form.provider_id = row.provider_id
     form.prompt_id = row.prompt_id
     const base = defaultProfileConfigs()
     if (row.configs) {
@@ -281,7 +315,6 @@ const showDialog = (type, row = null) => {
   } else {
     form.id = null
     form.name = ''
-    form.provider_id = null
     form.prompt_id = null
     form.configs = defaultProfileConfigs()
   }
@@ -289,8 +322,8 @@ const showDialog = (type, row = null) => {
 }
 
 const submitForm = async () => {
-  if (!form.name || !form.provider_id || !form.configs.provider.model_id) {
-    return ElMessage.warning('请补全基础配置信息')
+  if (!form.name || !form.configs.provider.provider_id || !form.configs.provider.model_id) {
+    return ElMessage.warning('请补全必填配置信息（配置名称、对话模型提供商、对话模型ID）')
   }
   submitting.value = true
   try {

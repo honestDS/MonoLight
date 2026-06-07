@@ -45,9 +45,15 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    if profile_in.provider_id > 0:
-        if not await provider_crud.get(db, profile_in.provider_id):
+    provider_id = profile_in.configs.get("provider", {}).get("provider_id")
+    if provider_id and provider_id > 0:
+        if not await provider_crud.get(db, provider_id):
             raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
+
+    embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
+    if embedding_provider_id and embedding_provider_id > 0:
+        if not await provider_crud.get(db, embedding_provider_id):
+            raise ParameterException("指定的向量模型提供商不存在")
 
     if await profile_crud.get_by_name(db, profile_in.name):
         raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
@@ -57,11 +63,14 @@ async def create_profile(
             raise ParameterException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.create(db, obj_in=profile_in)
-    # Re-fetch with provider
+    # Re-fetch with relations
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = ProfileResponse.model_validate(db_profile)
-    if db_profile.provider:
-        res_data.provider_name = db_profile.provider.name
+    provider_id = db_profile.configs.get("provider", {}).get("provider_id")
+    if provider_id:
+        provider = await provider_crud.get(db, provider_id)
+        if provider:
+            res_data.provider_name = provider.name
     return StandardResponse.success(
         data=res_data,
         message=constants.MSG_PROFILE_CREATED,
@@ -81,9 +90,11 @@ async def list_profiles(
     results = []
     for p in profiles:
         item = ProfileResponse.model_validate(p)
-        # 预加载了 relations 的话可以直接访问
-        if hasattr(p, "provider") and p.provider:
-            item.provider_name = p.provider.name
+        provider_id = p.configs.get("provider", {}).get("provider_id")
+        if provider_id:
+            provider = await provider_crud.get(db, provider_id)
+            if provider:
+                item.provider_name = provider.name
         results.append(item)
 
     page_data = PageData(
@@ -105,10 +116,11 @@ async def activate_profile(
     if not profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    if profile.provider_id <= 0:
+    provider_id = profile.configs.get("provider", {}).get("provider_id")
+    if not provider_id or provider_id <= 0:
         raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
 
-    if not await provider_crud.get(db, profile.provider_id):
+    if not await provider_crud.get(db, provider_id):
         raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     await db.execute(update(profile_crud.model).values(is_active=False))
@@ -128,10 +140,16 @@ async def update_profile(
     if not db_profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    if profile_in.provider_id is not None:
-        if profile_in.provider_id > 0:
-            if not await provider_crud.get(db, profile_in.provider_id):
+    if profile_in.configs:
+        provider_id = profile_in.configs.get("provider", {}).get("provider_id")
+        if provider_id and provider_id > 0:
+            if not await provider_crud.get(db, provider_id):
                 raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
+        
+        embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
+        if embedding_provider_id and embedding_provider_id > 0:
+            if not await provider_crud.get(db, embedding_provider_id):
+                raise ParameterException("指定的向量模型提供商不存在")
 
     if profile_in.name and profile_in.name != db_profile.name:
         if await profile_crud.get_by_name(db, profile_in.name):
@@ -142,11 +160,14 @@ async def update_profile(
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in)
-    # Re-fetch with relations for provider_name
+    # Re-fetch with relations
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = ProfileResponse.model_validate(db_profile)
-    if db_profile.provider:
-        res_data.provider_name = db_profile.provider.name
+    provider_id = db_profile.configs.get("provider", {}).get("provider_id")
+    if provider_id:
+        provider = await provider_crud.get(db, provider_id)
+        if provider:
+            res_data.provider_name = provider.name
     return StandardResponse.success(
         data=res_data,
         message=constants.MSG_PROFILE_UPDATED,

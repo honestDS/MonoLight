@@ -19,10 +19,10 @@ def validate_profile_and_cfg(profile: Profile) -> ProfileConfig:
 
     cfg = ProfileConfig.model_validate(profile.configs)
 
-    if not profile.provider:
+    # Note: 移除了不再使用的直接 provider 属性检查，因为 dispatcher 会处理具体的 Provider 对象。
+    # 我们只校验配置是否存在。
+    provider_id = cfg.provider.provider_id
+    if not provider_id or provider_id <= 0:
         raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
-
-    if profile.provider.usage == ModelUsage.EMBEDDING:
-        raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
 
     return cfg

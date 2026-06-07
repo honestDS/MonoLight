@@ -109,6 +109,11 @@ class ChatDispatcher:
 
                     messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
+                    from app.core.crud.provider import provider_crud
+                    chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
+                    if not chat_provider:
+                        raise LLMException(message="对话模型提供商未找到")
+
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
@@ -132,14 +137,14 @@ class ChatDispatcher:
                             current_tools = tools
 
                         response = await LLMClient.generate(
-                            api_key=profile.provider.api_key,
-                            base_url=profile.provider.base_url,
+                            api_key=chat_provider.api_key,
+                            base_url=chat_provider.base_url,
                             model_id=cfg.provider.model_id,
                             messages=messages,
                             temperature=cfg.provider.temperature,
                             max_tokens=cfg.provider.max_tokens,
                             tools=current_tools,
-                            protocol=getattr(profile.provider, "protocol", "openai"),
+                            protocol=getattr(chat_provider, "protocol", "openai"),
                         )
 
                         ai_msg = response.message
@@ -239,6 +244,11 @@ class ChatDispatcher:
 
                     messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
+                    from app.core.crud.provider import provider_crud
+                    chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
+                    if not chat_provider:
+                        raise LLMException(message="对话模型提供商未找到")
+
                     tools = ALL_TOOLS_SCHEMAS
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
@@ -266,14 +276,14 @@ class ChatDispatcher:
                         response_id = str(uuid.uuid4())
 
                         async for chunk in LLMClient.generate_stream(
-                            api_key=profile.provider.api_key,
-                            base_url=profile.provider.base_url,
+                            api_key=chat_provider.api_key,
+                            base_url=chat_provider.base_url,
                             model_id=cfg.provider.model_id,
                             messages=messages,
                             temperature=cfg.provider.temperature,
                             max_tokens=cfg.provider.max_tokens,
                             tools=current_tools,
-                            protocol=getattr(profile.provider, "protocol", "openai"),
+                            protocol=getattr(chat_provider, "protocol", "openai"),
                         ):
                             choices = chunk.get("choices", [])
                             if not choices:

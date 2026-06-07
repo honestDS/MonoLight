@@ -1,15 +1,17 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.providers.database import Base, engine
+from sqlmodel import SQLModel
+import app.models  # 导入所有模型以注册 metadata
+from app.providers.database import engine
 from main import app
 
 
 @pytest.fixture(scope="module", autouse=True)
 async def setup_db():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(SQLModel.metadata.drop_all)
+        await conn.run_sync(SQLModel.metadata.create_all)
     yield
 
 
@@ -20,7 +22,8 @@ async def test_profile_management_full_flow():
             "/api/v1/auth/reset_admin",
             json={"reset_token": "ed126d6c5a4ea6bf33774214633d2a16"},
         )
-        login_resp = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin"})
+        login_resp = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+        print("Login Resp:", login_resp.status_code, login_resp.text)
         token = login_resp.json()["data"]["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -43,9 +46,9 @@ async def test_profile_management_full_flow():
         # 2. 创建 Profile
         profile_data = {
             "name": "C1",
-            "provider_id": provider_id,
             "configs": {
                 "provider": {
+                    "provider_id": provider_id,
                     "model_id": "gpt-3.5-turbo",
                     "temperature": 0.7,
                     "top_p": 1.0,

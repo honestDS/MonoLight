@@ -122,3 +122,47 @@ async def delete_provider(
         raise ResourceNotFoundException(constants.ERR_PROVIDER_NOT_FOUND)
     await provider_crud.remove(db, id=provider_id)
     return StandardResponse.success(message=constants.MSG_PROVIDER_DELETED)
+
+
+@router.post("/test-embedding-dimension")
+async def test_embedding_dimension(
+    provider_id: int,
+    model_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
+):
+    """
+    自动检测向量模型的输出维度。
+    通过向大模型发送一条测试文本，并提取返回结果中向量的长度。
+    """
+    from app.transformers.openai import OpenAITransformer
+
+    db_obj = await provider_crud.get(db, provider_id)
+    if not db_obj:
+        raise ResourceNotFoundException(constants.ERR_PROVIDER_NOT_FOUND)
+
+    if not db_obj.base_url:
+        raise ParameterException("该提供商未配置 Base URL，无法执行自动检测。")
+
+    base_url = db_obj.base_url
+    if base_url.endswith("/embeddings"):
+        base_url = base_url.replace("/embeddings", "")
+
+    transformer = OpenAITransformer()
+    try:
+        res = await transformer.get_embeddings(
+            api_key=db_obj.api_key,
+            base_url=base_url,
+            model_id=model_id,
+            input_texts=["dimension test"],
+        )
+        if "data" in res and len(res["data"]) > 0:
+            dim = len(res["data"][0]["embedding"])
+            return StandardResponse.success(
+                data={"dimension": dim},
+                message=f"检测成功，该模型的默认输出维度为: {dim}",
+            )
+        else:
+            raise ParameterException("模型返回的数据结构异常，无法获取维度。")
+    except Exception as e:
+        raise ParameterException(f"检测失败: {str(e)}")

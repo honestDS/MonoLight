@@ -20,7 +20,11 @@ export const routeNameMap = {
 // 默认配置结构（用于 ProfilesView.vue）
 export const defaultProfileConfigs = () => ({
   provider: {
+    provider_id: null,
     model_id: '',
+    embedding_provider_id: null,
+    embedding_model_id: '',
+    embedding_dimensions: null,
     temperature: 0.7,
     top_p: 1.0,
     max_tokens: 2048,
