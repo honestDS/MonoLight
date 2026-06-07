@@ -20,19 +20,20 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/api/v1/system.py: 系统监控。支持运行状态获取与系统日志的实时 WebSocket 推送。
 
 ### 2.2 逻辑调度层 (Control Layer)
-- app/core/dispatcher: 核心调度器。负责 Agent 状态管理、工具调用链编排及安全审计决策。
-- app/core/context: 上下文管理器。负责窗口截断及工具调用状态的序列化与还原。
-- app/core/log: 全局日志系统。支持按照 UID 或会话 ID 进行分级日志记录。
+- app/core/dispatcher.py: 核心调度器。负责 Agent 状态管理、工具调用链编排及安全审计决策。
+- app/core/context.py: 上下文管理器。负责窗口截断及工具调用状态的序列化与还原。
+- app/core/log.py: 全局日志系统。支持按照 UID 或会话 ID 进行分级日志记录。
 - app/core/log_broadcaster.py: 日志广播器。基于异步模式将实时日志分发至所有活跃的 WebSocket 订阅者。
-- app/core/security: 安全防护层。执行 UID 级联数据隔离校验。
+- app/core/security.py: 安全防护层。执行 UID 级联数据隔离校验。
 - app/core/middleware/auditor.py: 安全审计逻辑。负责评估代码及指令的潜在风险分值与原因。
-- app/core/exceptions: 异常体系。封装 StandardResponse 友好的业务异常基类。
+- app/core/exceptions.py: 异常体系。封装 StandardResponse 友好的业务异常基类。
 - app/core/utils/: 工具集锦。
+  - dispatcher/: 调度器核心子逻辑集合。包含系统提示词注入、消息组装、工具限流、审计拦截等单一职责模块。
   - config.py: 配置中心。实现配置泵（Standardization Pump）机制。
   - tokenizer.py: Token 计算工具。基于加权算法进行 Token 预估。
   - message_parser.py: 消息解析工具。
   - message_assembler.py: 消息装配工具。支持多模态及工具调用消息的标准化封装。
-  - dt.py: 时区感知的时间处理工具，支持自定义偏移量。
+  - time.py: 时区感知的时间处理工具，支持自定义偏移量。
   - session.py: 会话增强工具。支持基于 LLM 自动生成会话摘要标题。
   - system.py: 系统环境探测工具。获取 CPU、内存、OS 等元数据供 Agent 上下文参考。
 - app/adapters: 通信适配层。抹平不同通信协议（如 Web HTTP, WebSocket）与内部调度器之间的差异。
@@ -77,6 +78,8 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
   - base.py: 原子工具抽象基类。定义了工具执行的标准接口与环境隔离规范。
   - shell.py: Shell 指令执行器。负责受控环境下的子进程调用与执行超时控制。
   - file_writer.py: 受控文件写入器。支持在安全隔离的临时目录内进行文件操作。
+  - firecrawl_search.py: 搜索引擎工具。支持基于 FireCrawl 的网络搜索与信息检索。
+  - firecrawl_scrape.py: 网页抓取工具。支持基于 FireCrawl 的目标网页内容抓取与提取。
 
 ### 2.8 全局配置与常量 (Constants Layer)
 - app/core/constants.py: 统一的消息资产库。
