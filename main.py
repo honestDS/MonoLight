@@ -1,4 +1,5 @@
 import os
+import warnings
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -50,6 +51,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+
+# 忽略由第三方库中产生的 Pydantic v2 模型警告 (firecrawl-py中的MonitorPageDiff等)
+warnings.filterwarnings("ignore", message='Field name "json" .* shadows an attribute in parent "BaseModel"', category=UserWarning)
 
 app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
 
