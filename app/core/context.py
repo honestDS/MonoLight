@@ -46,6 +46,7 @@ class ContextManager:
         current_msg_tokens = estimate_tokens(current_message)
 
         final_msgs, log_data = cls._strategy_atomic_truncate(
+            uid=uid,
             session_id=session_id,
             parsed_history=parsed_history,
             limit_tokens=limit_tokens,
@@ -61,6 +62,7 @@ class ContextManager:
     @classmethod
     def _strategy_atomic_truncate(
         cls,
+        uid: str,
         session_id: str,
         parsed_history: list[InternalMessage],
         limit_tokens: float,
@@ -147,12 +149,12 @@ class ContextManager:
                     i += 1
                 else:
                     # 如果工具链不完整，为了防止 LLM 报错，必须舍弃掉 this Assistant 调用
-                    logger.bind(session_id=session_id).warning(f"Broken tool chain. Required: {required_ids}")
+                    logger.bind(uid=uid, session_id=session_id).warning(f"Broken tool chain. Required: {required_ids}")
                     # 此时不添加该 assistant 消息，继续处理下一条
                     i += 1
             elif msg.role == MessageRole.TOOL:
                 # 孤立的工具结果（没有对应的 Assistant 调用），直接舍弃以保持协议合规
-                logger.bind(session_id=session_id).warning(f"Orphan tool result. ID: {msg.tool_call_id}")
+                logger.bind(uid=uid, session_id=session_id).warning(f"Orphan tool result. ID: {msg.tool_call_id}")
                 i += 1
             else:
                 # 普通消息直接添加

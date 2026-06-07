@@ -1,7 +1,11 @@
 import json
+
 from firecrawl import FirecrawlApp
-from .base import BaseExecutor
+
 from app.core.utils.system import get_full_system_context
+
+from .base import BaseExecutor
+
 
 class FirecrawlSearchExecutor(BaseExecutor):
     def __init__(self, project_root: str, uid: str = "default"):
@@ -18,7 +22,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
     async def execute(self, query: str, limit: int = 5, **kwargs) -> str:
         """
         使用 Firecrawl 进行搜索。
-        
+
         :param query: 搜索查询词
         :param limit: 返回结果数量限制
         :param kwargs: 其他搜索选项，如 scrape_options 等
@@ -36,7 +40,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
 
         try:
             self.logger.info(f"[{self.uid}] Firecrawl searching: {query} (limit={limit}, options={kwargs})")
-            
+
             # 兼容处理：将 scrapeOptions 转换为 scrape_options
             if "scrapeOptions" in kwargs:
                 kwargs["scrape_options"] = kwargs.pop("scrapeOptions")
@@ -49,7 +53,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
 
             # Firecrawl SDK v2.x search 参数是命名的
             results = self.app.search(query=query, limit=limit, **kwargs)
-            
+
             # SDK 返回的是 Pydantic 模型，需要转换为字典才能 JSON 序列化
             results_dict = results.model_dump() if hasattr(results, "model_dump") else results
 

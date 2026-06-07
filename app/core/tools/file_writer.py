@@ -1,11 +1,11 @@
 import json
-import os
-from pathlib import Path
 
 from app.core.log import get_logger
 from app.core.prompts import CONFIRMATION_PREFIX
 from app.core.utils.system import get_full_system_context
+
 from .base import BaseExecutor
+
 
 class FileWriterExecutor(BaseExecutor):
     logger = get_logger(__name__)
@@ -22,7 +22,7 @@ class FileWriterExecutor(BaseExecutor):
     async def execute(self, file_path: str, content: str, append: bool = False) -> str:
         """
         将内容写入指定文件。
-        
+
         :param file_path: 相对路径（相对于用户临时目录）
         :param content: 要写入的文本内容
         :param append: 是否以追加模式写入，默认为 False (覆盖)
@@ -53,7 +53,7 @@ class FileWriterExecutor(BaseExecutor):
                 f.write(content)
 
             self.logger.info(f"[{self.uid}] File {'appended' if append else 'written'}: {file_path}")
-            
+
             return json.dumps({
                 "status": "success",
                 "file_path": file_path,

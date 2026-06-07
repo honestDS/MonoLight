@@ -1,7 +1,11 @@
 import json
+
 from firecrawl import FirecrawlApp
-from .base import BaseExecutor
+
 from app.core.utils.system import get_full_system_context
+
+from .base import BaseExecutor
+
 
 class FirecrawlScrapeExecutor(BaseExecutor):
     def __init__(self, project_root: str, uid: str = "default"):
@@ -18,7 +22,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
     async def execute(self, url: str, formats: list = ["markdown"], **kwargs) -> str:
         """
         使用 Firecrawl 解析网页。
-        
+
         :param url: 目标网页 URL
         :param formats: 返回格式列表，可选 "markdown", "html", "raw_html", "screenshot", "links" 等
         :param kwargs: 其他高级抓取选项，如 mobile, wait_for, only_main_content 等
@@ -27,7 +31,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
 
         # 显式检查 API Key
         api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
-        
+
         if not api_key:
             return json.dumps({
                 "error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。",
@@ -36,10 +40,10 @@ class FirecrawlScrapeExecutor(BaseExecutor):
 
         try:
             self.logger.info(f"[{self.uid}] Firecrawl scraping: {url} (formats={formats}, options={kwargs})")
-            
-            # Firecrawl SDK v2.x 
+
+            # Firecrawl SDK v2.x
             doc = self.app.scrape_url(url, formats=formats, **kwargs)
-            
+
             # SDK 返回的是 Pydantic 模型 (Document)，需要转换为字典才能 JSON 序列化
             doc_dict = doc.model_dump() if hasattr(doc, "model_dump") else doc
 
@@ -55,7 +59,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             error_msg = str(e)
             if "401" in error_msg or "Unauthorized" in error_msg:
                 error_msg = "Firecrawl API Key 认证失败或已失效。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 检查并更新您的 API Key。"
-            
+
             return json.dumps({
                 "error": error_msg,
                 "system_info": system_info

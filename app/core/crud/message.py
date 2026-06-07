@@ -51,7 +51,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             select(Message)
             .where(Message.session_id == session_id)
             .where(Message.uid == uid)
-            .where(Message.is_processed == False)
+            .where(not Message.is_processed)
             .order_by(Message.created_at.asc())
         )
         return result.scalars().all()
