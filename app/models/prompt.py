@@ -15,7 +15,7 @@ from sqlmodel import (
     SQLModel,
 )
 
-from app.core.utils.dt import get_local_time
+from app.core.utils.time import get_local_time
 
 if TYPE_CHECKING:
     from app.models.profile import Profile

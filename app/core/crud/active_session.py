@@ -35,7 +35,7 @@ class CRUDActiveSession(CRUDBase[ActiveSession, ActiveSession, ActiveSession]):
         """
         from datetime import timedelta
 
-        from app.core.utils.dt import get_local_time
+        from app.core.utils.time import get_local_time
 
         deadline = get_local_time() - timedelta(seconds=timeout_seconds)
         stmt = delete(ActiveSession).where(ActiveSession.created_at < deadline)

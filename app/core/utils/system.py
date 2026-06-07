@@ -2,7 +2,7 @@ import platform
 
 import psutil
 
-from app.core.utils.dt import get_local_time
+from app.core.utils.time import get_local_time
 
 
 def get_system_info() -> str:

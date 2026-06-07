@@ -68,8 +68,15 @@ class AuditMiddleware:
         return None, text
 
     @staticmethod
-    def verify_token(command: str, session_id: str = None, uid: str = None) -> tuple[bool, str]:
-        """验证单条指令的 Token（主要用于 shell 命令）"""
+    def verify_token(command: str, session_id: str = None, uid: str = None) -> tuple[bool | None, str]:
+        """
+        验证指令的 Token。
+        返回: (是否通过, 原始内容)
+        其中 bool | None:
+          - True: Token 存在且匹配
+          - False: Token 存在但不匹配
+          - None: Token 不存在
+        """
         token, real_cmd = AuditMiddleware._extract_token(command)
         if token:
             expected_token = hashlib.sha256(real_cmd.strip().encode()).hexdigest()[:12]
@@ -82,7 +89,8 @@ class AuditMiddleware:
                 logger.bind(uid=uid, session_id=session_id, security=True).warning(
                     f"Token mismatch! Expected: {expected_token}, Got: {token}"
                 )
-        return False, command
+                return False, real_cmd
+        return None, command
 
     @staticmethod
     async def audit(
@@ -98,7 +106,7 @@ class AuditMiddleware:
         if tool_name not in ["execute_shell", "write_file"]:
             return None
 
-        is_any_verified = False
+        is_any_verified = None
         command = ""
 
         # 提取 execute_shell 的内容并检查验证状态
@@ -111,31 +119,47 @@ class AuditMiddleware:
             path_arg = str(args.get("file_path", ""))
             content_arg = str(args.get("content", ""))
 
-            # 提取可能存在的 Token，但此处不直接校验参数本身的哈希
+            # 提取可能存在的 Token
             token_p, clean_path = AuditMiddleware._extract_token(path_arg)
             token_c, clean_content = AuditMiddleware._extract_token(content_arg)
 
-            # 合成审计指令字符串
+            # 合成审计指令字符串 (基于清理后的内容)
             command = f"Write to {clean_path}: {clean_content}"
-            # 计算合成指令应有的预期 Token
-            expected_token = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
 
-            # 只要参数中提供的 Token 匹配合成指令的哈希，即视为验证通过
-            if (token_p == expected_token) or (token_c == expected_token):
-                logger.bind(uid=uid, session_id=session_id, security=True).info(
-                    f"Dynamic token verification passed for write_file: {clean_path}"
-                )
-                is_any_verified = True
-            elif token_p or token_c:
-                logger.bind(uid=uid, session_id=session_id, security=True).warning(
-                    f"Token mismatch for write_file! Expected: {expected_token}, Got: {token_p or token_c}"
-                )
+            # 使用统一的 verify_token 逻辑，但由于是合成指令，我们需要手动调用校验
+            # 注意：此处传入的是合成后的 command，而 Token 是从原参数中提取的
+            expected_token = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
+            provided_token = token_p or token_c
+
+            if provided_token:
+                if provided_token == expected_token:
+                    logger.bind(uid=uid, session_id=session_id, security=True).info(
+                        f"Dynamic token verification passed for write_file: {clean_path}"
+                    )
+                    is_any_verified = True
+                else:
+                    logger.bind(uid=uid, session_id=session_id, security=True).warning(
+                        f"Token mismatch for write_file! Expected: {expected_token}, Got: {provided_token}"
+                    )
+                    is_any_verified = False
+            else:
+                is_any_verified = None
 
         if not command:
             return None
 
-        if is_any_verified:
+        # 处理验证结果
+        if is_any_verified is True:
             return None
+
+        if is_any_verified is False:
+            return json.dumps(
+                {
+                    "error": "token_mismatch",
+                    "reason": f"Verification token mismatch. This usually happens if the command content was modified after the token was generated. Please use the EXACT command or request a new token. Expected token based on current content: {hashlib.sha256(command.strip().encode()).hexdigest()[:12]}",
+                },
+                ensure_ascii=False,
+            )
 
         if cfg.security.audit_threshold == 0:
             return None

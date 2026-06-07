@@ -32,7 +32,7 @@ from app.schemas.response import StandardResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.core.utils.dt import get_local_time
+    from app.core.utils.time import get_local_time
     from app.providers.init_db import init_system_data
 
     async with AsyncSessionLocal() as session:
