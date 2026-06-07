@@ -207,30 +207,54 @@ export function useChatSession() {
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newSessionId, text)
       },
-      onComplete: (data, thinkingIdParam, requestIdParam) => {
+      onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
+        // 如果是基于 response_id 变更（新轮次结束）触发的精准替换
+        if (eventType === 'turn_end' && data.response_id && data.content) {
+          const newMessages = [...chatState.messages.value]
+          const targetIdx = newMessages.findIndex(m => m.response_id === data.response_id && m.role === 'assistant')
+          if (targetIdx !== -1) {
+            newMessages[targetIdx] = { ...newMessages[targetIdx], content: data.content }
+            chatState.messages.value = newMessages
+          }
+          return // turn_end 时不需要执行 done 的历史比对和占位符清理
+        }
+
+        // 以下是原先在 type === 'done' (完全结束) 时的逻辑
         // 精确清理对应的 thinking 占位符
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
         
-        // 尝试从 history 中提取最后一条消息覆盖当前流式消息，以显示后端清洗后的格式（如剥离 Markdown）
+        // （如果还需要兜底的历史匹配的话，由于平时都已经靠 turn_end 精确匹配过了，这里只需要针对没有覆盖到的兜一下）
         if (data && data.history && data.history.length > 0) {
-          const lastHistoryMsg = data.history[data.history.length - 1]
-          if (lastHistoryMsg && lastHistoryMsg.role === 'assistant' && lastHistoryMsg.content) {
-             // 强制更新引用，确保视图响应
-             const newMessages = [...chatState.messages.value]
-             const targetIdx = newMessages.findIndex(m => m.role === 'assistant' && !m.tool_calls && m.request_id === requestIdParam)
-             
-             if (targetIdx !== -1) {
-               newMessages[targetIdx] = { ...newMessages[targetIdx], content: lastHistoryMsg.content }
-               chatState.messages.value = newMessages
-             } else {
-                // 如果没有带有 request_id 的普通内容消息，则找最后一个 assistant
-                const lastIdx = newMessages.map(m => m.role).lastIndexOf('assistant')
-                if (lastIdx !== -1 && !newMessages[lastIdx].tool_calls) {
-                  newMessages[lastIdx] = { ...newMessages[lastIdx], content: lastHistoryMsg.content }
-                  chatState.messages.value = newMessages
-                }
-             }
+          const newMessages = [...chatState.messages.value]
+          
+          const historyAssistants = data.history.filter(m => m.role === 'assistant' && (!m.tool_calls || m.tool_calls.length === 0) && m.content)
+          const frontAssistants = []
+          newMessages.forEach((m, idx) => {
+            if (m.role === 'assistant' && (!m.tool_calls || m.tool_calls.length === 0)) {
+              frontAssistants.push({ msg: m, idx })
+            }
+          })
+
+          let historyIdx = historyAssistants.length - 1
+          for (let i = frontAssistants.length - 1; i >= 0 && historyIdx >= 0; i--) {
+            const frontMsg = frontAssistants[i].msg
+            const histMsg = historyAssistants[historyIdx]
+
+            const checkLength = Math.min(20, frontMsg.content?.length || 0, histMsg.content?.length || 0)
+            if (checkLength > 5 && frontMsg.content.substring(0, checkLength) === histMsg.content.substring(0, checkLength)) {
+              if (frontMsg.content !== histMsg.content) {
+                newMessages[frontAssistants[i].idx] = { ...frontMsg, content: histMsg.content }
+              }
+              historyIdx--
+            } else if (!frontMsg.content || frontMsg.content.length <= 5) {
+               newMessages[frontAssistants[i].idx] = { ...frontMsg, content: histMsg.content }
+               historyIdx--
+            } else {
+               historyIdx--
+               i++ 
+            }
           }
+          chatState.messages.value = newMessages
         }
       },
       scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
@@ -350,6 +374,7 @@ export function useChatSession() {
     
     // 方法 - 发送
     send,
+    abortSend: transport.wsSendAbort,
     httpSend,
     wsSend,
     initWebSocket: transport.initWebSocket,

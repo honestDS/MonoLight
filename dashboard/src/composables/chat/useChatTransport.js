@@ -70,6 +70,18 @@ export function useChatTransport() {
       }
       return
     }
+    
+    // 1.5 处理每一轮结束（覆盖最终清洗后的文本，清理占位符）
+    if (type === 'turn_end') {
+      if (onComplete) {
+        // 调用我们刚才设计的基于 response_id 的覆盖逻辑（我们将不再传递 type=done 时的整个 history 逻辑过去）
+        onComplete(data, thinkingId, requestId, 'turn_end')
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
 
     // 2. 处理工具调用开始
     if (type === 'tool_start') {
@@ -184,6 +196,12 @@ export function useChatTransport() {
       stream: false
     })
     return res.data
+  }
+
+  const wsSendAbort = () => {
+    if (wsManager.isConnected.value) {
+      wsManager.sendMessage({ action: 'abort' })
+    }
   }
 
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {

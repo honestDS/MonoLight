@@ -321,7 +321,16 @@ class ChatDispatcher:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
+                        saved_msg = await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
+
+                        # 向前端推送当前轮次结束以及清洗后的最终内容，供前端通过 response_id 覆盖
+                        if saved_msg:
+                            yield {
+                                "type": "turn_end",
+                                "response_id": response_id,
+                                "content": saved_msg.content,
+                                "request_id": request_id,
+                            }
 
                         if not ai_msg.tool_calls:
                             new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)

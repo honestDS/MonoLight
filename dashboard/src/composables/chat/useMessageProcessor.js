@@ -49,9 +49,10 @@ export function useMessageProcessor() {
     }
 
     if (thinkingIdx !== -1) {
+      const originalThinkingMsg = messagesRef.value[thinkingIdx]
       // 转换：Thinking -> Assistant 并绑定 responseId 和 requestId
       messagesRef.value[thinkingIdx] = {
-        id: thinkingId || Date.now(),
+        id: originalThinkingMsg.id, // 必须使用它自己的 id，防止与前一轮响应发生重复 key 冲突导致渲染失效
         role: 'assistant',
         content: text,
         turn: turn,
@@ -141,6 +142,8 @@ export function useMessageProcessor() {
     }
 
     if (thinkingIdx !== -1) {
+      const originalThinkingMsg = messagesRef.value[thinkingIdx]
+      newMsg.id = originalThinkingMsg.id // 保持 id 一致防止重复 key
       messagesRef.value[thinkingIdx] = newMsg
       return
     }

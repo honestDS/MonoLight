@@ -214,15 +214,29 @@
                 class="chat-input"
                 :resize="'none'"
               />
-            </div>
 
-            <el-button 
-              type="primary" 
-              @click="send" 
-              :disabled="!inputMsg.trim() && attachments.length === 0"
-            >
-              发送
-            </el-button>
+              <div class="action-btn-container">
+                <el-button 
+                  v-if="!loading"
+                  type="primary" 
+                  @click="send" 
+                  :disabled="!inputMsg.trim() && attachments.length === 0"
+                  class="action-btn"                  
+                  circle
+                >
+                  <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
+                </el-button>
+                <el-button
+                  v-else
+                  type="danger"
+                  @click="abortSend"
+                  class="action-btn"
+                  circle
+                >
+                  <el-icon><VideoPause /></el-icon>
+                </el-button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -354,6 +368,7 @@ const {
   selectSession,
   createNewSession,
   send: originalSend,
+  abortSend,
   setTransportMode,
   disconnectWebSocket,
   formatTimestamp,

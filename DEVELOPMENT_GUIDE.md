@@ -13,13 +13,14 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
 ## 三、 代码风格与检查 (RUFF)
 本项目强制使用 **Ruff** 作为静态代码检查与格式化工具。
 1. 禁止使用未使用的导入。
-2. 单行长度限制为 **120** 字符。
+2. 单行长度限制为 **320** 字符。
 3. 必须在文件头部保留清晰的导入层级：标准库 -> 第三方库 -> 项目内模块。
 4. 提交代码前，必须执行：
    ```bash
    ruff check . --fix
    ruff format .
    ```
+5. ruff时禁止使用 --unsafe-fixes 选项。
 
 ## 四、 核心模型与协议
 1. **标准消息对象**：所有模块间的消息传递必须使用 `app.schemas.message` 中的 `InternalMessage`。

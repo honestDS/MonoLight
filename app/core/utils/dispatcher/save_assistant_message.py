@@ -26,7 +26,7 @@ async def save_assistant_message(
     # 清洗 Markdown 标记
     ai_msg = process_markdown_response(ai_msg, enable_markdown)
 
-    await save_message(
+    saved_msg = await save_message(
         db,
         session_id,
         uid,
@@ -36,3 +36,4 @@ async def save_assistant_message(
         profile_id,
         is_processed=True,
     )
+    return saved_msg

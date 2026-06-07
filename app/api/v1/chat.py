@@ -15,7 +15,6 @@ from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
-from app.core.dispatcher import ChatDispatcher
 from app.core.log import (
     get_logger,
 )
@@ -25,7 +24,6 @@ from app.models.message import (
     ChatCompletionRequest,
     MessageResponse,
     MessageRole,
-    MessageType,
 )
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal, get_db
@@ -245,6 +243,14 @@ async def chat_websocket(
             attachments = data.get("attachments")
             request_id = data.get("request_id")
 
+            action = data.get("action")
+
+            if action == "abort":
+                if active_task and not active_task.done():
+                    active_task.cancel()
+                    logger.bind(uid=uid, session_id=session_id).info("接收到中止信号，生成任务已取消")
+                continue
+
             if not message and not attachments:
                 await websocket.send_json({"error": "Message or attachments is required"})
                 continue
@@ -265,16 +271,18 @@ async def chat_websocket(
 
             # 如果当前已有任务在运行，新消息仅需保存到数据库
             if active_task and not active_task.done():
-                from app.models.message import InternalMessage
+                from app.core.utils.dispatcher.save_initial_message import save_initial_message
 
                 async with AsyncSessionLocal() as db:
                     profile = await profile_crud.get_active(db)
-                    initial_msg_obj = InternalMessage(
-                        role=MessageRole.USER,
-                        content=message,
-                        attachments=attachments,
+                    await save_initial_message(
+                        db,
+                        session_id,
+                        uid,
+                        profile,
+                        message,
+                        attachments,
                     )
-                    await ChatDispatcher._save_message(db, session_id, uid, MessageRole.USER, MessageType.TEXT, initial_msg_obj, profile.id if profile else -1, is_processed=False)
                 logger.bind(uid=uid, session_id=session_id).info(f"会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。")
             else:
                 # 否则启动新的调度任务

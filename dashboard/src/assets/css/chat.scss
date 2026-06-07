@@ -458,20 +458,37 @@
               border: none !important;
               box-shadow: none !important;
               background: transparent;
+              padding-right: 50px;
               
               &:focus {
                 box-shadow: none !important;
               }
             }
           }
+
+          .action-btn-container {
+            position: absolute;
+            right: 8px;
+            bottom: 8px;
+
+            .action-btn {
+              width: 32px !important;
+              height: 32px !important;
+              min-width: 32px !important;
+              padding: 0 !important;
+              margin: 0;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 50% !important;
+              
+              .el-icon {
+                font-size: 16px;
+              }
+            }
+          }
         }
 
-        .el-button {
-          flex-shrink: 0;
-          min-width: 80px;
-          height: 48px;
-          margin-bottom: 4px;
-        }
       }
     }
   }
