@@ -36,3 +36,8 @@ def delete_collection_items(collection_name: str, ids: list[str]):
         return
     collection = get_collection(collection_name)
     collection.delete(ids=ids)
+
+
+def get_collection_items(collection_name: str, include: list[str] | None = None):
+    collection = get_collection(collection_name)
+    return collection.get(include=include or ["documents", "metadatas"])

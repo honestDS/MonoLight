@@ -15,6 +15,7 @@ from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
+from app.core.crud.provider import provider_crud
 from app.core.log import (
     get_logger,
 )
@@ -26,6 +27,7 @@ from app.models.message import (
     MessageRole,
 )
 from app.models.profile import ProfileConfig
+from app.models.provider import ModelUsage
 from app.providers.database import AsyncSessionLocal, get_db
 from app.schemas.response import (
     LLMChoice,
@@ -149,19 +151,28 @@ async def generate_title(
 ):
     uid = getattr(current_user, "uid", None)
     profile = await profile_crud.get_active(db)
-    if not profile or not profile.provider:
+    if not profile:
         return StandardResponse.error(message="未配置有效的模型提供商")
 
     cfg = ProfileConfig.model_validate(profile.configs)
+    provider_id = cfg.provider.provider_id
+    if not provider_id or provider_id <= 0:
+        return StandardResponse.error(message="未配置有效的模型提供商")
+
+    provider = await provider_crud.get(db, provider_id)
+    if not provider:
+        return StandardResponse.error(message="未配置有效的模型提供商")
+    if provider.usage == ModelUsage.EMBEDDING:
+        return StandardResponse.error(message="当前模型提供商仅支持向量化，无法生成会话标题")
 
     title = await generate_session_title(
         uid=uid,
         session_id=request.session_id,
         first_message=request.first_message,
-        api_key=profile.provider.api_key,
-        base_url=profile.provider.base_url,
+        api_key=provider.api_key,
+        base_url=provider.base_url,
         model_id=cfg.provider.model_id,
-        protocol=getattr(profile.provider, "protocol", "openai"),
+        protocol=getattr(provider, "protocol", "openai"),
         max_tokens=cfg.provider.max_tokens,
     )
 

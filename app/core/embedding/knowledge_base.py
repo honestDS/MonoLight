@@ -6,10 +6,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.crud.provider import provider_crud
 from app.core.exceptions import LLMException
-from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseQueryTestItem, KnowledgeBaseQueryTestResponse
+from app.core.retrieval.hybrid import hybrid_query_knowledge_base
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
 from app.models.provider import ModelUsage
-from app.providers.vector_db import get_collection
 from app.transformers.openai import OpenAITransformer
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
@@ -100,30 +100,9 @@ async def query_knowledge_base(
         raise HTTPException(status_code=403, detail="无权查询不属于当前配置的知识库")
 
     query_embedding = (await embed_chunks(db, profile, [query], 1))[0]
-
-    try:
-        collection = get_collection(kb.collection_name)
-        result = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"知识库检索失败: {str(e)}")
-
-    ids = result.get("ids", [[]])[0] if result.get("ids") else []
-    documents = result.get("documents", [[]])[0] if result.get("documents") else []
-    metadatas = result.get("metadatas", [[]])[0] if result.get("metadatas") else []
-    distances = result.get("distances", [[]])[0] if result.get("distances") else []
-    items = []
-    for index, item_id in enumerate(ids):
-        items.append(
-            KnowledgeBaseQueryTestItem(
-                id=item_id,
-                content=documents[index] if index < len(documents) else "",
-                metadata=metadatas[index] if index < len(metadatas) and metadatas[index] else {},
-                distance=distances[index] if index < len(distances) else None,
-            )
-        )
-
-    return KnowledgeBaseQueryTestResponse(items=items)
+    return await hybrid_query_knowledge_base(
+        collection_name=kb.collection_name,
+        query_embedding=query_embedding,
+        query=query,
+        top_k=top_k,
+    )

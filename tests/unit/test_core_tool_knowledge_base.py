@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -16,6 +17,11 @@ from app.core.utils.dispatcher.inject_system_prompt import inject_system_prompt
 from app.models.knowledge_base import KnowledgeBase
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile
+
+
+class FakeKnowledgeBaseQueryResponse:
+    def __init__(self, items):
+        self.items = items
 
 
 @pytest.mark.asyncio
@@ -160,3 +166,36 @@ async def test_knowledge_base_query_executor(db_session: AsyncSession):
     data_invalid_id = json.loads(res_invalid_id)
     assert "error" in data_invalid_id
     assert "Invalid knowledge_base_id" in data_invalid_id["error"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_query_executor_returns_only_source_and_content(monkeypatch, db_session: AsyncSession):
+    async def fake_query_knowledge_base(**kwargs):
+        return FakeKnowledgeBaseQueryResponse(
+            [
+                SimpleNamespace(
+                    content="命中文本片段",
+                    metadata={
+                        "filename": "source.md",
+                        "dense_rank": 1,
+                        "sparse_rank": 1,
+                        "fusion_score": 0.1,
+                    },
+                )
+            ]
+        )
+
+    monkeypatch.setattr("app.core.tools.knowledge_base_query.query_knowledge_base", fake_query_knowledge_base)
+
+    executor = KnowledgeBaseQueryExecutor(project_root=".")
+    executor.set_runtime_context(
+        db=db_session,
+        profile=Profile(name="test", configs={}),
+        allowed_knowledge_base_ids=[1],
+    )
+
+    res = await executor.execute(knowledge_base_id="1", query="test")
+    data = json.loads(res)
+
+    assert set(data.keys()) == {"items"}
+    assert data["items"] == [{"source": "source.md", "content": "命中文本片段"}]

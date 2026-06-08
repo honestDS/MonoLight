@@ -22,3 +22,5 @@ pytest-asyncio
 httpx
 psutil
 chromadb
+rank-bm25
+jieba

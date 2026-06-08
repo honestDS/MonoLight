@@ -49,14 +49,13 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
             # 组装返回格式
             items = []
             for item in response_data.items:
+                metadata = item.metadata or {}
                 items.append(
                     {
-                        "id": item.id,
+                        "source": metadata.get("filename") or "未知来源",
                         "content": item.content,
-                        "distance": item.distance,
-                        "metadata": item.metadata,
                     }
                 )
-            return json.dumps({"knowledge_base_id": kb_id, "query": query, "top_k": KNOWLEDGE_BASE_QUERY_TOP_K, "items": items}, ensure_ascii=False)
+            return json.dumps({"items": items}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": f"Failed to query knowledge base: {str(e)}"}, ensure_ascii=False)
