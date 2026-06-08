@@ -145,7 +145,7 @@ async def update_profile(
         if provider_id and provider_id > 0:
             if not await provider_crud.get(db, provider_id):
                 raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
-        
+
         embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
         if embedding_provider_id and embedding_provider_id > 0:
             if not await provider_crud.get(db, embedding_provider_id):

@@ -24,7 +24,6 @@ from app.core.utils.config import standardize_config
 
 if TYPE_CHECKING:
     from app.models.prompt import PromptLibrary
-    from app.models.provider import ModelProvider
 
 
 class ProviderConfig(BaseModel):

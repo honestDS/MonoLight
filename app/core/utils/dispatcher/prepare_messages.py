@@ -51,4 +51,4 @@ async def prepare_messages(
             is_history = idx != len(messages) - 1
             messages[idx] = MessageAssembler.assemble(m, cfg.provider.multimodal, is_history)
 
-    return inject_system_prompt(profile, messages)
+    return await inject_system_prompt(db, profile, messages)

@@ -3,7 +3,6 @@ from chromadb.config import Settings
 
 from app.core.paths import CHROMA_DB_PATH, ensure_data_dirs
 
-
 ensure_data_dirs()
 
 chroma_client = chromadb.PersistentClient(

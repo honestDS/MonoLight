@@ -1,7 +1,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 from sqlmodel import SQLModel
+
 import app.models  # 导入所有模型以注册 metadata
 from app.providers.database import engine
 from main import app

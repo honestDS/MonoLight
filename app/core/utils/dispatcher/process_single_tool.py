@@ -35,6 +35,7 @@ async def process_single_tool(
     session_id: str,
     turn: int,
     uid: str,
+    allowed_knowledge_base_ids: list[int] | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = tool_call.arguments
@@ -62,6 +63,15 @@ async def process_single_tool(
             # 传递配置给 Executor
             if hasattr(instance, "set_config"):
                 instance.set_config(cfg)
+
+            # 传递运行时上下文给 Executor
+            if hasattr(instance, "set_runtime_context"):
+                instance.set_runtime_context(
+                    db=db,
+                    profile=profile,
+                    session_id=session_id,
+                    allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                )
 
             cmd_result = await instance.execute(**args)
         else:

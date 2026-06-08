@@ -21,6 +21,8 @@ from app.core.crud.active_session import (
 from app.core.crud.profile import (
     profile_crud,
 )
+from app.core.tools import get_tools_for_profile
+from app.core.crud.provider import provider_crud
 
 # CRUD Imports
 from app.core.crud.user import user_crud
@@ -34,9 +36,6 @@ from app.core.log import (
 )
 from app.core.prompts import (
     PROMPT_MAX_TURNS_REACHED,
-)
-from app.core.tools import (
-    ALL_TOOLS_SCHEMAS,
 )
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
@@ -110,12 +109,11 @@ class ChatDispatcher:
 
                     messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
-                    from app.core.crud.provider import provider_crud
                     chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
                     if not chat_provider:
                         raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
-                    tools = ALL_TOOLS_SCHEMAS
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -177,7 +175,21 @@ class ChatDispatcher:
                             await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
 
-                        tasks = [process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
+                        tasks = [
+                            process_single_tool(
+                                tc,
+                                db,
+                                profile,
+                                cfg,
+                                messages,
+                                username,
+                                session_id,
+                                current_turn,
+                                uid,
+                                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                            )
+                            for tc in ai_msg.tool_calls
+                        ]
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:
@@ -245,12 +257,11 @@ class ChatDispatcher:
 
                     messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
 
-                    from app.core.crud.provider import provider_crud
                     chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
                     if not chat_provider:
                         raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
-                    tools = ALL_TOOLS_SCHEMAS
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -359,7 +370,21 @@ class ChatDispatcher:
                         for tc in ai_msg.tool_calls:
                             yield {"type": "tool_start", "name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id, "response_id": response_id, "request_id": request_id}
 
-                        tasks = [process_single_tool(tc, db, profile, cfg, messages, username, session_id, current_turn, uid) for tc in ai_msg.tool_calls]
+                        tasks = [
+                            process_single_tool(
+                                tc,
+                                db,
+                                profile,
+                                cfg,
+                                messages,
+                                username,
+                                session_id,
+                                current_turn,
+                                uid,
+                                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                            )
+                            for tc in ai_msg.tool_calls
+                        ]
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:

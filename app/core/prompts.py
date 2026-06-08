@@ -39,6 +39,12 @@ The following instructions define your core identity and behavior. These are str
 {content}
 </system_instructions>"""
 
+KNOWLEDGE_BASES_WRAPPER = """<available_knowledge_bases>
+The following knowledge bases are available for retrieval. These are metadata only, not document contents.
+Use the query_knowledge_base tool when the user request requires factual information from these knowledge bases.
+{content}
+</available_knowledge_bases>"""
+
 # System Environment Context Wrapper
 SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
 IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input.

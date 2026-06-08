@@ -1,4 +1,13 @@
+import json
+
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.embedding.knowledge_base import (
+    build_knowledge_base_prompt_items,
+    list_available_knowledge_bases,
+)
 from app.core.prompts import (
+    KNOWLEDGE_BASES_WRAPPER,
     SYSTEM_CONTEXT_WRAPPER,
     SYSTEM_INSTRUCTIONS_WRAPPER,
 )
@@ -10,15 +19,21 @@ from app.models.message import (
 from app.models.profile import (
     Profile,
 )
+from app.core.log import (
+    get_logger,
+)
+logger = get_logger(__name__)
 
 
-def inject_system_prompt(
+async def inject_system_prompt(
+    db: AsyncSession,
     profile: Profile,
     messages: list[InternalMessage],
 ) -> list[InternalMessage]:
     """
     注入系统提示词。无论是否关联 Profile Prompt，环境上下文都会注入。
     通过结构化标签隔离系统信息与环境上下文。
+    若 Profile 有可用知识库，在尾部注入结构化知识库目录。
     """
     system_context = get_full_system_context()
 
@@ -31,6 +46,19 @@ def inject_system_prompt(
     if profile.prompt and profile.prompt.content:
         instruction_part = SYSTEM_INSTRUCTIONS_WRAPPER.format(content=profile.prompt.content)
         full_parts.append(instruction_part)
+
+    # 2. 查询该 Profile 关联的可用知识库并注入
+    try:
+        kbs = await list_available_knowledge_bases(db, profile)
+        if kbs:
+            kb_items = build_knowledge_base_prompt_items(kbs)
+            # 序列化为美化后的 JSON
+            kb_json_str = json.dumps(kb_items, ensure_ascii=False, indent=2)
+            kb_part = KNOWLEDGE_BASES_WRAPPER.format(content=kb_json_str)
+            full_parts.append(kb_part)
+    except Exception:
+        # 即使查询知识库失败，也不影响正常对话
+        pass
 
     # 合并所有系统提示部分
     full_prompt = "\n\n".join(full_parts)
@@ -45,5 +73,4 @@ def inject_system_prompt(
         ),
     )
 
-    # todo...此处应该将知识库信息追加到系统提示词的尾部
     return messages

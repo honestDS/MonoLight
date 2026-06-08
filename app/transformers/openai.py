@@ -1,5 +1,4 @@
 import json
-import logging
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
@@ -9,6 +8,7 @@ import aiohttp
 
 from app.core import constants
 from app.core.exceptions import LLMException
+from app.core.log import get_logger
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -17,7 +17,7 @@ from app.models.message import (
 
 from .base import BaseTransformer
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class OpenAITransformer(BaseTransformer):
@@ -59,7 +59,7 @@ class OpenAITransformer(BaseTransformer):
                         raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
                     return json.loads(txt)
         except Exception as e:
-            logger.error(f"OpenAI Driver Error: {str(e)}")
+            logger.bind(model_id=model_id, base_url=base_url, stream=False).error(f"OpenAI 对话接口调用失败: {str(e)}")
             raise LLMException(str(e))
 
     async def generate_stream(
@@ -116,9 +116,9 @@ class OpenAITransformer(BaseTransformer):
                                 try:
                                     yield json.loads(data_content)
                                 except Exception as json_err:
-                                    logger.warning(f"Failed to parse SSE line: {raw_line}, error: {json_err}")
+                                    logger.bind(model_id=model_id, base_url=base_url).warning(f"解析 SSE 响应行失败: {raw_line}，错误: {json_err}")
         except Exception as e:
-            logger.error(f"OpenAI Stream Driver Error: {str(e)}")
+            logger.bind(model_id=model_id, base_url=base_url, stream=True).error(f"OpenAI 流式对话接口调用失败: {str(e)}")
             raise LLMException(str(e))
 
     async def get_embeddings(
@@ -127,6 +127,7 @@ class OpenAITransformer(BaseTransformer):
         base_url: str,
         model_id: str,
         input_texts: str | list[str],
+        suppress_error_log: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         headers = {
@@ -154,7 +155,10 @@ class OpenAITransformer(BaseTransformer):
                         raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
                     return json.loads(txt)
         except Exception as e:
-            logger.error(f"OpenAI Embeddings Driver Error: {str(e)}")
+            if suppress_error_log:
+                logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(f"向量模型接口携带可选参数调用失败，准备降级重试: {str(e)}")
+            else:
+                logger.bind(model_id=model_id, base_url=base_url).error(f"向量模型接口调用失败: {str(e)}")
             raise LLMException(str(e))
 
     @staticmethod
@@ -215,6 +219,7 @@ class OpenAITransformer(BaseTransformer):
                     base_url=base_url,
                     model_id=model_id,
                     input_texts=input_texts,
+                    suppress_error_log=dimensions_supported is None,
                     dimensions=dimensions,
                 )
                 return {"response": response, "dimensions_supported": True}
@@ -292,7 +297,7 @@ class OpenAITransformer(BaseTransformer):
                         )
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to parse tool call arguments: {tc}, error: {e}")
+                    logger.bind(tool_call=tc).warning(f"解析工具调用参数失败: {e}")
 
         return InternalMessage(
             role=MessageRole.ASSISTANT,

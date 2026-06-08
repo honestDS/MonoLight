@@ -6,8 +6,13 @@ from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.crud.provider import provider_crud
-from app.core.exceptions import LLMException
+# Re-use the refactored embedding and knowledge base query core functions
+from app.core.embedding.knowledge_base import (
+    embed_chunks,
+    get_profile_embedding_config,
+    is_embedding_profile_available,
+    query_knowledge_base,
+)
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
 from app.models.knowledge_base import (
@@ -19,65 +24,17 @@ from app.models.knowledge_base import (
     KnowledgeBaseDocumentResponse,
     KnowledgeBaseListResponse,
     KnowledgeBaseProfileOption,
-    KnowledgeBaseQueryTestItem,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
 )
 from app.models.profile import Profile
-from app.models.provider import ModelUsage
 from app.providers.database import get_db
-from app.providers.vector_db import create_collection, delete_collection, delete_collection_items, get_collection, get_or_create_collection
+from app.providers.vector_db import create_collection, delete_collection, delete_collection_items, get_or_create_collection
 from app.schemas.response import StandardResponse
-from app.transformers.openai import OpenAITransformer
 
 router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"])
-
-
-async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tuple[str, str, str, int | None]:
-    provider_config = (profile.configs or {}).get("provider", {})
-    embedding_provider_id = provider_config.get("embedding_provider_id")
-    embedding_model_id = provider_config.get("embedding_model_id")
-    embedding_dimensions = provider_config.get("embedding_dimensions")
-
-    if not embedding_provider_id or embedding_provider_id <= 0:
-        raise HTTPException(status_code=400, detail="该知识库绑定的配置文件未设置向量模型提供商")
-    if not embedding_model_id:
-        raise HTTPException(status_code=400, detail="该知识库绑定的配置文件未设置向量模型ID")
-
-    provider = await provider_crud.get(db, embedding_provider_id)
-    if not provider:
-        raise HTTPException(status_code=404, detail="配置文件绑定的向量模型提供商不存在")
-    if provider.usage != ModelUsage.EMBEDDING:
-        raise HTTPException(status_code=400, detail="配置文件绑定的提供商不是向量模型类型")
-    if not provider.base_url:
-        raise HTTPException(status_code=400, detail="向量模型提供商未配置 Base URL")
-    return provider.api_key, provider.base_url, embedding_model_id, embedding_dimensions
-
-
-async def is_embedding_profile_available(db: AsyncSession, profile: Profile) -> bool:
-    try:
-        await get_profile_embedding_config(db, profile)
-        return True
-    except HTTPException:
-        return False
-
-
-async def embed_chunks(db: AsyncSession, profile: Profile, texts: list[str], batch_size: int) -> list[list[float]]:
-    api_key, base_url, model_id, dimensions = await get_profile_embedding_config(db, profile)
-    transformer = OpenAITransformer()
-    try:
-        return await transformer.embed_texts(
-            api_key=api_key,
-            base_url=base_url,
-            model_id=model_id,
-            input_texts=texts,
-            batch_size=batch_size,
-            dimensions=dimensions,
-        )
-    except LLMException as e:
-        raise HTTPException(status_code=502, detail=f"向量模型调用失败: {e.message}")
 
 
 @router.post("/create", response_model=StandardResponse[KnowledgeBaseResponse])
@@ -193,34 +150,8 @@ async def query_test_knowledge_base(
     if not profile:
         raise HTTPException(status_code=404, detail="知识库绑定的配置文件不存在")
 
-    query_embedding = (await embed_chunks(db, profile, [query_in.query], 1))[0]
-
-    try:
-        collection = get_collection(kb.collection_name)
-        result = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=query_in.top_k,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"知识库检索失败: {str(e)}")
-
-    ids = result.get("ids", [[]])[0] if result.get("ids") else []
-    documents = result.get("documents", [[]])[0] if result.get("documents") else []
-    metadatas = result.get("metadatas", [[]])[0] if result.get("metadatas") else []
-    distances = result.get("distances", [[]])[0] if result.get("distances") else []
-    items = []
-    for index, item_id in enumerate(ids):
-        items.append(
-            KnowledgeBaseQueryTestItem(
-                id=item_id,
-                content=documents[index] if index < len(documents) else "",
-                metadata=metadatas[index] if index < len(metadatas) and metadatas[index] else {},
-                distance=distances[index] if index < len(distances) else None,
-            )
-        )
-
-    return StandardResponse.success(data=KnowledgeBaseQueryTestResponse(items=items))
+    response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k)
+    return StandardResponse.success(data=response_data)
 
 
 @router.post("/delete", response_model=StandardResponse[bool])
@@ -340,13 +271,7 @@ async def list_documents(
         raise HTTPException(status_code=404, detail="知识库不存在")
 
     skip = (page - 1) * size
-    result = await db.execute(
-        select(KnowledgeBaseDocument)
-        .where(KnowledgeBaseDocument.knowledge_base_id == kb_id)
-        .order_by(KnowledgeBaseDocument.created_at.desc())
-        .offset(skip)
-        .limit(size)
-    )
+    result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id).order_by(KnowledgeBaseDocument.created_at.desc()).offset(skip).limit(size))
     documents = result.scalars().all()
     total_result = await db.execute(select(func.count()).select_from(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
     total = total_result.scalar() or 0
