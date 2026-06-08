@@ -83,6 +83,62 @@ async def sync_database_schema():
                     except Exception as e:
                         logger.error(f"SCHEMA_SYNC_ERR: Failed to add {column.name} to {table_name}: {e}")
 
+            obsolete_columns = []
+            if table_name == "profile" and "provider_id" in existing_column_names and "provider_id" not in table_obj.columns:
+                obsolete_columns.append("provider_id")
+
+            for obsolete_column in obsolete_columns:
+                if dialect_name == "sqlite" and table_name == "profile" and obsolete_column == "provider_id":
+                    try:
+                        await conn.execute(text("PRAGMA foreign_keys=OFF"))
+                        await conn.execute(text("DROP TABLE IF EXISTS profile_new"))
+                        await conn.execute(
+                            text(
+                                """
+                                CREATE TABLE profile_new (
+                                    name VARCHAR(100) NOT NULL,
+                                    prompt_id INTEGER,
+                                    configs JSON,
+                                    id INTEGER NOT NULL,
+                                    is_active BOOLEAN NOT NULL,
+                                    PRIMARY KEY (id),
+                                    FOREIGN KEY(prompt_id) REFERENCES prompt (id)
+                                )
+                                """
+                            )
+                        )
+                        await conn.execute(
+                            text(
+                                """
+                                INSERT INTO profile_new (name, prompt_id, configs, id, is_active)
+                                SELECT name, prompt_id, configs, id, is_active FROM profile
+                                """
+                            )
+                        )
+                        await conn.execute(text("DROP TABLE profile"))
+                        await conn.execute(text("ALTER TABLE profile_new RENAME TO profile"))
+                        await conn.execute(text("CREATE UNIQUE INDEX ix_profile_name ON profile (name)"))
+                        await conn.execute(text("CREATE INDEX ix_profile_id ON profile (id)"))
+                        await conn.execute(text("PRAGMA foreign_keys=ON"))
+                        await conn.commit()
+                        logger.info(f"SCHEMA_SYNC: Table {table_name} dropped obsolete column {obsolete_column}")
+                    except Exception as e:
+                        await conn.rollback()
+                        logger.error(f"SCHEMA_SYNC_ERR: Failed to rebuild {table_name} without {obsolete_column}: {e}")
+                    continue
+
+                if dialect_name == "mysql":
+                    drop_query = f"ALTER TABLE `{table_name}` DROP COLUMN `{obsolete_column}`"
+                else:
+                    drop_query = f"ALTER TABLE {table_name} DROP COLUMN {obsolete_column}"
+
+                try:
+                    await conn.execute(text(drop_query))
+                    await conn.commit()
+                    logger.info(f"SCHEMA_SYNC: Table {table_name} dropped obsolete column {obsolete_column}")
+                except Exception as e:
+                    logger.error(f"SCHEMA_SYNC_ERR: Failed to drop {obsolete_column} from {table_name}: {e}")
+
 
 def merge_configs(base: dict, target: dict) -> dict:
     for key, value in base.items():

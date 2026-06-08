@@ -5,3 +5,5 @@ from app.models.provider import ModelProvider as ModelProvider
 from app.models.session import ChatSession as ChatSession
 from app.models.system_log import SystemLog as SystemLog
 from app.models.user import User as User
+from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
+from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument

@@ -109,7 +109,7 @@
                   <el-input-number v-model="form.configs.provider.embedding_dimensions" :min="1" :step="1" placeholder="如 1024 (可选)" style="flex: 1;"></el-input-number>
                   <el-button type="primary" @click="handleDetectDimension" :loading="detectingDimension" :disabled="!form.configs.provider.embedding_provider_id || !form.configs.provider.embedding_model_id">自动检测</el-button>
                 </div>
-                <div class="help-text mt-5">部分模型支持动态指定返回向量的维度，留空则使用默认值。可点击“自动检测”发包测试以自动填入该模型的默认维度。</div>
+                <div class="help-text mt-5">部分向量模型支持自定义输出维度。导入文档时会先尝试携带该维度请求；如果模型不支持，会自动回退为默认维度请求。留空则始终使用模型默认维度。</div>
               </el-form-item>
             </div>
           </el-tab-pane>

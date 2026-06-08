@@ -1,6 +1,7 @@
 *.bak
 *.log
 *.db
+*.sqlite3
 
 .pytest_cache/
 .ruff_cache/
@@ -15,3 +16,4 @@ dashboard/node_modules/
 dashboard/package-lock.json
 dashboard/dist/
 参考项目/
+.clinerules/

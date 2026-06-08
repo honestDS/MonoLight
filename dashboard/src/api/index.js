@@ -22,7 +22,9 @@ request.interceptors.response.use(
     const { code, data, message } = res.data;
     if (code !== undefined && code !== 200) {
       // 业务报错，直接抛出，让 catch 块处理
-      return Promise.reject({ response: { data: { message: message || '未知错误' } } });
+      const error = new Error(message || '未知错误');
+      error.response = { data: { message: message || '未知错误', data } };
+      return Promise.reject(error);
     }
     return res;
   },
@@ -123,6 +125,20 @@ export const fileApi = {
   getDownloadUrl: (path) => {
     return `http://127.0.0.1:8001/api/v1/download?path=${encodeURIComponent(path)}`
   }
+}
+
+export const knowledgeBaseApi = {
+  list: (params) => request.get('/knowledge-base/list', { params }),
+  create: (data) => request.post('/knowledge-base/create', data),
+  update: (id, data) => request.post(`/knowledge-base/update?kb_id=${id}`, data),
+  delete: (id) => request.post(`/knowledge-base/delete?kb_id=${id}`),
+  importDocument: (id, formData) => request.post(`/knowledge-base/documents/import?kb_id=${id}`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  }),
+  documents: (id, params) => request.get('/knowledge-base/documents/list', { params: { ...params, kb_id: id } }),
+  document: (id, documentId) => request.get('/knowledge-base/documents/get', { params: { kb_id: id, document_id: documentId } }),
+  deleteDocument: (id, documentId) => request.post(`/knowledge-base/documents/delete?kb_id=${id}&document_id=${documentId}`),
+  queryTest: (id, data) => request.post(`/knowledge-base/query-test?kb_id=${id}`, data)
 }
 
 export default request

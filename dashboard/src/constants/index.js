@@ -10,6 +10,7 @@ export const PAGE_SIZE = 20
 export const routeNameMap = {
   '/': '智能交互',
   '/users': '用户管理',
+  '/knowledge-base': '知识库管理',
   '/profiles': '系统配置',
   '/providers': '系统配置',
   '/prompts': '系统配置',

@@ -7,6 +7,7 @@ const routes = [
   { path: '/prompts', component: () => import('../views/PromptsView.vue') },
   { path: '/providers', component: () => import('../views/ProvidersView.vue') },
   { path: '/users', component: () => import('../views/UsersView.vue') },
+  { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },
   { path: '/logs/history', component: () => import('../views/HistoryLogs.vue') }
 ]

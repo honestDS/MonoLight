@@ -157,6 +157,79 @@ class OpenAITransformer(BaseTransformer):
             logger.error(f"OpenAI Embeddings Driver Error: {str(e)}")
             raise LLMException(str(e))
 
+    @staticmethod
+    def normalize_embedding_base_url(base_url: str) -> str:
+        return base_url.rstrip("/").removesuffix("/embeddings")
+
+    async def embed_texts(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_texts: list[str],
+        batch_size: int = 16,
+        dimensions: int | None = None,
+    ) -> list[list[float]]:
+        if not input_texts:
+            return []
+
+        normalized_base_url = self.normalize_embedding_base_url(base_url)
+        embeddings: list[list[float]] = []
+        dimensions_supported: bool | None = None
+
+        for start in range(0, len(input_texts), batch_size):
+            batch_texts = input_texts[start : start + batch_size]
+            result = await self._get_embedding_batch_with_dimension_fallback(
+                api_key=api_key,
+                base_url=normalized_base_url,
+                model_id=model_id,
+                input_texts=batch_texts,
+                dimensions=dimensions,
+                dimensions_supported=dimensions_supported,
+            )
+            dimensions_supported = result["dimensions_supported"]
+            batch_embeddings = [item["embedding"] for item in result["response"].get("data", [])]
+
+            if len(batch_embeddings) != len(batch_texts):
+                raise LLMException("向量模型返回数量与文本数量不一致")
+            if dimensions and dimensions_supported is True and batch_embeddings and len(batch_embeddings[0]) != dimensions:
+                raise LLMException(f"向量模型实际输出维度为 {len(batch_embeddings[0])}，与配置的 {dimensions} 不一致")
+
+            embeddings.extend(batch_embeddings)
+
+        return embeddings
+
+    async def _get_embedding_batch_with_dimension_fallback(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_texts: list[str],
+        dimensions: int | None,
+        dimensions_supported: bool | None,
+    ) -> dict[str, Any]:
+        if dimensions and dimensions_supported is not False:
+            try:
+                response = await self.get_embeddings(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model_id=model_id,
+                    input_texts=input_texts,
+                    dimensions=dimensions,
+                )
+                return {"response": response, "dimensions_supported": True}
+            except LLMException:
+                if dimensions_supported is True:
+                    raise
+
+        response = await self.get_embeddings(
+            api_key=api_key,
+            base_url=base_url,
+            model_id=model_id,
+            input_texts=input_texts,
+        )
+        return {"response": response, "dimensions_supported": False if dimensions else dimensions_supported}
+
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
         from app.models.message import FilePart, ImagePart, TextPart

@@ -1,0 +1,79 @@
+@import "./common.scss";
+
+.view-container {
+  padding: 20px;
+}
+
+.full-width-input {
+  width: 100%;
+}
+
+.help-text {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
+}
+
+.mt-5 {
+  margin-top: 5px;
+}
+
+.mb-15 {
+  margin-bottom: 15px;
+}
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.action-buttons .el-button {
+  margin-left: 0;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.document-action-buttons {
+  gap: 8px;
+}
+
+.document-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.document-content {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 14px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  color: #303133;
+  line-height: 1.6;
+}
+
+.query-test-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+
+.query-result-table {
+  margin-top: 10px;
+}
+
+.query-result-content {
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}

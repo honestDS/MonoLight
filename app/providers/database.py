@@ -1,6 +1,5 @@
 import os
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import (
@@ -9,17 +8,19 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.core.paths import SQLITE_DB_PATH, ensure_data_dirs
+
 load_dotenv()
 
-root_dir = Path(__file__).resolve().parent.parent.parent
-default_db_path = root_dir / "monolight.db"
+ensure_data_dirs()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    DATABASE_URL = f"sqlite+aiosqlite:///{default_db_path}"
+    DATABASE_URL = f"sqlite+aiosqlite:///{SQLITE_DB_PATH}"
 
 if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     import tempfile
+    from pathlib import Path
 
     temp_db = Path(tempfile.gettempdir()) / "monolight_test_session.db"
     DATABASE_URL = f"sqlite+aiosqlite:///{temp_db}"

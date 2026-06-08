@@ -21,3 +21,4 @@ pytest
 pytest-asyncio
 httpx
 psutil
+chromadb

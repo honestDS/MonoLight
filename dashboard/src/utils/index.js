@@ -3,11 +3,9 @@
  * 提供在各组件间复用的工具函数
  */
 
-// 时间戳格式化
-export const formatTimestamp = (timestamp) => {
-  if (!timestamp) return ''
+const formatDateObject = (date, fallback = '') => {
   try {
-    const date = new Date(timestamp * 1000)  // 转换为毫秒
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return fallback
     const year = date.getFullYear()
     const month = String(date.getMonth() + 1).padStart(2, '0')
     const day = String(date.getDate()).padStart(2, '0')
@@ -16,8 +14,14 @@ export const formatTimestamp = (timestamp) => {
     const seconds = String(date.getSeconds()).padStart(2, '0')
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
   } catch {
-    return ''
+    return fallback
   }
+}
+
+// 时间戳格式化
+export const formatTimestamp = (timestamp) => {
+  if (!timestamp) return ''
+  return formatDateObject(new Date(timestamp * 1000))
 }
 
 // 内容截取（获取简短预览）
@@ -152,4 +156,10 @@ export const debounce = (fn, delay) => {
       fn.apply(context, args)
     }, delay)
   }
+}
+
+// 格式化 ISO 字符串时间
+export const formatTime = (isoString) => {
+  if (!isoString) return ''
+  return formatDateObject(new Date(isoString), isoString)
 }
