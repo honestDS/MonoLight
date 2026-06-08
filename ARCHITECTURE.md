@@ -6,108 +6,118 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 ## 2. 核心分层架构
 
 ### 2.0 应用入口
-- main.py: 应用入口。负责 FastAPI 实例初始化、中间件（CORS, Auditor）挂载、异常处理器注册以及全局路由集成。
+- main.py: FastAPI 应用入口。负责 lifespan 启动流程、系统数据初始化、日志初始化、CORS 中间件挂载、全局异常处理器注册以及 API 路由集成。
+- app/core/paths.py: 数据目录路径定义与初始化工具，负责维护 `data/`、SQLite 数据库路径与 ChromaDB 持久化路径。
 
 ### 2.1 API 层 (API Layer)
-负责外部请求的鉴权、路由分发与统一响应包装。
-- app/api/v1/auth.py: 用户认证与 JWT 令牌管理。
-- app/api/v1/users.py: 账户系统与权限管理。
-- app/api/v1/chat.py: 核心对话接口，支持会话上下文的自动装载。
-- app/api/v1/profile.py: 模型配置档的 CRUD 与状态切换。
-- app/api/v1/providers.py: 模型供应商元数据管理。
-- app/api/v1/prompts.py: 提示词资产库维护。
-- app/api/v1/files.py: 文件上传与下载管理，支持基于 Session 的临时存储。
-- app/api/v1/system.py: 系统监控。支持运行状态获取与系统日志的实时 WebSocket 推送。
+负责外部请求鉴权、路由分发与统一响应包装。
+- app/api/v1/auth.py: 登录认证、JWT 令牌签发与管理员账号重置。
+- app/api/v1/users.py: 用户账户管理，包含新增、列表、更新与删除。
+- app/api/v1/chat.py: 核心对话接口，提供 HTTP Chat Completions、WebSocket 流式对话、会话列表、历史、删除、Markdown 设置与标题生成。
+- app/api/v1/profile.py: Profile 的创建、列表、激活、更新与删除。
+- app/api/v1/providers.py: 模型供应商元数据管理，支持 CHAT/EMBEDDING 用途区分，并提供向量维度检测接口。
+- app/api/v1/prompts.py: PromptLibrary 提示词资产维护。
+- app/api/v1/files.py: 文件上传与下载管理，支持对话附件路径传递。
+- app/api/v1/knowledge_base.py: 知识库 API，负责知识库 CRUD、文档导入、文本分块、向量写入、检索测试、文档查看与删除。
+- app/api/v1/system.py: 系统监控与日志接口，支持系统日志查询与实时 WebSocket 推送。
 
-### 2.2 逻辑调度层 (Control Layer)
-- app/core/dispatcher.py: 核心调度器。负责 Agent 状态管理、工具调用链编排及安全审计决策。
-- app/core/context.py: 上下文管理器。负责窗口截断及工具调用状态的序列化与还原。
-- app/core/log.py: 全局日志系统。支持按照 UID 或会话 ID 进行分级日志记录。
-- app/core/log_broadcaster.py: 日志广播器。基于异步模式将实时日志分发至所有活跃的 WebSocket 订阅者。
-- app/core/security.py: 安全防护层。执行 UID 级联数据隔离校验。
-- app/core/middleware/auditor.py: 安全审计逻辑。负责评估代码及指令的潜在风险分值与原因。
-- app/core/exceptions.py: 异常体系。封装 StandardResponse 友好的业务异常基类。
-- app/core/utils/: 工具集锦。
-  - dispatcher/: 调度器核心子逻辑集合。包含系统提示词注入、消息组装、工具限流、审计拦截等单一职责模块。
-  - config.py: 配置中心。实现配置泵（Standardization Pump）机制。
-  - tokenizer.py: Token 计算工具。基于加权算法进行 Token 预估。
-  - message_parser.py: 消息解析工具。
-  - message_assembler.py: 消息装配工具。支持多模态及工具调用消息的标准化封装。
-  - time.py: 时区感知的时间处理工具，支持自定义偏移量。
-  - session.py: 会话增强工具。支持基于 LLM 自动生成会话摘要标题。
-  - system.py: 系统环境探测工具。获取 CPU、内存、OS 等元数据供 Agent 上下文参考。
-- app/adapters: 通信适配层。抹平不同通信协议（如 Web HTTP, WebSocket）与内部调度器之间的差异。
-  - app/adapters/base.py: 适配器抽象基类。
-  - app/adapters/chat_web.py: 常规 HTTP 对话适配。
-  - app/adapters/chat_ws.py: WebSocket 流式对话适配。
+### 2.2 通信适配层 (Adapter Layer)
+抹平 HTTP 与 WebSocket 通信协议差异，将外部请求转换为统一调度器调用。
+- app/adapters/base.py: 对话适配器抽象基类。
+- app/adapters/chat_web.py: 常规 HTTP 对话适配。
+- app/adapters/chat_ws.py: WebSocket 流式对话适配。
 
-### 2.3 向量化服务层 (Embedding Layer)
-提供统一的文本向量化能力，支持 RAG 及语义搜索。
-- app/embedding/client.py: 向量化统一客户端。
-- app/embedding/config.py: 向量化模块独立配置管理。
-- app/embedding/utils.py: 向量化通用工具类。
-- app/embedding/transformers/: 向量化协议转换。
-  - base.py: 向量化转换抽象基类。
-  - openai.py: 远程 OpenAI Embedding 协议适配。
-  - local.py: 基于 Sentence-Transformers 的本地化模型适配。
+### 2.3 逻辑调度层 (Control Layer)
+- app/core/dispatcher.py: 核心对话调度器。负责非流式与流式调度、会话锁状态机、活跃 Profile 获取、工具调用循环、追加消息合并、最大工具轮次控制与结果落库。
+- app/core/context.py: 上下文管理器。负责按照 Profile 上下文窗口配置装载与截断历史消息。
+- app/core/log.py: 全局日志系统。基于 loguru 记录运行日志、工具调用日志，并写入 WebSocket 广播器与数据库日志。
+- app/core/log_broadcaster.py: 日志广播器。将实时日志异步分发给活跃 WebSocket 订阅者。
+- app/core/security.py: 认证与用户安全模块。负责密码哈希、JWT 创建与当前用户解析。
+- app/core/middleware/auditor.py: 工具安全审计模块。对 `execute_shell` 与 `write_file` 等高风险工具调用执行 LLM 风险评分、动态确认 Token 校验、拦截或放行决策。
+- app/core/exceptions.py: 业务异常体系。封装认证、权限、资源、参数、服务端与 LLM 异常。
+- app/core/utils/dispatcher/: 调度器子流程模块集合，将系统提示词注入、消息准备、追加消息合并、工具限流、工具审计、工具执行、消息保存等逻辑拆分为单一职责函数。
+- app/core/utils/config.py: 配置标准化工具，实现扁平配置到 ProfileConfig 嵌套结构的标准化映射。
+- app/core/utils/tokenizer.py: Token 估算工具。
+- app/core/utils/message_parser.py: 消息解析工具。
+- app/core/utils/message_assembler.py: 多模态与附件消息装配工具。
+- app/core/utils/text_splitter.py: 知识库文本分块工具，支持段落切分、长文本硬切分与重叠窗口。
+- app/core/utils/time.py: 时区感知的时间工具。
+- app/core/utils/session.py: 会话标题生成工具，基于 LLM 生成摘要标题。
+- app/core/utils/system.py: 系统环境探测工具，为 Shell 工具结果补充 OS、CPU、内存等上下文。
 
 ### 2.4 协议转换层 (Transformer Layer)
-- app/transformers/base.py: 协议转换抽象基类。定义厂商无关的统一生成接口与编解码契约。
-- app/transformers/openai.py: OpenAI 协议适配实现。负责将 Internal 系列消息模型与 OpenAI 协议进行双向映射。
+- app/transformers/base.py: 协议转换抽象基类，定义厂商无关的生成、流式生成、协议转换接口。
+- app/transformers/openai.py: OpenAI 兼容协议适配实现。负责 InternalMessage 与 OpenAI Chat Completions 消息的双向映射，支持非流式生成、SSE 流式生成、Embeddings 调用、批量向量化与动态维度回退。
 
-### 2.5 数据驱动层 (Provider Layer)
-- app/providers/llm/client.py: 厂商中立调用客户端。持有 Transformer 注册表，负责根据 Profile 配置动态路由至具体的协议适配器，并执行最终的 InternalResponse 封装。
-- app/providers/database.py: 异步数据库引擎。负责 SQLAlchemy 异步 Engine 的初始化、Session 工厂管理以及基于环境（如 Pytest）的动态数据库连接路由。
-- app/providers/init_db.py: 系统初始化引导。负责物理数据库表的创建（Migration）以及默认 Profile、Prompt 模板的种子数据植入（Seeding）。
+### 2.5 模型与数据供应层 (Provider Layer)
+- app/providers/llm/client.py: LLM 统一客户端。持有 Transformer 注册表，根据协议名称路由到具体 Transformer，并将原始模型响应封装为 InternalResponse。
+- app/providers/database.py: 异步数据库引擎。负责 SQLAlchemy/SQLModel 异步 Engine、Session 工厂与依赖注入。
+- app/providers/init_db.py: 系统初始化引导。负责数据库结构同步、默认用户、默认供应商、默认 Prompt 与默认 Profile 种子数据。
+- app/providers/vector_db.py: ChromaDB 持久化客户端。负责 collection 创建、获取、删除以及向量条目删除。
 
-### 2.6 领域模型与验证层 (Domain & Schema Layer)
-- app/models/: 基于 SQLModel 的物理实体定义。
-  - user.py: 用户实体。
-  - profile.py: 配置档实体。
-  - prompt.py: 提示词实体。
-  - provider.py: 供应商实体。
-  - message.py: 消息实体。定义了 InternalMessage 交换标准。
-  - session.py & active_session.py: 对话会话及其活跃状态跟踪实体。
-  - system_log.py: 持久化系统运行与审计日志实体。
-- app/schemas/: 基于 Pydantic 的逻辑验证契约。负责 API 输入输出的数据校验、敏感字段过滤及业务配置档（ProfileConfig）的嵌套结构验证。
-- app/schemas/response.py: 统一响应契约。定义了 StandardResponse 标准结构，确保所有 API 输出符合前端预期的分级反馈格式。
-- app/schemas/auth.py: 身份验证契约。专门负责 JWT 签发、令牌解析以及登录请求的数据验证。
+### 2.6 知识库与向量检索层 (Knowledge Base & Vector Layer)
+当前项目没有独立的 `app/embedding/` 目录；向量化能力由 OpenAITransformer 提供，知识库流程由 API、模型、文本分块工具和 ChromaDB Provider 共同组成。
+- app/api/v1/knowledge_base.py: 编排知识库业务流程，调用 Profile 中的 embedding_provider_id、embedding_model_id 与 embedding_dimensions 配置完成向量模型调用。
+- app/models/knowledge_base.py: 定义 KnowledgeBase、KnowledgeBaseDocument 以及知识库请求/响应模型。
+- app/core/utils/text_splitter.py: 文档导入时的文本分块组件。
+- app/providers/vector_db.py: ChromaDB 持久化向量集合管理。
+- app/transformers/openai.py: OpenAI Embeddings 协议调用与批量向量化实现。
 
-### 2.7 资源执行层 (Execution Layer)
-- app/core/tools/: 外部资源调用工具链。
-  - base.py: 原子工具抽象基类。定义了工具执行的标准接口与环境隔离规范。
-  - shell.py: Shell 指令执行器。负责受控环境下的子进程调用与执行超时控制。
-  - file_writer.py: 受控文件写入器。支持在安全隔离的临时目录内进行文件操作。
-  - firecrawl_search.py: 搜索引擎工具。支持基于 FireCrawl 的网络搜索与信息检索。
-  - firecrawl_scrape.py: 网页抓取工具。支持基于 FireCrawl 的目标网页内容抓取与提取。
+### 2.7 领域模型与验证层 (Domain & Schema Layer)
+- app/models/: 基于 SQLModel/Pydantic 的数据库实体、内部消息对象与 API 请求响应模型。
+  - user.py: 用户实体与用户创建、更新、响应模型。
+  - provider.py: 模型供应商实体，包含 ProviderType 与 ModelUsage，其中 ModelUsage 区分 CHAT 与 EMBEDDING。
+  - profile.py: Profile 实体与 ProfileConfig 嵌套配置模型，包含 provider、security、tool、other 四类运行时配置。
+  - prompt.py: PromptLibrary 提示词资产实体。
+  - message.py: InternalMessage、InternalToolCall、InternalResponse、消息持久化实体与 ChatCompletionRequest。
+  - session.py & active_session.py: 对话会话与活跃会话锁实体。
+  - knowledge_base.py: 知识库、知识库文档与知识库接口模型。
+  - system_log.py: 系统运行日志与审计日志实体。
+- app/schemas/response.py: 统一响应契约，定义 StandardResponse、PageData、LLMResponse 等前后端通信结构。
+- app/schemas/auth.py: 身份验证请求契约。
 
-### 2.8 全局配置与常量 (Constants Layer)
-- app/core/constants.py: 统一的消息资产库。
-- app/core/prompts.py: 系统级提示词模板中心。
+### 2.8 资源执行层 (Execution Layer)
+- app/core/tools/: Agent 外部资源调用工具链。
+  - __init__.py: 工具 Schema 注册表与工具执行器映射。
+  - base.py: 原子工具抽象基类，定义工具执行接口与用户临时目录隔离基础能力。
+  - shell.py: Shell 指令执行器，在 `temp/temp_{uid}` 下运行命令，读取 Profile 超时配置，并返回标准 JSON 结果与系统信息。
+  - file_writer.py: 受控文件写入器。
+  - firecrawl_search.py: Firecrawl 搜索工具。
+  - firecrawl_scrape.py: Firecrawl 网页抓取工具。
 
-### 2.9 核心 CRUD 层
-- app/core/crud: 业务逻辑与数据持久化之间的缓冲，采用 Repository 模式。
+### 2.9 全局配置与常量 (Constants Layer)
+- app/core/constants.py: 统一错误消息、提示消息与常量定义。
+- app/core/prompts.py: 系统级提示词模板中心，包含审计提示词、确认提示词、工具轮次限制提示等。
+
+### 2.10 核心 CRUD 层
+- app/core/crud/: 业务逻辑与关系型数据库持久化之间的 Repository 层。
   - base.py: CRUD 抽象基类，封装通用异步数据库操作。
   - user.py: 用户账户管理。
-  - profile.py: 模型配置档管理。
-  - prompt.py: 提示词资产管理。
-  - provider.py: 模型供应商管理。
-  - session.py & active_session.py: 对话会话与上下文索引管理。
-  - message.py: 历史消息存储。
-  - log.py: 系统与审计日志持久化。
+  - profile.py: Profile 管理与激活配置查询。
+  - prompt.py: PromptLibrary 管理。
+  - provider.py: 模型供应商管理与按名称查询。
+  - session.py & active_session.py: 对话会话管理与活跃会话锁管理。
+  - message.py: 历史消息存储、分页查询、会话列表与会话删除。
+  - log.py: 系统日志与审计日志持久化。
 
-### 2.10 前端展现层 (Presentation Layer)
-- dashboard/: 基于 Vue 3 + Element Plus 的管理控制台。提供模型配置可视化、对话测试及系统监控。
+### 2.11 前端展现层 (Presentation Layer)
+- dashboard/: 基于 Vue 3、Vue CLI、Element Plus、Vue Router、Pinia、axios 与 vue-i18n 的管理控制台。
+- dashboard/src/views/: 页面视图包括 ChatView、KnowledgeBase、ProfilesView、ProvidersView、PromptsView、UsersView、HistoryLogs、RealTimeLogs 与 LoginView。
+- dashboard/src/api/index.js: 前端 API 客户端封装。
+- dashboard/src/components/: 通用表格、状态标签、虚拟化代码展示等组件。
+- dashboard/src/composables/: CRUD、删除确认、WebSocket、工具解析、聊天相关组合式逻辑。
 
 ## 3. 标准通信规程
-- 通信协议：内部组件通信强制使用 InternalMessage 对象，严禁透传原始字典。
-- 配置校验：所有配置变更必须通过 ProfileConfig 结构化模型验证。
-- 异常反馈：业务逻辑异常统一通过 StandardResponse 返回给前端。
-- 审计闭环：高危物理操作（Shell 执行）必须经过中间件审计评分，由调度器决定拦截、确认或放行。
+- 内部对话协议：调度器、LLMClient 与 Transformer 之间使用 InternalMessage、InternalToolCall、InternalResponse，避免在核心链路直接透传前端原始结构。
+- 模型供应商协议：当前注册的模型协议为 OpenAI 兼容协议，Chat Completions 与 Embeddings 均由 OpenAITransformer 适配。
+- 配置校验：Profile 运行时配置必须通过 ProfileConfig 标准化与校验后使用。
+- API 响应：管理类接口统一使用 StandardResponse；对话补全接口返回 OpenAI 风格的 LLMResponse。
+- 审计闭环：高风险工具调用在调度器工具执行前进入 AuditMiddleware；审计结果可直接放行、要求动态 Token 确认、因 Token 不匹配拒绝或按高风险分值拦截。
+- 数据隔离：认证用户由 get_current_user 解析；消息、会话、工具临时目录等链路携带 uid/session_id 进行隔离和日志追踪。
 
 ## 4. 质量保障
 - 物理证据前置：开发与文档更新必须基于源码事实。
 - 自动化测试：集成测试覆盖 API 全流程，单元测试覆盖核心转换与调度逻辑。
-- tests/unit/: 单元测试。验证核心组件（如 Transformer 编解码、Security 权限判定）的原子逻辑。
-- tests/integration/: 集成测试。覆盖 API 路由、数据库交互及 LLM 调用的端到端链路。
-- tests/initialization/: 初始化测试。专门验证数据库种子数据（Seeding）与表迁移（Migration）的正确性。
+- tests/unit/: 单元测试。验证核心配置、上下文管理、调度器、安全、审计、工具、Provider、Schema 与 Transformer 的原子逻辑。
+- tests/integration/: 集成测试。覆盖认证、用户、对话、Profile、Prompt、Provider 等 API 与数据库交互链路。
+- tests/initialization/: 初始化测试。验证数据库结构同步与系统种子数据初始化。
