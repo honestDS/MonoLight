@@ -57,7 +57,8 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile) -> tuple[lis
                 # 限制可选的 enum 范围
                 parameters = kb_tool["function"]["parameters"]
                 kb_id_prop = parameters["properties"]["knowledge_base_id"]
-                kb_id_prop["enum"] = whitelist_ids
+                kb_id_prop["type"] = "string"
+                kb_id_prop["enum"] = [str(kb_id) for kb_id in whitelist_ids]
 
                 # 动态生成描述信息
                 mapping_desc = ", ".join([f"ID {kb.id}: {kb.name}" for kb in valid_kbs])

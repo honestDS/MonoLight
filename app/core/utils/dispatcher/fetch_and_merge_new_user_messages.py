@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.crud.message import (
     message_crud,
 )
+from app.core.utils.dispatcher.markdown_instruction import append_session_markdown_instruction
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -51,4 +52,5 @@ async def fetch_and_merge_new_user_messages(
         content="\n".join(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
+    await append_session_markdown_instruction(db, session_id, combined_msg)
     return [combined_msg]

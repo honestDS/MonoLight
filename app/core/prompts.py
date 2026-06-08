@@ -54,3 +54,8 @@ DO NOT call any tools or execute any commands to query, verify, or update system
 
 # Session Title Generation Prompt
 SESSION_TITLE_PROMPT = "请根据以下用户的第一条输入，生成一个简短、准确的对话标题（不超过10个字）。直接返回标题，不要有任何解释。\n用户输入：{message}"
+
+# Markdown response format instruction
+MARKDOWN_FORMAT_INSTRUCTION_PROMPT = """[系统提示,此处不是用户说的话]
+当前会话 Markdown 格式开关状态：{status}。{requirement}
+[系统提示结束]"""

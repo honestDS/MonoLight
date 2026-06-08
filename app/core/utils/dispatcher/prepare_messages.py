@@ -10,6 +10,7 @@ from app.core.context import (
     ContextManager,
 )
 from app.core.utils.dispatcher.inject_system_prompt import inject_system_prompt
+from app.core.utils.dispatcher.markdown_instruction import append_session_markdown_instruction
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import (
     InternalMessage,
@@ -43,6 +44,7 @@ async def prepare_messages(
         before_id=initial_msg.id if is_first_iter else None,
     )
     if is_first_iter:
+        await append_session_markdown_instruction(db, session_id, initial_msg)
         messages.append(initial_msg)
 
     # 动态组装含有附件的多模态消息
