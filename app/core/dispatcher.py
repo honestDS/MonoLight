@@ -21,7 +21,6 @@ from app.core.crud.active_session import (
 from app.core.crud.profile import (
     profile_crud,
 )
-from app.core.tools import get_tools_for_profile
 from app.core.crud.provider import provider_crud
 
 # CRUD Imports
@@ -37,6 +36,7 @@ from app.core.log import (
 from app.core.prompts import (
     PROMPT_MAX_TURNS_REACHED,
 )
+from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit

@@ -49,7 +49,7 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
             # 组装返回格式
             items = []
             for item in response_data.items:
-                metadata = item.metadata or {}
+                metadata = item.metadata_ or {}
                 items.append(
                     {
                         "source": metadata.get("filename") or "未知来源",

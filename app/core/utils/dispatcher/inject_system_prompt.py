@@ -6,6 +6,9 @@ from app.core.embedding.knowledge_base import (
     build_knowledge_base_prompt_items,
     list_available_knowledge_bases,
 )
+from app.core.log import (
+    get_logger,
+)
 from app.core.prompts import (
     KNOWLEDGE_BASES_WRAPPER,
     SYSTEM_CONTEXT_WRAPPER,
@@ -19,9 +22,7 @@ from app.models.message import (
 from app.models.profile import (
     Profile,
 )
-from app.core.log import (
-    get_logger,
-)
+
 logger = get_logger(__name__)
 
 

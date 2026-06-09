@@ -1,9 +1,4 @@
 import os
-import warnings
-
-# 忽略由第三方库中产生的 Pydantic v2 模型警告 (firecrawl-py中的MonitorPageDiff等)
-warnings.filterwarnings("ignore", message='Field name "json" .* shadows an attribute in parent "BaseModel"', category=UserWarning)
-
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -17,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import app.warning_filters  # noqa: F401
 from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.files import router as files_router
@@ -179,7 +175,7 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=False,
         reload_dirs=["app"],
         reload_excludes=["temp", "data", "*.log"],
     )

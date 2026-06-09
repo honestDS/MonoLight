@@ -92,10 +92,12 @@ class KnowledgeBaseQueryTestRequest(SQLModel):
 
 
 class KnowledgeBaseQueryTestItem(SQLModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
     content: str
     distance: float | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata_: dict[str, Any] = Field(default_factory=dict, alias="metadata")
 
 
 class KnowledgeBaseQueryTestResponse(SQLModel):

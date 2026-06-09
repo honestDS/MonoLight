@@ -126,7 +126,7 @@ async def hybrid_query_knowledge_base(collection_name: str, query_embedding: lis
             KnowledgeBaseQueryTestItem(
                 id=hit.id,
                 content=hit.content,
-                metadata=metadata,
+                metadata_=metadata,
                 distance=hit.dense_distance,
             )
         )
