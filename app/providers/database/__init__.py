@@ -1,4 +1,6 @@
-from .client import DATABASE_URL, AsyncSessionLocal, Base, engine, get_db
+from sqlmodel import SQLModel as Base
+
+from .client import DATABASE_URL, AsyncSessionLocal, engine, get_db
 
 __all__ = [
     "AsyncSessionLocal",
