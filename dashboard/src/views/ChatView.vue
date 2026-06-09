@@ -107,10 +107,23 @@
               </div>
 
               <!-- 消息主体内容 -->
-              <div class="content markdown-body" v-if="typeof msg.content === 'string' && msg.content.trim() && currentSessionEnableMarkdown" v-html="renderMarkdown(msg.content)"></div>
-              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof msg.content === 'string' && msg.content.trim() && !currentSessionEnableMarkdown">{{ msg.content }}</div>
+              <div class="content markdown-body" v-if="typeof msg.content === 'string' && msg.content.trim() && currentSessionEnableMarkdown">
+                <!-- 当处于 queued 时显示 Loading 动画图标 -->
+                <div class="queued-indicator" v-if="msg.status === 'queued'">
+                  <img src="@/assets/svg/wait.svg" class="is-loading" />
+                </div><div v-html="renderMarkdown(msg.content)"></div>
+              </div>
+              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof msg.content === 'string' && msg.content.trim() && !currentSessionEnableMarkdown">
+                <!-- 当处于 queued 时显示 Loading 动画图标 -->
+                <div class="queued-indicator" v-if="msg.status === 'queued'">
+                  <img src="@/assets/svg/wait.svg" class="is-loading" />
+                </div>{{ msg.content }}
+              </div>
               <div class="content" v-else-if="Array.isArray(msg.content)">
-                <div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
+                <!-- 当处于 queued 时显示 Loading 动画图标 -->
+                <div class="queued-indicator" v-if="msg.status === 'queued'">
+                  <img src="@/assets/svg/wait.svg" class="is-loading" />
+                </div><div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
                   <div v-if="part.type === 'text'" class="text-part">{{ part.text }}</div>
                   <div v-else-if="part.type === 'image_url'" class="image-part">
                     <el-image 
@@ -396,7 +409,7 @@ const send = async () => {
     uploadFileList.value = []
     attachments.value = []
     
-    // 加入队列
+    // 加入队列视觉状态并直接发送
     chat.enqueueMessage(tempMsg, tempAttachments)
     return
   }

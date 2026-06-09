@@ -250,6 +250,9 @@ class ChatDispatcher:
                     return
 
                 try:
+                    # 获取到锁并进入调度流程时，发送任务开始广播（供前端清空 queued 视觉效果）
+                    yield {"type": "task_start", "request_id": request_id}
+
                     cfg = await validate_profile_and_cfg(db, profile)
 
                     if is_first_iter:

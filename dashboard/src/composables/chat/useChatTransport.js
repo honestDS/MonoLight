@@ -138,6 +138,14 @@ export function useChatTransport() {
       return
     }
 
+    // 处理任务开始确认
+    if (type === 'task_start') {
+      if (options.onTaskStart) {
+        options.onTaskStart()
+      }
+      return
+    }
+
     // 6. 处理异常通知
     if (type === 'error') {
       console.error('WebSocket业务错误:', data.message)

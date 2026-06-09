@@ -186,10 +186,24 @@
       flex-direction: column;      
       margin-bottom: 16px;
       max-width: 80%;
-      transition: opacity 0.3s;
+      position: relative; /* 确保 queued-indicator 能相对 message-item 绝对定位 */
+      transition: opacity 0.3s, transform 0.3s;
 
       &.queued {
-        opacity: 0.5;
+        opacity: 0.8;
+        .content {
+          position: relative;
+          &::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            background-size: 200% 100%;
+            animation: skeleton-loading 1.5s infinite;
+            border-radius: inherit;
+            pointer-events: none;
+          }
+        }
       }
 
       &.user {
@@ -246,6 +260,22 @@
         border-radius: 8px;
         word-break: break-word;
         white-space: pre-wrap;
+        position: relative; /* 为内部 queued-indicator 定位做基准 */
+
+        .queued-indicator {
+          position: absolute;
+          left: -24px;
+          bottom: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+
+          .is-loading {
+            width: 16px;
+            height: 16px;
+            color: #909399;
+          }
+        }
         
         &.markdown-body {
           white-space: normal; // Markdown 需要正常的换行解析
@@ -497,6 +527,11 @@
       }
     }
   }
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 @keyframes title-char-appear {

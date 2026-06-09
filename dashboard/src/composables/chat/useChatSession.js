@@ -47,12 +47,9 @@ export function useChatSession() {
   })
 
   // ==================== 核心发送方法 ====================
-  
-  // 消息队列
-  const messageQueue = ref([])
-  
+
   /**
-   * 将消息加入队列并显示在界面上
+   * 仅用于连续发送时插入一条携带 queued 状态的消息占位，并直接发送
    */
   const enqueueMessage = (text, attachments = []) => {
     const userMsgId = Date.now() + Math.random()
@@ -65,39 +62,18 @@ export function useChatSession() {
       content: text,
       attachments: attachmentsToSent,
       created_at: Date.now() / 1000,
-      status: 'queued' // 自定义状态，可选用于样式展示
+      status: 'queued' // 自定义状态，仅用于样式展示
     })
     
     nextTick(() => chatState.scrollToBottom())
     
-    messageQueue.value.push({ text, attachments: attachmentsToSent, messageId: userMsgId })
-  }
-
-  /**
-   * 处理队列中的下一条消息
-   */
-  const processQueue = async () => {
-    if (messageQueue.value.length === 0 || chatState.loading.value) return
-    
-    const nextMsg = messageQueue.value.shift()
-    if (!nextMsg) return
-    
-    // 发送队列中的消息
+    // 不排队，直接调用底层的发送机制
     if (transport.transportMode.value === 'ws') {
-      await wsSend(nextMsg.text, nextMsg.attachments, nextMsg.messageId)
+      wsSend(text, attachmentsToSent, userMsgId)
     } else {
-      await httpSend(nextMsg.text, nextMsg.attachments, nextMsg.messageId)
+      httpSend(text, attachmentsToSent, userMsgId)
     }
   }
-
-  /**
-   * 监听 loading 状态，完成后处理队列
-   */
-  watch(() => chatState.loading.value, (isLoading) => {
-    if (!isLoading && messageQueue.value.length > 0) {
-      processQueue()
-    }
-  })
 
   /**
    * 发送消息（统一入口）
@@ -137,11 +113,8 @@ export function useChatSession() {
       chatState.inputMsg.value = ''
       attachments.value = []
     } else {
-      // 移除可能存在的队列标记
-      const msg = chatState.messages.value.find(m => m.id === existingMsgId)
-      if (msg) {
-        delete msg.status
-      }
+      // 并不直接删除队列标记，而是等响应回来后再清理（为了保留视觉效果直到收到响应）
+      // 由于这是 HTTP 发送逻辑的入口，我们在此将 loading 状态标记为 true。
     }
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
@@ -149,7 +122,7 @@ export function useChatSession() {
     const thinkingId = userMsgId + 1
     chatState.addMessage({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
 
-    await performHttpSend(text, thinkingId, attachmentsToSent)
+    await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId)
   }
 
   /**
@@ -183,10 +156,21 @@ export function useChatSession() {
         return performHttpSend(text, thinkingId, attachmentsToSent)
       }
 
+      // 成功收到响应时清除当前消息的排队标记
+      const userMsg = chatState.messages.value.find(m => m.id === userMsgId && m.role === 'user')
+      if (userMsg && userMsg.status === 'queued') {
+        delete userMsg.status
+      }
+
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
 
       nextTick(() => chatState.scrollToBottom())
     } catch (err) {
+      // 出错时也应清除排队标记，以便重新发送或其他操作
+      const userMsg = chatState.messages.value.find(m => m.id === userMsgId && m.role === 'user')
+      if (userMsg && userMsg.status === 'queued') {
+        delete userMsg.status
+      }
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       ElMessage.error(err.message || '发送失败')
     } finally {
@@ -231,10 +215,10 @@ export function useChatSession() {
       chatState.inputMsg.value = ''
       attachments.value = []
     } else {
-      // 移除可能存在的队列标记并更新 request_id
+      // 并不直接删除队列标记，而是等响应回来后再清理（为了保留视觉效果直到收到响应）
+      // 仅更新 request_id
       const msg = chatState.messages.value.find(m => m.id === existingMsgId)
       if (msg) {
-        delete msg.status
         msg.request_id = requestId
       }
     }
@@ -251,6 +235,14 @@ export function useChatSession() {
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
       thinkingId,
+      onTaskStart: () => {
+        // 调度器明确发来了合并/开始信号，说明它正在处理最新的队列消息了，清除队列视觉状态
+        chatState.messages.value.forEach(m => {
+          if (m.role === 'user' && m.status === 'queued') {
+            delete m.status
+          }
+        })
+      },
       onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam) => {
         messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason, responseId, requestIdParam)
       },
@@ -278,6 +270,12 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newSessionId, text)
       },
       onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
+        chatState.messages.value.forEach(m => {
+          if (m.role === 'user' && m.status === 'queued') {
+            delete m.status
+          }
+        })
+        
         // 如果是基于 response_id 变更（新轮次结束）触发的精准替换
         if (eventType === 'turn_end' && data.response_id && data.content) {
           const newMessages = [...chatState.messages.value]
@@ -418,7 +416,6 @@ export function useChatSession() {
     inputMsg: chatState.inputMsg,
     loading: chatState.loading,
     messageList: chatState.messageList,
-    messageQueue,
     
     // 新增附件状态导出
     attachments,
