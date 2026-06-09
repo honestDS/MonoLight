@@ -29,7 +29,7 @@
       <el-table-column :resizable="false" label="操作" width="380" align="center" fixed="right">
         <template #default="scope">
           <div class="action-buttons">
-            <el-button type="success" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
+            <el-button :type="scope.row.is_active ? 'info' : 'success'" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">激活</el-button>
             <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">编辑</el-button>
             <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
           </div>
