@@ -134,3 +134,57 @@ async def test_embed_texts_dimensions_fallback_does_not_log_error(monkeypatch):
     assert len(MockSession.calls) == 2
     assert "dimensions" in MockSession.calls[0]
     assert "dimensions" not in MockSession.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_get_embeddings_normalizes_base_url(monkeypatch):
+    class MockResponse:
+        def __init__(self, status, text_data):
+            self.status = status
+            self.text_data = text_data
+
+        async def text(self):
+            return self.text_data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    class MockSession:
+        urls = []
+
+        def post(self, url, **kwargs):
+            self.urls.append(url)
+            fake_response = {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "index": 0,
+                        "embedding": [0.1, 0.2, 0.3],
+                    }
+                ],
+            }
+            return MockResponse(200, json.dumps(fake_response))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", MockSession)
+
+    transformer = OpenAITransformer()
+    await transformer.get_embeddings(
+        api_key="fake-key",
+        base_url="https://api.openai.com/v1/embeddings",
+        model_id="text-embedding-3-small",
+        input_texts=["Hello"],
+    )
+
+    assert MockSession.urls == ["https://api.openai.com/v1/embeddings"]

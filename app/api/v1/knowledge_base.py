@@ -31,7 +31,7 @@ from app.models.knowledge_base import (
 )
 from app.models.profile import Profile
 from app.providers.database import get_db
-from app.providers.vector_db import create_collection, delete_collection, delete_collection_items, get_or_create_collection
+from app.providers.vector import create_collection, delete_collection, delete_collection_items, get_or_create_collection
 from app.schemas.response import StandardResponse
 
 router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"])

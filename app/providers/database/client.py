@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlmodel import SQLModel as Base
 
 from app.core.paths import SQLITE_DB_PATH, ensure_data_dirs
 

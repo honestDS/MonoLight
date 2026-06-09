@@ -55,3 +55,28 @@ class BaseTransformer(ABC):
     def from_provider(cls, provider_response: Any) -> InternalResponse:
         """将厂商特定响应转换为内部标准响应模型"""
         pass
+
+
+class BaseEmbeddingTransformer(ABC):
+    @abstractmethod
+    async def get_embeddings(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_texts: str | list[str],
+        **kwargs,
+    ) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def embed_texts(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        input_texts: list[str],
+        batch_size: int = 16,
+        dimensions: int | None = None,
+    ) -> list[list[float]]:
+        pass

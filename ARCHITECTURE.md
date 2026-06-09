@@ -6,14 +6,14 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 ## 2. 核心分层架构
 
 ### 2.0 应用入口
-- main.py: FastAPI 应用入口。负责 lifespan 启动流程、系统数据初始化、日志初始化、CORS 中间件挂载、全局异常处理器注册以及 API 路由集成。
+- main.py: FastAPI 应用入口。负责 lifespan 启动流程、通过 `app/providers/database/bootstrap.py` 执行系统数据初始化、日志初始化、CORS 中间件挂载、全局异常处理器注册以及 API 路由集成。
 - app/core/paths.py: 数据目录路径定义与初始化工具，负责维护 `data/`、SQLite 数据库路径与 ChromaDB 持久化路径。
 
 ### 2.1 API 层 (API Layer)
 负责外部请求鉴权、路由分发与统一响应包装。
 - app/api/v1/auth.py: 登录认证、JWT 令牌签发与管理员账号重置。
 - app/api/v1/users.py: 用户账户管理，包含新增、列表、更新与删除。
-- app/api/v1/chat.py: 核心对话接口，提供 HTTP Chat Completions、WebSocket 流式对话、会话列表、历史、删除、Markdown 设置与标题生成。
+- app/api/v1/chat.py: 核心对话接口，提供 HTTP Chat Completions、WebSocket 流式对话、会话列表、历史、删除、Markdown 设置与标题生成；标题生成基于当前 ProfileConfig 读取对话供应商，并拦截仅用于 Embedding 的供应商。
 - app/api/v1/profile.py: Profile 的创建、列表、激活、更新与删除。
 - app/api/v1/providers.py: 模型供应商元数据管理，支持 CHAT/EMBEDDING 用途区分，并提供向量维度检测接口。
 - app/api/v1/prompts.py: PromptLibrary 提示词资产维护。
@@ -28,14 +28,14 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/adapters/chat_ws.py: WebSocket 流式对话适配。
 
 ### 2.3 逻辑调度层 (Control Layer)
-- app/core/dispatcher.py: 核心对话调度器。负责非流式与流式调度、会话锁状态机、活跃 Profile 获取、工具调用循环、追加消息合并、最大工具轮次控制与结果落库。
+- app/core/dispatcher.py: 核心对话调度器。负责非流式与流式调度、会话锁状态机、活跃 Profile 获取、动态工具清单与知识库白名单获取、工具调用循环、追加消息合并、最大工具轮次控制与结果落库。
 - app/core/context.py: 上下文管理器。负责按照 Profile 上下文窗口配置装载与截断历史消息。
 - app/core/log.py: 全局日志系统。基于 loguru 记录运行日志、工具调用日志，并写入 WebSocket 广播器与数据库日志。
 - app/core/log_broadcaster.py: 日志广播器。将实时日志异步分发给活跃 WebSocket 订阅者。
 - app/core/security.py: 认证与用户安全模块。负责密码哈希、JWT 创建与当前用户解析。
 - app/core/middleware/auditor.py: 工具安全审计模块。对 `execute_shell` 与 `write_file` 等高风险工具调用执行 LLM 风险评分、动态确认 Token 校验、拦截或放行决策。
 - app/core/exceptions.py: 业务异常体系。封装认证、权限、资源、参数、服务端与 LLM 异常。
-- app/core/utils/dispatcher/: 调度器子流程模块集合，将系统提示词注入、消息准备、追加消息合并、工具限流、工具审计、工具执行、消息保存等逻辑拆分为单一职责函数。
+- app/core/utils/dispatcher/: 调度器子流程模块集合，将 Profile 校验、系统提示词注入、可用知识库目录注入、会话 Markdown 指令注入、消息准备、追加消息合并、并行工具限流、工具审计、工具运行时上下文传递、Markdown 响应处理、消息保存等逻辑拆分为单一职责函数。
 - app/core/utils/config.py: 配置标准化工具，实现扁平配置到 ProfileConfig 嵌套结构的标准化映射。
 - app/core/utils/tokenizer.py: Token 估算工具。
 - app/core/utils/message_parser.py: 消息解析工具。
@@ -45,23 +45,44 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - app/core/utils/session.py: 会话标题生成工具，基于 LLM 生成摘要标题。
 - app/core/utils/system.py: 系统环境探测工具，为 Shell 工具结果补充 OS、CPU、内存等上下文。
 
+### 2.3.1 对话增强子流程
+- 知识库上下文注入：`inject_system_prompt.py` 会查询当前 Profile 可用知识库，使用 `KNOWLEDGE_BASES_WRAPPER` 以结构化 JSON 注入系统提示词，只暴露知识库元数据，不直接注入文档内容。
+- 会话 Markdown 指令：`markdown_instruction.py` 根据会话 `enable_markdown` 设置，将 Markdown 输出要求追加到当前用户消息，支持文本与多模态消息结构。
+- 动态工具暴露：`app/core/tools/__init__.py` 根据 Profile 可用知识库动态添加 `query_knowledge_base` 工具，并为 `knowledge_base_id` 注入 enum 白名单与描述映射。
+- 工具运行时上下文：`BaseExecutor.set_runtime_context` 向工具执行器传递 db、profile、session_id 与 allowed_knowledge_base_ids；`process_single_tool.py` 在执行工具前设置该上下文。
+
 ### 2.4 协议转换层 (Transformer Layer)
-- app/transformers/base.py: 协议转换抽象基类，定义厂商无关的生成、流式生成、协议转换接口。
-- app/transformers/openai.py: OpenAI 兼容协议适配实现。负责 InternalMessage 与 OpenAI Chat Completions 消息的双向映射，支持非流式生成、SSE 流式生成、Embeddings 调用、批量向量化与动态维度回退。
+- app/transformers/base.py: 协议转换抽象基类集合，包含 `BaseTransformer` 对话能力抽象与 `BaseEmbeddingTransformer` 向量化能力抽象，避免强制所有对话协议实现 Embedding 能力。
+- app/transformers/openai.py: OpenAI 兼容协议适配实现。负责 InternalMessage 与 OpenAI Chat Completions 消息的双向映射，支持非流式生成、SSE 流式生成、Embeddings 调用、批量向量化、Embedding Base URL 规范化与动态维度回退。
 
 ### 2.5 模型与数据供应层 (Provider Layer)
 - app/providers/llm/client.py: LLM 统一客户端。持有 Transformer 注册表，根据协议名称路由到具体 Transformer，并将原始模型响应封装为 InternalResponse。
-- app/providers/database.py: 异步数据库引擎。负责 SQLAlchemy/SQLModel 异步 Engine、Session 工厂与依赖注入。
-- app/providers/init_db.py: 系统初始化引导。负责数据库结构同步、默认用户、默认供应商、默认 Prompt 与默认 Profile 种子数据。
-- app/providers/vector_db.py: ChromaDB 持久化客户端。负责 collection 创建、获取、删除以及向量条目删除。
+- app/providers/embedding/client.py: Embedding 统一客户端。持有 `BaseEmbeddingTransformer` 注册表，根据 ProviderType 路由到具体 Embedding Transformer。
+- app/providers/database/: 关系型数据库 Provider 包。
+  - __init__.py: 对外导出 `AsyncSessionLocal`、`Base`、`DATABASE_URL`、`engine` 与 `get_db`，保持常用数据库依赖导入入口简洁。
+  - client.py: 异步数据库引擎。负责 SQLAlchemy/SQLModel 异步 Engine、Session 工厂、测试环境数据库 URL 切换与 FastAPI 依赖注入。
+  - bootstrap.py: 系统数据库引导。负责数据库结构同步、默认 Prompt、默认 Profile 与配置补全等启动期初始化流程。
+- app/providers/vector/: 向量数据库 Provider 包。
+  - __init__.py: 对外导出 Chroma collection 管理函数。
+  - chroma.py: ChromaDB 持久化客户端。负责 collection 创建、获取、删除、向量条目删除与条目读取。
+- requirements.txt: Provider 与检索链路依赖包括 `chromadb`、`rank-bm25` 与 `jieba`，分别支撑向量持久化、BM25 稀疏检索和中英文分词。
 
 ### 2.6 知识库与向量检索层 (Knowledge Base & Vector Layer)
-当前项目没有独立的 `app/embedding/` 目录；向量化能力由 OpenAITransformer 提供，知识库流程由 API、模型、文本分块工具和 ChromaDB Provider 共同组成。
-- app/api/v1/knowledge_base.py: 编排知识库业务流程，调用 Profile 中的 embedding_provider_id、embedding_model_id 与 embedding_dimensions 配置完成向量模型调用。
-- app/models/knowledge_base.py: 定义 KnowledgeBase、KnowledgeBaseDocument 以及知识库请求/响应模型。
+知识库流程由 API、领域模型、文本分块、Embedding Provider、Vector Provider 与混合检索模块共同组成。向量化能力通过 `EmbeddingClient` 分发到具体 `BaseEmbeddingTransformer` 实现，当前默认实现为 OpenAI 兼容协议。
+- app/api/v1/knowledge_base.py: 编排知识库业务流程，调用 Profile 中的 embedding_provider_id、embedding_model_id 与 embedding_dimensions 配置完成文档导入、向量写入、检索测试与文档管理。
+- app/core/embedding/knowledge_base.py: 知识库核心业务函数。负责读取 Profile 绑定的向量模型配置、调用 EmbeddingClient 生成向量、查询当前 Profile 可用知识库、构造知识库提示词清单与执行知识库查询。
+- app/core/retrieval/: 检索子系统。
+  - hybrid.py: 稠密向量检索与 BM25 稀疏检索并发执行，并通过 RRF 融合结果。
+  - sparse.py: BM25 稀疏检索实现。
+  - tokenizer.py: 中英文混合分词工具。
+  - fusion.py: Reciprocal Rank Fusion 排名融合。
+  - schemas.py: 检索 Chunk 与 Hit 内部结构。
 - app/core/utils/text_splitter.py: 文档导入时的文本分块组件。
-- app/providers/vector_db.py: ChromaDB 持久化向量集合管理。
-- app/transformers/openai.py: OpenAI Embeddings 协议调用与批量向量化实现。
+- app/core/tools/knowledge_base_query.py: Agent 知识库查询工具执行器，运行时注入知识库白名单与数据库/Profile 上下文，强制使用内部固定 top_k，并只返回来源与内容，避免向模型暴露冗余检索元数据。
+- app/models/knowledge_base.py: 定义 KnowledgeBase、KnowledgeBaseDocument 以及知识库请求/响应模型。
+- app/providers/embedding/client.py: Embedding 统一调用入口。
+- app/providers/vector/chroma.py: ChromaDB 持久化向量集合管理。
+- app/transformers/base.py 与 app/transformers/openai.py: Embedding 抽象与 OpenAI 兼容 Embeddings 协议实现。
 
 ### 2.7 领域模型与验证层 (Domain & Schema Layer)
 - app/models/: 基于 SQLModel/Pydantic 的数据库实体、内部消息对象与 API 请求响应模型。
@@ -79,11 +100,12 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 ### 2.8 资源执行层 (Execution Layer)
 - app/core/tools/: Agent 外部资源调用工具链。
   - __init__.py: 工具 Schema 注册表与工具执行器映射。
-  - base.py: 原子工具抽象基类，定义工具执行接口与用户临时目录隔离基础能力。
+  - base.py: 原子工具抽象基类，定义工具执行接口、用户临时目录隔离基础能力与工具运行时上下文注入入口。
   - shell.py: Shell 指令执行器，在 `temp/temp_{uid}` 下运行命令，读取 Profile 超时配置，并返回标准 JSON 结果与系统信息。
   - file_writer.py: 受控文件写入器。
   - firecrawl_search.py: Firecrawl 搜索工具。
   - firecrawl_scrape.py: Firecrawl 网页抓取工具。
+  - knowledge_base_query.py: 知识库查询工具，校验运行时知识库白名单，归一化 LLM 传入的 knowledge_base_id，并返回精简来源与内容。
 
 ### 2.9 全局配置与常量 (Constants Layer)
 - app/core/constants.py: 统一错误消息、提示消息与常量定义。
@@ -109,7 +131,9 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 
 ## 3. 标准通信规程
 - 内部对话协议：调度器、LLMClient 与 Transformer 之间使用 InternalMessage、InternalToolCall、InternalResponse，避免在核心链路直接透传前端原始结构。
-- 模型供应商协议：当前注册的模型协议为 OpenAI 兼容协议，Chat Completions 与 Embeddings 均由 OpenAITransformer 适配。
+- 模型供应商协议：当前注册的对话模型协议为 OpenAI 兼容协议，由 LLMClient 分发到 OpenAITransformer；Embedding 能力通过 EmbeddingClient 分发到实现了 BaseEmbeddingTransformer 的具体 Transformer。
+- 知识库工具协议：系统提示词只注入可用知识库目录；模型必须通过动态暴露的 `query_knowledge_base` 工具检索内容，工具侧再次校验运行时白名单。
+- Markdown 输出协议：会话级 Markdown 开关通过调度器在当前用户消息上追加系统指令，保存助手消息时再进行 Markdown 响应处理，保证前端显示设置与模型输出约束一致。
 - 配置校验：Profile 运行时配置必须通过 ProfileConfig 标准化与校验后使用。
 - API 响应：管理类接口统一使用 StandardResponse；对话补全接口返回 OpenAI 风格的 LLMResponse。
 - 审计闭环：高风险工具调用在调度器工具执行前进入 AuditMiddleware；审计结果可直接放行、要求动态 Token 确认、因 Token 不匹配拒绝或按高风险分值拦截。

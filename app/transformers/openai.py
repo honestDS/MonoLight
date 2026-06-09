@@ -15,12 +15,15 @@ from app.models.message import (
     MessageRole,
 )
 
-from .base import BaseTransformer
+from .base import (
+    BaseEmbeddingTransformer,
+    BaseTransformer,
+)
 
 logger = get_logger(__name__)
 
 
-class OpenAITransformer(BaseTransformer):
+class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer):
     async def generate(
         self,
         api_key: str,
@@ -146,7 +149,7 @@ class OpenAITransformer(BaseTransformer):
         if "user" in kwargs:
             payload["user"] = kwargs["user"]
 
-        url = f"{base_url.rstrip('/')}/embeddings"
+        url = f"{self.normalize_embedding_base_url(base_url)}/embeddings"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as resp:

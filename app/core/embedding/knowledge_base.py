@@ -9,13 +9,13 @@ from app.core.exceptions import LLMException
 from app.core.retrieval.hybrid import hybrid_query_knowledge_base
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
-from app.models.provider import ModelUsage
-from app.transformers.openai import OpenAITransformer
+from app.models.provider import ModelUsage, ProviderType
+from app.providers.embedding import EmbeddingClient
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
 
 
-async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tuple[str, str, str, int | None]:
+async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tuple[ProviderType, str, str, str, int | None]:
     provider_config = (profile.configs or {}).get("provider", {})
     embedding_provider_id = provider_config.get("embedding_provider_id")
     embedding_model_id = provider_config.get("embedding_model_id")
@@ -33,7 +33,7 @@ async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tu
         raise HTTPException(status_code=400, detail="配置文件绑定的提供商不是向量模型类型")
     if not provider.base_url:
         raise HTTPException(status_code=400, detail="向量模型提供商未配置 Base URL")
-    return provider.api_key, provider.base_url, embedding_model_id, embedding_dimensions
+    return provider.provider_type, provider.api_key, provider.base_url, embedding_model_id, embedding_dimensions
 
 
 async def is_embedding_profile_available(db: AsyncSession, profile: Profile) -> bool:
@@ -45,10 +45,10 @@ async def is_embedding_profile_available(db: AsyncSession, profile: Profile) -> 
 
 
 async def embed_chunks(db: AsyncSession, profile: Profile, texts: list[str], batch_size: int) -> list[list[float]]:
-    api_key, base_url, model_id, dimensions = await get_profile_embedding_config(db, profile)
-    transformer = OpenAITransformer()
+    provider_type, api_key, base_url, model_id, dimensions = await get_profile_embedding_config(db, profile)
     try:
-        return await transformer.embed_texts(
+        return await EmbeddingClient.embed_texts(
+            provider_type=provider_type,
             api_key=api_key,
             base_url=base_url,
             model_id=model_id,

@@ -20,6 +20,7 @@ from app.models.provider import (
     ProviderUpdate,
 )
 from app.providers.database import get_db
+from app.providers.embedding import EmbeddingClient
 from app.schemas.response import (
     PageData,
     StandardResponse,
@@ -135,8 +136,6 @@ async def test_embedding_dimension(
     自动检测向量模型的输出维度。
     通过向大模型发送一条测试文本，并提取返回结果中向量的长度。
     """
-    from app.transformers.openai import OpenAITransformer
-
     db_obj = await provider_crud.get(db, provider_id)
     if not db_obj:
         raise ResourceNotFoundException(constants.ERR_PROVIDER_NOT_FOUND)
@@ -144,15 +143,11 @@ async def test_embedding_dimension(
     if not db_obj.base_url:
         raise ParameterException("该提供商未配置 Base URL，无法执行自动检测。")
 
-    base_url = db_obj.base_url
-    if base_url.endswith("/embeddings"):
-        base_url = base_url.replace("/embeddings", "")
-
-    transformer = OpenAITransformer()
     try:
-        res = await transformer.get_embeddings(
+        res = await EmbeddingClient.get_embeddings(
+            provider_type=db_obj.provider_type,
             api_key=db_obj.api_key,
-            base_url=base_url,
+            base_url=db_obj.base_url,
             model_id=model_id,
             input_texts=["dimension test"],
         )

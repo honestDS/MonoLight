@@ -7,7 +7,7 @@ from app.core.retrieval.fusion import reciprocal_rank_fusion
 from app.core.retrieval.schemas import RetrievalChunk, RetrievalHit
 from app.core.retrieval.sparse import bm25_search
 from app.models.knowledge_base import KnowledgeBaseQueryTestItem, KnowledgeBaseQueryTestResponse
-from app.providers.vector_db import get_collection, get_collection_items
+from app.providers.vector import get_collection, get_collection_items
 
 HYBRID_DENSE_CANDIDATE_K = 20
 HYBRID_SPARSE_CANDIDATE_K = 20
