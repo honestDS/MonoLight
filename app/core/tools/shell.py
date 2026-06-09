@@ -82,36 +82,57 @@ class ShellExecutor(BaseExecutor):
         # Windows 下的兼容性处理：如果不是 ProactorEventLoop，则使用同步运行+线程池降级
         if sys.platform == "win32" and "Proactor" not in loop_type:
             t_logger.warning(f"[{self.uid}] Using synchronous fallback for Windows {loop_type}")
-            try:
 
+            # 使用 subprocess.Popen 并配合 asyncio，以便可以主动终止进程
+            process = None
+            try:
                 def run_sync():
-                    return subprocess.run(
+                    nonlocal process
+                    process = subprocess.Popen(
                         command,
                         shell=True,
-                        capture_output=True,
-                        text=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
                         cwd=str(self.user_temp_dir),
-                        env=os.environ.copy(),
-                        timeout=profile_timeout,
+                        env=os.environ.copy()
                     )
+                    return process.communicate(timeout=profile_timeout)
 
-                result = await loop.run_in_executor(None, run_sync)
+                # 为了能够在外部取消并终止，我们将 run_in_executor 包装在 wait_for 中，但是要注意 cancellation 的处理
+                stdout, stderr = await asyncio.wait_for(
+                    loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0
+                )
 
                 return json.dumps(
                     {
-                        "stdout": self._safe_decode(result.stdout),
-                        "stderr": self._safe_decode(result.stderr),
-                        "exit_code": result.returncode,
+                        "stdout": self._safe_decode(stdout),
+                        "stderr": self._safe_decode(stderr),
+                        "exit_code": process.returncode if process else -1,
                         "system_info": system_info,
                     },
                     ensure_ascii=False,
                 )
-            except subprocess.TimeoutExpired:
+            except TimeoutError:
+                if process:
+                    process.kill()
                 return json.dumps(
                     {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
+            except subprocess.TimeoutExpired:
+                if process:
+                    process.kill()
+                return json.dumps(
+                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
+                    ensure_ascii=False,
+                )
+            except asyncio.CancelledError:
+                if process:
+                    process.kill()
+                raise
             except Exception as e:
+                if process:
+                    process.kill()
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         # 正常的异步处理（Linux 或已正确配置的 Windows）
@@ -139,11 +160,23 @@ class ShellExecutor(BaseExecutor):
                 )
             except TimeoutError:
                 if process:
-                    process.kill()
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                 return json.dumps(
                     {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
                     ensure_ascii=False,
                 )
+            except asyncio.CancelledError:
+                if process:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                raise
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
