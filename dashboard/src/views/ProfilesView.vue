@@ -92,7 +92,7 @@
               </el-row>
               <el-form-item label="上下文限制 K">
                 <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
-                <div class="help-text mt-5">关联短期上下文的历史消息轮数</div>
+                <div class="help-text mt-5">限制上下文最大 Token 数（单位：K Tokens）</div>
               </el-form-item>
 
               <el-divider content-position="left"><span class="gray-divider-text">嵌入模型</span></el-divider>

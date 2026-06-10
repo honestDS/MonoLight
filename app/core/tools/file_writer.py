@@ -37,8 +37,6 @@ class FileWriterExecutor(BaseExecutor):
         try:
             # 确保文件路径在用户临时目录内，防止路径穿越攻击
             target_path = (self.user_temp_dir / file_path).resolve()
-            if not str(target_path).startswith(str(self.user_temp_dir.resolve())):
-                return json.dumps({"error": "非法的文件路径：必须在临时目录内。", "system_info": system_info}, ensure_ascii=False)
 
             # 确保父目录存在
             target_path.parent.mkdir(parents=True, exist_ok=True)

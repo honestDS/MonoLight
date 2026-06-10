@@ -38,7 +38,7 @@ class ProviderConfig(BaseModel):
     top_p: float = PydanticField(1.0, ge=0, le=1.0, description="核采样阈值")
     max_tokens: int = PydanticField(2048, ge=0, description="单次生成最大 Token 数量")
     multimodal: bool = PydanticField(False, description="启用多模态支持")
-    context_window_k: int = PydanticField(4, ge=1, description="短期上下文关联的历史消息轮数")
+    context_window_k: int = PydanticField(4, ge=1, description="限制上下文最大 Token 数（单位：K Tokens）")
 
 
 class SecurityConfig(BaseModel):
