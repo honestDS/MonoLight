@@ -3,7 +3,7 @@ import re
 
 from pydantic import (
     ConfigDict,
-    field_validator,
+    model_validator,
 )
 from sqlmodel import (
     Field,
@@ -11,9 +11,11 @@ from sqlmodel import (
 )
 
 
+
 class ModelUsage(enum.StrEnum):
     CHAT = "CHAT"
     EMBEDDING = "EMBEDDING"
+    RERANK = "RERANK"
 
 
 class ProviderType(enum.StrEnum):
@@ -29,12 +31,17 @@ class ProviderBase(SQLModel):
     base_url: str | None = Field(default=None)
     is_active: bool = Field(default=True)
 
-    @field_validator("base_url")
-    @classmethod
-    def validate_url(cls, v: str | None) -> str | None:
-        if v and not re.match(r"^https?://", v):
+    @model_validator(mode="after")
+    def validate_base_url(self) -> "ProviderBase":
+        # 合并 base_url 的格式校验与 RERANK 必填校验：
+        # 1. 若填写了 base_url，必须以 http:// 或 https:// 开头；
+        # 2. RERANK 类型为远程调用，base_url 必填。
+        if self.base_url and not re.match(r"^https?://", self.base_url):
             raise ValueError("base_url must start with http:// or https://")
-        return v
+        if self.usage == ModelUsage.RERANK and not self.base_url:
+            raise ValueError("usage 为 RERANK 时 base_url 必须配置")
+        return self
+
 
 
 class ModelProvider(ProviderBase, table=True):
@@ -54,12 +61,13 @@ class ProviderUpdate(SQLModel):
     base_url: str | None = None
     is_active: bool | None = None
 
-    @field_validator("base_url")
-    @classmethod
-    def validate_url(cls, v: str | None) -> str | None:
-        if v and not re.match(r"^https?://", v):
+    @model_validator(mode="after")
+    def validate_base_url(self) -> "ProviderUpdate":
+        # base_url 格式校验（部分更新模型，RERANK 必填约束在 API 层结合库内既有记录判断）
+        if self.base_url and not re.match(r"^https?://", self.base_url):
             raise ValueError("base_url must start with http:// or https://")
-        return v
+        return self
+
 
 
 class ProviderResponse(ProviderBase):

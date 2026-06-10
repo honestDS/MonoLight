@@ -164,6 +164,8 @@ async def generate_title(
         return StandardResponse.error(message="未配置有效的模型提供商")
     if provider.usage == ModelUsage.EMBEDDING:
         return StandardResponse.error(message="当前模型提供商仅支持向量化，无法生成会话标题")
+    if not provider.is_active:
+        return StandardResponse.error(message="对话模型提供商已被禁用，无法生成会话标题")
 
     title = await generate_session_title(
         uid=uid,

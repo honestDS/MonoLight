@@ -30,6 +30,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         protocol: str = "openai",
+        timeout: float = 60.0,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
@@ -45,9 +46,11 @@ class LLMClient:
             max_tokens=max_tokens,
             tools=tools,
             tool_choice=tool_choice,
+            timeout=timeout,
             **kwargs,
         ):
             yield chunk
+
 
     @classmethod
     async def generate(
@@ -61,6 +64,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         protocol: str = "openai",
+        timeout: float = 60.0,
         **kwargs,
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
@@ -76,8 +80,10 @@ class LLMClient:
             max_tokens=max_tokens,
             tools=tools,
             tool_choice=tool_choice,
+            timeout=timeout,
             **kwargs,
         )
+
 
         # 核心修复：调用 transformer.from_provider 将原始 dict 转换为 InternalResponse
         # 注意：目前的 OpenAITransformer.from_provider 返回的是 InternalMessage

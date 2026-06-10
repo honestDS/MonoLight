@@ -128,7 +128,7 @@ export function useChatSession() {
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, thinkingId, attachmentsToSent = []) => {
+  const performHttpSend = async (text, thinkingId, attachmentsToSent = [], userMsgId = null) => {
     try {
       const response = await transport.httpSend({
         message: text,
@@ -153,7 +153,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, thinkingId, attachmentsToSent)
+        return performHttpSend(text, thinkingId, attachmentsToSent, userMsgId)
       }
 
       // 成功收到响应时清除当前消息的排队标记

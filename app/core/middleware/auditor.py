@@ -158,6 +158,11 @@ class AuditMiddleware:
         provider = await provider_crud.get(db, cfg.security.audit_provider_id)
         if not provider:
             return None
+        # 审计模型被禁用时跳过安全审计（视为用户主动停用该审计能力），不阻断对话主线
+        if not provider.is_active:
+            logger.bind(uid=uid, session_id=session_id, security=True).warning("审计模型提供商已被禁用，跳过安全审计")
+            return None
+
 
         audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid)
 

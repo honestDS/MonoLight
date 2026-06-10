@@ -23,14 +23,16 @@
           <StatusTag :status="scope.row.is_active" active-text="启用" inactive-text="禁用" />
         </template>
       </el-table-column>
-      <el-table-column :resizable="false" label="操作" width="280" align="center" fixed="right">
+      <el-table-column :resizable="false" label="操作" width="360" align="center" fixed="right">
         <template #default="scope">
           <div class="action-buttons">
+            <el-button :type="scope.row.is_active ? 'warning' : 'success'" size="small" @click="handleToggleActive(scope.row)">{{ scope.row.is_active ? '禁用' : '启用' }}</el-button>
             <el-button type="primary" size="small" @click="handleEdit(scope.row)">编辑</el-button>
             <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
           </div>
         </template>
       </el-table-column>
+
     </BaseDataTable>
 
     <!-- 提供商编辑/创建弹窗 -->
@@ -89,7 +91,8 @@ const currentId = ref(null)
 // 模型用途映射表
 const modelUsageMap = {
   CHAT: '对话模型',
-  EMBEDDING: '向量模型'
+  EMBEDDING: '向量模型',
+  RERANK: '重排模型'
 }
 
 // 获取模型用途中文名称
@@ -116,6 +119,18 @@ const fetchProviders = async () => {
 
 // 使用删除确认组合式函数
 const { handleDelete } = useDeleteConfirm(providerApi.delete, fetchProviders)
+
+// 切换提供商启用/禁用状态
+const handleToggleActive = async (row) => {
+  try {
+    await providerApi.update(row.id, { is_active: !row.is_active })
+    ElMessage.success(row.is_active ? '已禁用' : '已启用')
+    fetchProviders()
+  } catch (err) {
+    ElMessage.error(err.message || '操作失败')
+  }
+}
+
 
 // 获取提供商类型列表
 const fetchProviderTypes = async () => {

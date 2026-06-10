@@ -3,7 +3,7 @@ from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, list_available_knowledge_bases
+from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, is_embedding_profile_available, list_available_knowledge_bases
 from app.core.log import get_logger
 from app.models.profile import Profile
 
@@ -47,6 +47,11 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile) -> tuple[lis
     whitelist_ids = []
 
     try:
+        # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
+        # 不向 LLM 暴露知识库查询工具，避免模型调用必然失败的工具。
+        if not await is_embedding_profile_available(db, profile):
+            return base_tools, whitelist_ids
+
         kbs = await list_available_knowledge_bases(db, profile)
         valid_kbs = [kb for kb in kbs if isinstance(kb.id, int)]
         if valid_kbs:

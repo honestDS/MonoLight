@@ -102,6 +102,9 @@ class KnowledgeBaseQueryTestItem(SQLModel):
 
 class KnowledgeBaseQueryTestResponse(SQLModel):
     items: list[KnowledgeBaseQueryTestItem]
+    retrieval_mode: str | None = None  # hybrid / hybrid_rerank
+    rerank_error: str | None = None  # 仅 query-test 路径在 rerank 降级时回填
+
 
 
 class KnowledgeBaseDocumentResponse(SQLModel):

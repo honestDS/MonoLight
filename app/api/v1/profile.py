@@ -20,6 +20,8 @@ from app.models.profile import (
     ProfileResponse,
     ProfileUpdate,
 )
+from app.models.provider import ModelUsage
+
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -39,6 +41,39 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
+async def validate_rerank_provider(db: AsyncSession, provider_config: dict) -> None:
+    """rerank 启用判定：配置了 rerank_provider_id 与 rerank_model_id 即视为启用。
+
+    - 两者均未配置：视为未启用 rerank，直接跳过校验。
+    - 仅配置其一：视为配置不完整，拦截并提示补全。
+    - 两者均配置：强校验 provider 存在且 usage 为 RERANK，并校验候选数量 K。
+    """
+    rerank_provider_id = provider_config.get("rerank_provider_id")
+    rerank_model_id = provider_config.get("rerank_model_id")
+    has_provider = bool(rerank_provider_id) and rerank_provider_id > 0
+    has_model = bool(rerank_model_id)
+
+    if not has_provider and not has_model:
+        return
+
+    if not has_provider or not has_model:
+        raise ParameterException("启用 rerank 需同时配置 rerank 模型提供商与 rerank 模型 ID")
+
+    provider = await provider_crud.get(db, rerank_provider_id)
+    if not provider:
+        raise ParameterException("指定的 rerank 模型提供商不存在")
+    if provider.usage != ModelUsage.RERANK:
+        raise ParameterException("指定的 rerank 模型提供商类型不是 RERANK")
+
+    # 候选数量 K 必须大于等于知识库返回数量，否则精排无法改变最终返回集合，rerank 失去意义
+    rerank_candidate_k = provider_config.get("rerank_candidate_k", 20)
+    kb_query_top_k = provider_config.get("kb_query_top_k", 5)
+    if isinstance(rerank_candidate_k, int) and isinstance(kb_query_top_k, int) and rerank_candidate_k < kb_query_top_k:
+        raise ParameterException("rerank 候选数量 K 必须大于等于知识库返回数量，否则精排不会生效")
+
+
+
+
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
 async def create_profile(
     profile_in: ProfileCreate,
@@ -55,8 +90,11 @@ async def create_profile(
         if not await provider_crud.get(db, embedding_provider_id):
             raise ParameterException("指定的向量模型提供商不存在")
 
+    await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
+
     if await profile_crud.get_by_name(db, profile_in.name):
         raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
+
 
     if profile_in.prompt_id:
         if not await prompt_crud.get(db, profile_in.prompt_id):
@@ -151,7 +189,10 @@ async def update_profile(
             if not await provider_crud.get(db, embedding_provider_id):
                 raise ParameterException("指定的向量模型提供商不存在")
 
+        await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
+
     if profile_in.name and profile_in.name != db_profile.name:
+
         if await profile_crud.get_by_name(db, profile_in.name):
             raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
 

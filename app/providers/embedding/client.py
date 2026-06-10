@@ -48,6 +48,7 @@ class EmbeddingClient:
         input_texts: list[str],
         batch_size: int = 16,
         dimensions: int | None = None,
+        timeout: float = 30.0,
     ) -> list[list[float]]:
         transformer = cls.get_transformer(provider_type)
         return await transformer.embed_texts(
@@ -57,4 +58,6 @@ class EmbeddingClient:
             input_texts=input_texts,
             batch_size=batch_size,
             dimensions=dimensions,
+            timeout=timeout,
         )
+

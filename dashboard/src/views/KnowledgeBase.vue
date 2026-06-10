@@ -216,9 +216,29 @@
       <div class="query-test-actions">
         <el-button type="primary" :loading="queryTesting" @click="submitQueryTest">开始测试</el-button>
       </div>
+      <el-alert
+        v-if="queryTested && rerankError"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mt-5"
+        title="本次检索已降级为混合检索"
+        :description="`Reranker 报错：${rerankError}`"
+      />
+      <el-alert
+        v-else-if="queryTested && retrievalMode === 'hybrid_rerank'"
+        type="success"
+        :closable="false"
+        show-icon
+        class="mt-5"
+        title="本次检索已启用 Reranker 精排（hybrid_rerank）"
+      />
       <el-table v-if="queryTestResults.length" :data="queryTestResults" border class="query-result-table">
         <el-table-column label="#" width="60" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
+        </el-table-column>
+        <el-table-column v-if="retrievalMode === 'hybrid_rerank'" label="Rerank 分数" width="110" align="center">
+          <template #default="{ row }">{{ formatScore(row.metadata?.rerank_score) }}</template>
         </el-table-column>
         <el-table-column label="距离" width="110" align="center">
           <template #default="{ row }">{{ formatDistance(row.distance) }}</template>
@@ -233,6 +253,7 @@
         </el-table-column>
       </el-table>
       <el-empty v-else-if="queryTested" description="未检索到结果" />
+
     </el-dialog>
   </div>
 </template>
@@ -276,6 +297,9 @@ const queryTesting = ref(false)
 const queryTested = ref(false)
 const queryTestFormRef = ref(null)
 const queryTestResults = ref([])
+const retrievalMode = ref(null)
+const rerankError = ref(null)
+
 
 const form = reactive({
   name: '',
@@ -507,7 +531,10 @@ const submitQueryTest = async () => {
         top_k: queryTestForm.top_k
       })
       queryTestResults.value = res.data.data.items || []
+      retrievalMode.value = res.data.data.retrieval_mode || null
+      rerankError.value = res.data.data.rerank_error || null
       queryTested.value = true
+
     } catch (error) {
       ElMessage.error('检索测试失败: ' + error.message)
     } finally {
@@ -520,6 +547,12 @@ const formatDistance = (distance) => {
   if (distance === null || distance === undefined) return '-'
   return Number(distance).toFixed(4)
 }
+
+const formatScore = (score) => {
+  if (score === null || score === undefined) return '-'
+  return Number(score).toFixed(4)
+}
+
 
 const submitForm = async () => {
   if (!formRef.value) return

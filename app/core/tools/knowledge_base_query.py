@@ -1,6 +1,7 @@
 import json
 
-from app.core.embedding.knowledge_base import KNOWLEDGE_BASE_QUERY_TOP_K, query_knowledge_base
+from app.core.embedding.knowledge_base import get_profile_kb_query_top_k, query_knowledge_base
+
 from app.core.tools.base import BaseExecutor
 
 KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA = {
@@ -38,14 +39,16 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
             return json.dumps({"error": "Database session or Profile configuration is missing in runtime context."}, ensure_ascii=False)
 
         try:
-            # 严格使用内部固定 KNOWLEDGE_BASE_QUERY_TOP_K 检索
+            # 最终返回数量从 Profile 配置读取（缺省回退默认值）
+            top_k = get_profile_kb_query_top_k(self.profile)
             response_data = await query_knowledge_base(
                 db=self.db,
                 profile=self.profile,
                 kb_id=kb_id,
                 query=query,
-                top_k=KNOWLEDGE_BASE_QUERY_TOP_K,
+                top_k=top_k,
             )
+
             # 组装返回格式
             items = []
             for item in response_data.items:

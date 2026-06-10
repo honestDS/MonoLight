@@ -150,8 +150,9 @@ async def query_test_knowledge_base(
     if not profile:
         raise HTTPException(status_code=404, detail="知识库绑定的配置文件不存在")
 
-    response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k)
+    response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k, expose_rerank_error=True)
     return StandardResponse.success(data=response_data)
+
 
 
 @router.post("/delete", response_model=StandardResponse[bool])

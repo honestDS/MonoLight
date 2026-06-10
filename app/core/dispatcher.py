@@ -144,7 +144,9 @@ class ChatDispatcher:
                             max_tokens=cfg.provider.max_tokens,
                             tools=current_tools,
                             protocol=getattr(chat_provider, "protocol", "openai"),
+                            timeout=cfg.provider.chat_timeout,
                         )
+
 
                         ai_msg = response.message
                         logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
@@ -299,7 +301,9 @@ class ChatDispatcher:
                             max_tokens=cfg.provider.max_tokens,
                             tools=current_tools,
                             protocol=getattr(chat_provider, "protocol", "openai"),
+                            timeout=cfg.provider.chat_timeout,
                         ):
+
                             choices = chunk.get("choices", [])
                             if not choices:
                                 continue

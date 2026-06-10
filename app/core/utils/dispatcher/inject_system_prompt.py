@@ -4,6 +4,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.embedding.knowledge_base import (
     build_knowledge_base_prompt_items,
+    is_embedding_profile_available,
     list_available_knowledge_bases,
 )
 from app.core.log import (
@@ -49,8 +50,13 @@ async def inject_system_prompt(
         full_parts.append(instruction_part)
 
     # 2. 查询该 Profile 关联的可用知识库并注入
+    # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
+    # 不注入知识库目录提示词，保持与工具暴露逻辑一致。
     try:
-        kbs = await list_available_knowledge_bases(db, profile)
+        if not await is_embedding_profile_available(db, profile):
+            kbs = []
+        else:
+            kbs = await list_available_knowledge_bases(db, profile)
         if kbs:
             kb_items = build_knowledge_base_prompt_items(kbs)
             # 序列化为美化后的 JSON

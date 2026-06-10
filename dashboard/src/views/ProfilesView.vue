@@ -37,7 +37,7 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+    <el-dialog :title="dialogType === 'create' ? '新建配置' : '编辑配置'" v-model="dialogVisible" width="60%" class="standard-dialog" center align-center>
       <el-form :model="form" label-width="120px" size="default">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
@@ -59,13 +59,14 @@
             <div class="tab-pane-content">
               <el-divider content-position="left"><span class="gray-divider-text">对话模型</span></el-divider>
               <el-form-item label="提供商">
-                <el-select v-model="form.configs.provider.provider_id" placeholder="选择提供商" class="full-width-input">
-                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                <el-select v-model="form.configs.provider.provider_id" placeholder="选择对话模型提供商" class="full-width-input">
+                  <el-option v-for="item in chatProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
               </el-form-item>
               <el-form-item label="模型 ID">
                 <el-input v-model="form.configs.provider.model_id" placeholder="如 gpt-4o"></el-input>
               </el-form-item>
+
               <el-row :gutter="20">
                 <el-col :span="12">
                   <el-form-item label="Temperature">
@@ -90,16 +91,27 @@
                   </el-form-item>
                 </el-col>
               </el-row>
-              <el-form-item label="上下文限制 K">
-                <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
-                <div class="help-text mt-5">限制上下文最大 Token 数（单位：K Tokens）</div>
-              </el-form-item>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="上下文限制 K">
+                    <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">限制上下文最大 Token 数（单位：K Tokens）</div>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="对话超时 (秒)">
+                    <el-input-number v-model="form.configs.provider.chat_timeout" :min="1" :max="600" :step="1" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">对话模型调用超时时间。流式对话下该超时仅作用于首字生成阶段，开始输出后不再判定超时，避免长回答被中途切断。</div>
+                  </el-form-item>
+                </el-col>
+              </el-row>
 
               <el-divider content-position="left"><span class="gray-divider-text">嵌入模型</span></el-divider>
               <el-form-item label="提供商">
                 <el-select v-model="form.configs.provider.embedding_provider_id" placeholder="选择向量提供商 (可选)" clearable class="full-width-input">
-                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                  <el-option v-for="item in embeddingProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
+
               </el-form-item>
               <el-form-item label="向量模型 ID">
                 <el-input v-model="form.configs.provider.embedding_model_id" placeholder="可选，用于知识库的专属模型如 text-embedding-3-small"></el-input>
@@ -111,6 +123,46 @@
                 </div>
                 <div class="help-text mt-5">部分向量模型支持自定义输出维度。导入文档时会先尝试携带该维度请求；如果模型不支持，会自动回退为默认维度请求。留空则始终使用模型默认维度。</div>
               </el-form-item>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="嵌入超时 (秒)">
+                    <el-input-number v-model="form.configs.provider.embedding_timeout" :min="1" :max="600" :step="1" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">向量模型调用的整体超时时间，用于文档导入向量化与知识库检索时的嵌入请求。</div>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="知识库返回数量">
+                    <el-input-number v-model="form.configs.provider.kb_query_top_k" :min="1" :max="50" :step="1" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">对话时调用知识库工具最终返回给模型的片段数量。启用 Reranker 时，需确保下方“候选数量 K”大于该值，精排才会生效。</div>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+
+              <el-divider content-position="left"><span class="gray-divider-text">重排模型 (Reranker)</span></el-divider>
+
+              <el-form-item label="提供商">
+                <el-select v-model="form.configs.provider.rerank_provider_id" placeholder="选择 Rerank 提供商 (可选)" clearable class="full-width-input">
+                  <el-option v-for="item in rerankProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                </el-select>
+
+                <div class="help-text mt-5">同时配置 Rerank 提供商与模型 ID 即视为启用远程 reranker；留空则不启用。远程调用失败时自动回退到混合检索结果。</div>
+              </el-form-item>
+              <el-form-item label="Rerank 模型 ID">
+                <el-input v-model="form.configs.provider.rerank_model_id" placeholder="可选，如 rerank-model-id"></el-input>
+              </el-form-item>
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="候选数量 K">
+                    <el-input-number v-model="form.configs.provider.rerank_candidate_k" :min="1" :max="50" :step="1" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">送入远程 reranker 的候选片段数量（上限 50），需大于等于知识库返回数量。</div>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="超时 (秒)">
+                    <el-input-number v-model="form.configs.provider.rerank_timeout" :min="1" :max="120" :step="1" class="full-width-input"></el-input-number>
+                  </el-form-item>
+                </el-col>
+              </el-row>
             </div>
           </el-tab-pane>
 
@@ -119,8 +171,9 @@
             <div class="tab-pane-content">
               <el-form-item label="审计提供商">
                 <el-select v-model="form.configs.security.audit_provider_id" placeholder="选择审计服务商" clearable class="full-width-input">
-                  <el-option v-for="item in providers" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                  <el-option v-for="item in auditProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
                 </el-select>
+
               </el-form-item>
               <el-form-item label="审计模型 ID">
                 <el-input v-model="form.configs.security.audit_model_id" placeholder="用于审计的模型 ID"></el-input>
@@ -191,7 +244,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { profileApi, providerApi, promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
@@ -211,6 +264,20 @@ const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
 const detectingDimension = ref(false)
+
+// 按模型类型与启用状态过滤提供商，供各模型配置下拉仅展示“未禁用且类型符合”的选项。
+// 为兼容编辑场景下已选中但当前被禁用/类型不符的存量值，额外把当前已选 id 保留在候选中，避免回显丢失。
+const filterProvidersByUsage = (usage, selectedId) => {
+  return providers.value.filter(
+    (item) => (item.usage === usage && item.is_active) || item.id === selectedId
+  )
+}
+
+const chatProviders = computed(() => filterProvidersByUsage('CHAT', form.configs.provider.provider_id))
+const embeddingProviders = computed(() => filterProvidersByUsage('EMBEDDING', form.configs.provider.embedding_provider_id))
+const rerankProviders = computed(() => filterProvidersByUsage('RERANK', form.configs.provider.rerank_provider_id))
+const auditProviders = computed(() => filterProvidersByUsage('CHAT', form.configs.security.audit_provider_id))
+
 
 const form = reactive({
   id: null,
@@ -325,7 +392,26 @@ const submitForm = async () => {
   if (!form.name || !form.configs.provider.provider_id || !form.configs.provider.model_id) {
     return ElMessage.warning('请补全必填配置信息（配置名称、对话模型提供商、对话模型ID）')
   }
+  // Reranker 启用判定：同时配置了提供商与模型 ID 即视为启用
+  const rerankProviderId = form.configs.provider.rerank_provider_id
+  const rerankModelId = (form.configs.provider.rerank_model_id || '').trim()
+  const hasRerankProvider = !!rerankProviderId
+  const hasRerankModel = !!rerankModelId
+  if (hasRerankProvider || hasRerankModel) {
+    // 仅配置其一视为配置不完整
+    if (!hasRerankProvider || !hasRerankModel) {
+      return ElMessage.warning('启用 Reranker 需同时配置 Rerank 提供商与模型 ID，否则请将两者都留空')
+    }
+    // 候选数量 K 必须大于等于知识库返回数量，否则精排不会生效
+    const candidateK = form.configs.provider.rerank_candidate_k
+    const topK = form.configs.provider.kb_query_top_k
+    if (Number(candidateK) < Number(topK)) {
+      return ElMessage.warning('Rerank 候选数量 K 必须大于等于知识库返回数量，否则精排不会生效')
+    }
+  }
+
   submitting.value = true
+
   try {
     if (dialogType.value === 'create') {
       await profileApi.create(form)
@@ -351,4 +437,7 @@ onMounted(() => {
 
 <style lang="scss">
 @import "@/assets/css/ProfilesView.scss";
+.el-form-item__content{
+  gap: 10px;
+}
 </style>

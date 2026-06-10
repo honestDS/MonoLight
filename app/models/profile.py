@@ -34,6 +34,13 @@ class ProviderConfig(BaseModel):
     embedding_provider_id: int | None = PydanticField(None, ge=-1, description="向量模型提供商 ID")
     embedding_model_id: str | None = PydanticField(None, description="用于知识库向量化的专属模型 ID")
     embedding_dimensions: int | None = PydanticField(None, gt=0, description="向量输出维度（如 1024，仅部分模型支持动态维度）")
+    rerank_provider_id: int | None = PydanticField(None, ge=-1, description="rerank 模型提供商 ID；与 rerank_model_id 同时配置即视为启用远程 reranker")
+    rerank_model_id: str | None = PydanticField(None, description="rerank 模型 ID；与 rerank_provider_id 同时配置即视为启用远程 reranker")
+    rerank_candidate_k: int = PydanticField(20, gt=0, le=50, description="送入远程 reranker 的候选数量")
+    rerank_timeout: float = PydanticField(15.0, gt=0, le=120, description="远程 rerank 调用超时（秒）")
+    kb_query_top_k: int = PydanticField(5, gt=0, le=50, description="对话工具知识库检索最终返回的片段数量")
+    chat_timeout: float = PydanticField(60.0, gt=0, le=600, description="对话模型调用超时（秒）；流式仅作用于首字生成，生成中不判定超时")
+    embedding_timeout: float = PydanticField(30.0, gt=0, le=600, description="嵌入模型调用超时（秒）")
     temperature: float = PydanticField(0.7, ge=0, le=2.0, description="采样温度，控制生成内容的随机性")
     top_p: float = PydanticField(1.0, ge=0, le=1.0, description="核采样阈值")
     max_tokens: int = PydanticField(2048, ge=0, description="单次生成最大 Token 数量")
@@ -83,6 +90,13 @@ class ProfileConfig(BaseModel):
                 "embedding_provider_id",
                 "embedding_model_id",
                 "embedding_dimensions",
+                "rerank_provider_id",
+                "rerank_model_id",
+                "rerank_candidate_k",
+                "rerank_timeout",
+                "kb_query_top_k",
+                "chat_timeout",
+                "embedding_timeout",
                 "temperature",
                 "top_p",
                 "max_tokens",
@@ -107,6 +121,13 @@ PROFILE_EXAMPLE = {
             "embedding_provider_id": 1,
             "embedding_model_id": "text-embedding-3-small",
             "embedding_dimensions": 1024,
+            "rerank_provider_id": 1,
+            "rerank_model_id": "rerank-model-id",
+            "rerank_candidate_k": 20,
+            "rerank_timeout": 15.0,
+            "kb_query_top_k": 5,
+            "chat_timeout": 60.0,
+            "embedding_timeout": 30.0,
             "temperature": 0.7,
             "top_p": 1,
             "max_tokens": 0,

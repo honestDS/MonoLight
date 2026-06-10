@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_CHAT_PROVIDER_DISABLED,
     ERR_LLM_PROVIDER_NOT_CONFIGURED,
     ERR_PROFILE_NOT_FOUND,
     ERR_PROVIDER_EMBEDDING_ONLY,
@@ -31,5 +32,8 @@ async def validate_profile_and_cfg(db: AsyncSession, profile: Profile) -> Profil
     chat_provider = await provider_crud.get(db, provider_id)
     if chat_provider and chat_provider.usage == ModelUsage.EMBEDDING:
         raise LLMException(message=ERR_PROVIDER_EMBEDDING_ONLY)
+    # 对话模型被禁用时拒绝调用，避免使用已停用的主对话模型
+    if chat_provider and not chat_provider.is_active:
+        raise LLMException(message=ERR_CHAT_PROVIDER_DISABLED)
 
     return cfg

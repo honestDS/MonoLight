@@ -92,6 +92,9 @@ async def test_embed_texts_dimensions_fallback_does_not_log_error(monkeypatch):
     class MockSession:
         calls = []
 
+        def __init__(self, *args, **kwargs):
+            pass
+
         def post(self, url, **kwargs):
             self.calls.append(kwargs["json"])
             if len(self.calls) == 1:
@@ -154,6 +157,9 @@ async def test_openai_get_embeddings_normalizes_base_url(monkeypatch):
 
     class MockSession:
         urls = []
+
+        def __init__(self, *args, **kwargs):
+            pass
 
         def post(self, url, **kwargs):
             self.urls.append(url)

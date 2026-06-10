@@ -44,8 +44,8 @@ async def create_provider(
     if await provider_crud.get_by_name(db, provider_in.name):
         raise ParameterException(constants.ERR_PROVIDER_NAME_EXISTS)
 
-    provider_in.is_active = True  # 该参数暂不允许设置
     db_obj = await provider_crud.create(db, obj_in=provider_in)
+
     return StandardResponse.success(
         data=ProviderResponse.model_validate(db_obj),
         message=constants.MSG_PROVIDER_CREATED,
@@ -104,8 +104,15 @@ async def update_provider(
         if await provider_crud.get_by_name(db, provider_in.name):
             raise ParameterException(constants.ERR_PROVIDER_NAME_EXISTS)
 
-    provider_in.is_active = True  # 该参数暂不允许设置
+    # 跨字段校验：结合库内既有 usage 判断更新后是否仍满足 RERANK 的 base_url 必填约束
+    # ProviderUpdate 为部分更新模型，usage 可能为 None（本次未改 usage），需结合数据库既有记录判断
+    final_usage = provider_in.usage if provider_in.usage is not None else db_obj.usage
+    final_base_url = provider_in.base_url if provider_in.base_url is not None else db_obj.base_url
+    if final_usage == ModelUsage.RERANK and not final_base_url:
+        raise ParameterException("usage 为 RERANK 时 base_url 必须配置")
+
     db_obj = await provider_crud.update(db, db_obj=db_obj, obj_in=provider_in)
+
     return StandardResponse.success(
         data=ProviderResponse.model_validate(db_obj),
         message=constants.MSG_PROVIDER_UPDATED,

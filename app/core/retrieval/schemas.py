@@ -19,3 +19,5 @@ class RetrievalHit:
     sparse_score: float | None = None
     sparse_rank: int | None = None
     fusion_score: float | None = None
+    rerank_score: float | None = None
+    rerank_rank: int | None = None

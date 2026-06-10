@@ -25,6 +25,7 @@ class BaseTransformer(ABC):
         max_tokens: int = 0,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
+        timeout: float = 60.0,
         **kwargs,
     ) -> InternalResponse:
         pass
@@ -40,6 +41,7 @@ class BaseTransformer(ABC):
         max_tokens: int = 0,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
+        timeout: float = 60.0,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         pass
@@ -65,6 +67,7 @@ class BaseEmbeddingTransformer(ABC):
         base_url: str,
         model_id: str,
         input_texts: str | list[str],
+        timeout: float = 30.0,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -78,5 +81,36 @@ class BaseEmbeddingTransformer(ABC):
         input_texts: list[str],
         batch_size: int = 16,
         dimensions: int | None = None,
+        timeout: float = 30.0,
     ) -> list[list[float]]:
         pass
+
+
+class BaseRerankTransformer(ABC):
+    @abstractmethod
+    async def get_rerank(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+        timeout: float = 15.0,
+        **kwargs,
+    ) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def rerank_texts(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+        timeout: float = 15.0,
+    ) -> list[dict[str, Any]]:
+        pass
+
