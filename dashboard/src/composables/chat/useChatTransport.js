@@ -6,6 +6,9 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useWebSocket } from '../useWebSocket'
+import i18n from '../../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
@@ -208,7 +211,7 @@ export function useChatTransport() {
 
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
     const token = localStorage.getItem('token')
-    if (!token) throw new Error('未登录')
+    if (!token) throw new Error(t('chat.not_logged_in'))
     
     const finalCallbacks = { ...callbacks, requestId }
     if (requestId) {
@@ -221,7 +224,7 @@ export function useChatTransport() {
         wsConnected.value = true
       } catch (e) {
         console.error('WebSocket连接失败:', e)
-        ElMessage.error('WebSocket 连接失败，将使用 HTTP 模式')
+        ElMessage.error(t('chat.ws_connect_failed'))
         transportMode.value = 'http'
         if (requestId) callbacksMap.delete(requestId)
         return false
@@ -237,7 +240,7 @@ export function useChatTransport() {
     }
     
     if (!wsManager.sendMessage(wsData)) {
-      ElMessage.error('WebSocket 消息发送失败')
+      ElMessage.error(t('chat.ws_message_send_failed'))
       if (requestId) callbacksMap.delete(requestId)
       return false
     }

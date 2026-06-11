@@ -11,6 +11,9 @@ import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
 import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolResultName, getToolResultContent, getMessageTimestamp } from '../../utils'
 import { chatApi } from '../../api'
+import i18n from '../../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useChatSession() {
   // ==================== 组合各模块 ====================
@@ -142,7 +145,7 @@ export function useChatSession() {
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
         // 1. 设置当前会话 ID (静默选择)
-        sessionManager.selectSession({ session_id: newId, title: '新会话', enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        sessionManager.selectSession({ session_id: newId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value }, null, false, false)
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
@@ -172,7 +175,7 @@ export function useChatSession() {
         delete userMsg.status
       }
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
-      ElMessage.error(err.message || '发送失败')
+      ElMessage.error(err.message || t('chat.send_failed'))
     } finally {
       // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
       const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
@@ -254,12 +257,12 @@ export function useChatSession() {
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam) => {
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
-        ElMessage.error(errorMessage || '流式对话过程出错')
+        ElMessage.error(errorMessage || t('chat.stream_error'))
       },
       onSessionId: (newSessionId) => {
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
-        sessionManager.selectSession({ session_id: newSessionId, title: '新会话', enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        sessionManager.selectSession({ session_id: newSessionId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value }, null, false, false)
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
@@ -339,7 +342,7 @@ export function useChatSession() {
       })
     } catch (e) {
       console.error('WebSocket发送失败:', e)
-      ElMessage.error('WebSocket 消息发送失败，将使用 HTTP 模式')
+      ElMessage.error(t('chat.ws_send_failed'))
       messageProcessor.removeThinkingMessage(chatState.messages, transport.getCurrentThinkingId())
       chatState.loading.value = false
       transport.setTransportMode('http')

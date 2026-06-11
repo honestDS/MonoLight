@@ -161,6 +161,7 @@ body {
 /* 全局布局 */
 .app-wrapper { height: 100vh; overflow: hidden; }
 .app-header { background: #fff; border-bottom: 1px solid #ebedf0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
+.app-header .header-right { display: flex; align-items: center; gap: 16px; }
 .app-main { 
   padding: 24px; 
   overflow-y: auto; 

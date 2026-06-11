@@ -7,6 +7,9 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useDeleteConfirm } from '../useDeleteConfirm'
 import { PAGE_SIZE } from '../../constants'
+import i18n from '../../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useSessionManager() {
   // ==================== 状态定义 ====================
@@ -50,7 +53,7 @@ export function useSessionManager() {
       const res = await chatApi.sessionsList()
       sessions.value = res.data.data || []
     } catch (err) {
-      ElMessage.error(err.message || '获取会话列表失败')
+      ElMessage.error(err.message || t('chat.load_sessions_failed'))
     } finally {
       sessionsLoading.value = false
     }
@@ -110,7 +113,7 @@ export function useSessionManager() {
       }
       return historyData
     } catch (err) {
-      ElMessage.error(err.message || '获取历史记录失败')
+      ElMessage.error(err.message || t('chat.load_history_failed'))
       return []
     } finally {
       historyLoading.value = false
@@ -178,7 +181,7 @@ export function useSessionManager() {
         first_message: firstMessage
       })
       
-      const newTitle = res.data?.data?.title || '新会话'
+      const newTitle = res.data?.data?.title || t('chat.default_title')
       
       // 更新本地会话列表中的标题
       let sessionIdx = sessions.value.findIndex(s => s.session_id === sessionId)
@@ -216,7 +219,7 @@ export function useSessionManager() {
       if (sessions.value.findIndex(s => s.session_id === sessionId) === -1) {
         sessions.value.unshift({
           session_id: sessionId,
-          title: '新会话',
+          title: t('chat.default_title'),
           last_active: lastActive
         })
       }

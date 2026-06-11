@@ -1,6 +1,10 @@
 <template>
   <div class="login-page">
+    <div class="login-lang-switcher">
+      <LanguageSwitcher />
+    </div>
     <div class="login-box">
+
       <div class="login-left">
         <div class="brand-info">
           <h1 class="brand-logo">MonoLight</h1>
@@ -64,6 +68,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { authApi } from '../api'
+import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+
 
 const { t } = useI18n()
 const router = useRouter()

@@ -3,8 +3,9 @@
     <!-- 左侧会话列表侧边栏 -->
     <div class="sessions-sidebar">
       <div class="sidebar-header">
-        <span>会话列表</span>
+        <span>{{ $t('chat.sessions_title') }}</span>
         <el-button type="text" size="small" @click="loadSessions">
+
           <i class="el-icon-refresh"></i>
         </el-button>
       </div>
@@ -26,8 +27,9 @@
                 >{{ char }}</span>
               </template>
               <template v-else>
-                {{ session.title || '会话: ' + session.session_id.substring(0, 8) }}
+                {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
               </template>
+
             </div>
             <div class="session-time">{{ session.last_active }}</div>
           </div>
@@ -36,8 +38,9 @@
           </div>
         </div>
         <div v-if="sessions.length === 0 && !sessionsLoading" class="empty-tip">
-          暂无会话
+          {{ $t('chat.no_sessions') }}
         </div>
+
       </div>
     </div>
 
@@ -45,8 +48,9 @@
     <div class="chat-main">
       <div class="message-list" ref="messageList">
         <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
-          <p>请选择左侧会话或新建会话开始聊天</p>
+          <p>{{ $t('chat.empty_chat_tip') }}</p>
         </div>
+
         <template v-else>
           <div v-for="msg in messages" :key="msg.id" :class="['message-item', getMessageClass(msg.role), { 'queued': msg.status === 'queued' }]">
             <!-- 普通消息或工具调用消息 -->
@@ -57,7 +61,7 @@
               <el-collapse v-model="activeCollapse">
                 <el-collapse-item :name="msg.id">
                   <template #title>
-                    <span class="tool-call-title">工具调用: {{ getToolName(msg) }}</span>
+                    <span class="tool-call-title">{{ $t('chat.tool_call', { name: getToolName(msg) }) }}</span>
                   </template>
                   <div class="tool-call-content">
                     <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolArguments(msg)" :max-height="300" />
@@ -72,7 +76,7 @@
               <el-collapse v-model="activeCollapse">
                 <el-collapse-item :name="msg.id">
                   <template #title>
-                    <span class="tool-result-title">工具返回: {{ getToolResultName(msg) }}</span>
+                    <span class="tool-result-title">{{ $t('chat.tool_result', { name: getToolResultName(msg) }) }}</span>
                   </template>
                   <div class="tool-result-content">
                     <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolResultContent(msg)" :max-height="300" />
@@ -144,7 +148,7 @@
       <div class="input-area">
         <div class="toolbar-row">
           <el-button type="primary" @click="createNewSession" class="new-session-btn">
-            <i class="el-icon-plus"></i> 新建会话
+            <i class="el-icon-plus"></i> {{ $t('chat.new_session') }}
           </el-button>
           
           <!-- 上传按钮移到模式选择之前 -->
@@ -156,7 +160,7 @@
               multiple
               :before-upload="() => true"
             >
-              <el-button title="上传图片/附件">上传图片/附件</el-button>
+              <el-button :title="$t('chat.upload')">{{ $t('chat.upload') }}</el-button>
             </el-upload>
           </div>
 
@@ -166,13 +170,13 @@
               :class="['mode-btn', { active: !currentSessionEnableMarkdown }]"
               @click="toggleMarkdown(false)"
               :disabled="loading"
-            >纯文本</button>
+            >{{ $t('chat.plain_text') }}</button>
             <button 
               type="button" 
               :class="['mode-btn', { active: currentSessionEnableMarkdown }]"
               @click="toggleMarkdown(true)"
               :disabled="loading"
-            >MD渲染</button>
+            >{{ $t('chat.md_render') }}</button>
           </div>
 
           <div class="mode-selector">
@@ -181,13 +185,13 @@
               :class="['mode-btn', { active: !isWsModeComputed }]"
               @click="handleModeChange(false)"
               :disabled="loading"
-            >非流</button>
+            >{{ $t('chat.non_stream') }}</button>
             <button 
               type="button" 
               :class="['mode-btn', { active: isWsModeComputed }]"
               @click="handleModeChange(true)"
               :disabled="loading"
-            >流式</button>
+            >{{ $t('chat.stream') }}</button>
           </div>
         </div>
         <div class="input-wrapper">
@@ -219,7 +223,7 @@
 
               <el-input
                 v-model="inputMsg" 
-                placeholder="输入消息或粘贴截图..." 
+                :placeholder="$t('chat.input_placeholder')" 
                 @keyup.enter="send"
                 @paste="handlePaste"
                 type="textarea"
@@ -253,7 +257,10 @@ import { ElCollapse, ElCollapseItem } from 'element-plus'
 import VirtualizedCode from '../components/VirtualizedCode.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { fileApi, chatApi } from '../api'
+
+const { t } = useI18n()
 
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
@@ -313,7 +320,7 @@ const toggleMarkdown = async (val) => {
   try {
     await chatApi.updateSessionSetting(currentSessionId.value, val)
   } catch (error) {
-    ElMessage.error(error.message || '设置失败')
+    ElMessage.error(error.message || t('chat.setting_failed'))
     // 回退状态
     currentSessionEnableMarkdown.value = !val
   }
@@ -462,10 +469,10 @@ const handleUpload = async (options) => {
       uploadFileList.value.push(newFileItem)
     }
 
-    ElMessage.success('附件上传成功')
+    ElMessage.success(t('chat.upload_success'))
   } catch (error) {
     if (onError) onError(error)
-    ElMessage.error(error.message || '上传失败')
+    ElMessage.error(error.message || t('chat.upload_failed'))
   }
 }
 
@@ -526,7 +533,7 @@ const isImageFile = (path) => {
 
 // 提取文件名
 const getFilename = (path) => {
-  if (!path) return '未知文件'
+  if (!path) return t('chat.unknown_file')
   const name = path.split(/[/\\]/).pop()
   // 去除 8位uuid_ 前缀
   return name.length > 9 && name[8] === '_' ? name.substring(9) : name

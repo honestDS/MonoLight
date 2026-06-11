@@ -71,8 +71,10 @@
             <span class="breadcrumb">{{ currentRouteName }}</span>
           </div>
           <div class="header-right">
-            <el-button type="text" @click="logout">退出登录</el-button>
+            <LanguageSwitcher class="header-lang-switcher" />
+            <el-button type="text" @click="logout">{{ $t('common.logout') }}</el-button>
           </div>
+
         </el-header>
         <el-main class="app-main">
           <transition name="fade" mode="out-in">
@@ -90,12 +92,17 @@
 <script>
 import { useResizeObserver } from './composables/useResizeObserver'
 import { routeNameMap } from './constants'
+import LanguageSwitcher from './components/LanguageSwitcher.vue'
 
 // 初始化 ResizeObserver 防抖补丁
 useResizeObserver()
 
 export default {
   name: 'App',
+  components: {
+    LanguageSwitcher
+  },
+
   computed: {
     isLoginPage() {
       return this.$route.path === '/login'
