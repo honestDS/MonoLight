@@ -6,6 +6,8 @@ from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core import constants
+
 # Re-use the refactored embedding and knowledge base query core functions
 from app.core.embedding.knowledge_base import (
     embed_chunks,
@@ -13,6 +15,7 @@ from app.core.embedding.knowledge_base import (
     is_embedding_profile_available,
     query_knowledge_base,
 )
+from app.core.i18n import t
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
 from app.models.knowledge_base import (
@@ -44,20 +47,22 @@ async def create_knowledge_base(
     current_user: Any = Depends(get_current_user),
 ):
     """创建知识库"""
+
     # 检查 profile 是否存在
     profile = await db.get(Profile, kb_in.profile_id)
     if not profile:
-        raise HTTPException(status_code=404, detail="指定的 Profile 不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NOT_FOUND)
     await get_profile_embedding_config(db, profile)
 
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
 
+
     # 在 ChromaDB 中创建 collection
     try:
         create_collection(collection_name)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"创建向量库集合失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
     # 存入关系型数据库
     db_kb = KnowledgeBase(
@@ -76,9 +81,9 @@ async def create_knowledge_base(
             delete_collection(collection_name)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"创建知识库失败，已回滚向量库集合: {str(e)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_CREATE_FAILED_WITH_ROLLBACK, message=str(e)))
 
-    return StandardResponse.success(data=KnowledgeBaseResponse.model_validate(db_kb))
+    return StandardResponse.success(data=KnowledgeBaseResponse.model_validate(db_kb), message=constants.MSG_KB_CREATED)
 
 
 @router.get("/list", response_model=StandardResponse[KnowledgeBaseListResponse])
@@ -124,7 +129,7 @@ async def update_knowledge_base(
     """修改知识库"""
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
 
     kb.name = kb_in.name
     kb.description = kb_in.description
@@ -132,7 +137,7 @@ async def update_knowledge_base(
     db.add(kb)
     await db.commit()
     await db.refresh(kb)
-    return StandardResponse.success(data=KnowledgeBaseResponse.model_validate(kb))
+    return StandardResponse.success(data=KnowledgeBaseResponse.model_validate(kb), message=constants.MSG_KB_UPDATED)
 
 
 @router.post("/query-test", response_model=StandardResponse[KnowledgeBaseQueryTestResponse])
@@ -142,13 +147,14 @@ async def query_test_knowledge_base(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
+
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
 
     profile = await db.get(Profile, kb.profile_id)
     if not profile:
-        raise HTTPException(status_code=404, detail="知识库绑定的配置文件不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_PROFILE_NOT_FOUND)
 
     response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k, expose_rerank_error=True)
     return StandardResponse.success(data=response_data)
@@ -162,9 +168,10 @@ async def delete_knowledge_base(
     current_user: Any = Depends(get_current_user),
 ):
     """删除知识库"""
+
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
 
     docs_result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
     for document in docs_result.scalars().all():
@@ -176,9 +183,9 @@ async def delete_knowledge_base(
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"删除知识库失败，已撤销数据库删除操作: {str(e)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DELETE_FAILED, message=str(e)))
 
-    return StandardResponse.success(data=True)
+    return StandardResponse.success(data=True, message=constants.MSG_KB_DELETED)
 
 
 @router.post("/documents/import", response_model=StandardResponse[KnowledgeBaseDocumentResponse])
@@ -191,15 +198,16 @@ async def import_document(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
+
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
     if chunk_overlap >= chunk_size:
-        raise HTTPException(status_code=400, detail="分块重叠必须小于分块大小")
+        raise HTTPException(status_code=400, detail=constants.ERR_KB_CHUNK_OVERLAP_ERROR)
 
     profile = await db.get(Profile, kb.profile_id)
     if not profile:
-        raise HTTPException(status_code=404, detail="知识库绑定的配置文件不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_PROFILE_NOT_FOUND)
 
     raw_content = await file.read()
     try:
@@ -208,11 +216,11 @@ async def import_document(
         try:
             content = raw_content.decode("gbk")
         except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail="暂仅支持 UTF-8 或 GBK 编码的文本类文档")
+            raise HTTPException(status_code=400, detail=constants.ERR_KB_FILE_ENCODING_ERROR)
 
     chunks = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(content)
     if not chunks:
-        raise HTTPException(status_code=400, detail="文档内容为空，无法导入")
+        raise HTTPException(status_code=400, detail=constants.ERR_KB_FILE_EMPTY)
 
     embeddings = await embed_chunks(db, profile, chunks, batch_size)
     document_uuid = uuid.uuid4().hex
@@ -231,7 +239,7 @@ async def import_document(
         collection = get_or_create_collection(kb.collection_name)
         collection.add(ids=chunk_ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"写入向量库失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
 
     db_document = KnowledgeBaseDocument(
         knowledge_base_id=kb.id,
@@ -254,9 +262,9 @@ async def import_document(
             delete_collection_items(kb.collection_name, chunk_ids)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"保存文档失败，已回滚向量分块: {str(e)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DOC_SAVE_FAILED, message=str(e)))
 
-    return StandardResponse.success(data=KnowledgeBaseDocumentResponse.model_validate(db_document), message="文档导入成功")
+    return StandardResponse.success(data=KnowledgeBaseDocumentResponse.model_validate(db_document), message=constants.MSG_KB_DOC_CREATED)
 
 
 @router.get("/documents/list", response_model=StandardResponse[KnowledgeBaseDocumentListResponse])
@@ -267,9 +275,10 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
+
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
 
     skip = (page - 1) * size
     result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id).order_by(KnowledgeBaseDocument.created_at.desc()).offset(skip).limit(size))
@@ -292,9 +301,10 @@ async def get_document_content(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
+
     document = await db.get(KnowledgeBaseDocument, document_id)
     if not document or document.knowledge_base_id != kb_id:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_DOC_NOT_FOUND)
     return StandardResponse.success(data=KnowledgeBaseDocumentContentResponse.model_validate(document))
 
 
@@ -305,12 +315,13 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
+
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
     document = await db.get(KnowledgeBaseDocument, document_id)
     if not document or document.knowledge_base_id != kb_id:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_DOC_NOT_FOUND)
 
     await db.delete(document)
     try:
@@ -319,5 +330,5 @@ async def delete_document(
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"删除文档失败，已撤销数据库删除操作: {str(e)}")
-    return StandardResponse.success(data=True, message="文档删除成功")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DOC_DELETE_FAILED, message=str(e)))
+    return StandardResponse.success(data=True, message=constants.MSG_KB_DOC_DELETED)

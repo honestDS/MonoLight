@@ -1,0 +1,37 @@
+# 默认对所有文本文件自动识别，并在仓库内统一以 LF 存储，消除跨平台 CRLF 噪声
+* text=auto eol=lf
+
+# 明确指定常见文本类型以 LF 结尾
+*.py    text eol=lf
+*.js    text eol=lf
+*.vue   text eol=lf
+*.ts    text eol=lf
+*.json  text eol=lf
+*.css   text eol=lf
+*.scss  text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.txt   text eol=lf
+*.toml  text eol=lf
+*.ini   text eol=lf
+*.sh    text eol=lf
+
+# Windows 批处理脚本必须保留 CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制文件不做换行符转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.svg   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.pdf   binary
+*.zip   binary

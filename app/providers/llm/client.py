@@ -35,7 +35,7 @@ class LLMClient:
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}")
+            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported protocol {protocol}")
 
         async for chunk in transformer.generate_stream(
             api_key=api_key,
@@ -69,7 +69,7 @@ class LLMClient:
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported protocol {protocol}")
+            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported protocol {protocol}")
 
         raw_response = await transformer.generate(
             api_key=api_key,

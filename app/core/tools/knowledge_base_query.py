@@ -1,7 +1,6 @@
 import json
 
 from app.core.embedding.knowledge_base import get_profile_kb_query_top_k, query_knowledge_base
-
 from app.core.tools.base import BaseExecutor
 
 KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA = {

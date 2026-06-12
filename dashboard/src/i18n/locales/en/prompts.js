@@ -1,0 +1,20 @@
+export default {
+  create_prompt: 'Create Prompt',
+  name: 'Name',
+  content_preview: 'Content Preview',
+  actions: 'Actions',
+  edit: 'Edit',
+  delete: 'Delete',
+  edit_prompt: 'Edit Prompt',
+  prompt_name: 'Prompt Name',
+  input_name: 'Please enter prompt name',
+  content: 'Content',
+  input_content: 'Please enter prompt content',
+  cancel: 'Cancel',
+  save: 'Save',
+  load_failed: 'Failed to load list',
+  fill_required: 'Please fill in name and content',
+  save_success: 'Saved successfully',
+  submit_failed: 'Submit failed',
+  refresh: 'Refresh'
+}

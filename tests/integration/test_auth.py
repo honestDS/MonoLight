@@ -30,5 +30,5 @@ async def test_auth_management_flow():
         )
 
         # 2. 正常流：登录获取 Token
-        r_login_ok = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin"})
+        r_login_ok = await ac.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
         assert r_login_ok.status_code == 200

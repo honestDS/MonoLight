@@ -16,7 +16,7 @@ class EmbeddingClient:
     def get_transformer(cls, provider_type: ProviderType | str) -> BaseEmbeddingTransformer:
         transformer = cls._transformers.get(str(provider_type).lower())
         if not transformer:
-            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported embedding provider {provider_type}")
+            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported embedding provider {provider_type}")
         return transformer
 
     @classmethod

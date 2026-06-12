@@ -21,7 +21,6 @@ from app.models.profile import (
     ProfileUpdate,
 )
 from app.models.provider import ModelUsage
-
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -57,19 +56,19 @@ async def validate_rerank_provider(db: AsyncSession, provider_config: dict) -> N
         return
 
     if not has_provider or not has_model:
-        raise ParameterException("启用 rerank 需同时配置 rerank 模型提供商与 rerank 模型 ID")
+        raise ParameterException(constants.ERR_PROFILE_RERANK_CONFIG_INCOMPLETE)
 
     provider = await provider_crud.get(db, rerank_provider_id)
     if not provider:
-        raise ParameterException("指定的 rerank 模型提供商不存在")
+        raise ParameterException(constants.ERR_PROFILE_RERANK_PROVIDER_NOT_FOUND)
     if provider.usage != ModelUsage.RERANK:
-        raise ParameterException("指定的 rerank 模型提供商类型不是 RERANK")
+        raise ParameterException(constants.ERR_PROFILE_PROVIDER_NOT_RERANK)
 
     # 候选数量 K 必须大于等于知识库返回数量，否则精排无法改变最终返回集合，rerank 失去意义
     rerank_candidate_k = provider_config.get("rerank_candidate_k", 20)
     kb_query_top_k = provider_config.get("kb_query_top_k", 5)
     if isinstance(rerank_candidate_k, int) and isinstance(kb_query_top_k, int) and rerank_candidate_k < kb_query_top_k:
-        raise ParameterException("rerank 候选数量 K 必须大于等于知识库返回数量，否则精排不会生效")
+        raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
 
@@ -88,7 +87,7 @@ async def create_profile(
     embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
     if embedding_provider_id and embedding_provider_id > 0:
         if not await provider_crud.get(db, embedding_provider_id):
-            raise ParameterException("指定的向量模型提供商不存在")
+            raise ParameterException(constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
 
     await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
 
@@ -187,7 +186,7 @@ async def update_profile(
         embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
         if embedding_provider_id and embedding_provider_id > 0:
             if not await provider_crud.get(db, embedding_provider_id):
-                raise ParameterException("指定的向量模型提供商不存在")
+                raise ParameterException(constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
 
         await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
 

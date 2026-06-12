@@ -3,6 +3,8 @@ import time
 
 from fastapi import HTTPException
 
+from app.core import constants
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.retrieval.fusion import reciprocal_rank_fusion
 from app.core.retrieval.schemas import RetrievalChunk, RetrievalHit
@@ -96,7 +98,7 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
         logger.bind(collection_name=collection_name, retrieval_type="dense").error(f"知识库稠密检索失败: {dense_result}")
         if isinstance(dense_result, HTTPException):
             raise dense_result
-        raise HTTPException(status_code=500, detail=f"知识库稠密检索失败: {str(dense_result)}")
+        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DENSE_RETRIEVAL_FAILED))
 
     dense_hits = dense_result
     logger.bind(collection_name=collection_name, candidate_k=dense_candidate_k, hit_count=len(dense_hits), retrieval_type="dense", retrieval_stage="finished").info(f"稠密检索完成：取到 {len(dense_hits)} 条信息")

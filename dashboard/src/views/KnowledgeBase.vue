@@ -6,33 +6,36 @@
       :total="total"
       v-model:current-page="currentPage"
       v-model:page-size="pageSize"
-      create-text="新建知识库"
+      :create-text="$t('knowledgeBase.create_kb')"
+      :refresh-text="$t('knowledgeBase.refresh')"
+      :total-text="$t('common.total_items', { total })"
+      :empty-text="$t('common.no_data')"
       @create="showDialog"
       @refresh="handleRefresh"
       @page-change="fetchData"
       @size-change="handleSizeChange"
     >
-      <el-table-column :resizable="false" prop="name" label="知识库名称" min-width="150" sortable />
-      <el-table-column :resizable="false" prop="description" label="描述" min-width="250" show-overflow-tooltip />
-      <el-table-column :resizable="false" label="配置文件" min-width="160" show-overflow-tooltip>
+      <el-table-column :resizable="false" prop="name" :label="$t('knowledgeBase.kb_name')" min-width="150" sortable />
+      <el-table-column :resizable="false" prop="description" :label="$t('knowledgeBase.description')" min-width="250" show-overflow-tooltip />
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.profile')" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           {{ getProfileName(row.profile_id) }}
         </template>
       </el-table-column>
-      <el-table-column :resizable="false" prop="created_at" label="创建时间" width="180" sortable>
+      <el-table-column :resizable="false" prop="created_at" :label="$t('knowledgeBase.created_at')" width="180" sortable>
         <template #default="{ row }">
           {{ formatTime(row.created_at) }}
         </template>
       </el-table-column>
 
-      <el-table-column :resizable="false" label="操作" width="520" align="center" fixed="right">
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.actions')" width="520" align="center" fixed="right">
         <template #default="{ row }">
           <div class="action-buttons">
-            <el-button type="success" size="small" @click="showImportDialog(row)">导入文档</el-button>
-            <el-button type="info" size="small" @click="showDocumentDialog(row)">文档</el-button>
-            <el-button type="warning" size="small" @click="showQueryTestDialog(row)">测试</el-button>
-            <el-button type="primary" size="small" @click="showEditDialog(row)">编辑</el-button>
-            <el-button type="danger" size="small" @click="handleDelete(row)">删除</el-button>
+            <el-button type="success" size="small" @click="showImportDialog(row)">{{ $t('knowledgeBase.import_doc') }}</el-button>
+            <el-button type="info" size="small" @click="showDocumentDialog(row)">{{ $t('knowledgeBase.documents') }}</el-button>
+            <el-button type="warning" size="small" @click="showQueryTestDialog(row)">{{ $t('knowledgeBase.test') }}</el-button>
+            <el-button type="primary" size="small" @click="showEditDialog(row)">{{ $t('knowledgeBase.edit') }}</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(row)">{{ $t('knowledgeBase.delete') }}</el-button>
           </div>
         </template>
       </el-table-column>
@@ -40,7 +43,7 @@
 
     <!-- 知识库弹窗 -->
     <el-dialog
-      :title="isEditing ? '编辑知识库' : '新建知识库'"
+      :title="isEditing ? $t('knowledgeBase.edit_kb') : $t('knowledgeBase.create_kb')"
       v-model="dialogVisible"
       width="50%"
       class="standard-dialog"
@@ -48,21 +51,21 @@
       align-center
     >
       <el-form :model="form" :rules="rules" ref="formRef" label-width="120px" size="default">
-        <el-form-item label="名称" prop="name">
-          <el-input v-model="form.name" placeholder="请输入知识库名称" />
+        <el-form-item :label="$t('knowledgeBase.name')" prop="name">
+          <el-input v-model="form.name" :placeholder="$t('knowledgeBase.input_kb_name')" />
         </el-form-item>
-        <el-form-item label="描述" prop="description">
+        <el-form-item :label="$t('knowledgeBase.description')" prop="description">
           <el-input
             v-model="form.description"
             type="textarea"
-            placeholder="请输入知识库描述"
+            :placeholder="$t('knowledgeBase.input_kb_desc')"
             :rows="3"
           />
         </el-form-item>
-        <el-form-item label="配置文件" prop="profile_id">
+        <el-form-item :label="$t('knowledgeBase.profile')" prop="profile_id">
           <el-select
             v-model="form.profile_id"
-            placeholder="选择绑定嵌入模型的配置"
+            :placeholder="$t('knowledgeBase.select_profile')"
             class="full-width-input"
             :disabled="isEditing"
           >
@@ -74,19 +77,19 @@
             />
           </el-select>
           <div class="help-text mt-5">
-            {{ isEditing ? '配置文件用于知识库向量化，创建后不可修改。' : '绑定此配置文件后，知识库将使用该配置中定义的 Embedding 模型进行向量化。' }}
+            {{ isEditing ? $t('knowledgeBase.profile_edit_hint') : $t('knowledgeBase.profile_create_hint') }}
           </div>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false" size="default">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitForm" size="default">确定</el-button>
+        <el-button @click="dialogVisible = false" size="default">{{ $t('knowledgeBase.cancel') }}</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitForm" size="default">{{ $t('knowledgeBase.confirm') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- 导入文档弹窗 -->
     <el-dialog
-      title="导入文档"
+      :title="$t('knowledgeBase.import_doc')"
       v-model="importDialogVisible"
       width="560px"
       class="standard-dialog"
@@ -94,17 +97,17 @@
       align-center
     >
       <el-alert
-        title="当前支持 UTF-8 或 GBK 编码的文本类文档。导入后会保存原文，并按设置切分成多个片段写入向量库。"
+        :title="$t('knowledgeBase.import_alert')"
         type="info"
         :closable="false"
         class="mb-15"
       />
       <el-form :model="importForm" :rules="importRules" ref="importFormRef" label-width="120px" size="default">
-        <el-form-item label="目标知识库">
+        <el-form-item :label="$t('knowledgeBase.target_kb')">
           <el-input :model-value="selectedKb?.name || '-'" disabled />
-          <div class="help-text mt-5">文档会导入到这个知识库，并使用该知识库绑定配置文件里的向量模型。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.target_kb_hint') }}</div>
         </el-form-item>
-        <el-form-item label="选择文档" prop="file">
+        <el-form-item :label="$t('knowledgeBase.select_doc')" prop="file">
           <el-upload
             class="full-width-input"
             action=""
@@ -114,32 +117,32 @@
             :on-change="handleFileChange"
             :on-remove="handleFileRemove"
           >
-            <el-button type="primary">选择文件</el-button>
+            <el-button type="primary">{{ $t('knowledgeBase.select_file') }}</el-button>
           </el-upload>
-          <div class="help-text mt-5">请选择需要导入的文本文件，例如 .txt、.md、.csv、.json 等。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.select_doc_hint') }}</div>
         </el-form-item>
-        <el-form-item label="分块大小" prop="chunk_size">
+        <el-form-item :label="$t('knowledgeBase.chunk_size')" prop="chunk_size">
           <el-input-number v-model="importForm.chunk_size" :min="100" :max="20000" :step="100" class="full-width-input" />
-          <div class="help-text mt-5">每个片段最多包含多少字符。数值越大，单段上下文越完整；数值越小，检索越精细。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.chunk_size_hint') }}</div>
         </el-form-item>
-        <el-form-item label="分块重叠" prop="chunk_overlap">
+        <el-form-item :label="$t('knowledgeBase.chunk_overlap')" prop="chunk_overlap">
           <el-input-number v-model="importForm.chunk_overlap" :min="0" :max="5000" :step="50" class="full-width-input" />
-          <div class="help-text mt-5">相邻片段重复保留的字符数，用于避免句子被切断后丢失上下文，必须小于分块大小。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.chunk_overlap_hint') }}</div>
         </el-form-item>
-        <el-form-item label="批处理大小" prop="batch_size">
+        <el-form-item :label="$t('knowledgeBase.batch_size')" prop="batch_size">
           <el-input-number v-model="importForm.batch_size" :min="1" :max="256" :step="1" class="full-width-input" />
-          <div class="help-text mt-5">每次请求向量模型处理的片段数量。网络稳定、模型额度充足时可适当调大。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.batch_size_hint') }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="importDialogVisible = false" size="default">取消</el-button>
-        <el-button type="primary" :loading="importing" @click="submitImport" size="default">开始导入</el-button>
+        <el-button @click="importDialogVisible = false" size="default">{{ $t('knowledgeBase.cancel') }}</el-button>
+        <el-button type="primary" :loading="importing" @click="submitImport" size="default">{{ $t('knowledgeBase.start_import') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- 文档管理弹窗 -->
     <el-dialog
-      :title="`文档管理 - ${selectedKb?.name || ''}`"
+      :title="$t('knowledgeBase.doc_management', { name: selectedKb?.name || '' })"
       v-model="documentDialogVisible"
       width="1040px"
       class="standard-dialog"
@@ -147,19 +150,19 @@
       align-center
     >
       <el-table :data="documentList" :loading="documentLoading" border>
-        <el-table-column prop="filename" label="文件名" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="chunk_count" label="分块数" width="90" align="center" />
-        <el-table-column prop="chunk_size" label="分块大小" width="100" align="center" />
-        <el-table-column prop="chunk_overlap" label="重叠" width="90" align="center" />
-        <el-table-column prop="batch_size" label="批处理" width="90" align="center" />
-        <el-table-column label="导入时间" width="170">
+        <el-table-column prop="filename" :label="$t('knowledgeBase.filename')" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="chunk_count" :label="$t('knowledgeBase.chunk_count')" width="90" align="center" />
+        <el-table-column prop="chunk_size" :label="$t('knowledgeBase.chunk_size')" width="100" align="center" />
+        <el-table-column prop="chunk_overlap" :label="$t('knowledgeBase.overlap')" width="90" align="center" />
+        <el-table-column prop="batch_size" :label="$t('knowledgeBase.batch_size_col')" width="90" align="center" />
+        <el-table-column :label="$t('knowledgeBase.import_time')" width="170">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="210" align="center" fixed="right">
+        <el-table-column :label="$t('knowledgeBase.actions')" width="210" align="center" fixed="right">
           <template #default="{ row }">
             <div class="action-buttons document-action-buttons">
-              <el-button type="primary" size="small" @click="showContentDialog(row)">原文</el-button>
-              <el-button type="danger" size="small" @click="handleDeleteDocument(row)">删除</el-button>
+              <el-button type="primary" size="small" @click="showContentDialog(row)">{{ $t('knowledgeBase.original_text') }}</el-button>
+              <el-button type="danger" size="small" @click="handleDeleteDocument(row)">{{ $t('knowledgeBase.delete') }}</el-button>
             </div>
           </template>
         </el-table-column>
@@ -179,7 +182,7 @@
 
     <!-- 原文查看弹窗 -->
     <el-dialog
-      :title="`查看原文 - ${contentTitle}`"
+      :title="$t('knowledgeBase.view_original', { title: contentTitle })"
       v-model="contentDialogVisible"
       width="760px"
       class="standard-dialog"
@@ -191,7 +194,7 @@
 
     <!-- 检索测试弹窗 -->
     <el-dialog
-      :title="`检索测试 - ${selectedKb?.name || ''}`"
+      :title="$t('knowledgeBase.query_test', { name: selectedKb?.name || '' })"
       v-model="queryTestDialogVisible"
       width="820px"
       class="standard-dialog"
@@ -201,20 +204,20 @@
       <el-form :model="queryTestForm" :rules="queryTestRules" ref="queryTestFormRef" label-width="100px" size="default">
         <el-form-item label="TopK" prop="top_k">
           <el-input-number v-model="queryTestForm.top_k" :min="1" :max="50" :step="1" class="full-width-input" />
-          <div class="help-text mt-5">返回最相似的片段数量。数值越大，返回结果越多，但测试耗时可能增加。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.top_k_hint') }}</div>
         </el-form-item>
-        <el-form-item label="检索词" prop="query">
+        <el-form-item :label="$t('knowledgeBase.query_text')" prop="query">
           <el-input
             v-model="queryTestForm.query"
             type="textarea"
             :rows="4"
-            placeholder="请输入要测试检索的关键词、问题或一段描述"
+            :placeholder="$t('knowledgeBase.input_query')"
           />
-          <div class="help-text mt-5">系统会将检索词向量化，并在当前知识库中查找最相似的文档片段。</div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.query_hint') }}</div>
         </el-form-item>
       </el-form>
       <div class="query-test-actions">
-        <el-button type="primary" :loading="queryTesting" @click="submitQueryTest">开始测试</el-button>
+        <el-button type="primary" :loading="queryTesting" @click="submitQueryTest">{{ $t('knowledgeBase.start_test') }}</el-button>
       </div>
       <el-alert
         v-if="queryTested && rerankError"
@@ -222,8 +225,8 @@
         :closable="false"
         show-icon
         class="mt-5"
-        title="本次检索已降级为混合检索"
-        :description="`Reranker 报错：${rerankError}`"
+        :title="$t('knowledgeBase.downgraded_to_hybrid')"
+        :description="$t('knowledgeBase.reranker_error', { error: rerankError })"
       />
       <el-alert
         v-else-if="queryTested && retrievalMode === 'hybrid_rerank'"
@@ -231,28 +234,28 @@
         :closable="false"
         show-icon
         class="mt-5"
-        title="本次检索已启用 Reranker 精排（hybrid_rerank）"
+        :title="$t('knowledgeBase.hybrid_rerank_enabled')"
       />
       <el-table v-if="queryTestResults.length" :data="queryTestResults" border class="query-result-table">
         <el-table-column label="#" width="60" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
-        <el-table-column v-if="retrievalMode === 'hybrid_rerank'" label="Rerank 分数" width="110" align="center">
+        <el-table-column v-if="retrievalMode === 'hybrid_rerank'" :label="$t('knowledgeBase.rerank_score')" width="110" align="center">
           <template #default="{ row }">{{ formatScore(row.metadata?.rerank_score) }}</template>
         </el-table-column>
-        <el-table-column label="距离" width="110" align="center">
+        <el-table-column :label="$t('knowledgeBase.distance')" width="110" align="center">
           <template #default="{ row }">{{ formatDistance(row.distance) }}</template>
         </el-table-column>
-        <el-table-column label="来源" width="180" show-overflow-tooltip>
+        <el-table-column :label="$t('knowledgeBase.source')" width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.metadata?.filename || '-' }}</template>
         </el-table-column>
-        <el-table-column label="片段内容" min-width="360">
+        <el-table-column :label="$t('knowledgeBase.chunk_content')" min-width="360">
           <template #default="{ row }">
             <div class="query-result-content">{{ row.content }}</div>
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-else-if="queryTested" description="未检索到结果" />
+      <el-empty v-else-if="queryTested" :description="$t('knowledgeBase.no_results')" />
 
     </el-dialog>
   </div>
@@ -261,10 +264,13 @@
 <script setup>
 import { ref, onMounted, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import BaseDataTable from '@/components/BaseDataTable.vue'
 import { knowledgeBaseApi } from '@/api'
 import { formatTime } from '@/utils'
 import { useDeleteConfirm } from '@/composables/useDeleteConfirm'
+
+const { t } = useI18n()
 
 const tableData = ref([])
 const loading = ref(false)
@@ -307,10 +313,10 @@ const form = reactive({
   profile_id: null
 })
 
-const rules = {
-  name: [{ required: true, message: '请输入知识库名称', trigger: 'blur' }],
-  profile_id: [{ required: true, message: '请选择配置文件', trigger: 'change' }]
-}
+const rules = computed(() => ({
+  name: [{ required: true, message: t('knowledgeBase.input_kb_name'), trigger: 'blur' }],
+  profile_id: [{ required: true, message: t('knowledgeBase.select_profile_err'), trigger: 'change' }]
+}))
 
 const importForm = reactive({
   file: null,
@@ -319,22 +325,22 @@ const importForm = reactive({
   batch_size: 16
 })
 
-const importRules = {
-  file: [{ required: true, message: '请选择要导入的文档', trigger: 'change' }],
-  chunk_size: [{ required: true, message: '请设置分块大小', trigger: 'blur' }],
-  chunk_overlap: [{ required: true, message: '请设置分块重叠', trigger: 'blur' }],
-  batch_size: [{ required: true, message: '请设置批处理大小', trigger: 'blur' }]
-}
+const importRules = computed(() => ({
+  file: [{ required: true, message: t('knowledgeBase.select_doc_err'), trigger: 'change' }],
+  chunk_size: [{ required: true, message: t('knowledgeBase.set_chunk_size'), trigger: 'blur' }],
+  chunk_overlap: [{ required: true, message: t('knowledgeBase.set_chunk_overlap'), trigger: 'blur' }],
+  batch_size: [{ required: true, message: t('knowledgeBase.set_batch_size'), trigger: 'blur' }]
+}))
 
 const queryTestForm = reactive({
   query: '',
   top_k: 5
 })
 
-const queryTestRules = {
-  query: [{ required: true, message: '请输入检索词', trigger: 'blur' }],
-  top_k: [{ required: true, message: '请设置 TopK', trigger: 'blur' }]
-}
+const queryTestRules = computed(() => ({
+  query: [{ required: true, message: t('knowledgeBase.input_query_err'), trigger: 'blur' }],
+  top_k: [{ required: true, message: t('knowledgeBase.set_top_k'), trigger: 'blur' }]
+}))
 
 const fetchData = async () => {
   loading.value = true
@@ -349,7 +355,7 @@ const fetchData = async () => {
     allProfiles.value = profiles || []
     profileList.value = availableProfiles || []
   } catch (error) {
-    ElMessage.error('获取列表失败: ' + error.message)
+    ElMessage.error(t('knowledgeBase.fetch_list_failed') + error.message)
   } finally {
     loading.value = false
   }
@@ -429,7 +435,7 @@ const handleFileRemove = () => {
 const submitImport = async () => {
   if (!importFormRef.value || !selectedKb.value) return
   if (importForm.chunk_overlap >= importForm.chunk_size) {
-    ElMessage.error('分块重叠必须小于分块大小')
+    ElMessage.error(t('knowledgeBase.overlap_less_than_size'))
     return
   }
   await importFormRef.value.validate(async (valid) => {
@@ -442,11 +448,11 @@ const submitImport = async () => {
       formData.append('chunk_overlap', importForm.chunk_overlap)
       formData.append('batch_size', importForm.batch_size)
       await knowledgeBaseApi.importDocument(selectedKb.value.id, formData)
-      ElMessage.success('文档导入成功')
+      ElMessage.success(t('knowledgeBase.import_success'))
       importDialogVisible.value = false
       if (documentDialogVisible.value) fetchDocuments()
     } catch (error) {
-      ElMessage.error('文档导入失败: ' + error.message)
+      ElMessage.error(t('knowledgeBase.import_failed') + error.message)
     } finally {
       importing.value = false
     }
@@ -471,7 +477,7 @@ const fetchDocuments = async () => {
     documentList.value = res.data.data.items || []
     documentTotal.value = res.data.data.total || 0
   } catch (error) {
-    ElMessage.error('获取文档列表失败: ' + error.message)
+    ElMessage.error(t('knowledgeBase.fetch_doc_list_failed') + error.message)
   } finally {
     documentLoading.value = false
   }
@@ -490,7 +496,7 @@ const showContentDialog = async (row) => {
     documentContent.value = res.data.data.content || ''
     contentDialogVisible.value = true
   } catch (error) {
-    ElMessage.error('获取文档原文失败: ' + error.message)
+    ElMessage.error(t('knowledgeBase.fetch_doc_content_failed') + error.message)
   }
 }
 
@@ -501,11 +507,11 @@ const { handleDelete: confirmDeleteDocument } = useDeleteConfirm(deleteSelectedD
 const handleDeleteDocument = (row) => {
   if (!selectedKb.value) return
   confirmDeleteDocument(row.id, row.filename, {
-    title: '提示',
-    message: `确定要删除文档 "${row.filename}" 吗？此操作会同时删除向量库中的相关分块。`,
+    title: t('knowledgeBase.prompt'),
+    message: t('knowledgeBase.delete_doc_confirm', { filename: row.filename }),
     dangerouslyUseHTMLString: false,
-    successMessage: '文档删除成功',
-    errorMessage: '文档删除失败'
+    successMessage: t('knowledgeBase.delete_doc_success'),
+    errorMessage: t('knowledgeBase.delete_doc_failed')
   })
 }
 
@@ -536,7 +542,7 @@ const submitQueryTest = async () => {
       queryTested.value = true
 
     } catch (error) {
-      ElMessage.error('检索测试失败: ' + error.message)
+      ElMessage.error(t('knowledgeBase.query_test_failed') + error.message)
     } finally {
       queryTesting.value = false
     }
@@ -565,15 +571,15 @@ const submitForm = async () => {
             name: form.name,
             description: form.description
           })
-          ElMessage.success('修改成功')
+          ElMessage.success(t('knowledgeBase.update_success'))
         } else {
           await knowledgeBaseApi.create(form)
-          ElMessage.success('创建成功')
+          ElMessage.success(t('knowledgeBase.create_success'))
         }
         dialogVisible.value = false
         fetchData()
       } catch (error) {
-        ElMessage.error((isEditing.value ? '修改失败: ' : '创建失败: ') + error.message)
+        ElMessage.error((isEditing.value ? t('knowledgeBase.update_failed') : t('knowledgeBase.create_failed')) + error.message)
       } finally {
         submitting.value = false
       }
@@ -585,10 +591,10 @@ const { handleDelete: confirmDeleteKnowledgeBase } = useDeleteConfirm(knowledgeB
 
 const handleDelete = (row) => {
   confirmDeleteKnowledgeBase(row.id, row.name, {
-    title: '提示',
-    message: `确定要删除知识库 "${row.name}" 吗？此操作将同时清空向量库中的相关数据且不可恢复。`,
+    title: t('knowledgeBase.prompt'),
+    message: t('knowledgeBase.delete_kb_confirm', { name: row.name }),
     dangerouslyUseHTMLString: false,
-    errorMessage: '删除失败'
+    errorMessage: t('knowledgeBase.delete_kb_failed')
   })
 }
 

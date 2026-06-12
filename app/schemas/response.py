@@ -5,20 +5,26 @@ from typing import (
 
 from pydantic import BaseModel
 
+from app.core.i18n import t
+
 T = TypeVar("T")
 
 
 class StandardResponse[T](BaseModel):
     code: int = 200
-    message: str = "成功"
+    message: str = "MSG_GENERIC_SUCCESS"
     data: T | None = None
 
     @classmethod
-    def success(cls, data: Any = None, message: str = "成功"):
+    def success(cls, data: Any = None, message: str = "MSG_GENERIC_SUCCESS", raw_message: bool = False, **kwargs):
+        if not raw_message:
+            message = t(message, default=message, **kwargs)
         return cls(code=200, message=message, data=data)
 
     @classmethod
-    def error(cls, code: int = 500, message: str = "错误"):
+    def error(cls, code: int = 500, message: str = "ERR_GENERIC_ERROR", raw_message: bool = False, **kwargs):
+        if not raw_message:
+            message = t(message, default=message, **kwargs)
         return cls(code=code, message=message, data=None)
 
 

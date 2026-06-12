@@ -1,0 +1,18 @@
+MESSAGES = {
+    "MSG_USER_CREATED": "用户添加成功",
+    "MSG_USER_UPDATED": "用户信息更新成功",
+    "MSG_USER_DELETED": "用户已删除",
+    "MSG_USER_LIST_SUCCESS": "获取用户列表成功",
+    "MSG_LOGIN_SUCCESS": "登录成功",
+    "ERR_ADMIN_PASSWORD_WRONG": "用户名或密码错误",
+    "ERR_USER_NOT_FOUND_OR_DISABLED": "用户不存在或已被禁用",
+    "ERR_INVALID_CREDENTIALS": "用户名或密码错误",
+    "ERR_ONLY_ADMIN_ALLOWED": "只有系统超级管理员有权执行此操作",
+    "ERR_UNAUTHORIZED": "无效的身份凭证",
+    "ERR_LOGIN_REQUIRED": "请先登录以获取访问权限",
+    "ERR_USER_NAME_EXISTS": "用户名已存在",
+    "ERR_USER_NOT_FOUND": "用户不存在",
+    "ERR_USER_SUPER_PROTECTED": "超级管理员账户受核心保护，严禁执行禁用或改名操作。",
+    "ERR_USER_SUPER_DELETE_FORBIDDEN": "禁止删除超级管理员账户。",
+    "MSG_ADMIN_RESET_SUCCESS": "超级管理员账户信息已成功重置，请及时登录并修改默认密码。",
+}

@@ -2,6 +2,9 @@
  * 公共工具函数
  * 提供在各组件间复用的工具函数
  */
+import i18n from '../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 const formatDateObject = (date, fallback = '') => {
   try {
@@ -26,7 +29,7 @@ export const formatTimestamp = (timestamp) => {
 
 // 内容截取（获取简短预览）
 export const getShortContent = (content, maxLength = 100) => {
-  if (!content) return '暂无内容'
+  if (!content) return t('common.empty_content')
   return content.length > maxLength ? content.substring(0, maxLength) + '...' : content
 }
 
@@ -53,13 +56,13 @@ export const getToolName = (msg) => {
     const content = msg.content
     if (typeof content === 'object' && content !== null) {
       const tc = content.tool_calls?.[0]
-      return tc?.name || tc?.function?.name || '未知工具'
+      return tc?.name || tc?.function?.name || t('common.unknown_tool')
     }
     const parsed = JSON.parse(content)
     const tc = parsed.tool_calls?.[0]
-    return tc?.name || tc?.function?.name || '未知工具'
+    return tc?.name || tc?.function?.name || t('common.unknown_tool')
   } catch {
-    return '未知工具'
+    return t('common.unknown_tool')
   }
 }
 
@@ -106,12 +109,12 @@ export const getToolResultName = (msg) => {
   try {
     const content = msg.content
     if (typeof content === 'object' && content !== null) {
-      return content.tool_call_id ? `ID: ${content.tool_call_id.substring(0, 20) + '...'}` : '工具返回'
+      return content.tool_call_id ? `ID: ${content.tool_call_id.substring(0, 20) + '...'}` : t('common.tool_result')
     }
     const parsed = JSON.parse(content)
-    return parsed.tool_call_id ? `ID: ${parsed.tool_call_id.substring(0, 20) + '...'}` : '工具返回'
+    return parsed.tool_call_id ? `ID: ${parsed.tool_call_id.substring(0, 20) + '...'}` : t('common.tool_result')
   } catch {
-    return '工具返回'
+    return t('common.tool_result')
   }
 }
 

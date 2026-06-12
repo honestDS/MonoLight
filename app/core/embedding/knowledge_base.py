@@ -5,8 +5,10 @@ from fastapi import HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core import constants
 from app.core.crud.provider import provider_crud
 from app.core.exceptions import LLMException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
@@ -42,19 +44,19 @@ async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tu
     embedding_dimensions = provider_config.get("embedding_dimensions")
 
     if not embedding_provider_id or embedding_provider_id <= 0:
-        raise HTTPException(status_code=400, detail="该知识库绑定的配置文件未设置向量模型提供商")
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
     if not embedding_model_id:
-        raise HTTPException(status_code=400, detail="该知识库绑定的配置文件未设置向量模型ID")
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
 
     provider = await provider_crud.get(db, embedding_provider_id)
     if not provider:
-        raise HTTPException(status_code=404, detail="配置文件绑定的向量模型提供商不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
     if provider.usage != ModelUsage.EMBEDDING:
-        raise HTTPException(status_code=400, detail="配置文件绑定的提供商不是向量模型类型")
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_PROVIDER_NOT_EMBEDDING)
     if not provider.is_active:
-        raise HTTPException(status_code=400, detail="向量模型提供商已被禁用，请在模型管理中启用后重试")
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_DISABLED)
     if not provider.base_url:
-        raise HTTPException(status_code=400, detail="向量模型提供商未配置 Base URL")
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_NO_URL)
     return provider.provider_type, provider.api_key, provider.base_url, embedding_model_id, embedding_dimensions
 
 
@@ -93,7 +95,7 @@ async def embed_chunks(db: AsyncSession, profile: Profile, texts: list[str], bat
             timeout=embedding_timeout,
         )
     except LLMException as e:
-        raise HTTPException(status_code=502, detail=f"向量模型调用失败: {e.message}")
+        raise HTTPException(status_code=502, detail=t(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=e.message))
 
 
 
@@ -139,10 +141,10 @@ async def query_knowledge_base(
     """
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND_FOR_QUERY)
 
     if kb.profile_id != profile.id:
-        raise HTTPException(status_code=403, detail="无权查询不属于当前配置的知识库")
+        raise HTTPException(status_code=403, detail=constants.ERR_KB_NOT_IN_PROFILE)
 
     query_embedding = (await embed_chunks(db, profile, [query], 1))[0]
     final_top_k = top_k
@@ -153,7 +155,7 @@ async def query_knowledge_base(
     try:
         rerank_config = await get_profile_rerank_config(db, profile)
     except LLMException as e:
-        rerank_error = e.message
+        rerank_error = t(e.message, default=e.message, **e.kwargs)
         logger.bind(profile_id=profile.id, kb_id=kb_id).warning(f"读取 rerank 配置失败，降级为纯混合检索: {e.message}")
 
     # 未启用 rerank：保持原 hybrid 行为
@@ -193,6 +195,6 @@ async def query_knowledge_base(
         return build_query_test_response(
             fused_hits[:final_top_k],
             retrieval_mode="hybrid",
-            rerank_error=e.message if expose_rerank_error else None,
+            rerank_error=t(e.message, default=e.message, **e.kwargs) if expose_rerank_error else None,
         )
 

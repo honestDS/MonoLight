@@ -1,11 +1,10 @@
 import os
 
+import tiktoken
 from dotenv import load_dotenv
 
 load_dotenv()
 
-
-import tiktoken
 
 def estimate_tokens(text: str) -> int:
     """
@@ -14,7 +13,7 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-        
+
     try:
         # 使用 tiktoken 计算更准确的 token 数量 (基于 OpenAI 的 cl100k_base)
         encoding = tiktoken.get_encoding("cl100k_base")

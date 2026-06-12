@@ -5,6 +5,9 @@
 import { ref, onUnmounted } from 'vue'
 import { chatApi } from '../api'
 import { ElMessage } from 'element-plus'
+import i18n from '../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useWebSocket() {
     const ws = ref(null)
@@ -69,7 +72,7 @@ export function useWebSocket() {
                     }, RECONNECT_INTERVAL)
                 } else if (isUserInitiated && !isNormalClose) {
                     // 只有在非正常关闭且重连失败时才显示错误
-                    ElMessage.warning('WebSocket 连接已断开')
+                    ElMessage.warning(t('common.ws_disconnected'))
                 }
             }
         })

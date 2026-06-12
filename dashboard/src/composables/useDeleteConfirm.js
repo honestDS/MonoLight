@@ -1,4 +1,7 @@
 import { ElMessageBox, ElMessage } from 'element-plus'
+import i18n from '../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 /**
  * 删除确认组合式函数
@@ -9,28 +12,28 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 export function useDeleteConfirm(apiDelete, onSuccess, options = {}) {
   const handleDelete = async (id, name, extraOptions = {}) => {
     const mergedOptions = { ...options, ...extraOptions }
-    const confirmMessage = mergedOptions.message || `确定要删除 <span style="color: #F56C6C; font-weight: bold;">${name}</span> 吗？`
+    const confirmMessage = mergedOptions.message || t('common.delete_named_confirm', { name })
     try {
       await ElMessageBox.confirm(
         confirmMessage,
-        mergedOptions.title || '警告',
+        mergedOptions.title || t('common.warning'),
         {
           type: 'warning',
-          confirmButtonText: '确定',
-          cancelButtonText: '取消',
+          confirmButtonText: mergedOptions.confirmButtonText || t('common.confirm'),
+          cancelButtonText: mergedOptions.cancelButtonText || t('common.cancel'),
           dangerouslyUseHTMLString: mergedOptions.dangerouslyUseHTMLString ?? true
         }
       )
       try {
         await apiDelete(id)
-        ElMessage.success(mergedOptions.successMessage || '删除成功')
+        ElMessage.success(mergedOptions.successMessage || t('common.delete_success'))
         onSuccess?.()
       } catch (err) {
-        ElMessage.error(err.message || mergedOptions.errorMessage || '删除失败')
+        ElMessage.error(err.message || mergedOptions.errorMessage || t('common.delete_failed'))
       }
     } catch (err) {
       if (err !== 'cancel') {
-        ElMessage.error(err.message || '操作失败')
+        ElMessage.error(err.message || t('common.action_failed'))
       }
     }
   }

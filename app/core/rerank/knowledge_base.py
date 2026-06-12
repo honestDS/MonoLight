@@ -1,5 +1,6 @@
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core import constants
 from app.core.crud.provider import provider_crud
 from app.core.exceptions import RerankException
 from app.core.log import get_logger
@@ -35,13 +36,13 @@ async def get_profile_rerank_config(db: AsyncSession, profile: Profile) -> Reran
 
     provider = await provider_crud.get(db, rerank_provider_id)
     if not provider:
-        raise RerankException("配置文件绑定的 rerank 模型提供商不存在")
+        raise RerankException(constants.ERR_PROFILE_RERANK_PROVIDER_NOT_FOUND)
     if provider.usage != ModelUsage.RERANK:
-        raise RerankException("配置文件绑定的提供商不是 rerank 模型类型")
+        raise RerankException(constants.ERR_PROFILE_PROVIDER_NOT_RERANK)
     if not provider.is_active:
-        raise RerankException("rerank 模型提供商已被禁用，请在模型管理中启用后重试")
+        raise RerankException(constants.ERR_PROFILE_RERANK_PROVIDER_DISABLED)
     if not provider.base_url:
-        raise RerankException("rerank 模型提供商未配置 Base URL")
+        raise RerankException(constants.ERR_PROFILE_RERANK_PROVIDER_NO_URL)
 
     return RerankConfig(
         provider_type=provider.provider_type,

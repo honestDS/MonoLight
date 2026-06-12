@@ -1,7 +1,6 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
-
 from typing import (
     Any,
 )
@@ -11,7 +10,6 @@ import aiohttp
 from app.core import constants
 from app.core.exceptions import EmbeddingException, LLMException, RerankException
 from app.core.log import get_logger
-
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -23,7 +21,6 @@ from .base import (
     BaseRerankTransformer,
     BaseTransformer,
 )
-
 
 logger = get_logger(__name__)
 
@@ -68,11 +65,13 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
+        except LLMException:
+            raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=False).error(f"OpenAI 对话接口调用失败: {str(e)}")
-            raise LLMException(str(e))
+            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_stream(
         self,
@@ -120,31 +119,27 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 # 等待响应头（含服务端首字前的思考时间）也纳入首字超时
                 try:
                     resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
-                except asyncio.TimeoutError:
-                    raise LLMException(f"等待对话模型首字响应超时（{timeout} 秒）")
+                except TimeoutError:
+                    raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
                 try:
                     if resp.status != 200:
                         txt = await resp.text()
-                        raise LLMException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
 
                     buffer = ""
                     first_content_yielded = False
                     chunk_iter = resp.content.iter_any().__aiter__()
                     while True:
                         try:
-                            if first_content_yielded:
-                                # 首字之后：不设超时，持续读取直至生成结束
-                                line = await chunk_iter.__anext__()
+                            timeout_val = max(deadline - loop.time(), 0.001) if not first_content_yielded else None
+                            if timeout_val is not None:
+                                line = await asyncio.wait_for(chunk_iter.__anext__(), timeout=timeout_val)
                             else:
-                                # 首字之前：用剩余 deadline 约束首个有效内容的累计到达时间
-                                remaining = deadline - loop.time()
-                                if remaining <= 0:
-                                    raise asyncio.TimeoutError
-                                line = await asyncio.wait_for(chunk_iter.__anext__(), timeout=remaining)
+                                line = await chunk_iter.__anext__()
+                        except TimeoutError:
+                            raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
                         except StopAsyncIteration:
                             break
-                        except asyncio.TimeoutError:
-                            raise LLMException(f"等待对话模型首字响应超时（{timeout} 秒）")
 
                         # 使用 iter_any() 获取任意大小的非阻塞原始字节块，避免阻塞
                         chunks = line.decode("utf-8")
@@ -173,9 +168,11 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                             break
                 finally:
                     await resp_cm.__aexit__(None, None, None)
+        except LLMException:
+            raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=True).error(f"OpenAI 流式对话接口调用失败: {str(e)}")
-            raise LLMException(str(e))
+            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
 
 
@@ -232,14 +229,16 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise EmbeddingException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                        raise EmbeddingException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
+        except EmbeddingException:
+            raise
         except Exception as e:
             if suppress_error_log:
                 logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(f"向量模型接口携带可选参数调用失败，准备降级重试: {str(e)}")
             else:
                 logger.bind(model_id=model_id, base_url=base_url).error(f"向量模型接口调用失败: {str(e)}")
-            raise EmbeddingException(str(e))
+            raise EmbeddingException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
 
     @staticmethod
@@ -281,11 +280,13 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise RerankException(f"{constants.ERR_LLM_API_RESPONSE_ERROR} [Status: {resp.status}]: {txt}")
+                        raise RerankException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
+        except RerankException:
+            raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url).error(f"Rerank 接口调用失败: {str(e)}")
-            raise RerankException(str(e))
+            raise RerankException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
 
     async def rerank_texts(
@@ -313,7 +314,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
 
         raw_results = response.get("results")
         if not isinstance(raw_results, list):
-            raise RerankException("Rerank 接口返回格式异常：缺少 results 列表")
+            raise RerankException(constants.ERR_RERANK_FORMAT_ERROR)
 
 
         normalized: list[dict[str, Any]] = []
@@ -367,10 +368,9 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             batch_embeddings = [item["embedding"] for item in result["response"].get("data", [])]
 
             if len(batch_embeddings) != len(batch_texts):
-                raise EmbeddingException("向量模型返回数量与文本数量不一致")
+                raise EmbeddingException(constants.ERR_EMBEDDING_COUNT_MISMATCH)
             if dimensions and dimensions_supported is True and batch_embeddings and len(batch_embeddings[0]) != dimensions:
-                raise EmbeddingException(f"向量模型实际输出维度为 {len(batch_embeddings[0])}，与配置的 {dimensions} 不一致")
-
+                raise EmbeddingException(constants.ERR_EMBEDDING_DIMENSION_MISMATCH, actual=len(batch_embeddings[0]), expected=dimensions)
 
             embeddings.extend(batch_embeddings)
 

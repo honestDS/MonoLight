@@ -8,14 +8,14 @@ export const PAGE_SIZE = 20
 
 // 路由名称映射
 export const routeNameMap = {
-  '/': '智能交互',
-  '/users': '用户管理',
-  '/knowledge-base': '知识库管理',
-  '/profiles': '系统配置',
-  '/providers': '系统配置',
-  '/prompts': '系统配置',
-  '/logs/realtime': '系统日志',
-  '/logs/history': '系统日志'
+  '/': 'common.menu.chat',
+  '/users': 'common.menu.users',
+  '/knowledge-base': 'common.menu.knowledge_base',
+  '/profiles': 'common.menu.system',
+  '/providers': 'common.menu.system',
+  '/prompts': 'common.menu.system',
+  '/logs/realtime': 'common.menu.logs',
+  '/logs/history': 'common.menu.logs'
 }
 
 // 默认配置结构（用于 ProfilesView.vue）
@@ -49,7 +49,7 @@ export const defaultProfileConfigs = () => ({
 export const defaultProviderForm = () => ({
   name: '',
   provider_type: 'OPENAI',
-  model_usage: 'CHAT',
+  usage: 'CHAT',
   api_key: '',
   base_url: '',
   is_active: true

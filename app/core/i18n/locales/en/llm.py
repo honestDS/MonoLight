@@ -1,0 +1,13 @@
+MESSAGES = {
+    "ERR_LLM_CONNECTION_FAILED": "Failed to connect to the large model provider gateway, please check network or proxy configuration",
+    "ERR_LLM_API_RESPONSE_ERROR": "Large model API returned an abnormal response",
+    "ERR_LLM_UNEXPECTED_ERROR": "Unexpected exception occurred when calling the large model interface",
+"ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL": "Unexpected exception occurred when calling the large model interface: {detail}",
+"ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS": "Large model API returned an abnormal response [Status: {status}]: {detail}",
+    "ERR_LLM_PROVIDER_NOT_CONFIGURED": "No valid model provider config or API Key detected. Please check in admin panel and activate a Profile with valid keys.",
+    "ERR_LLM_EMPTY_RESPONSE": "Large model returned an empty response, please try sending the instruction again or check the model configuration",
+    "ERR_LLM_FIRST_CHAR_TIMEOUT": "Timeout waiting for the dialog model's first character response ({timeout} seconds)",
+    "ERR_RERANK_FORMAT_ERROR": "Rerank interface returns abnormal format: missing results list",
+    "ERR_EMBEDDING_COUNT_MISMATCH": "The number of embeddings returned by the vector model does not match the number of texts",
+    "ERR_EMBEDDING_DIMENSION_MISMATCH": "The actual output dimension of the vector model is {actual}, which is inconsistent with the configured {expected}",
+}

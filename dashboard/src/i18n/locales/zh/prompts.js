@@ -1,0 +1,20 @@
+export default {
+  create_prompt: '新建提示词',
+  name: '名称',
+  content_preview: '内容预览',
+  actions: '操作',
+  edit: '编辑',
+  delete: '删除',
+  edit_prompt: '编辑提示词',
+  prompt_name: '提示词名称',
+  input_name: '请输入提示词名称',
+  content: '内容',
+  input_content: '请输入提示词内容',
+  cancel: '取消',
+  save: '保存',
+  load_failed: '加载列表失败',
+  fill_required: '请填写名称和内容',
+  save_success: '保存成功',
+  submit_failed: '提交失败',
+  refresh: '刷新列表'
+}

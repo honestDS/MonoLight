@@ -2,7 +2,10 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
+from app.core import constants
 from app.core.crud.log import system_log_crud
+from app.core.i18n.context import set_current_locale
+from app.core.i18n.locale import normalize_locale
 from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
 from app.models.system_log import SystemLogResponse
@@ -39,7 +42,7 @@ async def get_system_logs(
         page=page,
         size=size,
     )
-    return StandardResponse.success(data=page_data, message="日志获取成功")
+    return StandardResponse.success(data=page_data, message=constants.MSG_LOG_LIST_SUCCESS)
 
 
 @router.websocket("/logs/ws")
@@ -51,6 +54,9 @@ async def system_logs_websocket(
     系统日志实时监控 WebSocket 接口。
     连接后首先下发最近 100 条历史日志，随后进入实时推送模式。
     """
+    # 语言上下文需在 accept 之前设置；WebSocket 的 accept 统一由 log_broadcaster.connect 内部完成，此处不再重复 accept
+    lang_param = websocket.query_params.get("lang")
+    set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
     await log_broadcaster.connect(websocket)
     try:
         # 1. 回溯历史日志 (最近 100 条)
@@ -58,8 +64,9 @@ async def system_logs_websocket(
         # 注意：CRUD 返回的是按时间倒序的，发送前需反转
         history_logs.reverse()
 
-        for log in history_logs:
-            log_data = {
+        # 历史日志集中一次性推送，使用 type=history 标识批量消息，避免逐条发送的网络开销
+        history_payload = [
+            {
                 "timestamp": log.created_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                 "level": log.level,
                 "module": log.module,
@@ -68,7 +75,9 @@ async def system_logs_websocket(
                 "session_id": log.session_id,
                 "extra": log.extra,
             }
-            await websocket.send_json(log_data)
+            for log in history_logs
+        ]
+        await websocket.send_json({"type": "history", "logs": history_payload})
 
         # 2. 保持连接，等待广播器推送（保持心跳或等待断开）
         while True:

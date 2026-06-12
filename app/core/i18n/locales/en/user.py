@@ -1,0 +1,18 @@
+MESSAGES = {
+    "MSG_USER_CREATED": "User added successfully",
+    "MSG_USER_UPDATED": "User info updated successfully",
+    "MSG_USER_DELETED": "User deleted",
+    "MSG_USER_LIST_SUCCESS": "User list retrieved successfully",
+    "MSG_LOGIN_SUCCESS": "Login successful",
+    "ERR_ADMIN_PASSWORD_WRONG": "Incorrect username or password",
+    "ERR_USER_NOT_FOUND_OR_DISABLED": "User not found or disabled",
+    "ERR_INVALID_CREDENTIALS": "Incorrect username or password",
+    "ERR_ONLY_ADMIN_ALLOWED": "Only super administrators can perform this operation",
+    "ERR_UNAUTHORIZED": "Invalid credentials",
+    "ERR_LOGIN_REQUIRED": "Please login to access",
+    "ERR_USER_NAME_EXISTS": "Username already exists",
+    "ERR_USER_NOT_FOUND": "User not found",
+    "ERR_USER_SUPER_PROTECTED": "Super administrator accounts are core protected, disabling or renaming is strictly forbidden.",
+    "ERR_USER_SUPER_DELETE_FORBIDDEN": "Deleting super administrator accounts is forbidden.",
+    "MSG_ADMIN_RESET_SUCCESS": "Super administrator account information has been successfully reset, please log in and change the default password in time.",
+}

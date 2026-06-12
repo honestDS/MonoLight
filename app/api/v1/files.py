@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from app.core import constants
 from app.core.security import get_current_user
 
 router = APIRouter()
@@ -37,7 +38,7 @@ async def upload_file(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+        raise HTTPException(status_code=500, detail=constants.ERR_INTERNAL_SERVER_ERROR + f": {str(e)}")
     finally:
         file.file.close()
 

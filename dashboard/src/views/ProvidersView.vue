@@ -6,29 +6,32 @@
       :total="total"
       v-model:current-page="currentPage"
       v-model:page-size="pageSize"
-      create-text="添加提供商"
+      :create-text="$t('providers.create_provider')"
+      :refresh-text="$t('providers.refresh')"
+      :total-text="$t('common.total_items', { total })"
+      :empty-text="$t('common.no_data')"
       @create="openCreateDialog"
       @refresh="handleRefresh"
       @page-change="fetchProviders"
       @size-change="handleSizeChange">
 
-      <el-table-column :resizable="false" prop="name" label="名称" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" prop="provider_type" label="类型" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" label="模型类型" min-width="120" sortable>
+      <el-table-column :resizable="false" prop="name" :label="$t('providers.name')" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" prop="provider_type" :label="$t('providers.type')" min-width="120" sortable></el-table-column>
+      <el-table-column :resizable="false" :label="$t('providers.model_type')" min-width="120" sortable>
         <template #default="scope">{{ getModelUsageLabel(scope.row.usage) }}</template>
       </el-table-column>
-      <el-table-column :resizable="false" prop="base_url" label="基础URL" min-width="200" sortable></el-table-column>
-      <el-table-column :resizable="false" label="状态" align="center" sortable>
+      <el-table-column :resizable="false" prop="base_url" :label="$t('providers.base_url')" min-width="200" sortable></el-table-column>
+      <el-table-column :resizable="false" :label="$t('providers.status')" align="center" sortable>
         <template #default="scope">
-          <StatusTag :status="scope.row.is_active" active-text="启用" inactive-text="禁用" />
+          <StatusTag :status="scope.row.is_active" :active-text="$t('providers.enable')" :inactive-text="$t('providers.disable')" />
         </template>
       </el-table-column>
-      <el-table-column :resizable="false" label="操作" width="360" align="center" fixed="right">
+      <el-table-column :resizable="false" :label="$t('providers.actions')" width="360" align="center" fixed="right">
         <template #default="scope">
           <div class="action-buttons">
-            <el-button :type="scope.row.is_active ? 'warning' : 'success'" size="small" @click="handleToggleActive(scope.row)">{{ scope.row.is_active ? '禁用' : '启用' }}</el-button>
-            <el-button type="primary" size="small" @click="handleEdit(scope.row)">编辑</el-button>
-            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">删除</el-button>
+            <el-button :type="scope.row.is_active ? 'warning' : 'success'" size="small" @click="handleToggleActive(scope.row)">{{ scope.row.is_active ? $t('providers.disable') : $t('providers.enable') }}</el-button>
+            <el-button type="primary" size="small" @click="handleEdit(scope.row)">{{ $t('providers.edit') }}</el-button>
+            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">{{ $t('providers.delete') }}</el-button>
           </div>
         </template>
       </el-table-column>
@@ -36,44 +39,47 @@
     </BaseDataTable>
 
     <!-- 提供商编辑/创建弹窗 -->
-    <el-dialog :title="isEdit ? '编辑提供商' : '添加提供商'" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+    <el-dialog :title="isEdit ? $t('providers.edit_provider') : $t('providers.create_provider')" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
       <el-form :model="form" label-width="100px" size="default">
-        <el-form-item label="提供商名称">
-          <el-input v-model="form.name" placeholder="例如: OpenAI-Official" />
+        <el-form-item :label="$t('providers.provider_name')">
+          <el-input v-model="form.name" :placeholder="$t('providers.provider_name_placeholder')" />
         </el-form-item>
-        <el-form-item label="提供商类型">
-          <el-select v-model="form.provider_type" placeholder="请选择类型" class="full-width-input">
+        <el-form-item :label="$t('providers.provider_type')">
+          <el-select v-model="form.provider_type" :placeholder="$t('providers.select_type')" class="full-width-input">
             <el-option v-for="item in providerTypes" :key="item" :label="item" :value="item" />
           </el-select>
         </el-form-item>
-        <el-form-item label="模型类型">
-          <el-select v-model="form.usage" placeholder="模型类型" class="full-width-input">
+        <el-form-item :label="$t('providers.model_type_label')">
+          <el-select v-model="form.usage" :placeholder="$t('providers.model_type_label')" class="full-width-input">
             <el-option v-for="item in modelUsages" :key="item" :label="getModelUsageLabel(item)" :value="item" />
           </el-select>
         </el-form-item>
-        <el-form-item label="API密钥">
-          <el-input v-model="form.api_key" type="password" show-password placeholder="请输入API密钥" />
+        <el-form-item :label="$t('providers.api_key')">
+          <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('providers.api_key_placeholder')" />
         </el-form-item>
-        <el-form-item label="基础URL">
-          <el-input v-model="form.base_url" placeholder="可选，默认为官方URL" />
+        <el-form-item :label="$t('providers.base_url')">
+          <el-input v-model="form.base_url" :placeholder="$t('providers.base_url_placeholder')" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false" size="default">取消</el-button>
-        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">确定</el-button>
+        <el-button @click="dialogVisible = false" size="default">{{ $t('providers.cancel') }}</el-button>
+        <el-button type="primary" @click="submitForm" size="default" :loading="submitting">{{ $t('providers.confirm') }}</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, reactive } from 'vue'
+import { ref, onMounted, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { providerApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import { defaultProviderForm } from '../constants'
+
+const { t } = useI18n()
 
 // 数据结构定义 (基于 API.json ProviderCreate / ProviderUpdate)
 const providers = ref([])
@@ -88,15 +94,15 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 
-// 模型用途映射表
-const modelUsageMap = {
-  CHAT: '对话模型',
-  EMBEDDING: '向量模型',
-  RERANK: '重排模型'
-}
-
 // 获取模型用途中文名称
-const getModelUsageLabel = (value) => modelUsageMap[value] || value
+const getModelUsageLabel = (value) => {
+  const map = {
+    CHAT: t('providers.chat_model'),
+    EMBEDDING: t('providers.embedding_model'),
+    RERANK: t('providers.rerank_model')
+  }
+  return map[value] || value
+}
 
 const form = reactive(defaultProviderForm())
 
@@ -111,7 +117,7 @@ const fetchProviders = async () => {
     providers.value = res.data.data.items || []
     total.value = res.data.data.total || 0
   } catch (err) {
-    ElMessage.error(err.message || '获取列表失败')
+    ElMessage.error(err.message || t('providers.load_failed'))
   } finally {
     loading.value = false
   }
@@ -124,10 +130,10 @@ const { handleDelete } = useDeleteConfirm(providerApi.delete, fetchProviders)
 const handleToggleActive = async (row) => {
   try {
     await providerApi.update(row.id, { is_active: !row.is_active })
-    ElMessage.success(row.is_active ? '已禁用' : '已启用')
+    ElMessage.success(row.is_active ? t('providers.disabled') : t('providers.enabled'))
     fetchProviders()
   } catch (err) {
-    ElMessage.error(err.message || '操作失败')
+    ElMessage.error(err.message || t('providers.action_failed'))
   }
 }
 
@@ -140,7 +146,7 @@ const fetchProviderTypes = async () => {
     providerTypes.value = data?.provider_types || []
     modelUsages.value = data?.model_usages || []
   } catch (err) {
-    console.error('获取类型失败', err)
+    console.error(t('providers.load_types_failed'), err)
   }
 }
 
@@ -181,7 +187,7 @@ const handleEdit = (row) => {
 // 提交表单
 const submitForm = async () => {
   if (!form.name || !form.provider_type || (!isEdit.value && !form.api_key)) {
-    return ElMessage.warning('请填写必要信息')
+    return ElMessage.warning(t('providers.fill_required'))
   }
   
   submitting.value = true
@@ -195,16 +201,16 @@ const submitForm = async () => {
         base_url: form.base_url,
         is_active: form.is_active
       })
-      ElMessage.success('更新成功')
+      ElMessage.success(t('providers.update_success'))
     } else {
       // 创建逻辑 (ProviderCreate)
       await providerApi.create({ ...form })
-      ElMessage.success('创建成功')
+      ElMessage.success(t('providers.create_success'))
     }
     dialogVisible.value = false
     fetchProviders()
   } catch (err) {
-    ElMessage.error(err.message || '提交失败')
+    ElMessage.error(err.message || t('providers.submit_failed'))
   } finally {
     submitting.value = false
   }

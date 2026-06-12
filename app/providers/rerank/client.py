@@ -22,7 +22,7 @@ class RerankClient:
     def get_transformer(cls, provider_type: ProviderType | str) -> BaseRerankTransformer:
         transformer = cls._transformers.get(str(provider_type).lower())
         if not transformer:
-            raise LLMException(f"{constants.ERR_LLM_UNEXPECTED_ERROR}: Unsupported rerank provider {provider_type}")
+            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported rerank provider {provider_type}")
         return transformer
 
     @staticmethod

@@ -8,7 +8,7 @@
       <div class="login-left">
         <div class="brand-info">
           <h1 class="brand-logo">MonoLight</h1>
-          <p class="brand-desc">极致、纯粹的智能进化实体</p>
+          <p class="brand-desc">{{ $t('login.brand_desc') }}</p>
         </div>
         <div class="illustration">
           <div class="circle-bg"></div>
@@ -80,16 +80,33 @@ const resetDialog = ref(false)
 const resetToken = ref('')
 const form = reactive({ username: '', password: '' })
 
+const pickFirstValue = (...values) => {
+  const value = values.find(item => item !== undefined && item !== null && item !== '')
+  return value ?? ''
+}
+
+const normalizeResetAdminData = (response) => {
+  let data = response?.data ?? response ?? {}
+  while (data && typeof data === 'object' && data.data && typeof data.data === 'object') {
+    data = data.data
+  }
+
+  return {
+    username: pickFirstValue(data.username, data.account, data.login_account, data.loginAccount),
+    initialPassword: pickFirstValue(data.initial_password, data.initialPassword, data.default_password, data.defaultPassword, data.password)
+  }
+}
+
 const handleLogin = async () => {
   if (!form.username || !form.password) return
-  loading.ref = true
+  loading.value = true
   try {
     const res = await authApi.login(form)
     localStorage.setItem('token', res.data.data.access_token)
     ElMessage.success(t('login.success'))
     router.push('/')
   } catch (err) {
-    ElMessage.error(err.message || '登录失败')
+    ElMessage.error(err.message || t('login.login_failed'))
   } finally {
     loading.value = false
   }
@@ -99,16 +116,16 @@ const handleResetAdmin = async () => {
   if (!resetToken.value) return ElMessage.warning(t('login.reset_token_placeholder'))
   resetLoading.value = true
   try {
-    const res = await authApi.resetAdmin(resetToken.value)
-    const data = res.data.data
-    ElMessageBox.alert('账号：' + data.登录账号 + '<br>初始密码：' + data.初始密码, t('login.reset_admin'), {
+    const data = await authApi.resetAdmin(resetToken.value)
+    const { username, initialPassword } = normalizeResetAdminData(data)
+    ElMessageBox.alert(t('login.account') + username + '<br>' + t('login.initial_password') + initialPassword, t('login.reset_admin'), {
       dangerouslyUseHTMLString: true,
-      confirmButtonText: t('login.success'), center: true
+      confirmButtonText: t('common.confirm'), center: true
     })
     resetDialog.value = false
     resetToken.value = ''
   } catch (err) {
-    ElMessage.error(err.message || '重置失败')
+    ElMessage.error(err.message || t('login.reset_failed'))
   } finally {
     resetLoading.value = false
   }

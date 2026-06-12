@@ -3,23 +3,23 @@
     <!-- 筛选面板 -->
     <div class="filter-card">
       <el-form :inline="true" :model="filters" size="default">
-        <el-form-item label="日志级别">
-          <el-select v-model="filters.level" placeholder="请选择级别" clearable class="filter-level-select">
+        <el-form-item :label="$t('historyLogs.log_level')">
+          <el-select v-model="filters.level" :placeholder="$t('historyLogs.select_level')" clearable class="filter-level-select">
             <el-option label="DEBUG" value="DEBUG" />
             <el-option label="INFO" value="INFO" />
             <el-option label="WARNING" value="WARNING" />
             <el-option label="ERROR" value="ERROR" />
           </el-select>
         </el-form-item>
-        <el-form-item label="用户UID">
-          <el-input v-model="filters.uid" placeholder="请输入UID" clearable class="filter-uid-input" />
+        <el-form-item :label="$t('historyLogs.uid')">
+          <el-input v-model="filters.uid" :placeholder="$t('historyLogs.input_uid')" clearable class="filter-uid-input" />
         </el-form-item>
-        <el-form-item label="会话ID">
-          <el-input v-model="filters.sessionId" placeholder="请输入会话ID" clearable class="filter-session-input" />
+        <el-form-item :label="$t('historyLogs.session_id')">
+          <el-input v-model="filters.sessionId" :placeholder="$t('historyLogs.input_session_id')" clearable class="filter-session-input" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="handleSearch">搜索</el-button>
-          <el-button @click="resetFilters">重置</el-button>
+          <el-button type="primary" @click="handleSearch">{{ $t('historyLogs.search') }}</el-button>
+          <el-button @click="resetFilters">{{ $t('historyLogs.reset') }}</el-button>
         </el-form-item>
       </el-form>
     </div>
@@ -31,27 +31,30 @@
       :total="total"
       v-model:current-page="currentPage"
       v-model:page-size="pageSize"
-      refresh-text="刷新"
+      :create-text="''"
+      :refresh-text="$t('historyLogs.refresh')"
+      :total-text="$t('common.total_items', { total })"
+      :empty-text="$t('common.no_data')"
       @refresh="handleRefresh"
       @page-change="loadLogs"
       @size-change="handleSizeChange">
       
-      <el-table-column :resizable="false" prop="created_at" label="时间" width="200" sortable>
+      <el-table-column :resizable="false" prop="created_at" :label="$t('historyLogs.time')" width="200" sortable>
         <template #default="scope">
           {{ formatTime(scope.row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column :resizable="false" prop="level" label="级别" width="100" align="center">
+      <el-table-column :resizable="false" prop="level" :label="$t('historyLogs.level')" width="100" align="center">
         <template #default="scope">
           <el-tag :type="getLevelTag(scope.row.level)" size="default">
             {{ scope.row.level }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column :resizable="false" prop="module" label="模块" width="180" show-overflow-tooltip />
-      <el-table-column :resizable="false" prop="message" label="消息内容" min-width="300" show-overflow-tooltip />
-      <el-table-column :resizable="false" prop="uid" label="用户UID" width="160" show-overflow-tooltip />
-      <el-table-column :resizable="false" prop="session_id" label="会话ID" width="160" show-overflow-tooltip />
+      <el-table-column :resizable="false" prop="module" :label="$t('historyLogs.module')" width="180" show-overflow-tooltip />
+      <el-table-column :resizable="false" prop="message" :label="$t('historyLogs.message')" min-width="300" show-overflow-tooltip />
+      <el-table-column :resizable="false" prop="uid" :label="$t('historyLogs.uid')" width="160" show-overflow-tooltip />
+      <el-table-column :resizable="false" prop="session_id" :label="$t('historyLogs.session_id')" width="160" show-overflow-tooltip />
     </BaseDataTable>
   </div>
 </template>
@@ -59,6 +62,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { systemApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 
@@ -67,6 +71,8 @@ const loading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+
+const { t } = useI18n()
 
 const filters = reactive({
   level: '',
@@ -111,7 +117,7 @@ const loadLogs = async () => {
     logs.value = res.data.data.items || []
     total.value = res.data.data.total || 0
   } catch (err) {
-    ElMessage.error(err.message || '获取日志失败')
+    ElMessage.error(err.message || t('historyLogs.load_failed'))
   } finally {
     loading.value = false
   }

@@ -40,7 +40,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
         if not user.hashed_password or not verify_password(request.password, user.hashed_password):
             raise AuthException(constants.ERR_INVALID_CREDENTIALS)
     except ValueError as e:
-        raise ParameterException(str(e))
+        raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
 
     access_token = create_access_token(data={"sub": user.username})
     return StandardResponse.success(
@@ -53,7 +53,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
 async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)):
     env_reset_token = os.getenv("ADMIN_RESET_TOKEN")
     if not env_reset_token or request.reset_token != env_reset_token:
-        raise AuthException("无效或未配置重置 Token。")
+        raise AuthException(constants.ERR_AUTH_RESET_TOKEN_INVALID)
 
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     user = await user_crud.get_by_username(db, admin_username)
@@ -87,13 +87,13 @@ async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncS
         )
 
     user_data = {
-        "用户标识": user.uid,
-        "登录账号": user.username,
-        "初始密码": default_password,
-        "账户状态": "已激活",
-        "权限等级": "超级管理员",
+        "user_id": user.uid,
+        "username": user.username,
+        "initial_password": default_password,
+        "account_status": "active",
+        "role": "super_admin",
     }
     return StandardResponse.success(
         data=user_data,
-        message="超级管理员账户信息已成功重置，请及时登录并修改默认密码。",
+        message=constants.MSG_ADMIN_RESET_SUCCESS,
     )

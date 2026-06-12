@@ -4,12 +4,12 @@
       <div class="toolbar-left">
         <span class="terminal-tab">
           <el-icon><Monitor /></el-icon>
-          实时日志
+          {{ $t('realTimeLogs.realtime_logs') }}
         </span>
       </div>
       <div class="toolbar-right">
         <div class="control-item">
-          <span class="label">自动滚动</span>
+          <span class="label">{{ $t('realTimeLogs.auto_scroll') }}</span>
           <el-switch v-model="isAutoScroll" size="small" />
         </div>
         <el-divider direction="vertical" />
@@ -17,10 +17,10 @@
           type="text" 
           @click="clearLogs" 
           class="toolbar-btn delete"
-          title="清空控制台"
+          :title="$t('realTimeLogs.clear_title')"
         >
           <el-icon><Delete /></el-icon>
-          <span>清空</span>
+          <span>{{ $t('realTimeLogs.clear') }}</span>
         </el-button>
       </div>
     </div>
@@ -28,7 +28,7 @@
     <div class="terminal-body" ref="terminalBody">
       <div v-if="logs.length === 0" class="empty-state">
         <el-icon class="is-loading"><Loading /></el-icon>
-        <span>正在等待实时数据流...</span>
+        <span>{{ $t('realTimeLogs.waiting') }}</span>
       </div>
       
       <!-- 日志项容器：极致扁平化，支持自然文本复制 -->
@@ -45,10 +45,10 @@
         
         <!-- 上下文与扩展数据直接衔接在同一个容器流中（通过换行保持格式） -->
         <span v-if="log.uid || log.session_id" class="txt-sub-info">
-          用户ID: {{ log.uid || '-' }} / 会话ID: {{ log.session_id || '-' }}
+          {{ $t('realTimeLogs.user_id') }}: {{ log.uid || '-' }} / {{ $t('realTimeLogs.session_id') }}: {{ log.session_id || '-' }}
         </span>
         <span v-if="log.extra && Object.keys(log.extra).length" class="txt-sub-info">
-          扩展信息: {{ formatExtra(log.extra) }}
+          {{ $t('realTimeLogs.extra_info') }}: {{ formatExtra(log.extra) }}
         </span>
       </div>
     </div>
@@ -89,15 +89,28 @@ const connectWebSocket = () => {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      if (data) {
-        logs.value.push(data)
-        if (logs.value.length > 2000) logs.value.shift()
-        if (isAutoScroll.value) scrollToBottom()
+      if (!data) return
+
+      if (data.type === 'history') {
+        // 历史日志批量下发：一次性追加，避免逐条 push 触发的多次渲染
+        const historyLogs = Array.isArray(data.logs) ? data.logs : []
+        if (historyLogs.length > 0) {
+          logs.value.push(...historyLogs)
+          if (logs.value.length > 2000) logs.value.splice(0, logs.value.length - 2000)
+          if (isAutoScroll.value) scrollToBottom()
+        }
+        return
       }
+
+      // 实时推送的单条日志
+      logs.value.push(data)
+      if (logs.value.length > 2000) logs.value.shift()
+      if (isAutoScroll.value) scrollToBottom()
     } catch (err) {
       console.error('WS Error:', err)
     }
   }
+
   ws.onclose = () => setTimeout(connectWebSocket, 5000)
 }
 

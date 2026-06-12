@@ -11,7 +11,6 @@ from sqlmodel import (
 )
 
 
-
 class ModelUsage(enum.StrEnum):
     CHAT = "CHAT"
     EMBEDDING = "EMBEDDING"

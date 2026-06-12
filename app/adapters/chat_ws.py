@@ -8,6 +8,7 @@ from app.adapters.base import BaseChatAdapter
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -38,10 +39,10 @@ class WebSocketChatAdapter(BaseChatAdapter):
             ):
                 yield chunk
         except BaseBusinessException as e:
-            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=e.message), finish_reason=True, created_at=time.time())], history=[]).model_dump()
+            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, **e.kwargs)), finish_reason=True, created_at=time.time())], history=[]).model_dump()
         except Exception as e:
             logger.exception(f"Unexpected error in WebSocketChatAdapter: {str(e)}")
-            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=ERR_LLM_UNEXPECTED_ERROR), finish_reason=True, created_at=time.time())], history=[]).model_dump()
+            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=t(ERR_LLM_UNEXPECTED_ERROR)), finish_reason=True, created_at=time.time())], history=[]).model_dump()
 
 
 ws_chat_adapter = WebSocketChatAdapter()

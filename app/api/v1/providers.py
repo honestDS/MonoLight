@@ -109,7 +109,7 @@ async def update_provider(
     final_usage = provider_in.usage if provider_in.usage is not None else db_obj.usage
     final_base_url = provider_in.base_url if provider_in.base_url is not None else db_obj.base_url
     if final_usage == ModelUsage.RERANK and not final_base_url:
-        raise ParameterException("usage 为 RERANK 时 base_url 必须配置")
+        raise ParameterException(constants.ERR_PROVIDER_RERANK_NO_URL)
 
     db_obj = await provider_crud.update(db, db_obj=db_obj, obj_in=provider_in)
 
@@ -148,7 +148,7 @@ async def test_embedding_dimension(
         raise ResourceNotFoundException(constants.ERR_PROVIDER_NOT_FOUND)
 
     if not db_obj.base_url:
-        raise ParameterException("该提供商未配置 Base URL，无法执行自动检测。")
+        raise ParameterException(constants.ERR_PROVIDER_TEST_NO_URL)
 
     try:
         res = await EmbeddingClient.get_embeddings(
@@ -162,9 +162,9 @@ async def test_embedding_dimension(
             dim = len(res["data"][0]["embedding"])
             return StandardResponse.success(
                 data={"dimension": dim},
-                message=f"检测成功，该模型的默认输出维度为: {dim}",
+                message=constants.MSG_PROVIDER_TEST_SUCCESS, dim=dim,
             )
         else:
-            raise ParameterException("模型返回的数据结构异常，无法获取维度。")
+            raise ParameterException(constants.ERR_PROVIDER_TEST_DIMENSION_ERROR)
     except Exception as e:
-        raise ParameterException(f"检测失败: {str(e)}")
+        raise ParameterException(constants.ERR_PROVIDER_TEST_FAILED, message=str(e))

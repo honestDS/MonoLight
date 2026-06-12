@@ -1,6 +1,7 @@
 <template>
-  <div id="app">
-    <router-view v-if="isLoginPage"></router-view>
+  <el-config-provider :locale="locale">
+    <div id="app">
+      <router-view v-if="isLoginPage"></router-view>
     <el-container v-else class="app-wrapper">
       <el-aside width="220px" class="sidebar">
         <div class="logo-container">
@@ -17,37 +18,37 @@
           router
           class="side-menu">
           <el-menu-item index="/">
-            <span>智能交互</span>
+            <span>{{ $t('common.menu.chat') }}</span>
           </el-menu-item>
           <el-menu-item index="/users">
-            <span>用户管理</span>
+            <span>{{ $t('common.menu.users') }}</span>
           </el-menu-item>
           <el-menu-item index="/knowledge-base">
-            <span>知识库管理</span>
+            <span>{{ $t('common.menu.knowledge_base') }}</span>
           </el-menu-item>
           <el-sub-menu index="/system">
             <template #title>
-              <span>系统配置</span>
+              <span>{{ $t('common.menu.system') }}</span>
             </template>
             <el-menu-item index="/profiles">
-              <span>配置管理</span>
+              <span>{{ $t('common.menu.profiles') }}</span>
             </el-menu-item>
             <el-menu-item index="/providers">
-              <span>模型管理</span>
+              <span>{{ $t('common.menu.providers') }}</span>
             </el-menu-item>
             <el-menu-item index="/prompts">
-              <span>提示词管理</span>
+              <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>
           </el-sub-menu>
           <el-sub-menu index="/logs">
             <template #title>
-              <span>系统日志</span>
+              <span>{{ $t('common.menu.logs') }}</span>
             </template>
             <el-menu-item index="/logs/realtime">
-              <span>实时日志</span>
+              <span>{{ $t('common.menu.realtime_logs') }}</span>
             </el-menu-item>
             <el-menu-item index="/logs/history">
-              <span>历史日志</span>
+              <span>{{ $t('common.menu.history_logs') }}</span>
             </el-menu-item>
           </el-sub-menu>
         </el-menu>
@@ -57,10 +58,10 @@
             router
             class="side-menu-footer">
             <el-menu-item index="/docs">
-              <span>文档中心</span>
+              <span>{{ $t('common.menu.docs') }}</span>
             </el-menu-item>
             <el-menu-item index="/support">
-              <span>技术支持</span>
+              <span>{{ $t('common.menu.support') }}</span>
             </el-menu-item>
           </el-menu>
         </div>
@@ -81,18 +82,21 @@
             <router-view></router-view>
           </transition>
           <div class="app-footer">
-            <span>&copy; 2024 MonoLight LLM Admin. All rights reserved.</span>
-          </div>
-        </el-main>
+              <span>&copy; 2024 MonoLight LLM Admin. All rights reserved.</span>
+            </div>
+          </el-main>
+        </el-container>
       </el-container>
-    </el-container>
-  </div>
+    </div>
+  </el-config-provider>
 </template>
 
 <script>
 import { useResizeObserver } from './composables/useResizeObserver'
 import { routeNameMap } from './constants'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import en from 'element-plus/es/locale/lang/en'
 
 // 初始化 ResizeObserver 防抖补丁
 useResizeObserver()
@@ -109,7 +113,11 @@ export default {
     },
     currentRouteName() {
       const path = this.$route.path
-      return routeNameMap[path] || '控制面板'
+      const key = routeNameMap[path]
+      return key ? this.$t(key) : this.$t('common.menu.chat') // fallback 
+    },
+    locale() {
+      return this.$i18n.locale === 'zh' ? zhCn : en
     }
   },
   methods: {

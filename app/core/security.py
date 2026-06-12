@@ -18,6 +18,7 @@ from jose import (
 )
 from starlette.requests import HTTPConnection
 
+from app.core import constants
 from app.core.crud.user import user_crud
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal
@@ -80,7 +81,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="无效的身份凭证",
+        detail=constants.ERR_UNAUTHORIZED,
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:

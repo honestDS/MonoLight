@@ -1,0 +1,15 @@
+MESSAGES = {
+    "MSG_PROVIDER_CREATED": "Model provider created successfully",
+    "MSG_PROVIDER_UPDATED": "Model provider updated successfully",
+    "MSG_PROVIDER_DELETED": "Model provider deleted",
+    "ERR_PROVIDER_NOT_FOUND": "Model provider not found",
+    "ERR_PROVIDER_NAME_EXISTS": "Provider name already exists",
+    "ERR_CHAT_PROVIDER_NOT_FOUND": "Chat model provider not found",
+    "ERR_CHAT_PROVIDER_DISABLED": "Chat model provider is disabled, please enable it in provider management and try again",
+    "ERR_PROVIDER_EMBEDDING_ONLY": "This model provider is currently configured for Embedding tasks only, and cannot reply directly to conversations.",
+    "ERR_PROVIDER_RERANK_NO_URL": "base_url must be configured when usage is RERANK",
+    "ERR_PROVIDER_TEST_NO_URL": "This provider has no Base URL configured, auto-detection cannot be performed.",
+    "ERR_PROVIDER_TEST_DIMENSION_ERROR": "The model returned an abnormal data structure, dimensions cannot be obtained.",
+    "ERR_PROVIDER_TEST_FAILED": "Detection failed: {message}",
+    "MSG_PROVIDER_TEST_SUCCESS": "Detection successful, the default output dimension of the model is: {dim}",
+}

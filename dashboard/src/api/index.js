@@ -1,4 +1,7 @@
 import axios from 'axios'
+import i18n from '../i18n'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
 
 const request = axios.create({
   baseURL: 'http://127.0.0.1:8001/api/v1',
@@ -12,6 +15,7 @@ const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws'
 request.interceptors.request.use(config => {
   const token = localStorage.getItem('token')
   if (token) { config.headers['Authorization'] = `Bearer ${token}` }
+  config.headers['Accept-Language'] = localStorage.getItem('locale') || 'zh'
   return config
 })
 
@@ -22,8 +26,8 @@ request.interceptors.response.use(
     const { code, data, message } = res.data;
     if (code !== undefined && code !== 200) {
       // 业务报错，直接抛出，让 catch 块处理
-      const error = new Error(message || '未知错误');
-      error.response = { data: { message: message || '未知错误', data } };
+      const error = new Error(message || t('common.unknown_error'));
+      error.response = { data: { message: message || t('common.unknown_error'), data } };
       return Promise.reject(error);
     }
     return res;
@@ -34,7 +38,7 @@ request.interceptors.response.use(
       if (window.location.hash !== '#/login') window.location.hash = '/login';
     }
     // 统一错误提示格式：优先读取后端返回的 message 或 detail
-    const errorMsg = err.response?.data?.message || err.response?.data?.detail || err.message || '网络请求失败';
+    const errorMsg = err.response?.data?.message || err.response?.data?.detail || err.message || t('common.network_request_failed');
     err.message = errorMsg; 
     return Promise.reject(err);
   }
@@ -49,13 +53,17 @@ export const adminApi = {
 
 export const authApi = {
   login: (data) => request.post('/auth/login', data),
-  resetAdmin: (token) => request.post('/auth/reset_admin', { reset_token: token })
+  resetAdmin: async (token) => {
+    const res = await request.post('/auth/reset_admin', { reset_token: token })
+    return res.data?.data || res.data || {}
+  }
 }
 
 export const chatApi = {
     // 聊天 WS 接口
     createWebSocket(token) {
-        const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/chat/ws?token=${token}`
+        const lang = localStorage.getItem('locale') || 'zh'
+        const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/chat/ws?token=${token}&lang=${lang}`
         console.log('WebSocket connecting to:', wsUrl)
         return new WebSocket(wsUrl)
     },
@@ -105,7 +113,8 @@ export const systemApi = {
   logsHistory: (params) => request.get('/system/logs', { params }),
   // 系统日志实时 WS 接口
   createLogsWebSocket: (token) => {
-    const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}`
+    const lang = localStorage.getItem('locale') || 'zh'
+    const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}&lang=${lang}`
     console.log('System Logs WebSocket connecting to:', wsUrl)
     return new WebSocket(wsUrl)
   }

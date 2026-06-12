@@ -13,9 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
+from app.core import constants
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.provider import provider_crud
+from app.core.i18n.context import set_current_locale
+from app.core.i18n.locale import normalize_locale
 from app.core.log import (
     get_logger,
 )
@@ -90,7 +93,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
         }
         for row in sessions
     ]
-    return StandardResponse.success(data=data, message="会话列表获取成功")
+    return StandardResponse.success(data=data, message=constants.MSG_SESSION_LIST_SUCCESS)
 
 
 @router.post("/sessions/delete")
@@ -104,9 +107,9 @@ async def delete_session(
     row_count = await message_crud.remove_session(db, session_id=session_id, uid=uid, is_admin=is_admin)
 
     if row_count == 0:
-        return StandardResponse.success(message="会话未找到或已删除")
+        return StandardResponse.error(code=404, message=constants.ERR_SESSION_NOT_FOUND)
 
-    return StandardResponse.success(message=f"已成功清理会话 {session_id} 的全部历史记录")
+    return StandardResponse.success(message=constants.MSG_SESSION_CLEARED)
 
 
 class SessionSettingRequest(BaseModel):
@@ -127,15 +130,15 @@ async def update_session_setting(
 
     session = await session_crud.get_by_session_id(db, request.session_id)
     if not session:
-        return StandardResponse.error(message="会话未找到")
+        return StandardResponse.error(message=constants.ERR_SESSION_NOT_FOUND)
 
     if not is_admin and session.uid != uid:
-        return StandardResponse.error(message="无权操作此会话")
+        return StandardResponse.error(message=constants.ERR_SESSION_NO_PERMISSION)
 
     session.enable_markdown = request.enable_markdown
     await db.commit()
 
-    return StandardResponse.success(message="会话设置已更新")
+    return StandardResponse.success(message=constants.MSG_SESSION_UPDATED)
 
 
 class SessionTitleGenerateRequest(BaseModel):
@@ -150,22 +153,23 @@ async def generate_title(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+
     profile = await profile_crud.get_active(db)
     if not profile:
-        return StandardResponse.error(message="未配置有效的模型提供商")
+        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
 
     cfg = ProfileConfig.model_validate(profile.configs)
     provider_id = cfg.provider.provider_id
     if not provider_id or provider_id <= 0:
-        return StandardResponse.error(message="未配置有效的模型提供商")
+        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
 
     provider = await provider_crud.get(db, provider_id)
     if not provider:
-        return StandardResponse.error(message="未配置有效的模型提供商")
+        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
     if provider.usage == ModelUsage.EMBEDDING:
-        return StandardResponse.error(message="当前模型提供商仅支持向量化，无法生成会话标题")
+        return StandardResponse.error(message=constants.ERR_PROVIDER_EMBEDDING_ONLY_FOR_TITLE)
     if not provider.is_active:
-        return StandardResponse.error(message="对话模型提供商已被禁用，无法生成会话标题")
+        return StandardResponse.error(message=constants.ERR_PROVIDER_DISABLED_FOR_TITLE)
 
     title = await generate_session_title(
         uid=uid,
@@ -178,7 +182,7 @@ async def generate_title(
         max_tokens=cfg.provider.max_tokens,
     )
 
-    return StandardResponse.success(data={"title": title}, message="标题生成成功")
+    return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
 
 
 @router.get("/sessions/history")
@@ -196,8 +200,9 @@ async def get_session_history(
     # 倒序取出，正序返回
     messages.reverse()
 
+
     data = [MessageResponse.model_validate(m) for m in messages]
-    return StandardResponse.success(data=data, message="会话历史记录获取成功")
+    return StandardResponse.success(data=data, message=constants.MSG_MESSAGE_LIST_SUCCESS)
 
 
 @router.websocket("/ws")
@@ -210,6 +215,10 @@ async def chat_websocket(
     认证方式与 HTTP 接口一致（通常通过 Query Token 或 Header）
     """
     await websocket.accept()
+    # 从 query 获取 lang 并设置上下文
+    lang_param = websocket.query_params.get("lang")
+    set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
+
     uid = getattr(current_user, "uid", None)
 
     # 用于追踪当前是否有正在运行的调度任务
@@ -241,7 +250,7 @@ async def chat_websocket(
         except Exception:
             logger.bind(uid=uid, session_id=session_id).exception("WebSocket 任务发生异常")
             try:
-                await websocket.send_json({"type": "error", "message": "Internal server error"})
+                await websocket.send_json({"type": "error", "message": constants.ERR_INTERNAL_SERVER_ERROR})
             except Exception:
                 pass
         finally:
@@ -309,7 +318,7 @@ async def chat_websocket(
         # 异常处理
         logger.bind(uid=uid).exception("聊天 WebSocket 发生异常")
         try:
-            await websocket.send_json({"error": "Internal server error"})
+            await websocket.send_json({"error": constants.ERR_INTERNAL_SERVER_ERROR})
         except Exception:
             pass
         if active_task and not active_task.done():

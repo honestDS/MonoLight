@@ -3,7 +3,7 @@
     <!-- 复制按钮 -->
     <div class="copy-btn-wrapper">
       <el-button 
-        title="复制全部代码"
+        :title="$t('common.code.copy_all')"
         @click="copyContent"
         class="copy-btn"
       >
@@ -24,10 +24,10 @@
     
     <!-- 操作按钮 (悬浮在右下角) -->
     <div v-if="hasMore" class="expand-actions">
-      <div class="stats-info">已显示 {{ limit }} / {{ allLines.length }} 行</div>
+      <div class="stats-info">{{ $t('common.code.showing', { limit: limit, total: allLines.length }) }}</div>
       <el-button-group>
-        <el-button size="small" plain @click="expandMore">继续展开 (+100行)</el-button>
-        <el-button size="small" type="primary" @click="expandAll">展开全部</el-button>
+        <el-button size="small" plain @click="expandMore">{{ $t('common.code.expand_more') }}</el-button>
+        <el-button size="small" type="primary" @click="expandAll">{{ $t('common.code.expand_all') }}</el-button>
       </el-button-group>
     </div>
   </div>
@@ -36,6 +36,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { CopyDocument } from '@element-plus/icons-vue'
 
 const props = defineProps({
@@ -48,6 +49,8 @@ const props = defineProps({
     default: 400
   }
 })
+
+const { t } = useI18n()
 
 const limit = ref(100)
 
@@ -101,7 +104,7 @@ const copyContent = async () => {
     // 优先使用现代 Clipboard API
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(textToCopy)
-      ElMessage.success('复制成功')
+      ElMessage.success(t('common.code.copy_success'))
     } else {
       // 降级方案：兼容纯 IP/HTTP 等非安全上下文
       const textArea = document.createElement('textarea')
@@ -116,17 +119,17 @@ const copyContent = async () => {
       try {
         const successful = document.execCommand('copy')
         if (successful) {
-          ElMessage.success('复制成功')
+          ElMessage.success(t('common.code.copy_success'))
         } else {
-          ElMessage.error('复制失败')
+          ElMessage.error(t('common.code.copy_failed'))
         }
       } catch (err) {
-        ElMessage.error('复制失败')
+        ElMessage.error(t('common.code.copy_failed'))
       }
       document.body.removeChild(textArea)
     }
   } catch (err) {
-    ElMessage.error('复制失败: ' + err.message)
+    ElMessage.error(t('common.code.copy_failed') + ': ' + err.message)
   }
 }
 

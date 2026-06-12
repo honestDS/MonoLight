@@ -3,8 +3,8 @@
 
     <!-- 表格操作按钮 -->
     <div class="table-actions">
-      <el-button type="primary" size="default" @click="$emit('create')">{{ createText }}</el-button>
-      <el-button size="default" @click="$emit('refresh')">{{ refreshText }}</el-button>
+      <el-button v-if="resolvedCreateText" type="primary" size="default" @click="$emit('create')">{{ resolvedCreateText }}</el-button>
+      <el-button v-if="resolvedRefreshText" size="default" @click="$emit('refresh')">{{ resolvedRefreshText }}</el-button>
     </div>
 
     <!-- 数据表格 -->
@@ -15,7 +15,7 @@
         border
         stripe
         size="default"
-        :empty-text="emptyText">
+        :empty-text="resolvedEmptyText">
         <slot></slot>
       </el-table>
     </div>
@@ -24,7 +24,7 @@
     <div v-if="showFooter" class="table-footer">
       <div class="pagination-info">
         <slot name="info">
-          <span>共 {{ total }} 条</span>
+          <span>{{ totalText }}</span>
         </slot>
       </div>
       <div class="pagination-wrapper">
@@ -43,6 +43,11 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
+
 const props = defineProps({
   data: {
     type: Array,
@@ -54,15 +59,19 @@ const props = defineProps({
   },
   createText: {
     type: String,
-    default: '新建'
+    default: undefined
   },
   refreshText: {
     type: String,
-    default: '刷新列表'
+    default: undefined
   },
   emptyText: {
     type: String,
-    default: '暂无数据'
+    default: undefined
+  },
+  totalText: {
+    type: String,
+    default: ''
   },
   showFooter: {
     type: Boolean,
@@ -83,6 +92,10 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['create', 'refresh', 'page-change', 'size-change', 'update:currentPage', 'update:pageSize'])
+
+const resolvedCreateText = computed(() => props.createText === undefined ? t('common.create') : props.createText)
+const resolvedRefreshText = computed(() => props.refreshText === undefined ? t('common.refresh') : props.refreshText)
+const resolvedEmptyText = computed(() => props.emptyText === undefined ? t('common.no_data') : props.emptyText)
 
 const handleSizeChange = (val) => {
   emit('update:pageSize', val)

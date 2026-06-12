@@ -58,7 +58,7 @@ async def add_new_user(
             },
         )
     except ValueError as e:
-        raise ParameterException(str(e))
+        raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
 
     return StandardResponse.success(data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED)
 
@@ -100,14 +100,14 @@ async def update_user(
         is_renaming = user_in.username and user_in.username != user.username
         is_deactivating = user_in.is_active is False
         if is_renaming or is_deactivating:
-            raise ParameterException("超级管理员账户受核心保护，严禁执行禁用或改名操作。")
+            raise ParameterException(constants.ERR_USER_SUPER_PROTECTED)
 
     update_dict = {}
     if user_in.password:
         try:
             update_dict["hashed_password"] = get_password_hash(user_in.password)
         except ValueError as e:
-            raise ParameterException(str(e))
+            raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
 
     if user_in.is_active is not None:
         update_dict["is_active"] = user_in.is_active
@@ -130,7 +130,7 @@ async def delete_user(
         raise ResourceNotFoundException(constants.ERR_USER_NOT_FOUND)
 
     if user.is_superuser:
-        raise ParameterException("禁止删除超级管理员账户。")
+        raise ParameterException(constants.ERR_USER_SUPER_DELETE_FORBIDDEN)
 
     await user_crud.remove(db, id=user.id)
     return StandardResponse.success(message=constants.MSG_USER_DELETED)
