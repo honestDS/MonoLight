@@ -58,6 +58,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 ### 2.5 模型与数据供应层 (Provider Layer)
 - app/providers/llm/client.py: LLM 统一客户端。持有 Transformer 注册表，根据协议名称路由到具体 Transformer，并将原始模型响应封装为 InternalResponse。
 - app/providers/embedding/client.py: Embedding 统一客户端。持有 `BaseEmbeddingTransformer` 注册表，根据 ProviderType 路由到具体 Embedding Transformer。
+- app/providers/rerank/client.py: Rerank 统一客户端。持有 `BaseRerankTransformer` 注册表，根据 ProviderType 路由到具体的重排服务实现，支持对检索结果文本进行精排（Rerank）。
 - app/providers/database/: 关系型数据库 Provider 包。
   - __init__.py: 对外导出 `AsyncSessionLocal`、`Base`、`DATABASE_URL`、`engine` 与 `get_db`，保持常用数据库依赖导入入口简洁。
   - client.py: 异步数据库引擎。负责 SQLAlchemy/SQLModel 异步 Engine、Session 工厂、测试环境数据库 URL 切换与 FastAPI 依赖注入。
@@ -68,15 +69,16 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - requirements.txt: Provider 与检索链路依赖包括 `chromadb`、`rank-bm25` 与 `jieba`，分别支撑向量持久化、BM25 稀疏检索和中英文分词。
 
 ### 2.6 知识库与向量检索层 (Knowledge Base & Vector Layer)
-知识库流程由 API、领域模型、文本分块、Embedding Provider、Vector Provider 与混合检索模块共同组成。向量化能力通过 `EmbeddingClient` 分发到具体 `BaseEmbeddingTransformer` 实现，当前默认实现为 OpenAI 兼容协议。
+知识库流程由 API、领域模型、文本分块、Embedding Provider、Vector Provider、混合检索与重排精排（Rerank）模块共同组成。向量化与重排能力分别通过 `EmbeddingClient` 与 `RerankClient` 分发到兼容协议实现。
 - app/api/v1/knowledge_base.py: 编排知识库业务流程，调用 Profile 中的 embedding_provider_id、embedding_model_id 与 embedding_dimensions 配置完成文档导入、向量写入、检索测试与文档管理。
 - app/core/embedding/knowledge_base.py: 知识库核心业务函数。负责读取 Profile 绑定的向量模型配置、调用 EmbeddingClient 生成向量、查询当前 Profile 可用知识库、构造知识库提示词清单与执行知识库查询。
+- app/core/rerank/: 检索精排子系统。在初步混合检索并得出 RRF 融合候选集后，当 Profile 配置了有效的重排提供商时，负责将候选文本和原查询送入远程 Reranker 打分，实现更精准的内容筛选与排序。
 - app/core/retrieval/: 检索子系统。
   - hybrid.py: 稠密向量检索与 BM25 稀疏检索并发执行，并通过 RRF 融合结果。
   - sparse.py: BM25 稀疏检索实现。
   - tokenizer.py: 中英文混合分词工具。
   - fusion.py: Reciprocal Rank Fusion 排名融合。
-  - schemas.py: 检索 Chunk 与 Hit 内部结构。
+  - schemas.py: 检索 Chunk 与 Hit 内部结构，支持记录 RRF 融合分与 Rerank 评分。
 - app/core/utils/text_splitter.py: 文档导入时的文本分块组件。
 - app/core/tools/knowledge_base_query.py: Agent 知识库查询工具执行器，运行时注入知识库白名单与数据库/Profile 上下文，强制使用内部固定 top_k，并只返回来源与内容，避免向模型暴露冗余检索元数据。
 - app/models/knowledge_base.py: 定义 KnowledgeBase、KnowledgeBaseDocument 以及知识库请求/响应模型。
@@ -87,8 +89,8 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 ### 2.7 领域模型与验证层 (Domain & Schema Layer)
 - app/models/: 基于 SQLModel/Pydantic 的数据库实体、内部消息对象与 API 请求响应模型。
   - user.py: 用户实体与用户创建、更新、响应模型。
-  - provider.py: 模型供应商实体，包含 ProviderType 与 ModelUsage，其中 ModelUsage 区分 CHAT 与 EMBEDDING。
-  - profile.py: Profile 实体与 ProfileConfig 嵌套配置模型，包含 provider、security、tool、other 四类运行时配置。
+  - provider.py: 模型供应商实体，包含 ProviderType 与 ModelUsage，其中 ModelUsage 区分 CHAT、EMBEDDING 与 RERANK。
+  - profile.py: Profile 实体与 ProfileConfig 嵌套配置模型，包含 provider、security、tool、other 四类运行时配置；ProviderConfig 涵盖了嵌入配置及 Rerank 远程调用的关联与超时配置。
   - prompt.py: PromptLibrary 提示词资产实体。
   - message.py: InternalMessage、InternalToolCall、InternalResponse、消息持久化实体与 ChatCompletionRequest。
   - session.py & active_session.py: 对话会话与活跃会话锁实体。
@@ -107,9 +109,10 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
   - firecrawl_scrape.py: Firecrawl 网页抓取工具。
   - knowledge_base_query.py: 知识库查询工具，校验运行时知识库白名单，归一化 LLM 传入的 knowledge_base_id，并返回精简来源与内容。
 
-### 2.9 全局配置与常量 (Constants Layer)
+### 2.9 全局配置与杂项子系统 (Constants & Utilities Layer)
 - app/core/constants.py: 统一错误消息、提示消息与常量定义。
 - app/core/prompts.py: 系统级提示词模板中心，包含审计提示词、确认提示词、工具轮次限制提示等。
+- app/core/i18n/: 国际化多语言翻译引擎。基于 `contextvars` 在中间件/生命周期注入当前会话/请求语言，通过动态加载语言包与缺失回退机制，实现业务错误码、文案提示与异常描述的多语言自动翻译。
 
 ### 2.10 核心 CRUD 层
 - app/core/crud/: 业务逻辑与关系型数据库持久化之间的 Repository 层。
@@ -126,8 +129,9 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
 - dashboard/: 基于 Vue 3、Vue CLI、Element Plus、Vue Router、Pinia、axios 与 vue-i18n 的管理控制台。
 - dashboard/src/views/: 页面视图包括 ChatView、KnowledgeBase、ProfilesView、ProvidersView、PromptsView、UsersView、HistoryLogs、RealTimeLogs 与 LoginView。
 - dashboard/src/api/index.js: 前端 API 客户端封装。
-- dashboard/src/components/: 通用表格、状态标签、虚拟化代码展示等组件。
+- dashboard/src/components/: 通用表格、状态标签、虚拟化代码展示以及 LanguageSwitcher 多语言切换等组件。
 - dashboard/src/composables/: CRUD、删除确认、WebSocket、工具解析、聊天相关组合式逻辑。
+- dashboard/src/i18n/: 前端国际化语言包管理模块，负责多语言词条挂载与切换逻辑。
 
 ## 3. 标准通信规程
 - 内部对话协议：调度器、LLMClient 与 Transformer 之间使用 InternalMessage、InternalToolCall、InternalResponse，避免在核心链路直接透传前端原始结构。
