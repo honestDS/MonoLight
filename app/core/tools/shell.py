@@ -94,22 +94,14 @@ class ShellExecutor(BaseExecutor):
             # 使用 subprocess.Popen 并配合 asyncio，以便可以主动终止进程
             process = None
             try:
+
                 def run_sync():
                     nonlocal process
-                    process = subprocess.Popen(
-                        command,
-                        shell=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        cwd=str(self.user_temp_dir),
-                        env=os.environ.copy()
-                    )
+                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=os.environ.copy())
                     return process.communicate(timeout=profile_timeout)
 
                 # 为了能够在外部取消并终止，我们将 run_in_executor 包装在 wait_for 中，但是要注意 cancellation 的处理
-                stdout, stderr = await asyncio.wait_for(
-                    loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0
-                )
+                stdout, stderr = await asyncio.wait_for(loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0)
 
                 return json.dumps(
                     {

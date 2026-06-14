@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # CRUD Imports
 from app.core.crud.message import message_crud
 from app.core.log import get_logger
+from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -140,18 +141,25 @@ class ContextManager:
                             matched_tools.append(target)
                             found_tool_call_ids.add(target.tool_call_id)
 
-                # 只有当所有的工具调用都有对应的返回结果时，才保留这一整套链条
-                if len(found_tool_call_ids) == len(required_ids):
-                    audited_msgs.append(msg)
-                    for mt in matched_tools:
-                        audited_msgs.append(mt)
-                        consumed_msg_ids.add(id(mt))
-                    i += 1
-                else:
-                    # 如果工具链不完整，为了防止 LLM 报错，必须舍弃掉 this Assistant 调用
-                    logger.bind(uid=uid, session_id=session_id).warning(f"Broken tool chain. Required: {required_ids}")
-                    # 此时不添加该 assistant 消息，继续处理下一条
-                    i += 1
+                # 保持协议合规：如果工具链不完整，通过虚拟响应进行补偿，而不是直接舍弃
+                audited_msgs.append(msg)
+                # 先添加已有的工具响应
+                for mt in matched_tools:
+                    audited_msgs.append(mt)
+                    consumed_msg_ids.add(id(mt))
+
+                # 如果有缺失，注入虚拟补偿响应
+                if len(found_tool_call_ids) < len(required_ids):
+                    logger.bind(uid=uid, session_id=session_id).warning(f"Tool chain incomplete. Required: {required_ids}, Found: {list(found_tool_call_ids)}. Injecting virtual compensation.")
+                    for tc_id in required_ids:
+                        if tc_id not in found_tool_call_ids:
+                            virtual_tool_msg = InternalMessage(
+                                role=MessageRole.TOOL,
+                                tool_call_id=tc_id,
+                                content=json.dumps({"error": PROMPT_TOOL_INTERRUPTED}),
+                            )
+                            audited_msgs.append(virtual_tool_msg)
+                i += 1
             elif msg.role == MessageRole.TOOL:
                 # 孤立的工具结果（没有对应的 Assistant 调用），直接舍弃以保持协议合规
                 logger.bind(uid=uid, session_id=session_id).warning(f"Orphan tool result. ID: {msg.tool_call_id}")

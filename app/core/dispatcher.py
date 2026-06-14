@@ -148,7 +148,6 @@ class ChatDispatcher:
                             timeout=cfg.provider.chat_timeout,
                         )
 
-
                         ai_msg = response.message
                         logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
 
@@ -304,7 +303,6 @@ class ChatDispatcher:
                             protocol=getattr(chat_provider, "protocol", "openai"),
                             timeout=cfg.provider.chat_timeout,
                         ):
-
                             choices = chunk.get("choices", [])
                             if not choices:
                                 continue
@@ -314,7 +312,14 @@ class ChatDispatcher:
                             content = delta.get("content")
                             if content:
                                 current_content_chunks.append(content)
-                                yield {"type": "content", "content": content, "turn": current_turn, "response_id": response_id, "request_id": request_id}
+                                yield {
+                                    "type": "content",
+                                    "content": content,
+                                    "turn": current_turn,
+                                    "response_id": response_id,
+                                    "request_id": request_id,
+                                    "session_id": session_id,
+                                }
 
                             tool_calls = delta.get("tool_calls")
                             if tool_calls:
@@ -360,6 +365,7 @@ class ChatDispatcher:
                                 "response_id": response_id,
                                 "content": saved_msg.content,
                                 "request_id": request_id,
+                                "session_id": session_id,
                             }
 
                         if not ai_msg.tool_calls:
@@ -376,7 +382,15 @@ class ChatDispatcher:
                             continue
 
                         for tc in ai_msg.tool_calls:
-                            yield {"type": "tool_start", "name": tc.name, "arguments": tc.arguments, "tool_call_id": tc.id, "response_id": response_id, "request_id": request_id}
+                            yield {
+                                "type": "tool_start",
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                                "tool_call_id": tc.id,
+                                "response_id": response_id,
+                                "request_id": request_id,
+                                "session_id": session_id,
+                            }
 
                         tasks = [
                             process_single_tool(
@@ -398,7 +412,15 @@ class ChatDispatcher:
                         for tool_res in tool_responses:
                             await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
                             tool_name = next((tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), "unknown")
-                            yield {"type": "tool_end", "name": tool_name, "result": tool_res.content, "tool_call_id": tool_res.tool_call_id, "response_id": response_id, "request_id": request_id}
+                            yield {
+                                "type": "tool_end",
+                                "name": tool_name,
+                                "result": tool_res.content,
+                                "tool_call_id": tool_res.tool_call_id,
+                                "response_id": response_id,
+                                "request_id": request_id,
+                                "session_id": session_id,
+                            }
 
                 finally:
                     await active_session_crud.release_lock(db, session_id)

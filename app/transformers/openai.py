@@ -174,8 +174,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             logger.bind(model_id=model_id, base_url=base_url, stream=True).error(f"OpenAI 流式对话接口调用失败: {str(e)}")
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
-
-
     @staticmethod
     def _stream_chunk_has_payload(parsed: dict[str, Any]) -> bool:
         """判断流式数据块是否包含实质负载（非空文本、推理内容或工具调用）。
@@ -225,7 +223,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
@@ -239,7 +236,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             else:
                 logger.bind(model_id=model_id, base_url=base_url).error(f"向量模型接口调用失败: {str(e)}")
             raise EmbeddingException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
-
 
     @staticmethod
     def normalize_embedding_base_url(base_url: str) -> str:
@@ -288,7 +284,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             logger.bind(model_id=model_id, base_url=base_url).error(f"Rerank 接口调用失败: {str(e)}")
             raise RerankException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
-
     async def rerank_texts(
         self,
         api_key: str,
@@ -316,7 +311,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         if not isinstance(raw_results, list):
             raise RerankException(constants.ERR_RERANK_FORMAT_ERROR)
 
-
         normalized: list[dict[str, Any]] = []
         for item in raw_results:
             if not isinstance(item, dict):
@@ -333,7 +327,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             normalized.append({"index": int(index), "relevance_score": float(score)})
 
         return normalized
-
 
     async def embed_texts(
         self,
@@ -402,7 +395,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 if dimensions_supported is True:
                     raise
 
-
         response = await self.get_embeddings(
             api_key=api_key,
             base_url=base_url,
@@ -411,7 +403,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             timeout=timeout,
         )
         return {"response": response, "dimensions_supported": False if dimensions else dimensions_supported}
-
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:

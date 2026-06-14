@@ -106,7 +106,6 @@ class KnowledgeBaseQueryTestResponse(SQLModel):
     rerank_error: str | None = None  # 仅 query-test 路径在 rerank 降级时回填
 
 
-
 class KnowledgeBaseDocumentResponse(SQLModel):
     id: int
     knowledge_base_id: int

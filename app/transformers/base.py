@@ -113,4 +113,3 @@ class BaseRerankTransformer(ABC):
         timeout: float = 15.0,
     ) -> list[dict[str, Any]]:
         pass
-

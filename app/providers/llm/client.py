@@ -51,7 +51,6 @@ class LLMClient:
         ):
             yield chunk
 
-
     @classmethod
     async def generate(
         cls,
@@ -83,7 +82,6 @@ class LLMClient:
             timeout=timeout,
             **kwargs,
         )
-
 
         # 核心修复：调用 transformer.from_provider 将原始 dict 转换为 InternalResponse
         # 注意：目前的 OpenAITransformer.from_provider 返回的是 InternalMessage

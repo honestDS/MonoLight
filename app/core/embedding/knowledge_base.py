@@ -35,8 +35,6 @@ def get_profile_kb_query_top_k(profile: Profile) -> int:
     return min(raw_top_k, 50)
 
 
-
-
 async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tuple[ProviderType, str, str, str, int | None]:
     provider_config = (profile.configs or {}).get("provider", {})
     embedding_provider_id = provider_config.get("embedding_provider_id")
@@ -96,7 +94,6 @@ async def embed_chunks(db: AsyncSession, profile: Profile, texts: list[str], bat
         )
     except LLMException as e:
         raise HTTPException(status_code=502, detail=t(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=e.message))
-
 
 
 async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> list[KnowledgeBase]:
@@ -197,4 +194,3 @@ async def query_knowledge_base(
             retrieval_mode="hybrid",
             rerank_error=t(e.message, default=e.message, **e.kwargs) if expose_rerank_error else None,
         )
-

@@ -57,7 +57,6 @@ async def create_knowledge_base(
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
 
-
     # 在 ChromaDB 中创建 collection
     try:
         create_collection(collection_name)
@@ -158,7 +157,6 @@ async def query_test_knowledge_base(
 
     response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k, expose_rerank_error=True)
     return StandardResponse.success(data=response_data)
-
 
 
 @router.post("/delete", response_model=StandardResponse[bool])

@@ -104,7 +104,6 @@ class AuditMiddleware:
 
         # 提取 execute_shell 的内容并检查验证状态
         if tool_name == "execute_shell":
-
             cmd_arg = args.get("command", "")
 
             blacklisted = ShellExecutor.check_blacklist(cmd_arg)
@@ -175,7 +174,6 @@ class AuditMiddleware:
         if not provider.is_active:
             logger.bind(uid=uid, session_id=session_id, security=True).warning("审计模型提供商已被禁用，跳过安全审计")
             return None
-
 
         audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid)
 

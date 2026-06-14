@@ -71,8 +71,6 @@ async def validate_rerank_provider(db: AsyncSession, provider_config: dict) -> N
         raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
-
-
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
 async def create_profile(
     profile_in: ProfileCreate,
@@ -93,7 +91,6 @@ async def create_profile(
 
     if await profile_crud.get_by_name(db, profile_in.name):
         raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
-
 
     if profile_in.prompt_id:
         if not await prompt_crud.get(db, profile_in.prompt_id):
@@ -191,7 +188,6 @@ async def update_profile(
         await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
 
     if profile_in.name and profile_in.name != db_profile.name:
-
         if await profile_crud.get_by_name(db, profile_in.name):
             raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
 

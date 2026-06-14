@@ -11,5 +11,5 @@ MESSAGES = {
     "MSG_TITLE_GENERATED": "标题生成成功",
     "MSG_NEW_SESSION": "新会话",
     "MSG_TITLE_GENERATE_FAILED": "无法生成标题，将使用默认标题",
-    "MSG_MESSAGE_LIST_SUCCESS": "会话历史记录获取成功"
+    "MSG_MESSAGE_LIST_SUCCESS": "会话历史记录获取成功",
 }

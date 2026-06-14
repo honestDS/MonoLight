@@ -42,7 +42,6 @@ class ProviderBase(SQLModel):
         return self
 
 
-
 class ModelProvider(ProviderBase, table=True):
     __tablename__ = "provider"
     id: int | None = Field(default=None, primary_key=True, index=True)
@@ -66,7 +65,6 @@ class ProviderUpdate(SQLModel):
         if self.base_url and not re.match(r"^https?://", self.base_url):
             raise ValueError("base_url must start with http:// or https://")
         return self
-
 
 
 class ProviderResponse(ProviderBase):

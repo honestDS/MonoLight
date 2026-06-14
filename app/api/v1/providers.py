@@ -162,7 +162,8 @@ async def test_embedding_dimension(
             dim = len(res["data"][0]["embedding"])
             return StandardResponse.success(
                 data={"dimension": dim},
-                message=constants.MSG_PROVIDER_TEST_SUCCESS, dim=dim,
+                message=constants.MSG_PROVIDER_TEST_SUCCESS,
+                dim=dim,
             )
         else:
             raise ParameterException(constants.ERR_PROVIDER_TEST_DIMENSION_ERROR)

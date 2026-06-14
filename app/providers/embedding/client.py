@@ -60,4 +60,3 @@ class EmbeddingClient:
             dimensions=dimensions,
             timeout=timeout,
         )
-

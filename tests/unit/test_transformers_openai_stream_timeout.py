@@ -13,7 +13,6 @@ def restore_wait_for(monkeypatch):
     monkeypatch.setattr(asyncio, "wait_for", asyncio.tasks.wait_for)
 
 
-
 class _MockResponse:
     def __init__(self, status, chunks, first_delay=0.0, later_delay=0.0):
         self.status = status
@@ -81,8 +80,6 @@ def _role_only():
 
     payload = {"choices": [{"delta": {"role": "assistant", "content": ""}}]}
     return f"data: {json.dumps(payload)}\n".encode()
-
-
 
 
 @pytest.mark.asyncio
@@ -168,4 +165,3 @@ async def test_generate_stream_keepalive_does_not_reset_first_token_timeout(monk
             timeout=0.05,
         ):
             pass
-

@@ -201,7 +201,6 @@ async def get_session_history(
     # 倒序取出，正序返回
     messages.reverse()
 
-
     data = [MessageResponse.model_validate(m) for m in messages]
     return StandardResponse.success(data=data, message=constants.MSG_MESSAGE_LIST_SUCCESS)
 
@@ -278,37 +277,55 @@ async def chat_websocket(
                 await websocket.send_json({"error": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED)})
                 continue
 
-            # 会话 ID 生成与解析逻辑
+            # 会话 ID 解析与切换逻辑
+            old_session_id = current_session_id
             if not session_id:
-                # 如果没有活跃任务，或者上次任务已结束，且收到 null，则视为开启新会话
+                # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
                 if not active_task or active_task.done():
                     current_session_id = str(uuid.uuid4())
-                    # 立即推送给前端，确保其能同步状态
                     await websocket.send_json({"type": "session_id", "session_id": current_session_id})
-
-                # 使用当前确定的 ID（无论是刚生成的还是之前正在用的）
                 session_id = current_session_id
             else:
-                # 前端明确传了 ID，则更新当前上下文 ID
                 current_session_id = session_id
 
-            # 如果当前已有任务在运行，新消息仅需保存到数据库
-            if active_task and not active_task.done():
-                from app.core.utils.dispatcher.save_initial_message import save_initial_message
+            # 判断是否发生了会话切换
+            is_session_switched = old_session_id is not None and session_id != old_session_id
 
-                async with AsyncSessionLocal() as db:
-                    profile = await profile_crud.get_active(db)
-                    await save_initial_message(
-                        db,
-                        session_id,
-                        uid,
-                        profile,
-                        message,
-                        attachments,
-                    )
-                logger.bind(uid=uid, session_id=session_id).info(f"会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。")
+            # 如果当前已有任务在运行
+            if active_task and not active_task.done():
+                if is_session_switched:
+                    # 1. 切换会话场景：取消旧任务，显式清理锁后再启动新会话任务
+                    active_task.cancel()
+                    try:
+                        await active_task
+                    except asyncio.CancelledError:
+                        pass
+
+                    # 强制显式清理旧会话锁
+                    from app.core.crud.active_session import active_session_crud
+
+                    async with AsyncSessionLocal() as db_cleanup:
+                        await active_session_crud.release_lock(db_cleanup, old_session_id)
+
+                    logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info("检测到会话切换，旧任务已终止且锁已显式清理，正在启动新会话任务。")
+                    active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
+                else:
+                    # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
+                    from app.core.utils.dispatcher.save_initial_message import save_initial_message
+
+                    async with AsyncSessionLocal() as db:
+                        profile = await profile_crud.get_active(db)
+                        await save_initial_message(
+                            db,
+                            session_id,
+                            uid,
+                            profile,
+                            message,
+                            attachments,
+                        )
+                    logger.bind(uid=uid, session_id=session_id).info(f"会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。")
             else:
-                # 否则启动新的调度任务
+                # 3. 无活跃任务：启动新任务
                 active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
 
     except WebSocketDisconnect:
@@ -326,6 +343,13 @@ async def chat_websocket(
             active_task.cancel()
         await websocket.close()
     finally:
-        # 确保任务被取消
+        # 确保任务被取消并释放锁
         if active_task and not active_task.done():
             active_task.cancel()
+
+        # 显式清理当前会话锁
+        if current_session_id:
+            from app.core.crud.active_session import active_session_crud
+
+            async with AsyncSessionLocal() as db_cleanup:
+                await active_session_crud.release_lock(db_cleanup, current_session_id)

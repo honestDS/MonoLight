@@ -11,5 +11,5 @@ MESSAGES = {
     "MSG_TITLE_GENERATED": "Title generated successfully",
     "MSG_NEW_SESSION": "New Session",
     "MSG_TITLE_GENERATE_FAILED": "Unable to generate title, default title will be used",
-    "MSG_MESSAGE_LIST_SUCCESS": "Session history retrieved successfully"
+    "MSG_MESSAGE_LIST_SUCCESS": "Session history retrieved successfully",
 }

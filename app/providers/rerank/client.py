@@ -12,7 +12,6 @@ RERANK_MAX_DOCUMENT_CHARS = 3000
 logger = get_logger(__name__)
 
 
-
 class RerankClient:
     _transformers: dict[str, BaseRerankTransformer] = {
         ProviderType.OPENAI.value.lower(): OpenAITransformer(),
@@ -59,10 +58,7 @@ class RerankClient:
             timeout=timeout,
         )
 
-        results = [
-            RerankResult(index=item["index"], relevance_score=item["relevance_score"])
-            for item in raw_results
-        ]
+        results = [RerankResult(index=item["index"], relevance_score=item["relevance_score"]) for item in raw_results]
 
         logger.bind(
             provider_type=str(provider_type),
@@ -72,4 +68,3 @@ class RerankClient:
         ).info(f"远程 rerank 响应完成：返回 {len(results)} 条结果")
 
         return results
-

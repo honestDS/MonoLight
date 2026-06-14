@@ -62,4 +62,3 @@ class RerankException(LLMException):
 
     def __init__(self, message: str = "重排模型调用异常", code: int = 502, **kwargs):
         super().__init__(message=message, code=code, **kwargs)
-
