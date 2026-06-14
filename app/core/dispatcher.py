@@ -30,6 +30,7 @@ from app.core.exceptions import (
     LLMException,
     ServerException,
 )
+from app.core.i18n import t
 from app.core.log import (
     get_logger,
 )
@@ -215,7 +216,7 @@ class ChatDispatcher:
         except BaseBusinessException:
             raise
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).exception("调度器错误")
+            logger.bind(uid=uid, session_id=session_id).error("调度器错误", exc_info=True)
             raise ServerException(message=str(e))
 
     @staticmethod
@@ -411,7 +412,7 @@ class ChatDispatcher:
             yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages], "request_id": request_id}
 
         except BaseBusinessException as bbe:
-            yield {"type": "error", "message": bbe.message, "request_id": request_id}
+            yield {"type": "error", "message": t(bbe.message, **bbe.kwargs), "request_id": request_id}
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).exception("流式调度器错误")
+            logger.bind(uid=uid, session_id=session_id).error("流式调度器错误", exc_info=True)
             yield {"type": "error", "message": str(e), "request_id": request_id}

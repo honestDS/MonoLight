@@ -5,6 +5,7 @@ MESSAGES = {
     "ERR_SESSION_NO_PERMISSION": "No permission to operate on this session",
     "MSG_SESSION_UPDATED": "Session settings updated",
     "ERR_NO_VALID_PROVIDER": "No valid model provider configured",
+    "ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED": "Message content or attachments cannot be empty",
     "ERR_PROVIDER_EMBEDDING_ONLY_FOR_TITLE": "The current model provider only supports embedding, cannot generate session title",
     "ERR_PROVIDER_DISABLED_FOR_TITLE": "Chat model provider has been disabled, cannot generate session title",
     "MSG_TITLE_GENERATED": "Title generated successfully",

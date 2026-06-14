@@ -5,6 +5,7 @@ MESSAGES = {
     "ERR_SESSION_NO_PERMISSION": "无权操作此会话",
     "MSG_SESSION_UPDATED": "会话设置已更新",
     "ERR_NO_VALID_PROVIDER": "未配置有效的模型提供商",
+    "ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED": "消息内容或附件不能为空",
     "ERR_PROVIDER_EMBEDDING_ONLY_FOR_TITLE": "当前模型提供商仅支持向量化，无法生成会话标题",
     "ERR_PROVIDER_DISABLED_FOR_TITLE": "对话模型提供商已被禁用，无法生成会话标题",
     "MSG_TITLE_GENERATED": "标题生成成功",

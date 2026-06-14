@@ -20,6 +20,14 @@ class ShellExecutor(BaseExecutor):
         "powershell",
     ]
 
+    @classmethod
+    def check_blacklist(cls, command: str) -> str | None:
+        """检查命令是否在黑名单中，如果在则返回匹配的黑名单项"""
+        for blacklisted in cls.COMMAND_BLACKLIST:
+            if blacklisted.lower() in command.lower():
+                return blacklisted
+        return None
+
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
         self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
@@ -59,17 +67,17 @@ class ShellExecutor(BaseExecutor):
 
         system_info = get_full_system_context()
 
-        for blacklisted in self.COMMAND_BLACKLIST:
-            if blacklisted.lower() in command.lower():
-                return json.dumps(
-                    {
-                        "stdout": f"不允许使用shell工具执行该命令: {blacklisted},禁止命令列表: {self.COMMAND_BLACKLIST}",
-                        "stderr": "",
-                        "exit_code": 1,
-                        "system_info": system_info,
-                    },
-                    ensure_ascii=False,
-                )
+        blacklisted = self.check_blacklist(command)
+        if blacklisted:
+            return json.dumps(
+                {
+                    "stdout": f"不允许使用shell工具执行该命令: {blacklisted},禁止命令列表: {self.COMMAND_BLACKLIST}",
+                    "stderr": "",
+                    "exit_code": 1,
+                    "system_info": system_info,
+                },
+                ensure_ascii=False,
+            )
 
         t_logger = self.logger.bind(tool_call=True)
         # 获取当前循环类型进行诊断

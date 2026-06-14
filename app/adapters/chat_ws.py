@@ -39,10 +39,28 @@ class WebSocketChatAdapter(BaseChatAdapter):
             ):
                 yield chunk
         except BaseBusinessException as e:
-            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, **e.kwargs)), finish_reason=True, created_at=time.time())], history=[]).model_dump()
+            yield LLMResponse(
+                choices=[
+                    LLMChoice(
+                        message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, **e.kwargs)),
+                        finish_reason=True,
+                        created_at=time.time(),
+                    )
+                ],
+                history=[],
+            ).model_dump()
         except Exception as e:
-            logger.exception(f"Unexpected error in WebSocketChatAdapter: {str(e)}")
-            yield LLMResponse(choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ERR, content=t(ERR_LLM_UNEXPECTED_ERROR)), finish_reason=True, created_at=time.time())], history=[]).model_dump()
+            logger.bind(uid=uid, session_id=session_id).error(f"Unexpected error in WebSocketChatAdapter: {str(e)}", exc_info=True)
+            yield LLMResponse(
+                choices=[
+                    LLMChoice(
+                        message=LLMChoiceMessage(role=MessageRole.ERR, content=t(ERR_LLM_UNEXPECTED_ERROR)),
+                        finish_reason=True,
+                        created_at=time.time(),
+                    )
+                ],
+                history=[],
+            ).model_dump()
 
 
 ws_chat_adapter = WebSocketChatAdapter()

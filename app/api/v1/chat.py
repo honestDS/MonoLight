@@ -17,6 +17,7 @@ from app.core import constants
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.provider import provider_crud
+from app.core.i18n import t
 from app.core.i18n.context import set_current_locale
 from app.core.i18n.locale import normalize_locale
 from app.core.log import (
@@ -248,7 +249,7 @@ async def chat_websocket(
             logger.bind(uid=uid, session_id=session_id).info("用户已断开连接，调度器终止")
             raise
         except Exception:
-            logger.bind(uid=uid, session_id=session_id).exception("WebSocket 任务发生异常")
+            logger.bind(uid=uid, session_id=session_id).error("WebSocket 任务发生异常", exc_info=True)
             try:
                 await websocket.send_json({"type": "error", "message": constants.ERR_INTERNAL_SERVER_ERROR})
             except Exception:
@@ -274,7 +275,7 @@ async def chat_websocket(
                 continue
 
             if not message and not attachments:
-                await websocket.send_json({"error": "Message or attachments is required"})
+                await websocket.send_json({"error": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED)})
                 continue
 
             # 会话 ID 生成与解析逻辑
@@ -316,9 +317,9 @@ async def chat_websocket(
             active_task.cancel()
     except Exception:
         # 异常处理
-        logger.bind(uid=uid).exception("聊天 WebSocket 发生异常")
+        logger.bind(uid=uid).error("聊天 WebSocket 发生异常", exc_info=True)
         try:
-            await websocket.send_json({"error": constants.ERR_INTERNAL_SERVER_ERROR})
+            await websocket.send_json({"error": t(constants.ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
         if active_task and not active_task.done():

@@ -11,6 +11,7 @@ from app.core.prompts import (
     CONFIRMATION_PREFIX,
     FILE_WRITE_CONFIRMATION_PROMPT,
 )
+from app.core.tools.shell import ShellExecutor
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -103,7 +104,19 @@ class AuditMiddleware:
 
         # 提取 execute_shell 的内容并检查验证状态
         if tool_name == "execute_shell":
+
             cmd_arg = args.get("command", "")
+
+            blacklisted = ShellExecutor.check_blacklist(cmd_arg)
+            if blacklisted:
+                return json.dumps(
+                    {
+                        "error": "Security Blocked",
+                        "reason": f"不允许使用shell工具执行该命令: {blacklisted},禁止命令列表: {ShellExecutor.COMMAND_BLACKLIST}",
+                    },
+                    ensure_ascii=False,
+                )
+
             is_any_verified, command = AuditMiddleware.verify_token(cmd_arg, session_id=session_id, uid=uid)
 
         # 提取 write_file 的内容并检查验证状态
