@@ -1,7 +1,7 @@
 import asyncio
 import time
-from collections.abc import AsyncGenerator
-from typing import Any, MutableSet
+from collections.abc import AsyncGenerator, MutableSet
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 

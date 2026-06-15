@@ -6,7 +6,6 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.providers.database import AsyncSessionLocal
 
-
 logger = get_logger(__name__)
 
 

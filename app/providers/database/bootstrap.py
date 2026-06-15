@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 
 import app.models  # noqa
-from app.models.active_session import ActiveSession
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
+from app.models.active_session import ActiveSession
 from app.models.profile import (
     ProfileConfig,
 )

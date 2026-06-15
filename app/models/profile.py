@@ -1,3 +1,4 @@
+import os
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -12,8 +13,6 @@ from pydantic import (
 from pydantic import (
     Field as PydanticField,
 )
-import os
-
 from sqlmodel import (
     JSON,
     Column,

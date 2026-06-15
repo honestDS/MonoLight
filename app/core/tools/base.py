@@ -1,8 +1,9 @@
 import abc
 import asyncio
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.core.log import get_logger
 

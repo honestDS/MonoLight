@@ -2,10 +2,9 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, MutableSet
 from typing import (
     Any,
-    MutableSet,
 )
 
 from sqlalchemy.ext.asyncio import (
@@ -431,10 +430,10 @@ class ChatDispatcher:
                                         allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                     )
                                 )
-                                
+
                                 if active_tasks is not None:
                                     active_tasks.add(task)
-                                
+
                                 try:
                                     return await task
                                 finally:
