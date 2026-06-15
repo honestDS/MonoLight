@@ -276,6 +276,17 @@
             color: #909399;
           }
         }
+
+        .message-link {
+          display: inline;
+          vertical-align: baseline;
+          white-space: normal;
+          word-break: break-all;
+
+          .el-link__inner {
+            display: inline;
+          }
+        }
         
         &.markdown-body {
           white-space: normal; // Markdown 需要正常的换行解析

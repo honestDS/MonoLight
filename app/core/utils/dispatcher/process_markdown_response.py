@@ -17,9 +17,14 @@ class MLStripper(HTMLParser):
     def handle_data(self, d):
         self.fed.append(d)
 
+    def handle_starttag(self, tag, attrs):
+        # 代码块需要在开始处补换行，防止与前文粘连
+        if tag in ["pre"]:
+            self.fed.append("\n")
+
     def handle_endtag(self, tag):
         # 针对块级元素添加换行，防止文字粘连，保留合理的段落结构
-        if tag in ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "br", "tr"]:
+        if tag in ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "br", "tr", "pre"]:
             self.fed.append("\n")
 
     def get_data(self):
@@ -36,8 +41,9 @@ def remove_markdown(text: str) -> str:
     """剔除文本中的 Markdown 标记，返回纯文本"""
     if not text:
         return text
-    # 将 markdown 转为 HTML
-    html = markdown.markdown(text)
+    # 使用 Python-Markdown 内置 fenced_code 扩展识别 ```python 这类围栏代码块，
+    # 避免代码块内容中的 # 注释被误识别为 Markdown 标题
+    html = markdown.markdown(text, extensions=["fenced_code"])
     # 提取纯文本
     clean_text = strip_tags(html)
     # 清理多余的连续空白行（将 3 个以上的连续换行替换为 2 个换行，保持段落间距）

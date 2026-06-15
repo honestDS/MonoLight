@@ -121,14 +121,36 @@
                 <!-- 当处于 queued 时显示 Loading 动画图标 -->
                 <div class="queued-indicator" v-if="msg.status === 'queued'">
                   <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div>{{ msg.content }}
+                </div><template v-for="(part, idx) in renderTextWithLinks(msg.content)" :key="idx">
+                  <el-link
+                    v-if="part.type === 'link'"
+                    :href="part.href"
+                    class="message-link"
+                    type="primary"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    underline
+                  >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
+                </template>
               </div>
               <div class="content" v-else-if="Array.isArray(msg.content)">
                 <!-- 当处于 queued 时显示 Loading 动画图标 -->
                 <div class="queued-indicator" v-if="msg.status === 'queued'">
                   <img src="@/assets/svg/wait.svg" class="is-loading" />
                 </div><div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
-                  <div v-if="part.type === 'text'" class="text-part">{{ part.text }}</div>
+                  <div v-if="part.type === 'text'" class="text-part">
+                    <template v-for="(textPart, textIdx) in renderTextWithLinks(part.text)" :key="textIdx">
+                      <el-link
+                        v-if="textPart.type === 'link'"
+                        :href="textPart.href"
+                        class="message-link"
+                        type="primary"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        underline
+                      >{{ textPart.text }}</el-link><span v-else>{{ textPart.text }}</span>
+                    </template>
+                  </div>
                   <div v-else-if="part.type === 'image_url'" class="image-part">
                     <el-image 
                       :src="part.image_url.url" 
@@ -283,8 +305,55 @@ const md = new MarkdownIt({
   }
 })
 
+const defaultLinkOpenRender = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
+
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet('class', 'el-link el-link--primary is-underline message-link')
+  tokens[idx].attrSet('target', '_blank')
+  tokens[idx].attrSet('rel', 'noopener noreferrer')
+  return defaultLinkOpenRender(tokens, idx, options, env, self)
+}
+
 const renderMarkdown = (text) => {
   return md.render(text || '')
+}
+
+const renderTextWithLinks = (text) => {
+  if (!text) return []
+
+  const matches = md.linkify.match(text)
+  if (!matches) {
+    return [{ type: 'text', text }]
+  }
+
+  const parts = []
+  let lastIndex = 0
+
+  matches.forEach(match => {
+    if (match.index > lastIndex) {
+      parts.push({
+        type: 'text',
+        text: text.slice(lastIndex, match.index)
+      })
+    }
+
+    parts.push({
+      type: 'link',
+      text: match.text,
+      href: match.url
+    })
+
+    lastIndex = match.lastIndex
+  })
+
+  if (lastIndex < text.length) {
+    parts.push({
+      type: 'text',
+      text: text.slice(lastIndex)
+    })
+  }
+
+  return parts
 }
 
 const chat = useChatSession()
