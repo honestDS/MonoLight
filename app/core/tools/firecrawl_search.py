@@ -1,10 +1,42 @@
 import json
+from typing import Any
 
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncV1FirecrawlApp
+from firecrawl.v1.client import V1ScrapeOptions
 
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
+
+SCRAPE_OPTIONS_ALIASES = {
+    "include_tags": "includeTags",
+    "exclude_tags": "excludeTags",
+    "only_main_content": "onlyMainContent",
+    "wait_for": "waitFor",
+    "skip_tls_verification": "skipTlsVerification",
+    "remove_base64_images": "removeBase64Images",
+    "block_ads": "blockAds",
+    "parse_pdf": "parsePDF",
+}
+
+FORMAT_ALIASES = {
+    "raw_html": "rawHtml",
+}
+
+
+def normalize_scrape_options(scrape_options: dict[str, Any] | V1ScrapeOptions) -> V1ScrapeOptions:
+    """将工具入参中的抓取选项转换为 Firecrawl SDK v1 异步 search 所需的配置对象"""
+    if isinstance(scrape_options, V1ScrapeOptions):
+        return scrape_options
+
+    normalized = {}
+    for key, value in scrape_options.items():
+        normalized_key = SCRAPE_OPTIONS_ALIASES.get(key, key)
+        if normalized_key == "formats" and isinstance(value, list):
+            value = [FORMAT_ALIASES.get(item, item) for item in value]
+        normalized[normalized_key] = value
+
+    return V1ScrapeOptions(**normalized)
 
 
 class FirecrawlSearchExecutor(BaseExecutor):
@@ -14,11 +46,10 @@ class FirecrawlSearchExecutor(BaseExecutor):
 
     def get_app(self):
         """
-        获取 FirecrawlApp 实例。每次调用都新建实例，以避免在多线程池环境下共享同一个
-        可能含有非线程安全状态的 SDK 实例。
+        获取 AsyncV1FirecrawlApp 实例。每次调用都新建实例，避免在并发环境下共享客户端状态。
         """
         api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
-        return FirecrawlApp(api_key=api_key or "")
+        return AsyncV1FirecrawlApp(api_key=api_key or "")
 
     async def execute(self, query: str, limit: int = 5, **kwargs) -> str:
         """
@@ -43,16 +74,17 @@ class FirecrawlSearchExecutor(BaseExecutor):
             if "scrapeOptions" in kwargs:
                 kwargs["scrape_options"] = kwargs.pop("scrapeOptions")
 
-            # 默认使用 markdown 格式进行抓取
+            # 默认使用 markdown 格式进行抓取；AsyncV1FirecrawlApp.search 要求 scrape_options 为 SDK 配置对象
             if "scrape_options" not in kwargs:
                 kwargs["scrape_options"] = {"formats": ["markdown"]}
             elif isinstance(kwargs["scrape_options"], dict) and "formats" not in kwargs["scrape_options"]:
                 kwargs["scrape_options"]["formats"] = ["markdown"]
 
-            # Firecrawl SDK v2.x search 参数是命名的
-            # 为了支持强制中断同步调用，我们需要在 executor 中运行
+            kwargs["scrape_options"] = normalize_scrape_options(kwargs["scrape_options"])
+
+            # Firecrawl SDK 提供原生异步 search，直接 await 便于任务取消时中断底层网络请求
             app = self.get_app()
-            results = await self.run_sync(app.search, query=query, limit=limit, **kwargs)
+            results = await app.search(query=query, limit=limit, **kwargs)
 
             # SDK 返回的是 Pydantic 模型，需要转换为字典才能 JSON 序列化
             results_dict = results.model_dump() if hasattr(results, "model_dump") else results

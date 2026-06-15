@@ -1,10 +1,19 @@
 import json
 
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncV1FirecrawlApp
 
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
+
+FORMAT_ALIASES = {
+    "raw_html": "rawHtml",
+}
+
+
+def normalize_formats(formats: list[str]) -> list[str]:
+    """将工具 schema 中的格式名转换为 Firecrawl SDK v1 异步接口需要的格式名"""
+    return [FORMAT_ALIASES.get(item, item) for item in formats]
 
 
 class FirecrawlScrapeExecutor(BaseExecutor):
@@ -14,11 +23,10 @@ class FirecrawlScrapeExecutor(BaseExecutor):
 
     def get_app(self):
         """
-        获取 FirecrawlApp 实例。每次调用都新建实例，以避免在多线程池环境下共享同一个
-        可能含有非线程安全状态的 SDK 实例。
+        获取 AsyncV1FirecrawlApp 实例。每次调用都新建实例，避免在并发环境下共享客户端状态。
         """
         api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
-        return FirecrawlApp(api_key=api_key or "")
+        return AsyncV1FirecrawlApp(api_key=api_key or "")
 
     async def execute(self, url: str, formats: list = ["markdown"], **kwargs) -> str:
         """
@@ -39,10 +47,9 @@ class FirecrawlScrapeExecutor(BaseExecutor):
         try:
             self.logger.bind(uid=self.uid, url=url).info(f"Firecrawl scraping: (formats={formats}, options={kwargs})")
 
-            # Firecrawl SDK v2.x
-            # 为了支持强制中断同步调用，我们需要在 executor 中运行
+            # Firecrawl SDK 提供原生异步 scrape_url，直接 await 便于任务取消时中断底层网络请求
             app = self.get_app()
-            doc = await self.run_sync(app.scrape_url, url, formats=formats, **kwargs)
+            doc = await app.scrape_url(url, formats=normalize_formats(formats), **kwargs)
 
             # SDK 返回的是 Pydantic 模型 (Document)，需要转换为字典才能 JSON 序列化
             doc_dict = doc.model_dump() if hasattr(doc, "model_dump") else doc

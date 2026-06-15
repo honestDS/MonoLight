@@ -45,10 +45,10 @@
         
         <!-- 上下文与扩展数据直接衔接在同一个容器流中（通过换行保持格式） -->
         <span v-if="log.uid || log.session_id" class="txt-sub-info">
-          {{ $t('realTimeLogs.user_id') }}: {{ log.uid || '-' }} / {{ $t('realTimeLogs.session_id') }}: {{ log.session_id || '-' }}
+          [{{ $t('realTimeLogs.user_id') }}: {{ log.uid || '-' }} / {{ $t('realTimeLogs.session_id') }}: {{ log.session_id || '-' }}]
         </span>
         <span v-if="log.extra && Object.keys(log.extra).length" class="txt-sub-info">
-          {{ $t('realTimeLogs.extra_info') }}: {{ formatExtra(log.extra) }}
+          [{{ $t('realTimeLogs.extra_info') }}: {{ formatExtra(log.extra) }}]
         </span>
       </div>
     </div>
