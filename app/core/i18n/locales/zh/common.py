@@ -1,5 +1,7 @@
 MESSAGES = {
     "MSG_LOG_LIST_SUCCESS": "日志获取成功",
+    "MSG_LOG_CLEANER_CLEARED": "已清理 {deleted_count} 条过期系统日志",
+    "ERR_LOG_CLEANER_FAILED": "清理过期系统日志失败: {message}",
     "MSG_KB_CREATED": "知识库创建成功",
     "MSG_KB_UPDATED": "知识库更新成功",
     "MSG_KB_DELETED": "知识库删除成功",

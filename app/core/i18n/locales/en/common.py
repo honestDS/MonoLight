@@ -1,5 +1,7 @@
 MESSAGES = {
     "MSG_LOG_LIST_SUCCESS": "Log list retrieved successfully",
+    "MSG_LOG_CLEANER_CLEARED": "Cleared {deleted_count} expired system logs",
+    "ERR_LOG_CLEANER_FAILED": "Failed to clean expired system logs: {message}",
     "MSG_KB_CREATED": "Knowledge base created successfully",
     "MSG_KB_UPDATED": "Knowledge base updated successfully",
     "MSG_KB_DELETED": "Knowledge base deleted",
