@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 
 import app.models  # noqa
+from app.models.active_session import ActiveSession
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
 from app.models.profile import (
@@ -150,6 +151,10 @@ def merge_configs(base: dict, target: dict) -> dict:
 async def init_system_data(session: AsyncSession):
     # 1. 物理架构同步 (异步化)
     await sync_database_schema()
+
+    # 清空会话锁表 (active_session)
+    await session.execute(text(f"DELETE FROM {ActiveSession.__tablename__}"))
+    logger.info("INIT: active_session table cleared")
 
     # 2. 基础表初始化 (若表不存在则创建)
     async with engine.begin() as conn:

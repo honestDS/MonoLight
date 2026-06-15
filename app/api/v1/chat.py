@@ -1,6 +1,7 @@
 import asyncio
 import time
 import uuid
+import weakref
 
 from fastapi import (
     APIRouter,
@@ -222,11 +223,29 @@ async def chat_websocket(
     uid = getattr(current_user, "uid", None)
 
     # 用于追踪当前是否有正在运行的调度任务
-    active_task = None
+    active_task: asyncio.Task | None = None
+    active_tasks = weakref.WeakSet()  # 使用弱引用集合记录子任务，防止内存泄漏
     current_session_id = None
+
+    async def cancel_all_tasks():
+        """取消所有当前任务及子任务并等待其结束"""
+        tasks_to_await = []
+        if active_task and not active_task.done():
+            active_task.cancel()
+            tasks_to_await.append(active_task)
+
+        for t_sub in list(active_tasks):
+            if not t_sub.done():
+                t_sub.cancel()
+                tasks_to_await.append(t_sub)
+
+        if tasks_to_await:
+            # 等待所有任务完成取消过程，忽略 CancelledError
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
 
     async def run_chat(message_text, session_id, attachments=None, request_id=None):
         nonlocal active_task
+        active_tasks.clear()
         try:
             async with AsyncSessionLocal() as db:
                 async for response in ws_chat_adapter.chat(
@@ -236,6 +255,7 @@ async def chat_websocket(
                     session_id=session_id,
                     attachments=attachments,
                     request_id=request_id,
+                    active_tasks=active_tasks,
                 ):
                     await websocket.send_json(response)
         except RuntimeError as e:
@@ -268,9 +288,8 @@ async def chat_websocket(
             action = data.get("action")
 
             if action == "abort":
-                if active_task and not active_task.done():
-                    active_task.cancel()
-                    logger.bind(uid=uid, session_id=session_id).info("接收到中止信号，生成任务已取消")
+                await cancel_all_tasks()
+                logger.bind(uid=uid, session_id=session_id).info("接收到中止信号，生成任务及子任务已取消")
                 continue
 
             if not message and not attachments:
@@ -295,17 +314,10 @@ async def chat_websocket(
             if active_task and not active_task.done():
                 if is_session_switched:
                     # 1. 切换会话场景：取消旧任务，显式清理锁后再启动新会话任务
-                    active_task.cancel()
-                    try:
-                        await active_task
-                    except asyncio.CancelledError:
-                        pass
+                    await cancel_all_tasks()
 
                     # 强制显式清理旧会话锁
-                    from app.core.crud.active_session import active_session_crud
-
-                    async with AsyncSessionLocal() as db_cleanup:
-                        await active_session_crud.release_lock(db_cleanup, old_session_id)
+                    await ws_chat_adapter.release_session_lock(old_session_id)
 
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info("检测到会话切换，旧任务已终止且锁已显式清理，正在启动新会话任务。")
                     active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -330,26 +342,26 @@ async def chat_websocket(
 
     except WebSocketDisconnect:
         # 连接正常关闭
-        if active_task and not active_task.done():
-            active_task.cancel()
+        await cancel_all_tasks()
     except Exception:
         # 异常处理
-        logger.bind(uid=uid).error("聊天 WebSocket 发生异常", exc_info=True)
+        logger.bind(uid=uid).exception("聊天 WebSocket 发生异常")
         try:
             await websocket.send_json({"error": t(constants.ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
-        if active_task and not active_task.done():
-            active_task.cancel()
-        await websocket.close()
+        await cancel_all_tasks()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
     finally:
         # 确保任务被取消并释放锁
-        if active_task and not active_task.done():
-            active_task.cancel()
+        await cancel_all_tasks()
 
         # 显式清理当前会话锁
         if current_session_id:
-            from app.core.crud.active_session import active_session_crud
-
-            async with AsyncSessionLocal() as db_cleanup:
-                await active_session_crud.release_lock(db_cleanup, current_session_id)
+            try:
+                await ws_chat_adapter.release_session_lock(current_session_id)
+            except Exception:
+                logger.bind(uid=uid, session_id=current_session_id).error("释放会话锁失败", exc_info=True)

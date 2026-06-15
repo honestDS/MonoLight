@@ -191,12 +191,19 @@
             <div class="tab-pane-content">
               <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.scheduling_control') }}</span></el-divider>
               <el-row :gutter="20">
-                <el-col :span="12">
+                <el-col :span="8">
                   <el-form-item :label="$t('profiles.max_parallel_tools')">
                     <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
                   </el-form-item>
                 </el-col>
-                <el-col :span="12">
+                <el-col :span="8">
+                  <el-form-item :label="$t('profiles.executor_max_workers')">
+                    <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
                   <el-form-item :label="$t('profiles.max_turns')">
                     <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input"></el-input-number>
                   </el-form-item>

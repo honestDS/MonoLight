@@ -1,5 +1,8 @@
 import abc
+import asyncio
+from functools import partial
 from pathlib import Path
+from typing import Any, Callable
 
 from app.core.log import get_logger
 
@@ -14,6 +17,11 @@ class BaseExecutor(abc.ABC):
         self.profile = None
         self.session_id = None
         self.allowed_knowledge_base_ids = []
+
+    async def run_sync(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
+        """使用 asyncio.to_thread 执行同步函数，由系统原生管理线程池并随调度器信号量动态控制并发"""
+        p_func = partial(func, *args, **kwargs)
+        return await asyncio.to_thread(p_func)
 
     def set_config(self, cfg):
         self.cfg = cfg

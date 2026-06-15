@@ -5,6 +5,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
+    MutableSet,
 )
 
 from sqlalchemy.ext.asyncio import (
@@ -69,6 +70,7 @@ class ChatDispatcher:
         uid: str,
         session_id: str = "default",
         attachments: list[str] | None = None,
+        active_tasks: MutableSet[asyncio.Task] | None = None,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -177,21 +179,37 @@ class ChatDispatcher:
                             await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
 
-                        tasks = [
-                            process_single_tool(
-                                tc,
-                                db,
-                                profile,
-                                cfg,
-                                messages,
-                                username,
-                                session_id,
-                                current_turn,
-                                uid,
-                                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                            )
-                            for tc in ai_msg.tool_calls
-                        ]
+                        # 使用信号量控制并发执行数，确保同步和异步工具都受 executor_max_workers 约束
+                        sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
+
+                        async def wrapped_tool_call(tc):
+                            async with sem:
+                                # 只有获取信号量后，才创建并运行实际的任务，以确保并发控制生效
+                                task = asyncio.create_task(
+                                    process_single_tool(
+                                        tc,
+                                        db,
+                                        profile,
+                                        cfg,
+                                        messages,
+                                        username,
+                                        session_id,
+                                        current_turn,
+                                        uid,
+                                        allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                    )
+                                )
+
+                                if active_tasks is not None:
+                                    active_tasks.add(task)
+
+                                try:
+                                    return await task
+                                finally:
+                                    if active_tasks is not None:
+                                        active_tasks.discard(task)
+
+                        tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:
@@ -226,6 +244,7 @@ class ChatDispatcher:
         session_id: str = "default",
         attachments: list[str] | None = None,
         request_id: str | None = None,
+        active_tasks: MutableSet[asyncio.Task] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -392,21 +411,37 @@ class ChatDispatcher:
                                 "session_id": session_id,
                             }
 
-                        tasks = [
-                            process_single_tool(
-                                tc,
-                                db,
-                                profile,
-                                cfg,
-                                messages,
-                                username,
-                                session_id,
-                                current_turn,
-                                uid,
-                                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                            )
-                            for tc in ai_msg.tool_calls
-                        ]
+                        # 使用信号量控制并发执行数，确保同步和异步工具都受 executor_max_workers 约束
+                        sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
+
+                        async def wrapped_tool_call(tc):
+                            async with sem:
+                                # 只有获取信号量后，才创建并运行实际的任务，以确保并发控制生效
+                                task = asyncio.create_task(
+                                    process_single_tool(
+                                        tc,
+                                        db,
+                                        profile,
+                                        cfg,
+                                        messages,
+                                        username,
+                                        session_id,
+                                        current_turn,
+                                        uid,
+                                        allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                    )
+                                )
+                                
+                                if active_tasks is not None:
+                                    active_tasks.add(task)
+                                
+                                try:
+                                    return await task
+                                finally:
+                                    if active_tasks is not None:
+                                        active_tasks.discard(task)
+
+                        tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
                         for tool_res in tool_responses:

@@ -1,5 +1,6 @@
+import asyncio
 import time
-from typing import Any
+from typing import Any, MutableSet
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +11,12 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import MessageRole
-from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
+from app.schemas.response import (
+    FinishReason,
+    LLMChoice,
+    LLMChoiceMessage,
+    LLMResponse,
+)
 
 logger = get_logger(__name__)
 
@@ -23,6 +29,7 @@ class WebChatAdapter(BaseChatAdapter):
         uid: str,
         session_id: str,
         attachments: list[str] | None = None,
+        active_tasks: MutableSet[asyncio.Task] | None = None,
     ):
         if not session_id:
             raise BaseBusinessException(message="session_id is required")
@@ -33,6 +40,7 @@ class WebChatAdapter(BaseChatAdapter):
                 uid=uid,
                 session_id=session_id,
                 attachments=attachments,
+                active_tasks=active_tasks,
             )
             return llm_response
         except BaseBusinessException as e:
@@ -40,7 +48,7 @@ class WebChatAdapter(BaseChatAdapter):
                 choices=[
                     LLMChoice(
                         message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, **e.kwargs)),
-                        finish_reason="error",
+                        finish_reason=FinishReason.ERROR,
                         created_at=time.time(),
                     )
                 ],
@@ -52,7 +60,7 @@ class WebChatAdapter(BaseChatAdapter):
                 choices=[
                     LLMChoice(
                         message=LLMChoiceMessage(role=MessageRole.ERR, content=t(ERR_LLM_UNEXPECTED_ERROR)),
-                        finish_reason="error",
+                        finish_reason=FinishReason.ERROR,
                         created_at=time.time(),
                     )
                 ],

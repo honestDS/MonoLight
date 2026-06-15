@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from firecrawl import FirecrawlApp
@@ -12,12 +13,13 @@ class FirecrawlScrapeExecutor(BaseExecutor):
         super().__init__(project_root, uid)
         self._app = None
 
-    @property
-    def app(self):
-        if self._app is None:
-            api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
-            self._app = FirecrawlApp(api_key=api_key or "")
-        return self._app
+    def get_app(self):
+        """
+        获取 FirecrawlApp 实例。每次调用都新建实例，以避免在多线程池环境下共享同一个
+        可能含有非线程安全状态的 SDK 实例。
+        """
+        api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
+        return FirecrawlApp(api_key=api_key or "")
 
     async def execute(self, url: str, formats: list = ["markdown"], **kwargs) -> str:
         """
@@ -36,10 +38,12 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             return json.dumps({"error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。", "system_info": system_info}, ensure_ascii=False)
 
         try:
-            self.logger.info(f"[{self.uid}] Firecrawl scraping: {url} (formats={formats}, options={kwargs})")
+            self.logger.bind(uid=self.uid, url=url).info(f"Firecrawl scraping: (formats={formats}, options={kwargs})")
 
             # Firecrawl SDK v2.x
-            doc = self.app.scrape_url(url, formats=formats, **kwargs)
+            # 为了支持强制中断同步调用，我们需要在 executor 中运行
+            app = self.get_app()
+            doc = await self.run_sync(app.scrape_url, url, formats=formats, **kwargs)
 
             # SDK 返回的是 Pydantic 模型 (Document)，需要转换为字典才能 JSON 序列化
             doc_dict = doc.model_dump() if hasattr(doc, "model_dump") else doc
@@ -47,9 +51,11 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             return json.dumps({"status": "success", "url": url, "data": doc_dict, "system_info": system_info}, ensure_ascii=False)
 
         except Exception as e:
-            self.logger.error(f"[{self.uid}] Firecrawl scrape failed: {e}")
+            self.logger.bind(uid=self.uid, url=url).error("Firecrawl scrape failed", exc_info=True)
             error_msg = str(e)
-            if "401" in error_msg or "Unauthorized" in error_msg:
+            if e is None or "NoneType" in error_msg:
+                error_msg = "Firecrawl 服务响应异常（空响应）。请检查网络连接或 Firecrawl 服务状态。"
+            elif "401" in error_msg or "Unauthorized" in error_msg:
                 error_msg = "Firecrawl API Key 认证失败或已失效。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 检查并更新您的 API Key。"
 
             return json.dumps({"error": error_msg, "system_info": system_info}, ensure_ascii=False)

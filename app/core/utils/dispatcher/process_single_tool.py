@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import time
 from typing import (
     Any,
 )
@@ -10,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.log import (
     LogManager,
+    get_logger,
 )
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
@@ -36,6 +39,7 @@ async def process_single_tool(
     turn: int,
     uid: str,
     allowed_knowledge_base_ids: list[int] | None = None,
+    active_tasks: set[asyncio.Task] | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = tool_call.arguments
@@ -73,7 +77,30 @@ async def process_single_tool(
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                 )
 
-            cmd_result = await instance.execute(**args)
+            current_coro = instance.execute(**args)
+            task = asyncio.create_task(current_coro)
+            if active_tasks is not None:
+                active_tasks.add(task)
+
+            start_time = time.perf_counter()
+            try:
+                cmd_result = await task
+            except asyncio.CancelledError:
+                duration = time.perf_counter() - start_time
+
+                get_logger("dispatcher").bind(
+                    uid=uid,
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    duration=f"{duration:.3f}s",
+                ).warning(f"工具 {tool_name} 在执行 {duration:.3f}s 后被中止")
+
+                if not task.done():
+                    task.cancel()
+                raise
+            finally:
+                if active_tasks is not None:
+                    active_tasks.discard(task)
         else:
             cmd_result = json.dumps(
                 {"error": f"Tool {tool_name} not registered"},

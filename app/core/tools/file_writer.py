@@ -44,8 +44,11 @@ class FileWriterExecutor(BaseExecutor):
             mode = "a" if append else "w"
             encoding = "utf-8"
 
-            with open(target_path, mode, encoding=encoding) as f:
-                f.write(content)
+            def write_sync():
+                with open(target_path, mode, encoding=encoding) as f:
+                    f.write(content)
+
+            await self.run_sync(write_sync)
 
             self.logger.info(f"[{self.uid}] File {'appended' if append else 'written'}: {file_path}")
 

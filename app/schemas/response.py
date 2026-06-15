@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import (
     Any,
     TypeVar,
@@ -8,6 +9,14 @@ from pydantic import BaseModel
 from app.core.i18n import t
 
 T = TypeVar("T")
+
+
+class FinishReason(StrEnum):
+    STOP = "stop"
+    LENGTH = "length"
+    TOOL_CALLS = "tool_calls"
+    CONTENT_FILTER = "content_filter"
+    ERROR = "error"
 
 
 class StandardResponse[T](BaseModel):
@@ -42,7 +51,7 @@ class LLMChoiceMessage(BaseModel):
 
 class LLMChoice(BaseModel):
     message: LLMChoiceMessage
-    finish_reason: bool | str | None = True
+    finish_reason: bool | str | FinishReason | None = True
     created_at: float
 
 
