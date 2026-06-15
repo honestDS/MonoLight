@@ -7,6 +7,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
 
 
@@ -14,7 +15,7 @@ class LogManager:
     _configured = False
 
     @classmethod
-    def setup(cls, log_path: str = "data/logs/monolight.log", level: str = "INFO"):
+    def setup(cls, log_path: str = str(DEFAULT_LOG_FILE_PATH), level: str = "INFO"):
         if cls._configured:
             return
 
@@ -148,7 +149,7 @@ class LogManager:
         )
 
         # 添加专用工具日志
-        tool_log_path = str(Path(abs_log_path).parent / "tools.log")
+        tool_log_path = str(Path(abs_log_path).parent / TOOLS_LOG_FILENAME)
         logger.add(
             tool_log_path,
             filter=lambda record: "tool_call" in record["extra"] or "tool_result" in record["extra"],

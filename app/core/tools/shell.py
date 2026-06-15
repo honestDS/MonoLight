@@ -6,6 +6,7 @@ import sys
 
 from app.core.crud.profile import profile_crud
 from app.core.log import get_logger
+from app.core.paths import get_user_temp_dir
 from app.core.prompts import CONFIRMATION_PREFIX
 from app.core.utils.system import get_full_system_context
 from app.models.profile import ProfileConfig
@@ -30,7 +31,7 @@ class ShellExecutor(BaseExecutor):
 
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
-        self.user_temp_dir = self.project_root / "temp" / f"temp_{uid}"
+        self.user_temp_dir = get_user_temp_dir(self.project_root, uid)
         self._ensure_temp_dir()
 
     def _ensure_temp_dir(self):

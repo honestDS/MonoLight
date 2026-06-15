@@ -6,11 +6,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core import constants
+from app.core.paths import TEMP_DIR, get_user_temp_dir
 from app.core.security import get_current_user
 
 router = APIRouter()
-
-TEMP_DIR = os.path.join(os.getcwd(), "temp")
 
 
 @router.post("/upload")
@@ -27,7 +26,7 @@ async def upload_file(
     if not session_id:
         session_id = f"unassigned_{uuid.uuid4().hex[:8]}"
 
-    session_dir = os.path.join(TEMP_DIR, f"temp_{session_id}")
+    session_dir = get_user_temp_dir(TEMP_DIR.parent, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
     # 构造安全且唯一的文件名以避免覆盖

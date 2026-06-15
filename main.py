@@ -16,6 +16,7 @@ from app.api.v1.providers import router as provider_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core.log import LogManager, get_logger
+from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers
 from app.providers.database import AsyncSessionLocal
@@ -30,12 +31,13 @@ async def lifespan(app: FastAPI):
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
     now_aware = get_local_time()
+    log_file_path = os.getenv("LOG_FILE_PATH", str(DEFAULT_LOG_FILE_PATH))
     LogManager.setup(
-        log_path=os.getenv("LOG_FILE_PATH", "data/logs/monolight.log"),
+        log_path=log_file_path,
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
 
-    get_logger("app.core.log").info(f"Log system initialized. Path: {os.getenv('LOG_FILE_PATH', 'data/logs/monolight.log')} | Time: {now_aware.isoformat()}")
+    get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
 
     cleaner_task = asyncio.create_task(background_log_cleaner(7))
 
@@ -84,5 +86,5 @@ if __name__ == "__main__":
         port=port,
         reload=False,
         reload_dirs=["app"],
-        reload_excludes=["temp", "data", "*.log"],
+        reload_excludes=[TEMP_DIR.name, DATA_DIR.name, "*.log"],
     )

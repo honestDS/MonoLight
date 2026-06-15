@@ -13,14 +13,13 @@ from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.i18n.context import set_current_locale
 from app.core.i18n.locale import normalize_locale
-from app.core.paths import ROOT_DIR
+from app.core.paths import FAVICON_PATH
 from app.schemas.response import StandardResponse
 
 
 async def favicon():
-    path = ROOT_DIR / "dashboard" / "public" / "favicon.ico"
-    if os.path.exists(path):
-        return FileResponse(path)
+    if os.path.exists(FAVICON_PATH):
+        return FileResponse(FAVICON_PATH)
     return JSONResponse(status_code=404, content={"message": "Favicon not found"})
 
 
