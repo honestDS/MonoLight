@@ -212,6 +212,18 @@
         .content {
           background: #409eff;
           color: #fff;
+
+          .message-link {
+            --el-link-text-color: #fff;
+            --el-link-hover-text-color: #fff;
+
+            color: #fff;
+            text-decoration-color: rgba(255, 255, 255, 0.75);
+
+            .el-link__inner {
+              color: inherit;
+            }
+          }
         }
       }
 

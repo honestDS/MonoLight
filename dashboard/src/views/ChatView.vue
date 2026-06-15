@@ -305,6 +305,9 @@ const md = new MarkdownIt({
   }
 })
 
+// 关闭裸域名模糊识别，避免中文前缀与域名连写时被整体识别为链接
+md.linkify.set({ fuzzyLink: false })
+
 const defaultLinkOpenRender = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
 
 md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
