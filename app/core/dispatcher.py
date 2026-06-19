@@ -259,8 +259,19 @@ class ChatDispatcher:
                                 chat_provider, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                                 chat_params = _resolve_chat_params(model_entry, chat_channel)
-                                # 降级换渠道后，按新渠道的多模态能力重组带附件的消息，
-                                # 避免把图片/音视频内容发往不支持该模态的渠道
+                                # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
+                                messages = await prepare_messages(
+                                    db,
+                                    session_id,
+                                    uid,
+                                    profile,
+                                    cfg,
+                                    initial_msg,
+                                    message,
+                                    is_first_iter,
+                                    context_window_k=chat_params["context_window_k"],
+                                    embedding_profile_available=embedding_profile_available,
+                                )
                                 _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
@@ -518,7 +529,19 @@ class ChatDispatcher:
                                 chat_provider, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                                 chat_params = _resolve_chat_params(model_entry, chat_channel)
-                                # 降级换渠道后，按新渠道的多模态能力重组带附件的消息
+                                # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
+                                messages = await prepare_messages(
+                                    db,
+                                    session_id,
+                                    uid,
+                                    profile,
+                                    cfg,
+                                    initial_msg,
+                                    message,
+                                    is_first_iter,
+                                    context_window_k=chat_params["context_window_k"],
+                                    embedding_profile_available=embedding_profile_available,
+                                )
                                 _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
                                 current_tool_calls_map = {}
                                 current_content_chunks = []
