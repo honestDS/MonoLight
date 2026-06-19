@@ -56,6 +56,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             payload["tool_choice"] = tool_choice
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
+        if kwargs.get("top_p") is not None:
+            payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         # 非流式：对整个请求设置整体超时
@@ -101,6 +103,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             payload["tool_choice"] = tool_choice
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
+        if kwargs.get("top_p") is not None:
+            payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         # 流式：超时仅作用于首字生成阶段（建立连接、等待响应头、读取到首个有效内容块的整个累计耗时）。

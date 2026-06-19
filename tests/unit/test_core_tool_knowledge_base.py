@@ -11,6 +11,8 @@ from app.core.embedding.knowledge_base import (
     list_available_knowledge_bases,
     query_knowledge_base,
 )
+from app.core.exceptions import LLMException
+from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import get_tools_for_profile
 from app.core.tools.knowledge_base_query import KnowledgeBaseQueryExecutor
 from app.core.utils.dispatcher.inject_system_prompt import inject_system_prompt
@@ -108,16 +110,16 @@ async def test_dynamic_tools_and_prompt_injection(db_session: AsyncSession):
     await db_session.refresh(kb)
 
     # 2.1 测试动态工具列表暴露并定制化 query_knowledge_base
-    tools, whitelist = await get_tools_for_profile(db_session, profile_with_kb)
+    tools, whitelist = await get_tools_for_profile(db_session, profile_with_kb, embedding_profile_available=True)
     assert "query_knowledge_base" in [t["function"]["name"] for t in tools]
     assert whitelist == [kb.id]
 
     kb_tool = next(t for t in tools if t["function"]["name"] == "query_knowledge_base")
-    assert kb_tool["function"]["parameters"]["properties"]["knowledge_base_id"]["enum"] == [kb.id]
+    assert kb_tool["function"]["parameters"]["properties"]["knowledge_base_id"]["enum"] == [str(kb.id)]
     assert "My Special KB" in kb_tool["function"]["parameters"]["properties"]["knowledge_base_id"]["description"]
 
     # 2.2 测试提示词注入包含 <available_knowledge_bases>
-    messages_injected = await inject_system_prompt(db_session, profile_with_kb, messages)
+    messages_injected = await inject_system_prompt(db_session, profile_with_kb, messages, embedding_profile_available=True)
     system_msg = messages_injected[0].content
     assert "<available_knowledge_bases>" in system_msg
     assert f'"id": {kb.id}' in system_msg
@@ -175,7 +177,7 @@ async def test_knowledge_base_query_executor_returns_only_source_and_content(mon
             [
                 SimpleNamespace(
                     content="命中文本片段",
-                    metadata={
+                    metadata_={
                         "filename": "source.md",
                         "dense_rank": 1,
                         "sparse_rank": 1,
@@ -199,3 +201,126 @@ async def test_knowledge_base_query_executor_returns_only_source_and_content(mon
 
     assert set(data.keys()) == {"items"}
     assert data["items"] == [{"source": "source.md", "content": "命中文本片段"}]
+
+
+@pytest.mark.asyncio
+async def test_query_knowledge_base_falls_back_to_hybrid_when_rerank_fails(monkeypatch, db_session: AsyncSession):
+    kb = KnowledgeBase(name="KB Rerank Fallback", description="", profile_id=1, collection_name="kb_rerank_fallback")
+    db_session.add(kb)
+    await db_session.commit()
+    await db_session.refresh(kb)
+
+    profile = Profile(id=1, name="test", configs={})
+
+    async def fake_embed_chunks(*args, **kwargs):
+        return [[0.1, 0.2]]
+
+    async def fake_get_profile_rerank_config(*args, **kwargs):
+        if 1 in (kwargs.get("excluded_priorities") or set()):
+            return None
+        return SimpleNamespace(
+            candidate_k=5,
+            priority=1,
+            provider_id=1,
+            provider_name="rerank-provider",
+            provider_type="OPENAI",
+            model_id="rerank-model",
+        )
+
+    async def fake_hybrid_query_collection(*args, **kwargs):
+        return [
+            RetrievalHit(
+                id="chunk-1",
+                content="混合检索结果",
+                metadata={"filename": "fallback.md"},
+                dense_rank=1,
+                sparse_rank=1,
+                fusion_score=0.1,
+            ),
+            RetrievalHit(
+                id="chunk-2",
+                content="第二个候选片段",
+                metadata={"filename": "fallback.md"},
+                dense_rank=2,
+                sparse_rank=2,
+                fusion_score=0.05,
+            ),
+        ]
+
+    async def fake_rerank_retrieval_hits(*args, **kwargs):
+        raise LLMException(message="rerank failed")
+
+    monkeypatch.setattr("app.core.embedding.knowledge_base.embed_chunks", fake_embed_chunks)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.get_profile_rerank_config", fake_get_profile_rerank_config)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.hybrid_query_collection", fake_hybrid_query_collection)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.rerank_retrieval_hits", fake_rerank_retrieval_hits)
+
+    response = await query_knowledge_base(db_session, profile, kb.id, "query", top_k=1, expose_rerank_error=False)
+
+    assert response.retrieval_mode == "hybrid"
+    assert response.rerank_error is None
+    assert response.items[0].content == "混合检索结果"
+
+    await db_session.delete(kb)
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_query_knowledge_base_exposes_rerank_error_for_query_test(monkeypatch, db_session: AsyncSession):
+    kb = KnowledgeBase(name="KB Rerank Error", description="", profile_id=1, collection_name="kb_rerank_error")
+    db_session.add(kb)
+    await db_session.commit()
+    await db_session.refresh(kb)
+
+    profile = Profile(id=1, name="test", configs={})
+
+    async def fake_embed_chunks(*args, **kwargs):
+        return [[0.1, 0.2]]
+
+    async def fake_get_profile_rerank_config(*args, **kwargs):
+        if 1 in (kwargs.get("excluded_priorities") or set()):
+            return None
+        return SimpleNamespace(
+            candidate_k=5,
+            priority=1,
+            provider_id=1,
+            provider_name="rerank-provider",
+            provider_type="OPENAI",
+            model_id="rerank-model",
+        )
+
+    async def fake_hybrid_query_collection(*args, **kwargs):
+        return [
+            RetrievalHit(
+                id="chunk-1",
+                content="混合检索结果",
+                metadata={"filename": "fallback.md"},
+                dense_rank=1,
+                sparse_rank=1,
+                fusion_score=0.1,
+            ),
+            RetrievalHit(
+                id="chunk-2",
+                content="第二个候选片段",
+                metadata={"filename": "fallback.md"},
+                dense_rank=2,
+                sparse_rank=2,
+                fusion_score=0.05,
+            ),
+        ]
+
+    async def fake_rerank_retrieval_hits(*args, **kwargs):
+        raise LLMException(message="rerank failed")
+
+    monkeypatch.setattr("app.core.embedding.knowledge_base.embed_chunks", fake_embed_chunks)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.get_profile_rerank_config", fake_get_profile_rerank_config)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.hybrid_query_collection", fake_hybrid_query_collection)
+    monkeypatch.setattr("app.core.embedding.knowledge_base.rerank_retrieval_hits", fake_rerank_retrieval_hits)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await query_knowledge_base(db_session, profile, kb.id, "query", top_k=1, expose_rerank_error=True)
+
+    assert exc_info.value.status_code == 502
+
+    await db_session.delete(kb)
+    await db_session.commit()

@@ -1,7 +1,43 @@
 @import "./common.scss";
+@import "./ChannelEditor.scss";
 
 .gray-divider-text {
   color: var(--color-text-secondary);
   font-weight: normal;
   font-size: 13px;
+}
+
+.settings-section {
+  padding: 16px 18px 18px;
+  margin-bottom: 18px;
+  background: var(--color-bg-base);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 4%);
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--el-color-primary);
+  font-size: 14px;
+  font-weight: 600;
+
+  &::before {
+    content: "";
+    width: 4px;
+    height: 16px;
+    background: var(--el-color-primary);
+    border-radius: 2px;
+  }
+}
+
+.el-form-item__content {
+  gap: 10px;
 }

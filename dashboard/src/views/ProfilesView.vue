@@ -14,13 +14,14 @@
       @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" :label="$t('profiles.profile_name')" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" prop="provider_name" :label="$t('profiles.provider')" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" :label="$t('profiles.model_id')" min-width="150" sortable>
+      <el-table-column :resizable="false" :label="$t('profiles.chat_channel_label')" min-width="200">
         <template #default="scope">
-          {{ scope.row.configs?.provider?.model_id || $t('profiles.not_set') }}
+          <span v-if="scope.row.configs?.provider?.chat_channel?.rules?.length">
+            {{ scope.row.configs.provider.chat_channel.rules.map(r => r.model_id).join(', ') }}
+          </span>
+          <span v-else class="text-muted">{{ $t('profiles.not_set') }}</span>
         </template>
       </el-table-column>
-      
       <el-table-column :resizable="false" :label="$t('profiles.status')" align="center" sortable>
         <template #default="scope">
           <StatusTag :status="scope.row.is_active" :active-text="$t('profiles.active')" :inactive-text="$t('profiles.inactive')" />
@@ -38,207 +39,155 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="60%" class="standard-dialog" center align-center>
+    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
       <el-form :model="form" label-width="120px" size="default">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane :label="$t('profiles.base_settings')" name="base">
             <div class="tab-pane-content">
-              <el-form-item :label="$t('profiles.profile_name')">
-                <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
-              </el-form-item>
-              <el-form-item :label="$t('profiles.associated_prompt')">
-                <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
-                  <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
-              </el-form-item>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.base_settings') }}</div>
+                <el-form-item :label="$t('profiles.profile_name')">
+                  <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
+                </el-form-item>
+                <el-form-item :label="$t('profiles.associated_prompt')">
+                  <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
+                    <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                  </el-select>
+                </el-form-item>
+              </div>
             </div>
           </el-tab-pane>
 
-          <!-- 模型设置 -->
+          <!-- 模型设置（渠道管理） -->
           <el-tab-pane :label="$t('profiles.model_settings')" name="model">
             <div class="tab-pane-content">
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.chat_model') }}</span></el-divider>
-              <el-form-item :label="$t('profiles.provider')">
-                <el-select v-model="form.configs.provider.provider_id" :placeholder="$t('profiles.select_chat_provider')" class="full-width-input">
-                  <el-option v-for="item in chatProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
-              </el-form-item>
-              <el-form-item :label="$t('profiles.model_id')">
-                <el-input v-model="form.configs.provider.model_id" :placeholder="$t('profiles.model_id_placeholder')"></el-input>
-              </el-form-item>
 
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.temperature')">
-                    <el-input-number v-model="form.configs.provider.temperature" :min="0" :max="2" :step="0.1" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.top_p')">
-                    <el-input-number v-model="form.configs.provider.top_p" :min="0" :max="1" :step="0.05" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-              </el-row>
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.max_tokens')">
-                    <el-input-number v-model="form.configs.provider.max_tokens" :min="0" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.multimodal')">
-                    <el-switch v-model="form.configs.provider.multimodal"></el-switch>
-                  </el-form-item>
-                </el-col>
-              </el-row>
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.context_window')">
-                    <el-input-number v-model="form.configs.provider.context_window_k" :min="1" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.context_window_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.chat_timeout')">
-                    <el-input-number v-model="form.configs.provider.chat_timeout" :min="1" :max="600" :step="1" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.chat_timeout_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.chat_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.provider.chat_channel"
+                  :providers="providers"
+                  usage="CHAT"
+                  :label="$t('profiles.chat_model')"
+                />
+              </div>
 
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.embedding_model') }}</span></el-divider>
-              <el-form-item :label="$t('profiles.provider')">
-                <el-select v-model="form.configs.provider.embedding_provider_id" :placeholder="$t('profiles.select_embedding_provider')" clearable class="full-width-input">
-                  <el-option v-for="item in embeddingProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.embedding_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.provider.embedding_channel"
+                  :providers="providers"
+                  usage="EMBEDDING"
+                  :label="$t('profiles.embedding_model')"
+                />
+              </div>
 
-              </el-form-item>
-              <el-form-item :label="$t('profiles.embedding_model_id')">
-                <el-input v-model="form.configs.provider.embedding_model_id" :placeholder="$t('profiles.embedding_model_hint')"></el-input>
-              </el-form-item>
-              <el-form-item :label="$t('profiles.embedding_dimensions')">
-                <div style="display: flex; gap: 10px; width: 100%;">
-                  <el-input-number v-model="form.configs.provider.embedding_dimensions" :min="1" :step="1" :placeholder="$t('profiles.embedding_dimensions_placeholder')" style="flex: 1;"></el-input-number>
-                  <el-button type="primary" @click="handleDetectDimension" :loading="detectingDimension" :disabled="!form.configs.provider.embedding_provider_id || !form.configs.provider.embedding_model_id">{{ $t('profiles.auto_detect') }}</el-button>
-                </div>
-                <div class="help-text mt-5">{{ $t('profiles.embedding_dimensions_hint') }}</div>
-              </el-form-item>
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.embedding_timeout')">
-                    <el-input-number v-model="form.configs.provider.embedding_timeout" :min="1" :max="600" :step="1" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.embedding_timeout_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.kb_query_top_k')">
-                    <el-input-number v-model="form.configs.provider.kb_query_top_k" :min="1" :max="50" :step="1" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.kb_query_top_k_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.rerank_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.provider.rerank_channel"
+                  :providers="providers"
+                  usage="RERANK"
+                  :label="$t('profiles.rerank_model')"
+                />
+              </div>
 
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.rerank_model') }}</span></el-divider>
 
-              <el-form-item :label="$t('profiles.provider')">
-                <el-select v-model="form.configs.provider.rerank_provider_id" :placeholder="$t('profiles.select_rerank_provider')" clearable class="full-width-input">
-                  <el-option v-for="item in rerankProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
-
-                <div class="help-text mt-5">{{ $t('profiles.rerank_provider_hint') }}</div>
-              </el-form-item>
-              <el-form-item :label="$t('profiles.rerank_model_id')">
-                <el-input v-model="form.configs.provider.rerank_model_id" :placeholder="$t('profiles.rerank_model_hint')"></el-input>
-              </el-form-item>
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.rerank_candidate_k')">
-                    <el-input-number v-model="form.configs.provider.rerank_candidate_k" :min="1" :max="50" :step="1" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.rerank_candidate_k_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.rerank_timeout')">
-                    <el-input-number v-model="form.configs.provider.rerank_timeout" :min="1" :max="120" :step="1" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-              </el-row>
             </div>
           </el-tab-pane>
 
           <!-- 安全设置 -->
           <el-tab-pane :label="$t('profiles.security_settings')" name="security">
             <div class="tab-pane-content">
-              <el-form-item :label="$t('profiles.audit_provider')">
-                <el-select v-model="form.configs.security.audit_provider_id" :placeholder="$t('profiles.select_audit_provider')" clearable class="full-width-input">
-                  <el-option v-for="item in auditProviders" :key="item.id" :label="item.name" :value="item.id"></el-option>
-                </el-select>
-
-              </el-form-item>
-              <el-form-item :label="$t('profiles.audit_model_id')">
-                <el-input v-model="form.configs.security.audit_model_id" :placeholder="$t('profiles.audit_model_hint')"></el-input>
-              </el-form-item>
-              <el-form-item :label="$t('profiles.audit_threshold')">
-                <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
-                <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
-              </el-form-item>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.security_settings') }}</div>
+                <el-form-item :label="$t('profiles.audit_model_id')">
+                  <el-select
+                    v-model="auditModelKey"
+                    :placeholder="$t('profiles.audit_model_hint')"
+                    clearable
+                    filterable
+                    class="full-width-input"
+                  >
+                    <el-option
+                      v-for="item in auditModelOptions"
+                      :key="item.key"
+                      :label="item.label"
+                      :value="item.key"
+                    ></el-option>
+                  </el-select>
+                </el-form-item>
+                <el-form-item :label="$t('profiles.audit_threshold')">
+                  <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
+                  <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
+                </el-form-item>
+              </div>
             </div>
           </el-tab-pane>
 
           <!-- 工具设置 -->
           <el-tab-pane :label="$t('profiles.tool_settings')" name="tool">
             <div class="tab-pane-content">
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.scheduling_control') }}</span></el-divider>
-              <el-row :gutter="20">
-                <el-col :span="8">
-                  <el-form-item :label="$t('profiles.max_parallel_tools')">
-                    <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="8">
-                  <el-form-item :label="$t('profiles.executor_max_workers')">
-                    <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
-                  </el-form-item>
-                </el-col>
-                <el-col :span="8">
-                  <el-form-item :label="$t('profiles.max_turns')">
-                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.scheduling_control') }}</div>
+                <el-row :gutter="20">
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.max_parallel_tools')">
+                      <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                      <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.executor_max_workers')">
+                      <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
+                      <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.max_turns')">
+                      <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </div>
 
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.shell_config') }}</span></el-divider>
-              <el-row :gutter="20">
-                <el-col :span="12">
-                  <el-form-item :label="$t('profiles.shell_timeout')">
-                    <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input"></el-input-number>
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.shell_config') }}</div>
+                <el-row :gutter="20">
+                  <el-col :span="12">
+                    <el-form-item :label="$t('profiles.shell_timeout')">
+                      <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </div>
 
-              <el-divider content-position="left"><span class="gray-divider-text">{{ $t('profiles.firecrawl_config') }}</span></el-divider>
-              <el-row :gutter="20">
-                <el-col :span="24">
-                  <el-form-item :label="$t('profiles.api_key')">
-                    <el-input v-model="form.configs.tool.firecrawl_api_key" :placeholder="$t('profiles.firecrawl_key_placeholder')" show-password></el-input>
-                    <div class="help-text mt-5">
-                      {{ $t('profiles.firecrawl_hint_1') }}
-                      <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" :underline="false">{{ $t('profiles.firecrawl_hint_2') }}</el-link> 
-                      {{ $t('profiles.firecrawl_hint_3') }}
-                    </div>
-                  </el-form-item>
-                </el-col>
-              </el-row>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.firecrawl_config') }}</div>
+                <el-row :gutter="20">
+                  <el-col :span="24">
+                    <el-form-item :label="$t('profiles.api_key')">
+                      <el-input v-model="form.configs.tool.firecrawl_api_key" :placeholder="$t('profiles.firecrawl_key_placeholder')" show-password></el-input>
+                      <div class="help-text mt-5">
+                        {{ $t('profiles.firecrawl_hint_1') }}
+                        <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" :underline="false">{{ $t('profiles.firecrawl_hint_2') }}</el-link>
+                        {{ $t('profiles.firecrawl_hint_3') }}
+                      </div>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </div>
             </div>
           </el-tab-pane>
 
           <!-- 其他设置 -->
           <el-tab-pane :label="$t('profiles.other_settings')" name="other">
             <div class="tab-pane-content">
-              <div class="help-text">{{ $t('profiles.no_other_settings') }}</div>
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.other_settings') }}</div>
+                <div class="help-text">{{ $t('profiles.no_other_settings') }}</div>
+              </div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -259,6 +208,7 @@ import { profileApi, providerApi, promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
+import ChannelEditor from '../components/ChannelEditor.vue'
 import { defaultProfileConfigs } from '../constants'
 
 const { t } = useI18n()
@@ -274,21 +224,25 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
-const detectingDimension = ref(false)
 
-// 按模型类型与启用状态过滤提供商，供各模型配置下拉仅展示“未禁用且类型符合”的选项。
-// 为兼容编辑场景下已选中但当前被禁用/类型不符的存量值，额外把当前已选 id 保留在候选中，避免回显丢失。
-const filterProvidersByUsage = (usage, selectedId) => {
-  return providers.value.filter(
-    (item) => (item.usage === usage && item.is_active) || item.id === selectedId
-  )
-}
-
-const chatProviders = computed(() => filterProvidersByUsage('CHAT', form.configs.provider.provider_id))
-const embeddingProviders = computed(() => filterProvidersByUsage('EMBEDDING', form.configs.provider.embedding_provider_id))
-const rerankProviders = computed(() => filterProvidersByUsage('RERANK', form.configs.provider.rerank_provider_id))
-const auditProviders = computed(() => filterProvidersByUsage('CHAT', form.configs.security.audit_provider_id))
-
+const auditModelOptions = computed(() => {
+  const options = []
+  providers.value
+    .filter(provider => provider.is_active !== false)
+    .forEach(provider => {
+      ;(provider.model_ids || [])
+        .filter(model => model.usage === 'CHAT' && model.model_id)
+        .forEach(model => {
+          options.push({
+            key: `${provider.id}::${model.model_id}`,
+            provider_id: provider.id,
+            model_id: model.model_id,
+            label: `${provider.name} / ${model.model_id}`
+          })
+        })
+    })
+  return options
+})
 
 const form = reactive({
   id: null,
@@ -297,7 +251,26 @@ const form = reactive({
   configs: defaultProfileConfigs()
 })
 
-// 加载配置列表
+const auditModelKey = computed({
+  get() {
+    const security = form.configs.security
+    if (!security.audit_provider_id || !security.audit_model_id) return null
+    return `${security.audit_provider_id}::${security.audit_model_id}`
+  },
+  set(key) {
+    if (!key) {
+      form.configs.security.audit_provider_id = null
+      form.configs.security.audit_model_id = null
+      return
+    }
+
+    const option = auditModelOptions.value.find(item => item.key === key)
+    if (!option) return
+    form.configs.security.audit_provider_id = option.provider_id
+    form.configs.security.audit_model_id = option.model_id
+  }
+})
+
 const loadProfiles = async () => {
   loading.value = true
   try {
@@ -314,7 +287,6 @@ const loadProfiles = async () => {
   }
 }
 
-// 使用删除确认组合式函数
 const { handleDelete } = useDeleteConfirm(profileApi.delete, loadProfiles)
 
 const fetchPrompts = async () => {
@@ -347,23 +319,6 @@ const handleSizeChange = () => {
   loadProfiles()
 }
 
-const handleDetectDimension = async () => {
-  if (!form.configs.provider.embedding_provider_id || !form.configs.provider.embedding_model_id) {
-    return ElMessage.warning(t('profiles.detect_warn'))
-  }
-  detectingDimension.value = true
-  try {
-    const res = await providerApi.testEmbeddingDimension(form.configs.provider.embedding_provider_id, form.configs.provider.embedding_model_id)
-    const dim = res.data.data.dimension
-    form.configs.provider.embedding_dimensions = dim
-    ElMessage.success(res.data.message || t('profiles.detect_success', { dim }))
-  } catch (err) {
-    ElMessage.error(err.message || t('profiles.detect_failed'))
-  } finally {
-    detectingDimension.value = false
-  }
-}
-
 const handleActivate = async (id) => {
   try {
     const res = await profileApi.activate(id)
@@ -383,11 +338,16 @@ const showDialog = (type, row = null) => {
     form.prompt_id = row.prompt_id
     const base = defaultProfileConfigs()
     if (row.configs) {
-      Object.keys(base).forEach(key => {
-        if (row.configs[key]) {
-          Object.assign(base[key], row.configs[key])
-        }
-      })
+      if (row.configs.provider) {
+        const p = row.configs.provider
+        // 深合并渠道配置
+        if (p.chat_channel) Object.assign(base.provider.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
+        if (p.embedding_channel) Object.assign(base.provider.embedding_channel, JSON.parse(JSON.stringify(p.embedding_channel)))
+        if (p.rerank_channel) Object.assign(base.provider.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
+      }
+      if (row.configs.security) Object.assign(base.security, row.configs.security)
+      if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
+      if (row.configs.other) Object.assign(base.other, row.configs.other)
     }
     form.configs = base
   } else {
@@ -400,29 +360,29 @@ const showDialog = (type, row = null) => {
 }
 
 const submitForm = async () => {
-  if (!form.name || !form.configs.provider.provider_id || !form.configs.provider.model_id) {
+  if (!form.name) {
     return ElMessage.warning(t('profiles.fill_required'))
   }
-  // Reranker 启用判定：同时配置了提供商与模型 ID 即视为启用
-  const rerankProviderId = form.configs.provider.rerank_provider_id
-  const rerankModelId = (form.configs.provider.rerank_model_id || '').trim()
-  const hasRerankProvider = !!rerankProviderId
-  const hasRerankModel = !!rerankModelId
-  if (hasRerankProvider || hasRerankModel) {
-    // 仅配置其一视为配置不完整
-    if (!hasRerankProvider || !hasRerankModel) {
-      return ElMessage.warning(t('profiles.rerank_warn_1'))
-    }
-    // 候选数量 K 必须大于等于知识库返回数量，否则精排不会生效
-    const candidateK = form.configs.provider.rerank_candidate_k
-    const topK = form.configs.provider.kb_query_top_k
-    if (Number(candidateK) < Number(topK)) {
-      return ElMessage.warning(t('profiles.rerank_warn_2'))
-    }
+
+  // 清理无效规则与旧版规则级启用状态，并按后端规则排序：priority 数字越小越优先。
+  // 同一 priority 内保留当前顺序，因为该顺序就是加权轮询周期内的使用顺序。
+  const compareRules = (left, right) => {
+    return (left.priority || 1) - (right.priority || 1)
   }
 
-  submitting.value = true
+  const cleanChannel = (ch) => {
+    if (ch && ch.rules) {
+      ch.rules = ch.rules
+        .filter(r => r.provider_id && r.model_id)
+        .map(({ provider_id, model_id, priority, weight }) => ({ provider_id, model_id, priority, weight }))
+        .sort(compareRules)
+    }
+  }
+  cleanChannel(form.configs.provider.chat_channel)
+  cleanChannel(form.configs.provider.embedding_channel)
+  cleanChannel(form.configs.provider.rerank_channel)
 
+  submitting.value = true
   try {
     if (dialogType.value === 'create') {
       await profileApi.create(form)
@@ -448,7 +408,4 @@ onMounted(() => {
 
 <style lang="scss">
 @import "@/assets/css/ProfilesView.scss";
-.el-form-item__content{
-  gap: 10px;
-}
 </style>

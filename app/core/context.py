@@ -15,7 +15,6 @@ from app.models.message import (
 )
 from app.models.profile import (
     Profile,
-    ProfileConfig,
 )
 
 load_dotenv()
@@ -32,12 +31,16 @@ class ContextManager:
         profile: Profile,
         current_message: str,
         before_id: int | None = None,
+        context_window_k: int = 4,
+        reserved_tokens: int = 0,
     ) -> list[InternalMessage]:
         """
         获取经过压缩与对齐后的上下文消息列表。
+
+        reserved_tokens：预留给系统提示词等运行时注入内容的 Token 数，
+        从总预算中扣除，确保压缩后加上系统消息不会超出模型上下文限制。
         """
-        cfg = ProfileConfig.model_validate(profile.configs)
-        limit_tokens = cfg.provider.context_window_k * 1024
+        limit_tokens = max(1, context_window_k * 1024 - reserved_tokens)
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
         raw_history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=5000, before_id=before_id)
@@ -54,9 +57,11 @@ class ContextManager:
             current_msg_tokens=current_msg_tokens,
         )
 
-        # 3. 压缩日志记录
-        if log_data["is_hard_truncated"]:
-            logger.bind(uid=uid, session_id=session_id).info(f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']}")
+        # 3. 压缩日志记录：仅当确实发生压缩（Token 真正减少）时才记录，避免误导性日志
+        if log_data["is_hard_truncated"] and log_data["after"] < log_data["before"]:
+            logger.bind(uid=uid, session_id=session_id).info(
+                f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']} (预留系统词 {reserved_tokens})"
+            )
 
         return final_msgs
 
@@ -75,16 +80,19 @@ class ContextManager:
         temp_msgs = []
         current_total = current_msg_tokens
         raw_history_tokens = 0
+        dropped_history_tokens = 0
         is_hard_truncated = False
 
-        # 反向装载（从新到旧）
+        # 反向装载（从新到旧）：窗口已满后继续累计被丢弃消息的 Token，
+        # 以便压缩日志的 before 反映完整历史规模，而非仅窗口内保留部分。
         for msg in parsed_history:
             msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
             msg_tokens = estimate_tokens(msg_str)
 
-            if current_total + msg_tokens > limit_tokens:
+            if is_hard_truncated or current_total + msg_tokens > limit_tokens:
                 is_hard_truncated = True
-                break
+                dropped_history_tokens += msg_tokens
+                continue
 
             temp_msgs.insert(0, msg)
             current_total += msg_tokens
@@ -175,10 +183,8 @@ class ContextManager:
             fm_str = json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
             final_history_tokens += estimate_tokens(fm_str)
 
-        is_hard_truncated or (len(audited_msgs) < len(parsed_history))
-
         return audited_msgs, {
             "is_hard_truncated": is_hard_truncated,
-            "before": current_msg_tokens + raw_history_tokens,
+            "before": current_msg_tokens + raw_history_tokens + dropped_history_tokens,
             "after": current_msg_tokens + final_history_tokens,
         }

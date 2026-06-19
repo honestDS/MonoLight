@@ -27,15 +27,16 @@ from app.models.profile import (
 logger = get_logger(__name__)
 
 
-async def inject_system_prompt(
+async def build_system_prompt(
     db: AsyncSession,
     profile: Profile,
-    messages: list[InternalMessage],
-) -> list[InternalMessage]:
+    embedding_profile_available: bool | None = None,
+) -> str:
     """
-    注入系统提示词。无论是否关联 Profile Prompt，环境上下文都会注入。
-    通过结构化标签隔离系统信息与环境上下文。
-    若 Profile 有可用知识库，在尾部注入结构化知识库目录。
+    构造系统提示词字符串（不注入消息列表）。
+
+    抽离构造逻辑，便于在上下文压缩前预先计算系统提示词的 Token 数，
+    从而将其计入压缩预算，避免系统消息未被纳入窗口计算导致实际请求超限。
     """
     system_context = get_full_system_context()
 
@@ -53,7 +54,11 @@ async def inject_system_prompt(
     # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
     # 不注入知识库目录提示词，保持与工具暴露逻辑一致。
     try:
-        if not await is_embedding_profile_available(db, profile):
+        is_embedding_available = embedding_profile_available
+        if is_embedding_available is None:
+            is_embedding_available = await is_embedding_profile_available(db, profile)
+
+        if not is_embedding_available:
             kbs = []
         else:
             kbs = await list_available_knowledge_bases(db, profile)
@@ -68,9 +73,13 @@ async def inject_system_prompt(
         pass
 
     # 合并所有系统提示部分
-    full_prompt = "\n\n".join(full_parts)
+    return "\n\n".join(full_parts)
 
-    # 清除原有的 System 消息并插入新的组合消息到顶部
+
+def inject_system_prompt_text(messages: list[InternalMessage], full_prompt: str) -> list[InternalMessage]:
+    """
+    将已构造的系统提示词文本注入消息列表顶部（清除原有 System 消息）。
+    """
     messages = [m for m in messages if m.role != MessageRole.SYSTEM]
     messages.insert(
         0,
@@ -79,5 +88,19 @@ async def inject_system_prompt(
             content=full_prompt,
         ),
     )
-
     return messages
+
+
+async def inject_system_prompt(
+    db: AsyncSession,
+    profile: Profile,
+    messages: list[InternalMessage],
+    embedding_profile_available: bool | None = None,
+) -> list[InternalMessage]:
+    """
+    注入系统提示词。无论是否关联 Profile Prompt，环境上下文都会注入。
+    通过结构化标签隔离系统信息与环境上下文。
+    若 Profile 有可用知识库，在尾部注入结构化知识库目录。
+    """
+    full_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
+    return inject_system_prompt_text(messages, full_prompt)

@@ -1,3 +1,9 @@
+"""Embedding 知识库：渠道管理架构适配版
+
+get_profile_embedding_config() 走 embedding_channel 路由；
+embed_chunks() 超时从 model_entry 读取
+"""
+
 import time
 from typing import Any
 
@@ -6,15 +12,15 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core import constants
-from app.core.crud.provider import provider_crud
+from app.core.channel_router import select_channel
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
+from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
-from app.models.provider import ModelUsage, ProviderType
 from app.providers.embedding import EmbeddingClient
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
@@ -22,78 +28,140 @@ KNOWLEDGE_BASE_QUERY_TOP_K = 5
 logger = get_logger(__name__)
 
 
-def get_profile_kb_query_top_k(profile: Profile) -> int:
-    """读取 Profile 配置的对话工具知识库检索最终返回数量。
+def _get_channel_config(profile: Profile, channel_key: str) -> ChannelConfig | None:
+    provider_config = (profile.configs or {}).get("provider", {})
+    channel_raw = provider_config.get(channel_key)
+    if not channel_raw:
+        return None
+    try:
+        return ChannelConfig.model_validate(channel_raw)
+    except Exception:
+        return None
 
-    存量 Profile 的 configs 中可能不存在该键，缺键时回退默认值 KNOWLEDGE_BASE_QUERY_TOP_K。
-    同时对取值做合法性裁剪（1~50），避免存量脏数据导致越界。
+
+def get_profile_kb_query_top_k(profile: Profile) -> int:
+    """读取重排渠道配置的知识库检索最终返回数量。"""
+    rerank_channel = _get_channel_config(profile, "rerank_channel")
+    if not rerank_channel or rerank_channel.kb_query_top_k <= 0:
+        return KNOWLEDGE_BASE_QUERY_TOP_K
+    return min(rerank_channel.kb_query_top_k, 50)
+
+
+async def get_profile_embedding_config(db: AsyncSession, profile: Profile, call_context: str = "knowledge_base_embedding_config", log_selection: bool = True) -> tuple:
+    """从 Profile 的 embedding_channel 中通过渠道路由获取嵌入配置。
+
+    Returns:
+        (provider_type, api_key, base_url, model_id, dimensions)
     """
     provider_config = (profile.configs or {}).get("provider", {})
-    raw_top_k = provider_config.get("kb_query_top_k")
-    if not isinstance(raw_top_k, int) or raw_top_k <= 0:
-        return KNOWLEDGE_BASE_QUERY_TOP_K
-    return min(raw_top_k, 50)
+    embedding_channel_raw = provider_config.get("embedding_channel")
 
-
-async def get_profile_embedding_config(db: AsyncSession, profile: Profile) -> tuple[ProviderType, str, str, str, int | None]:
-    provider_config = (profile.configs or {}).get("provider", {})
-    embedding_provider_id = provider_config.get("embedding_provider_id")
-    embedding_model_id = provider_config.get("embedding_model_id")
-    embedding_dimensions = provider_config.get("embedding_dimensions")
-
-    if not embedding_provider_id or embedding_provider_id <= 0:
+    if not embedding_channel_raw:
         raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
-    if not embedding_model_id:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
 
-    provider = await provider_crud.get(db, embedding_provider_id)
-    if not provider:
-        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
-    if provider.usage != ModelUsage.EMBEDDING:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_PROVIDER_NOT_EMBEDDING)
-    if not provider.is_active:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_DISABLED)
+    try:
+        embedding_channel = ChannelConfig.model_validate(embedding_channel_raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    selection = await select_channel(db, embedding_channel, "EMBEDDING", call_context=call_context, log_selection=log_selection)
+    if not selection:
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+
+    provider, model_entry, _rule = selection
+    model_id = model_entry.get("model_id")
+    if not model_id:
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
     if not provider.base_url:
         raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_NO_URL)
-    return provider.provider_type, provider.api_key, provider.base_url, embedding_model_id, embedding_dimensions
+
+    dimensions = model_entry.get("embedding_dimensions")
+    return provider.provider_type, provider.api_key, provider.base_url, model_id, dimensions
 
 
 async def is_embedding_profile_available(db: AsyncSession, profile: Profile) -> bool:
     try:
-        await get_profile_embedding_config(db, profile)
+        # 仅为判断是否暴露知识库工具的可用性探测，非真实嵌入调用，静默不打"选择渠道"日志
+        await get_profile_embedding_config(db, profile, call_context="knowledge_base_profile_availability_check", log_selection=False)
         return True
     except HTTPException:
         return False
 
 
 def get_profile_embedding_timeout(profile: Profile) -> float:
-    """读取 Profile 配置的嵌入模型调用超时（秒）。
-
-    存量 Profile 缺键时回退默认值 30 秒，并对取值做合法性裁剪（0~600）。
-    """
-    provider_config = (profile.configs or {}).get("provider", {})
-    raw_timeout = provider_config.get("embedding_timeout")
-    if not isinstance(raw_timeout, int | float) or raw_timeout <= 0:
+    """读取嵌入渠道配置的模型调用超时（秒）。"""
+    embedding_channel = _get_channel_config(profile, "embedding_channel")
+    if not embedding_channel or embedding_channel.embedding_timeout <= 0:
         return 30.0
-    return min(float(raw_timeout), 600.0)
+    return min(float(embedding_channel.embedding_timeout), 600.0)
 
 
-async def embed_chunks(db: AsyncSession, profile: Profile, texts: list[str], batch_size: int) -> list[list[float]]:
-    provider_type, api_key, base_url, model_id, dimensions = await get_profile_embedding_config(db, profile)
-    embedding_timeout = get_profile_embedding_timeout(profile)
+async def embed_chunks(
+    db: AsyncSession,
+    profile: Profile,
+    texts: list[str],
+    batch_size: int,
+    call_context: str = "knowledge_base_embedding",
+) -> list[list[float]]:
+    provider_config = (profile.configs or {}).get("provider", {})
+    embedding_channel_raw = provider_config.get("embedding_channel")
+    if not embedding_channel_raw:
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+
     try:
-        return await EmbeddingClient.embed_texts(
-            provider_type=provider_type,
-            api_key=api_key,
-            base_url=base_url,
-            model_id=model_id,
-            input_texts=texts,
-            batch_size=batch_size,
-            dimensions=dimensions,
-            timeout=embedding_timeout,
+        embedding_channel = ChannelConfig.model_validate(embedding_channel_raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    embedding_timeout = get_profile_embedding_timeout(profile)
+    excluded_priorities: set[int] = set()
+    last_error: LLMException | None = None
+
+    while True:
+        selection = await select_channel(
+            db,
+            embedding_channel,
+            "EMBEDDING",
+            call_context=call_context,
+            excluded_priorities=excluded_priorities,
+            cursor_key=f"{profile.id}:EMBEDDING",
         )
-    except LLMException as e:
-        raise HTTPException(status_code=502, detail=t(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=e.message))
+        if not selection:
+            if last_error:
+                raise HTTPException(status_code=502, detail=t(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=last_error.message))
+            raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+
+        provider, model_entry, _rule = selection
+        model_id = model_entry.get("model_id")
+        if not model_id:
+            excluded_priorities.add(_rule.priority)
+            continue
+        if not provider.base_url:
+            excluded_priorities.add(_rule.priority)
+            continue
+
+        try:
+            return await EmbeddingClient.embed_texts(
+                provider_type=provider.provider_type,
+                api_key=provider.api_key,
+                base_url=provider.base_url,
+                model_id=model_id,
+                input_texts=texts,
+                batch_size=batch_size,
+                dimensions=model_entry.get("embedding_dimensions"),
+                timeout=embedding_timeout,
+            )
+        except LLMException as e:
+            last_error = e
+            excluded_priorities.add(_rule.priority)
+            logger.bind(
+                profile_id=profile.id,
+                provider_id=provider.id,
+                provider_name=provider.name,
+                model_id=model_id,
+                model_name=model_id,
+                channel_name=f"{provider.name} / {model_id}",
+            ).warning(f"嵌入渠道调用失败，降级到下一优先级组重试: {t(e.message, default=e.message, **e.kwargs)}")
 
 
 async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> list[KnowledgeBase]:
@@ -104,7 +172,7 @@ async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> 
 
 
 def build_knowledge_base_prompt_items(kbs: list[KnowledgeBase]) -> list[dict[str, Any]]:
-    """将知识库实体转换为系统提示词清单项，输出 id、name 与 description"""
+    """将知识库实体转换为系统提示词清单项"""
     return [
         {
             "id": kb.id,
@@ -128,14 +196,7 @@ async def query_knowledge_base(
     top_k: int = KNOWLEDGE_BASE_QUERY_TOP_K,
     expose_rerank_error: bool = False,
 ) -> KnowledgeBaseQueryTestResponse:
-    """根据知识库 ID 检索知识库。
-
-    检索流程：dense/sparse 召回 -> RRF 融合 -> 可选远程 reranker 精排 -> final_top_k 截断。
-
-    参数：
-    - top_k：最终返回数量（final_top_k），由调用方入参传入（query-test 传用户入参，对话工具传固定值）。
-    - expose_rerank_error：是否把 rerank 降级原因回填到响应（query-test 路径传 True，对话工具路径保持 False 静默降级）。
-    """
+    """根据知识库 ID 检索知识库。"""
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
         raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND_FOR_QUERY)
@@ -143,54 +204,63 @@ async def query_knowledge_base(
     if kb.profile_id != profile.id:
         raise HTTPException(status_code=403, detail=constants.ERR_KB_NOT_IN_PROFILE)
 
-    query_embedding = (await embed_chunks(db, profile, [query], 1))[0]
+    query_embedding = (await embed_chunks(db, profile, [query], 1, call_context="knowledge_base_query_embedding"))[0]
     final_top_k = top_k
 
-    # 读取 rerank 配置；配置缺失/异常时降级（不阻断检索）
-    rerank_config = None
+    excluded_rerank_priorities: set[int] = set()
     rerank_error: str | None = None
-    try:
-        rerank_config = await get_profile_rerank_config(db, profile)
-    except LLMException as e:
-        rerank_error = t(e.message, default=e.message, **e.kwargs)
-        logger.bind(profile_id=profile.id, kb_id=kb_id).warning(f"读取 rerank 配置失败，降级为纯混合检索: {e.message}")
+    rerank_attempted = False
 
-    # 未启用 rerank：保持原 hybrid 行为
-    if rerank_config is None:
-        fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k)
-        return build_query_test_response(
-            fused_hits[:final_top_k],
-            retrieval_mode="hybrid",
-            rerank_error=rerank_error if expose_rerank_error else None,
-        )
+    while True:
+        try:
+            rerank_config = await get_profile_rerank_config(db, profile, excluded_priorities=excluded_rerank_priorities)
+        except LLMException as e:
+            rerank_error = t(e.message, default=e.message, **e.kwargs)
+            logger.bind(profile_id=profile.id, kb_id=kb_id).warning(f"读取 rerank 配置失败，降级为纯混合检索: {e.message}")
+            break
 
-    # 启用 rerank：扩大候选池到 effective_candidate_k
-    effective_candidate_k = max(rerank_config.candidate_k, final_top_k)
-    fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k)
+        if rerank_config is None:
+            break
 
-    # 候选不足以改变最终返回集合时，短路跳过远程 rerank，按 RRF 顺序返回
-    if len(fused_hits) <= final_top_k:
-        return build_query_test_response(fused_hits[:final_top_k], retrieval_mode="hybrid")
+        rerank_attempted = True
+        effective_candidate_k = max(rerank_config.candidate_k, final_top_k)
+        fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k)
 
-    # 调用远程 reranker，失败时降级回退 RRF 结果
-    try:
-        rerank_started = time.perf_counter()
-        reranked_hits = await rerank_retrieval_hits(rerank_config, query, fused_hits, final_top_k)
-        rerank_latency_ms = (time.perf_counter() - rerank_started) * 1000
-        logger.bind(
-            kb_id=kb_id,
-            candidate_count=len(fused_hits),
-            final_top_k=final_top_k,
-            rerank_provider_type=str(rerank_config.provider_type),
-            rerank_model_id=rerank_config.model_id,
-            rerank_latency_ms=round(rerank_latency_ms, 2),
-        ).info("远程 rerank 精排完成")
-        return build_query_test_response(reranked_hits[:final_top_k], retrieval_mode="hybrid_rerank")
+        if len(fused_hits) <= final_top_k:
+            return build_query_test_response(fused_hits[:final_top_k], retrieval_mode="hybrid")
 
-    except LLMException as e:
-        logger.bind(kb_id=kb_id, rerank_model_id=rerank_config.model_id).warning(f"远程 rerank 调用失败，降级为纯混合检索: {e.message}")
-        return build_query_test_response(
-            fused_hits[:final_top_k],
-            retrieval_mode="hybrid",
-            rerank_error=t(e.message, default=e.message, **e.kwargs) if expose_rerank_error else None,
-        )
+        try:
+            rerank_started = time.perf_counter()
+            reranked_hits = await rerank_retrieval_hits(rerank_config, query, fused_hits, final_top_k)
+            rerank_latency_ms = (time.perf_counter() - rerank_started) * 1000
+            logger.bind(
+                kb_id=kb_id,
+                candidate_count=len(fused_hits),
+                final_top_k=final_top_k,
+                rerank_provider_type=str(rerank_config.provider_type),
+                rerank_model_id=rerank_config.model_id,
+                rerank_latency_ms=round(rerank_latency_ms, 2),
+            ).info("远程 rerank 精排完成")
+            return build_query_test_response(reranked_hits[:final_top_k], retrieval_mode="hybrid_rerank")
+
+        except LLMException as e:
+            excluded_rerank_priorities.add(rerank_config.priority)
+            rerank_error = t(e.message, default=e.message, **e.kwargs)
+            logger.bind(
+                kb_id=kb_id,
+                rerank_provider_id=rerank_config.provider_id,
+                rerank_provider_name=getattr(rerank_config, "provider_name", None),
+                rerank_model_id=rerank_config.model_id,
+                rerank_model_name=rerank_config.model_id,
+                rerank_channel_name=f"{getattr(rerank_config, 'provider_name', None)} / {rerank_config.model_id}",
+            ).warning(f"远程 rerank 调用失败，降级到下一优先级组重试: {t(e.message, default=e.message, **e.kwargs)}")
+
+    if rerank_attempted and rerank_error and expose_rerank_error:
+        raise HTTPException(status_code=502, detail=rerank_error)
+
+    fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k)
+    return build_query_test_response(
+        fused_hits[:final_top_k],
+        retrieval_mode="hybrid",
+        rerank_error=rerank_error if expose_rerank_error else None,
+    )

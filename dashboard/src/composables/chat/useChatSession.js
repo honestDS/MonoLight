@@ -257,6 +257,14 @@ export function useChatSession() {
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam) => {
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
+        // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败：
+        // 清除全部排队消息的视觉状态，并清理残留的 thinking 占位（含追加消息产生的占位）
+        chatState.messages.value.forEach(m => {
+          if (m.role === 'user' && m.status === 'queued') {
+            delete m.status
+          }
+        })
+        messageProcessor.cleanupThinkingMessage(chatState.messages)
         ElMessage.error(errorMessage || t('chat.stream_error'))
       },
       onSessionId: (newSessionId) => {

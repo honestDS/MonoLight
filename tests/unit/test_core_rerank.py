@@ -9,12 +9,15 @@ from app.providers.rerank.client import RERANK_MAX_DOCUMENT_CHARS, RerankClient
 
 def _make_config() -> RerankConfig:
     return RerankConfig(
+        provider_id=1,
+        provider_name="rerank-provider",
         provider_type=ProviderType.OPENAI,
         api_key="fake-key",
         base_url="https://api.example.com/v1",
         model_id="rerank-model",
         candidate_k=20,
         timeout=15.0,
+        priority=1,
     )
 
 

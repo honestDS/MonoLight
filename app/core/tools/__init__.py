@@ -37,7 +37,7 @@ def get_registered_tool_names():
     return [schema["function"]["name"] for schema in ALL_TOOLS_SCHEMAS] + [KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]]
 
 
-async def get_tools_for_profile(db: AsyncSession, profile: Profile) -> tuple[list[dict[str, Any]], list[int]]:
+async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 动态生成工具列表和可用知识库白名单。
     如果 Profile 没有可用知识库，则不暴露知识库检索工具，也不提供白名单。
@@ -49,7 +49,11 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile) -> tuple[lis
     try:
         # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
         # 不向 LLM 暴露知识库查询工具，避免模型调用必然失败的工具。
-        if not await is_embedding_profile_available(db, profile):
+        is_embedding_available = embedding_profile_available
+        if is_embedding_available is None:
+            is_embedding_available = await is_embedding_profile_available(db, profile)
+
+        if not is_embedding_available:
             return base_tools, whitelist_ids
 
         kbs = await list_available_knowledge_bases(db, profile)

@@ -18,6 +18,7 @@ from app.core.tools import (
     TOOL_EXECUTOR_MAP,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -40,6 +41,7 @@ async def process_single_tool(
     uid: str,
     allowed_knowledge_base_ids: list[int] | None = None,
     active_tasks: set[asyncio.Task] | None = None,
+    context_window_k: int = 4,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = tool_call.arguments
@@ -108,6 +110,15 @@ async def process_single_tool(
             )
 
     LogManager.log_tool_result(turn, cmd_result, session_id, uid)
+
+    # 工具响应过大保护：超过模型上下文限制一半时截断，避免撑爆上下文导致请求超时
+    cmd_result, truncated = truncate_tool_result(cmd_result, context_window_k)
+    if truncated:
+        get_logger("dispatcher").bind(
+            uid=uid,
+            session_id=session_id,
+            tool_name=tool_name,
+        ).warning(f"工具 {tool_name} 响应过大，已截断至上下文限制的一半（context_window_k={context_window_k}）")
 
     return InternalMessage(
         role=MessageRole.TOOL,

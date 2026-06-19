@@ -1,3 +1,4 @@
+from app.models.channel_cursor import ChannelCursor as ChannelCursor
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.message import Message as Message

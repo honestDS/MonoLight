@@ -1,3 +1,8 @@
+"""Profile API：渠道管理架构适配版
+
+CRUD 支持 chat_channel/embedding_channel/rerank_channel；activate 校验适配
+"""
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -8,19 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
-from app.core.crud.provider import provider_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
     ResourceNotFoundException,
 )
 from app.core.security import get_current_user
+from app.models.channel import ChannelConfig
 from app.models.profile import (
     ProfileCreate,
     ProfileResponse,
     ProfileUpdate,
 )
-from app.models.provider import ModelUsage
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -40,35 +44,35 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
-async def validate_rerank_provider(db: AsyncSession, provider_config: dict) -> None:
-    """rerank 启用判定：配置了 rerank_provider_id 与 rerank_model_id 即视为启用。
+async def validate_channel_configs(provider_config: dict) -> None:
+    """校验 provider 配置中的渠道配置合法性。
 
-    - 两者均未配置：视为未启用 rerank，直接跳过校验。
-    - 仅配置其一：视为配置不完整，拦截并提示补全。
-    - 两者均配置：强校验 provider 存在且 usage 为 RERANK，并校验候选数量 K。
+    - chat_channel：至少需要一条启用规则
+    - embedding_channel：可选，有配置则校验
+    - rerank_channel：可选，有配置则校验
     """
-    rerank_provider_id = provider_config.get("rerank_provider_id")
-    rerank_model_id = provider_config.get("rerank_model_id")
-    has_provider = bool(rerank_provider_id) and rerank_provider_id > 0
-    has_model = bool(rerank_model_id)
+    chat_channel = provider_config.get("chat_channel")
+    if chat_channel:
+        try:
+            ChannelConfig.model_validate(chat_channel)
+        except Exception as e:
+            raise ParameterException(f"chat_channel 校验失败: {e}")
 
-    if not has_provider and not has_model:
-        return
+    embedding_channel = provider_config.get("embedding_channel")
+    if embedding_channel:
+        try:
+            ChannelConfig.model_validate(embedding_channel)
+        except Exception as e:
+            raise ParameterException(f"embedding_channel 校验失败: {e}")
 
-    if not has_provider or not has_model:
-        raise ParameterException(constants.ERR_PROFILE_RERANK_CONFIG_INCOMPLETE)
-
-    provider = await provider_crud.get(db, rerank_provider_id)
-    if not provider:
-        raise ParameterException(constants.ERR_PROFILE_RERANK_PROVIDER_NOT_FOUND)
-    if provider.usage != ModelUsage.RERANK:
-        raise ParameterException(constants.ERR_PROFILE_PROVIDER_NOT_RERANK)
-
-    # 候选数量 K 必须大于等于知识库返回数量，否则精排无法改变最终返回集合，rerank 失去意义
-    rerank_candidate_k = provider_config.get("rerank_candidate_k", 20)
-    kb_query_top_k = provider_config.get("kb_query_top_k", 5)
-    if isinstance(rerank_candidate_k, int) and isinstance(kb_query_top_k, int) and rerank_candidate_k < kb_query_top_k:
-        raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
+    rerank_channel = provider_config.get("rerank_channel")
+    if rerank_channel:
+        try:
+            rerank_config = ChannelConfig.model_validate(rerank_channel)
+        except Exception as e:
+            raise ParameterException(f"rerank_channel 校验失败: {e}")
+        if rerank_config.rerank_candidate_k < rerank_config.kb_query_top_k:
+            raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
@@ -77,17 +81,8 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    provider_id = profile_in.configs.get("provider", {}).get("provider_id")
-    if provider_id and provider_id > 0:
-        if not await provider_crud.get(db, provider_id):
-            raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
-
-    embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
-    if embedding_provider_id and embedding_provider_id > 0:
-        if not await provider_crud.get(db, embedding_provider_id):
-            raise ParameterException(constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
-
-    await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
+    provider_config = profile_in.configs.get("provider", {})
+    await validate_channel_configs(provider_config)
 
     if await profile_crud.get_by_name(db, profile_in.name):
         raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
@@ -97,14 +92,8 @@ async def create_profile(
             raise ParameterException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.create(db, obj_in=profile_in)
-    # Re-fetch with relations
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = ProfileResponse.model_validate(db_profile)
-    provider_id = db_profile.configs.get("provider", {}).get("provider_id")
-    if provider_id:
-        provider = await provider_crud.get(db, provider_id)
-        if provider:
-            res_data.provider_name = provider.name
     return StandardResponse.success(
         data=res_data,
         message=constants.MSG_PROFILE_CREATED,
@@ -124,11 +113,6 @@ async def list_profiles(
     results = []
     for p in profiles:
         item = ProfileResponse.model_validate(p)
-        provider_id = p.configs.get("provider", {}).get("provider_id")
-        if provider_id:
-            provider = await provider_crud.get(db, provider_id)
-            if provider:
-                item.provider_name = provider.name
         results.append(item)
 
     page_data = PageData(
@@ -150,12 +134,11 @@ async def activate_profile(
     if not profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    provider_id = profile.configs.get("provider", {}).get("provider_id")
-    if not provider_id or provider_id <= 0:
+    # 校验 chat_channel 配置存在
+    provider_config = profile.configs.get("provider", {})
+    chat_channel = provider_config.get("chat_channel")
+    if not chat_channel or not chat_channel.get("rules"):
         raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
-
-    if not await provider_crud.get(db, provider_id):
-        raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
 
     await db.execute(update(profile_crud.model).values(is_active=False))
     profile.is_active = True
@@ -175,17 +158,8 @@ async def update_profile(
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
     if profile_in.configs:
-        provider_id = profile_in.configs.get("provider", {}).get("provider_id")
-        if provider_id and provider_id > 0:
-            if not await provider_crud.get(db, provider_id):
-                raise ParameterException(constants.ERR_PROVIDER_NOT_FOUND)
-
-        embedding_provider_id = profile_in.configs.get("provider", {}).get("embedding_provider_id")
-        if embedding_provider_id and embedding_provider_id > 0:
-            if not await provider_crud.get(db, embedding_provider_id):
-                raise ParameterException(constants.ERR_PROFILE_EMBEDDING_PROVIDER_NOT_FOUND)
-
-        await validate_rerank_provider(db, profile_in.configs.get("provider", {}))
+        provider_config = profile_in.configs.get("provider", {})
+        await validate_channel_configs(provider_config)
 
     if profile_in.name and profile_in.name != db_profile.name:
         if await profile_crud.get_by_name(db, profile_in.name):
@@ -196,14 +170,8 @@ async def update_profile(
             raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
 
     db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in)
-    # Re-fetch with relations
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = ProfileResponse.model_validate(db_profile)
-    provider_id = db_profile.configs.get("provider", {}).get("provider_id")
-    if provider_id:
-        provider = await provider_crud.get(db, provider_id)
-        if provider:
-            res_data.provider_name = provider.name
     return StandardResponse.success(
         data=res_data,
         message=constants.MSG_PROFILE_UPDATED,
@@ -220,7 +188,6 @@ async def delete_profile(
     if not db_profile:
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
-    # 简单统计逻辑依然可以保留
     count = len(await profile_crud.get_multi(db))
     if count <= 1:
         raise ParameterException(constants.ERR_DELETE_LAST_PROFILE)

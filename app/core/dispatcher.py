@@ -1,3 +1,8 @@
+"""对话调度器：渠道管理架构适配版
+
+对话调度走 chat_channel：路由选择 → 从 model_entry 读取参数 → LLMClient 调用 → 失败降级重试
+"""
+
 import asyncio
 import json
 import time
@@ -11,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.channel_router import select_channel
 from app.core.constants import (
     ERR_CHAT_PROVIDER_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
@@ -21,10 +27,8 @@ from app.core.crud.active_session import (
 from app.core.crud.profile import (
     profile_crud,
 )
-from app.core.crud.provider import provider_crud
-
-# CRUD Imports
 from app.core.crud.user import user_crud
+from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.exceptions import (
     BaseBusinessException,
     LLMException,
@@ -32,6 +36,7 @@ from app.core.exceptions import (
 )
 from app.core.i18n import t
 from app.core.log import (
+    channel_log_extra,
     get_logger,
 )
 from app.core.prompts import (
@@ -48,6 +53,7 @@ from app.core.utils.dispatcher.save_assistant_message import save_assistant_mess
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -59,6 +65,55 @@ from app.providers.llm.client import (
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
+
+
+def _get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
+    """从模型条目中提取多模态能力"""
+    return (
+        model_entry.get("image_understanding", False),
+        model_entry.get("audio_understanding", False),
+        model_entry.get("video_understanding", False),
+    )
+
+
+def _resolve_chat_params(model_entry: dict, chat_channel) -> dict:
+    """从模型条目与对话渠道中解析对话参数。"""
+    return {
+        "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
+        "top_p": model_entry.get("top_p"),
+        "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else 2048,
+        "chat_timeout": chat_channel.chat_timeout,
+        "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else 4,
+    }
+
+
+def _format_exception_message(exc: Exception) -> str:
+    if isinstance(exc, BaseBusinessException):
+        return t(exc.message, default=exc.message, **exc.kwargs)
+    return str(exc)
+
+
+def _reassemble_multimodal_messages(
+    messages: list[InternalMessage],
+    image_understanding: bool,
+    audio_understanding: bool,
+    video_understanding: bool,
+) -> None:
+    """按给定多模态能力就地重组消息列表中带附件的用户消息。
+
+    依赖 MessageAssembler.assemble 的幂等性：可对已组装过的消息安全重复调用，
+    用于降级换渠道后按新渠道能力重新组装附件内容。
+    """
+    for idx, m in enumerate(messages):
+        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+            is_history = idx != len(messages) - 1
+            messages[idx] = MessageAssembler.assemble(
+                m,
+                image_understanding=image_understanding,
+                audio_understanding=audio_understanding,
+                video_understanding=video_understanding,
+                is_history=is_history,
+            )
 
 
 class ChatDispatcher:
@@ -109,13 +164,45 @@ class ChatDispatcher:
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
 
-                    messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
-
-                    chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
-                    if not chat_provider:
+                    # ========== 渠道路由选择 ==========
+                    chat_channel = cfg.provider.chat_channel
+                    chat_cursor_key = f"{profile.id}:CHAT"
+                    selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream", cursor_key=chat_cursor_key)
+                    if not selection:
                         raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
+                    chat_provider, model_entry, _channel_rule = selection
+                    img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
+                    chat_params = _resolve_chat_params(model_entry, chat_channel)
+
+                    embedding_profile_available = await is_embedding_profile_available(db, profile)
+
+                    messages = await prepare_messages(
+                        db,
+                        session_id,
+                        uid,
+                        profile,
+                        cfg,
+                        initial_msg,
+                        message,
+                        is_first_iter,
+                        context_window_k=chat_params["context_window_k"],
+                        embedding_profile_available=embedding_profile_available,
+                    )
+
+                    # 重新组装带附件的多模态消息（使用模型实际的多模态能力）
+                    for idx, m in enumerate(messages):
+                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+                            is_history = idx != len(messages) - 1
+                            messages[idx] = MessageAssembler.assemble(
+                                m,
+                                image_understanding=img_understanding,
+                                audio_understanding=audio_understanding,
+                                video_understanding=video_understanding,
+                                is_history=is_history,
+                            )
+
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -124,8 +211,8 @@ class ChatDispatcher:
                         new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
                             logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
-                            current_turn = 0  # 重置轮次限制
-                            append_new_user_messages(cfg, messages, new_user_msgs)
+                            current_turn = 0
+                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
                         current_turn += 1
 
@@ -137,28 +224,50 @@ class ChatDispatcher:
                         else:
                             current_tools = tools
 
-                        response = await LLMClient.generate(
-                            api_key=chat_provider.api_key,
-                            base_url=chat_provider.base_url,
-                            model_id=cfg.provider.model_id,
-                            messages=messages,
-                            temperature=cfg.provider.temperature,
-                            max_tokens=cfg.provider.max_tokens,
-                            tools=current_tools,
-                            protocol=getattr(chat_provider, "protocol", "openai"),
-                            timeout=cfg.provider.chat_timeout,
-                        )
+                        excluded_priorities: set[int] = set()
+                        while True:
+                            try:
+                                response = await LLMClient.generate(
+                                    api_key=chat_provider.api_key,
+                                    base_url=chat_provider.base_url,
+                                    model_id=model_entry["model_id"],
+                                    messages=messages,
+                                    temperature=chat_params["temperature"],
+                                    top_p=chat_params["top_p"],
+                                    max_tokens=chat_params["max_tokens"],
+                                    tools=current_tools,
+                                    protocol=getattr(chat_provider, "protocol", "openai"),
+                                    timeout=chat_params["chat_timeout"],
+                                )
+                                # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
+                                ai_msg = response.message
+                                if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+                                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                break
+                            except LLMException as exc:
+                                # 仅捕获 LLM 调用相关异常（连接失败/超时/状态码错误/空响应等）做降级，
+                                # 组装、协议转换或代码缺陷类异常向上抛出，避免掩盖真实问题
+                                excluded_priorities.add(_channel_rule.priority)
+                                logger.bind(
+                                    uid=uid,
+                                    session_id=session_id,
+                                    **channel_log_extra(chat_provider, model_entry),
+                                ).warning(f"对话渠道调用失败，降级到下一优先级组重试: {_format_exception_message(exc)}")
+                                selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
+                                if not selection:
+                                    raise
+                                chat_provider, model_entry, _channel_rule = selection
+                                img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
+                                chat_params = _resolve_chat_params(model_entry, chat_channel)
+                                # 降级换渠道后，按新渠道的多模态能力重组带附件的消息，
+                                # 避免把图片/音视频内容发往不支持该模态的渠道
+                                _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
-                        ai_msg = response.message
                         logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
 
-                        if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
-                            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-
                         messages.append(ai_msg)
-                        turn_messages.append(ai_msg)  # 记录到增量历史
+                        turn_messages.append(ai_msg)
 
-                        # save_assistant_message 内部会对 ai_msg 引用进行 Markdown 洗理，因此其 content 会被更新
                         await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
 
                         if not ai_msg.tool_calls:
@@ -168,22 +277,19 @@ class ChatDispatcher:
                                 break
 
                             logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
-                            append_new_user_messages(cfg, messages, new_user_msgs)
+                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
                             current_turn = 0
                             continue
 
-                        # 并行工具调用处理
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
                             await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
 
-                        # 使用信号量控制并发执行数，确保同步和异步工具都受 executor_max_workers 约束
                         sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
 
                         async def wrapped_tool_call(tc):
                             async with sem:
-                                # 只有获取信号量后，才创建并运行实际的任务，以确保并发控制生效
                                 task = asyncio.create_task(
                                     process_single_tool(
                                         tc,
@@ -196,6 +302,7 @@ class ChatDispatcher:
                                         current_turn,
                                         uid,
                                         allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                        context_window_k=chat_params["context_window_k"],
                                     )
                                 )
 
@@ -218,11 +325,9 @@ class ChatDispatcher:
                     await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
-                # 锁释放后的“捕获检查”：防止在释放锁的瞬间有新消息到达
                 new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break
-                # 如果发现新消息，while True 会继续，重新竞争锁并进入下一轮处理
 
             return LLMResponse(
                 choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
@@ -270,7 +375,6 @@ class ChatDispatcher:
                     return
 
                 try:
-                    # 获取到锁并进入调度流程时，发送任务开始广播（供前端清空 queued 视觉效果）
                     yield {"type": "task_start", "request_id": request_id}
 
                     cfg = await validate_profile_and_cfg(db, profile)
@@ -278,13 +382,45 @@ class ChatDispatcher:
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
 
-                    messages = await prepare_messages(db, session_id, uid, profile, cfg, initial_msg, message, is_first_iter)
-
-                    chat_provider = await provider_crud.get(db, cfg.provider.provider_id)
-                    if not chat_provider:
+                    # ========== 渠道路由选择 ==========
+                    chat_channel = cfg.provider.chat_channel
+                    chat_cursor_key = f"{profile.id}:CHAT"
+                    selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream", cursor_key=chat_cursor_key)
+                    if not selection:
                         raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
 
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
+                    chat_provider, model_entry, _channel_rule = selection
+                    img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
+                    chat_params = _resolve_chat_params(model_entry, chat_channel)
+
+                    embedding_profile_available = await is_embedding_profile_available(db, profile)
+
+                    messages = await prepare_messages(
+                        db,
+                        session_id,
+                        uid,
+                        profile,
+                        cfg,
+                        initial_msg,
+                        message,
+                        is_first_iter,
+                        context_window_k=chat_params["context_window_k"],
+                        embedding_profile_available=embedding_profile_available,
+                    )
+
+                    # 重新组装带附件的多模态消息
+                    for idx, m in enumerate(messages):
+                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
+                            is_history = idx != len(messages) - 1
+                            messages[idx] = MessageAssembler.assemble(
+                                m,
+                                image_understanding=img_understanding,
+                                audio_understanding=audio_understanding,
+                                video_understanding=video_understanding,
+                                is_history=is_history,
+                            )
+
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -293,7 +429,7 @@ class ChatDispatcher:
                         new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
                             current_turn = 0
-                            append_new_user_messages(cfg, messages, new_user_msgs)
+                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
                         current_turn += 1
 
@@ -310,47 +446,82 @@ class ChatDispatcher:
 
                         response_id = str(uuid.uuid4())
 
-                        async for chunk in LLMClient.generate_stream(
-                            api_key=chat_provider.api_key,
-                            base_url=chat_provider.base_url,
-                            model_id=cfg.provider.model_id,
-                            messages=messages,
-                            temperature=cfg.provider.temperature,
-                            max_tokens=cfg.provider.max_tokens,
-                            tools=current_tools,
-                            protocol=getattr(chat_provider, "protocol", "openai"),
-                            timeout=cfg.provider.chat_timeout,
-                        ):
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
-                            choice = choices[0]
-                            delta = choice.get("delta", {})
+                        excluded_priorities: set[int] = set()
+                        while True:
+                            emitted_chunk = False
+                            try:
+                                async for chunk in LLMClient.generate_stream(
+                                    api_key=chat_provider.api_key,
+                                    base_url=chat_provider.base_url,
+                                    model_id=model_entry["model_id"],
+                                    messages=messages,
+                                    temperature=chat_params["temperature"],
+                                    top_p=chat_params["top_p"],
+                                    max_tokens=chat_params["max_tokens"],
+                                    tools=current_tools,
+                                    protocol=getattr(chat_provider, "protocol", "openai"),
+                                    timeout=chat_params["chat_timeout"],
+                                ):
+                                    choices = chunk.get("choices", [])
+                                    if not choices:
+                                        continue
+                                    choice = choices[0]
+                                    delta = choice.get("delta", {})
 
-                            content = delta.get("content")
-                            if content:
-                                current_content_chunks.append(content)
-                                yield {
-                                    "type": "content",
-                                    "content": content,
-                                    "turn": current_turn,
-                                    "response_id": response_id,
-                                    "request_id": request_id,
-                                    "session_id": session_id,
-                                }
+                                    content = delta.get("content")
+                                    if content:
+                                        emitted_chunk = True
+                                        current_content_chunks.append(content)
+                                        yield {
+                                            "type": "content",
+                                            "content": content,
+                                            "turn": current_turn,
+                                            "response_id": response_id,
+                                            "request_id": request_id,
+                                            "session_id": session_id,
+                                        }
 
-                            tool_calls = delta.get("tool_calls")
-                            if tool_calls:
-                                for tc in tool_calls:
-                                    idx = tc.get("index", 0)
-                                    if idx not in current_tool_calls_map:
-                                        current_tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                                    if tc.get("id"):
-                                        current_tool_calls_map[idx]["id"] = tc.get("id")
-                                    if tc.get("function", {}).get("name"):
-                                        current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
-                                    if tc.get("function", {}).get("arguments"):
-                                        current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+                                    tool_calls = delta.get("tool_calls")
+                                    if tool_calls:
+                                        emitted_chunk = True
+                                        for tc in tool_calls:
+                                            idx = tc.get("index", 0)
+                                            if idx not in current_tool_calls_map:
+                                                current_tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                                            if tc.get("id"):
+                                                current_tool_calls_map[idx]["id"] = tc.get("id")
+                                            if tc.get("function", {}).get("name"):
+                                                current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
+                                            if tc.get("function", {}).get("arguments"):
+                                                current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
+
+                                # 流式结束后若本轮未产出任何有效内容（既无文本也无工具调用），
+                                # 视为空响应：此时尚未向前端推送过内容，可安全降级到下一优先级组重试
+                                stream_text = "".join(current_content_chunks).strip()
+                                stream_has_tool = any(v.get("name") for v in current_tool_calls_map.values())
+                                if not stream_text and not stream_has_tool:
+                                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                break
+                            except LLMException as exc:
+                                # 仅捕获 LLM 调用相关异常做降级；已向前端推送过内容则不可降级，直接抛出
+                                if emitted_chunk:
+                                    raise
+                                excluded_priorities.add(_channel_rule.priority)
+                                logger.bind(
+                                    uid=uid,
+                                    session_id=session_id,
+                                    **channel_log_extra(chat_provider, model_entry),
+                                ).warning(f"流式对话渠道调用失败，降级到下一优先级组重试: {_format_exception_message(exc)}")
+                                selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
+                                if not selection:
+                                    raise
+                                chat_provider, model_entry, _channel_rule = selection
+                                img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
+                                chat_params = _resolve_chat_params(model_entry, chat_channel)
+                                # 降级换渠道后，按新渠道的多模态能力重组带附件的消息
+                                _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
+                                current_tool_calls_map = {}
+                                current_content_chunks = []
 
                         final_content = "".join(current_content_chunks)
                         final_tool_calls = []
@@ -376,7 +547,6 @@ class ChatDispatcher:
 
                         saved_msg = await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
 
-                        # 向前端推送当前轮次结束以及清洗后的最终内容，供前端通过 response_id 覆盖
                         if saved_msg:
                             yield {
                                 "type": "turn_end",
@@ -391,7 +561,7 @@ class ChatDispatcher:
                             if not new_user_msgs:
                                 break
 
-                            append_new_user_messages(cfg, messages, new_user_msgs)
+                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
                             current_turn = 0
                             continue
 
@@ -410,12 +580,10 @@ class ChatDispatcher:
                                 "session_id": session_id,
                             }
 
-                        # 使用信号量控制并发执行数，确保同步和异步工具都受 executor_max_workers 约束
                         sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
 
                         async def wrapped_tool_call(tc):
                             async with sem:
-                                # 只有获取信号量后，才创建并运行实际的任务，以确保并发控制生效
                                 task = asyncio.create_task(
                                     process_single_tool(
                                         tc,
@@ -428,6 +596,7 @@ class ChatDispatcher:
                                         current_turn,
                                         uid,
                                         allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                        context_window_k=chat_params["context_window_k"],
                                     )
                                 )
 
@@ -460,7 +629,6 @@ class ChatDispatcher:
                     await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
-                # 锁释放后的“捕获检查”
                 new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break

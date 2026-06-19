@@ -1,4 +1,6 @@
 from app.core.crud.session import session_crud
+from app.core.exceptions import BaseBusinessException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.models.message import InternalMessage, MessageRole
@@ -16,9 +18,13 @@ async def generate_session_title(
     model_id: str,
     protocol: str = "openai",
     max_tokens: int = 200,
+    raise_on_error: bool = False,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
+
+    raise_on_error 为 True 时，调用失败将向上抛出异常（供调用方做渠道降级重试）；
+    为 False 时沿用旧行为，捕获异常并返回 None。
     """
     logger.bind(uid=uid, session_id=session_id).info(f"开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={first_message}")
     try:
@@ -58,5 +64,8 @@ async def generate_session_title(
         return None
 
     except Exception as e:
-        logger.bind(uid=uid, session_id=session_id).error(f"生成会话标题失败: {e}")
+        msg = t(e.message, default=e.message, **e.kwargs) if isinstance(e, BaseBusinessException) else str(e)
+        logger.bind(uid=uid, session_id=session_id).error(f"生成会话标题失败: {msg}")
+        if raise_on_error:
+            raise
         return None

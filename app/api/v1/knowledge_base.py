@@ -52,7 +52,7 @@ async def create_knowledge_base(
     profile = await db.get(Profile, kb_in.profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NOT_FOUND)
-    await get_profile_embedding_config(db, profile)
+    await get_profile_embedding_config(db, profile, call_context="knowledge_base_create_embedding_check")
 
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
@@ -220,7 +220,7 @@ async def import_document(
     if not chunks:
         raise HTTPException(status_code=400, detail=constants.ERR_KB_FILE_EMPTY)
 
-    embeddings = await embed_chunks(db, profile, chunks, batch_size)
+    embeddings = await embed_chunks(db, profile, chunks, batch_size, call_context="knowledge_base_document_import_embedding")
     document_uuid = uuid.uuid4().hex
     chunk_ids = [f"kb_{kb.id}_doc_{document_uuid}_chunk_{index}" for index in range(len(chunks))]
     metadatas = [

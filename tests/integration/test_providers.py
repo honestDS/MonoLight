@@ -50,11 +50,16 @@ async def test_provider_full_lifecycle():
         )
         assert r_ok.status_code == 200
 
-        # 测试创建 Embedding 类型的 Provider
+        # 测试创建含 EMBEDDING 模型条目的 Provider
         r_emb = await ac.post(
             "/api/v1/providers/create",
-            json={"name": "PEmb", "provider_type": "OPENAI", "usage": "EMBEDDING", "api_key": "k_emb"},
+            json={
+                "name": "PEmb",
+                "provider_type": "OPENAI",
+                "api_key": "k_emb",
+                "model_ids": [{"model_id": "text-embedding-3-small", "usage": "EMBEDDING"}],
+            },
             headers=headers,
         )
         assert r_emb.status_code == 200
-        assert r_emb.json()["data"]["usage"] == "EMBEDDING"
+        assert r_emb.json()["data"]["model_ids"][0]["usage"] == "EMBEDDING"
