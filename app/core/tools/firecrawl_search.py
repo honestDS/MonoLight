@@ -4,6 +4,7 @@ from typing import Any
 from firecrawl import AsyncV1FirecrawlApp
 from firecrawl.v1.client import V1ScrapeOptions
 
+from app.core.i18n import t
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -68,7 +69,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
             return json.dumps({"error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。", "system_info": system_info}, ensure_ascii=False)
 
         try:
-            self.logger.bind(uid=self.uid, query=query).info(f"Firecrawl searching: (limit={limit}, options={kwargs})")
+            self.logger.bind(uid=self.uid, query=query).info(t("LOG_FIRECRAWL_SEARCHING", limit=limit, options=kwargs))
 
             # 兼容处理：将 scrapeOptions 转换为 scrape_options
             if "scrapeOptions" in kwargs:
@@ -92,7 +93,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
             return json.dumps({"status": "success", "query": query, "results": results_dict, "system_info": system_info}, ensure_ascii=False)
 
         except Exception as e:
-            self.logger.bind(uid=self.uid, query=query).error("Firecrawl search failed", exc_info=True)
+            self.logger.bind(uid=self.uid, query=query).error(t("LOG_FIRECRAWL_SEARCH_FAILED"), exc_info=True)
             error_msg = str(e)
             if e is None or "NoneType" in error_msg:
                 error_msg = "Firecrawl 服务响应异常（空响应）。请检查网络连接或 Firecrawl 服务状态。"

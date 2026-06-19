@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 from app.core.crud.profile import profile_crud
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.prompts import CONFIRMATION_PREFIX
@@ -58,7 +59,7 @@ class ShellExecutor(BaseExecutor):
                     cfg = ProfileConfig.model_validate(profile.configs)
                     return cfg.tool.shell_timeout
         except Exception as e:
-            self.logger.error(f"Failed to get profile timeout: {e}")
+            self.logger.error(t("LOG_SHELL_PROFILE_TIMEOUT_FAILED", error=str(e)))
         return 30.0
 
     async def execute(self, command: str) -> str:
@@ -90,7 +91,7 @@ class ShellExecutor(BaseExecutor):
 
         # Windows 下的兼容性处理：如果不是 ProactorEventLoop，则使用同步运行+线程池降级
         if sys.platform == "win32" and "Proactor" not in loop_type:
-            t_logger.warning(f"[{self.uid}] Using synchronous fallback for Windows {loop_type}")
+            t_logger.warning(t("LOG_SHELL_WINDOWS_SYNC_FALLBACK", uid=self.uid, loop_type=loop_type))
 
             # 使用 subprocess.Popen 并配合 asyncio，以便可以主动终止进程
             process = None

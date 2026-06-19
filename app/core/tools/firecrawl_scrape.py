@@ -2,6 +2,7 @@ import json
 
 from firecrawl import AsyncV1FirecrawlApp
 
+from app.core.i18n import t
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -45,7 +46,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             return json.dumps({"error": "Firecrawl API Key 未配置。请前往 [系统配置] -> [工具设置] -> [Firecrawl 配置] 中设置有效的 API Key。您可以从 https://www.firecrawl.dev/ 获取。", "system_info": system_info}, ensure_ascii=False)
 
         try:
-            self.logger.bind(uid=self.uid, url=url).info(f"Firecrawl scraping: (formats={formats}, options={kwargs})")
+            self.logger.bind(uid=self.uid, url=url).info(t("LOG_FIRECRAWL_SCRAPING", formats=formats, options=kwargs))
 
             # Firecrawl SDK 提供原生异步 scrape_url，直接 await 便于任务取消时中断底层网络请求
             app = self.get_app()
@@ -57,7 +58,7 @@ class FirecrawlScrapeExecutor(BaseExecutor):
             return json.dumps({"status": "success", "url": url, "data": doc_dict, "system_info": system_info}, ensure_ascii=False)
 
         except Exception as e:
-            self.logger.bind(uid=self.uid, url=url).error("Firecrawl scrape failed", exc_info=True)
+            self.logger.bind(uid=self.uid, url=url).error(t("LOG_FIRECRAWL_SCRAPE_FAILED"), exc_info=True)
             error_msg = str(e)
             if e is None or "NoneType" in error_msg:
                 error_msg = "Firecrawl 服务响应异常（空响应）。请检查网络连接或 Firecrawl 服务状态。"

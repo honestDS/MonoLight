@@ -4,6 +4,7 @@ from typing import (
     Any,
 )
 
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import (
     AUDIT_PROMPT,
@@ -52,7 +53,7 @@ async def audit_command(command: str, provider_url: str, api_key: str, model_id:
 
         return json.loads(clean_content)
     except Exception as e:
-        logger.bind(uid=uid, session_id=session_id, security=True).error(f"Audit Exception: {e}")
+        logger.bind(uid=uid, session_id=session_id, security=True).error(t("LOG_AUDIT_EXCEPTION", error=str(e)))
         return None
 
 
@@ -80,10 +81,10 @@ class AuditMiddleware:
         if token:
             expected_token = hashlib.sha256(real_cmd.strip().encode()).hexdigest()[:12]
             if token == expected_token:
-                logger.bind(uid=uid, session_id=session_id, security=True).info(f"Dynamic token verification passed for command: {real_cmd[:30]}...")
+                logger.bind(uid=uid, session_id=session_id, security=True).info(t("LOG_AUDIT_TOKEN_VERIFIED_COMMAND", command_preview=real_cmd[:30]))
                 return True, real_cmd
             else:
-                logger.bind(uid=uid, session_id=session_id, security=True).warning(f"Token mismatch! Expected: {expected_token}, Got: {token}")
+                logger.bind(uid=uid, session_id=session_id, security=True).warning(t("LOG_AUDIT_TOKEN_MISMATCH", expected_token=expected_token, token=token))
                 return False, real_cmd
         return None, command
 
@@ -137,10 +138,10 @@ class AuditMiddleware:
 
             if provided_token:
                 if provided_token == expected_token:
-                    logger.bind(uid=uid, session_id=session_id, security=True).info(f"Dynamic token verification passed for write_file: {clean_path}")
+                    logger.bind(uid=uid, session_id=session_id, security=True).info(t("LOG_AUDIT_TOKEN_VERIFIED_WRITE_FILE", path=clean_path))
                     is_any_verified = True
                 else:
-                    logger.bind(uid=uid, session_id=session_id, security=True).warning(f"Token mismatch for write_file! Expected: {expected_token}, Got: {provided_token}")
+                    logger.bind(uid=uid, session_id=session_id, security=True).warning(t("LOG_AUDIT_TOKEN_MISMATCH_WRITE_FILE", expected_token=expected_token, token=provided_token))
                     is_any_verified = False
             else:
                 is_any_verified = None
@@ -172,7 +173,7 @@ class AuditMiddleware:
             return None
         # 审计模型被禁用时跳过安全审计（视为用户主动停用该审计能力），不阻断对话主线
         if not provider.is_active:
-            logger.bind(uid=uid, session_id=session_id, security=True).warning("审计模型提供商已被禁用，跳过安全审计")
+            logger.bind(uid=uid, session_id=session_id, security=True).warning(t("LOG_AUDIT_PROVIDER_DISABLED"))
             return None
 
         audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid)

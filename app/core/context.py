@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # CRUD Imports
 from app.core.crud.message import message_crud
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -60,7 +61,12 @@ class ContextManager:
         # 3. 压缩日志记录：仅当确实发生压缩（Token 真正减少）时才记录，避免误导性日志
         if log_data["is_hard_truncated"] and log_data["after"] < log_data["before"]:
             logger.bind(uid=uid, session_id=session_id).info(
-                f"上下文压缩. Tokens: {log_data['before']} -> {log_data['after']} (预留系统词 {reserved_tokens})"
+                t(
+                    "LOG_CONTEXT_COMPRESSED",
+                    before=log_data["before"],
+                    after=log_data["after"],
+                    reserved_tokens=reserved_tokens,
+                )
             )
 
         return final_msgs
@@ -158,7 +164,13 @@ class ContextManager:
 
                 # 如果有缺失，注入虚拟补偿响应
                 if len(found_tool_call_ids) < len(required_ids):
-                    logger.bind(uid=uid, session_id=session_id).warning(f"Tool chain incomplete. Required: {required_ids}, Found: {list(found_tool_call_ids)}. Injecting virtual compensation.")
+                    logger.bind(uid=uid, session_id=session_id).warning(
+                        t(
+                            "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE",
+                            required_ids=required_ids,
+                            found_ids=list(found_tool_call_ids),
+                        )
+                    )
                     for tc_id in required_ids:
                         if tc_id not in found_tool_call_ids:
                             virtual_tool_msg = InternalMessage(
@@ -170,7 +182,7 @@ class ContextManager:
                 i += 1
             elif msg.role == MessageRole.TOOL:
                 # 孤立的工具结果（没有对应的 Assistant 调用），直接舍弃以保持协议合规
-                logger.bind(uid=uid, session_id=session_id).warning(f"Orphan tool result. ID: {msg.tool_call_id}")
+                logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
                 i += 1
             else:
                 # 普通消息直接添加

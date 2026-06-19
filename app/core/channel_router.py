@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig, ChannelRule
 from app.models.provider import ModelProvider
@@ -95,7 +96,7 @@ async def select_channel(
         (provider, model_entry, rule) 三元组，若没有可用渠道则返回 None
     """
     if not channel_cfg or not channel_cfg.rules:
-        logger.warning(f"渠道配置为空或无路由规则，expected_usage={expected_usage}")
+        logger.warning(t("LOG_CHANNEL_CONFIG_EMPTY", expected_usage=expected_usage))
         return None
 
     from app.core.crud.provider import provider_crud
@@ -108,7 +109,7 @@ async def select_channel(
         priority_groups[rule.priority].append(rule)
 
     if not priority_groups:
-        logger.warning("没有路由规则")
+        logger.warning(t("LOG_CHANNEL_NO_RULES"))
         return None
 
     # 按 priority 升序尝试（越小越优先）
@@ -124,13 +125,13 @@ async def select_channel(
         # 组内按 weight 加权轮询选择一个渠道，不在组内重试
         selected_rule = await _pick_round_robin(group_rules, cursor_key or "", priority)
         if not selected_rule:
-            logger.bind(priority=priority).warning("组内无有效权重渠道（所有权重为 0）")
+            logger.bind(priority=priority).warning(t("LOG_CHANNEL_ZERO_WEIGHT"))
             continue
 
         # 校验 Provider 存在且有效
         provider = await provider_crud.get(db, selected_rule.provider_id)
         if not provider or not provider.is_active:
-            logger.bind(provider_id=selected_rule.provider_id).warning("渠道对应的 Provider 不存在或已禁用")
+            logger.bind(provider_id=selected_rule.provider_id).warning(t("LOG_CHANNEL_PROVIDER_UNAVAILABLE"))
             continue
 
         # 校验 Provider 的 model_ids 中存在 model_id 且 usage 匹配的条目
@@ -140,7 +141,7 @@ async def select_channel(
                 provider_id=provider.id,
                 model_id=selected_rule.model_id,
                 expected_usage=expected_usage,
-            ).warning("Provider 中未找到匹配 model_id 与 usage 的模型条目")
+            ).warning(t("LOG_CHANNEL_MODEL_ENTRY_NOT_FOUND"))
             continue
 
         if log_selection:
@@ -154,9 +155,9 @@ async def select_channel(
                 priority=priority,
                 expected_usage=expected_usage,
                 call_context=call_context or "unspecified",
-            ).info(f"选择渠道：{channel_name}")
+            ).info(t("LOG_CHANNEL_SELECTED", channel_name=channel_name))
 
         return provider, model_entry, selected_rule
 
-    logger.warning(f"所有优先级组的渠道均不可用，expected_usage={expected_usage}")
+    logger.warning(t("LOG_CHANNEL_ALL_UNAVAILABLE", expected_usage=expected_usage))
     return None

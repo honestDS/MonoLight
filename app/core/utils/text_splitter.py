@@ -1,10 +1,13 @@
 import re
 
+from app.core import constants
+from app.core.exceptions import ParameterException
+
 
 class TextSplitter:
     def __init__(self, chunk_size: int, chunk_overlap: int):
         if chunk_overlap >= chunk_size:
-            raise ValueError("分块重叠必须小于分块大小")
+            raise ParameterException(constants.ERR_KB_CHUNK_OVERLAP_ERROR)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 

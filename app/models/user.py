@@ -5,7 +5,6 @@ from typing import (
 
 from pydantic import (
     ConfigDict,
-    field_validator,
 )
 from pydantic import (
     Field as PydanticField,
@@ -66,13 +65,6 @@ class UserCreate(SQLModel):
         json_schema_extra={"example": "secure_pass_123"},
     )
 
-    @field_validator("password")
-    @classmethod
-    def password_length_check(cls, v: str | None) -> str | None:
-        if v and len(v.encode("utf-8")) > 72:
-            raise ValueError("password must not exceed 72 bytes")
-        return v
-
     model_config = ConfigDict(json_schema_extra={"example": {"username": "new_user_01", "password": "secure_pass_123"}})
 
 
@@ -92,13 +84,6 @@ class UserUpdate(SQLModel):
         json_schema_extra={"example": "new_secure_password"},
     )
     is_active: bool | None = PydanticField(None, json_schema_extra={"example": True})
-
-    @field_validator("password")
-    @classmethod
-    def password_length_check(cls, v: str | None) -> str | None:
-        if v and len(v.encode("utf-8")) > 72:
-            raise ValueError("password must not exceed 72 bytes")
-        return v
 
     model_config = ConfigDict(
         json_schema_extra={

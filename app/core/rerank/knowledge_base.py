@@ -8,6 +8,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core import constants
 from app.core.channel_router import select_channel
 from app.core.exceptions import RerankException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.schemas import RerankConfig
 from app.core.retrieval.schemas import RetrievalHit
@@ -36,7 +37,7 @@ async def get_profile_rerank_config(
     try:
         rerank_channel = ChannelConfig.model_validate(rerank_channel_raw)
     except Exception as e:
-        logger.bind(profile_id=profile.id).warning(f"解析 rerank_channel 配置失败，跳过 rerank: {e}")
+        logger.bind(profile_id=profile.id).warning(t("LOG_RERANK_CONFIG_PARSE_FAILED", error=str(e)))
         return None
 
     if not rerank_channel or not rerank_channel.rules:
@@ -102,7 +103,7 @@ async def rerank_retrieval_hits(
     for result in results:
         index = result.index
         if index < 0 or index >= len(hits) or index in used_indexes:
-            logger.bind(index=index, hit_count=len(hits)).warning("Rerank 返回的 index 非法或重复，已丢弃")
+            logger.bind(index=index, hit_count=len(hits)).warning(t("LOG_RERANK_INDEX_INVALID"))
             continue
         hit = hits[index]
         hit.rerank_score = result.relevance_score

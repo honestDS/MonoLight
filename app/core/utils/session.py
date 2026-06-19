@@ -26,7 +26,7 @@ async def generate_session_title(
     raise_on_error 为 True 时，调用失败将向上抛出异常（供调用方做渠道降级重试）；
     为 False 时沿用旧行为，捕获异常并返回 None。
     """
-    logger.bind(uid=uid, session_id=session_id).info(f"开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={first_message}")
+    logger.bind(uid=uid, session_id=session_id).info(t("LOG_SESSION_TITLE_STARTED", uid=uid, session_id=session_id, model_id=model_id, message=first_message))
     try:
         first_message = first_message.strip()
         if first_message == "":
@@ -47,7 +47,7 @@ async def generate_session_title(
         )
 
         title = response.message.content.strip()
-        logger.bind(uid=uid, session_id=session_id).info(f"LLM 成功生成会话标题: {title}")
+        logger.bind(uid=uid, session_id=session_id).info(t("LOG_SESSION_TITLE_GENERATED", title=title))
         if title:
             # 移除可能存在的引号
             title = title.strip('"').strip("'")
@@ -65,7 +65,7 @@ async def generate_session_title(
 
     except Exception as e:
         msg = t(e.message, default=e.message, **e.kwargs) if isinstance(e, BaseBusinessException) else str(e)
-        logger.bind(uid=uid, session_id=session_id).error(f"生成会话标题失败: {msg}")
+        logger.bind(uid=uid, session_id=session_id).error(t("LOG_SESSION_TITLE_FAILED", error=msg))
         if raise_on_error:
             raise
         return None

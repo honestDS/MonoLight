@@ -7,6 +7,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from app.core.i18n import t
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
 
@@ -200,12 +201,12 @@ class LogManager:
         # 记录工具调用日志
         lines = [line.strip() for line in command.splitlines() if line.strip()]
         log_cmd = lines if len(lines) > 1 else command.strip()
-        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(f"Turn {turn} | Tool: {tool_name} | Args: {log_cmd}")
+        logger.bind(tool_call=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_CALL", turn=turn, tool_name=tool_name, args=log_cmd))
 
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
-        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(f"Turn {turn} | Result: {result}")
+        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=result))
 
 
 def get_logger(name: str):

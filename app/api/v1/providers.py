@@ -5,6 +5,7 @@ CRUD 支持 model_ids 字段；移除 usage 字段
 
 import copy
 import json
+import re
 
 from fastapi import (
     APIRouter,
@@ -29,6 +30,7 @@ from app.models.provider import (
     ProviderResponse,
     ProviderType,
     ProviderUpdate,
+    validate_provider_model_ids,
 )
 from app.providers.database import get_db
 from app.providers.embedding import EmbeddingClient
@@ -277,6 +279,18 @@ async def create_provider(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
+    validation_error, validation_kwargs = validate_provider_model_ids(provider_in.model_ids)
+    if validation_error:
+        return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
+
+    if provider_in.base_url and not re.match(r"^https?://", provider_in.base_url):
+        return StandardResponse.error(code=422, message=constants.ERR_PROVIDER_BASE_URL_SCHEME)
+
+    if provider_in.model_ids:
+        has_rerank = any(item.get("usage") == ModelUsage.RERANK for item in provider_in.model_ids)
+        if has_rerank and not provider_in.base_url:
+            return StandardResponse.error(code=422, message=constants.ERR_PROVIDER_BASE_URL_REQUIRED_FOR_RERANK)
+
     if await provider_crud.get_by_name(db, provider_in.name):
         raise ParameterException(constants.ERR_PROVIDER_NAME_EXISTS)
 
@@ -342,17 +356,12 @@ async def update_provider(
 
     # 校验 model_ids 合法性（如果传入）
     if provider_in.model_ids is not None:
-        seen_model_keys: set[tuple[str, str]] = set()
-        for i, item in enumerate(provider_in.model_ids):
-            try:
-                validated = ProviderModelItem.model_validate(item)
-            except Exception as e:
-                raise ParameterException(f"model_ids[{i}] 校验失败: {e}")
+        validation_error, validation_kwargs = validate_provider_model_ids(provider_in.model_ids)
+        if validation_error:
+            return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
-            model_key = (validated.usage.value, validated.model_id)
-            if model_key in seen_model_keys:
-                raise ParameterException(f"同一用途下模型 ID 不能重复: {validated.usage.value}/{validated.model_id}")
-            seen_model_keys.add(model_key)
+    if provider_in.base_url and not re.match(r"^https?://", provider_in.base_url):
+        return StandardResponse.error(code=422, message=constants.ERR_PROVIDER_BASE_URL_SCHEME)
 
     # 跨字段校验：结合库内既有数据判断 RERANK 的 base_url 必填约束
     final_model_ids = provider_in.model_ids if provider_in.model_ids is not None else db_obj.model_ids
@@ -360,7 +369,7 @@ async def update_provider(
     if final_model_ids:
         has_rerank = any(item.get("usage") == ModelUsage.RERANK for item in final_model_ids)
         if has_rerank and not final_base_url:
-            raise ParameterException(constants.ERR_PROVIDER_RERANK_NO_URL)
+            return StandardResponse.error(code=422, message=constants.ERR_PROVIDER_BASE_URL_REQUIRED_FOR_RERANK)
 
     # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
     old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []

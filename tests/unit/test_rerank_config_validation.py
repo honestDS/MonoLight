@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from app.models.channel import ChannelConfig
 from app.models.profile import ProfileConfig, ProviderConfig
-from app.models.provider import ModelUsage, ProviderBase, ProviderType, ProviderUpdate
+from app.models.provider import ModelUsage, ProviderBase, ProviderType, ProviderUpdate, validate_provider_model_ids
 
 
 def test_provider_config_channel_defaults():
@@ -26,15 +26,17 @@ def test_profile_config_fills_channel_defaults_for_legacy_configs():
     assert cfg.provider.rerank_channel is None
 
 
-def test_rerank_model_entry_requires_base_url():
-    with pytest.raises(ValidationError):
-        ProviderBase(
-            name="rerank-provider",
-            provider_type=ProviderType.OPENAI,
-            api_key="fake-key",
-            base_url=None,
-            model_ids=[{"model_id": "rerank-model", "usage": ModelUsage.RERANK}],
-        )
+def test_rerank_model_entry_without_base_url_is_deferred_to_api_validation():
+    provider = ProviderBase(
+        name="rerank-provider",
+        provider_type=ProviderType.OPENAI,
+        api_key="fake-key",
+        base_url=None,
+        model_ids=[{"model_id": "rerank-model", "usage": ModelUsage.RERANK}],
+    )
+
+    assert provider.base_url is None
+    assert provider.model_ids[0]["usage"] == ModelUsage.RERANK
 
 
 def test_rerank_model_entry_with_base_url_ok():
@@ -60,12 +62,14 @@ def test_provider_update_allows_same_model_id_for_different_usage():
     assert len(update.model_ids) == 2
 
 
-def test_provider_update_rejects_duplicate_model_id_in_same_usage():
-    with pytest.raises(ValidationError):
-        ProviderUpdate(
-            model_ids=[
-                {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
-                {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
-            ]
-        )
+def test_provider_model_id_validation_reports_duplicate_model_id_in_same_usage():
+    error_key, error_kwargs = validate_provider_model_ids(
+        [
+            {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
+            {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
+        ]
+    )
+
+    assert error_key == "ERR_PROVIDER_MODEL_IDS_DUPLICATED"
+    assert error_kwargs == {"usage": ModelUsage.CHAT.value, "model_id": "gpt-4o"}
 

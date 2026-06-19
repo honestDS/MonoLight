@@ -7,6 +7,7 @@ import os
 
 from PIL import Image
 
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import FilePart, ImagePart, InternalMessage, TextPart
 
@@ -36,7 +37,7 @@ class MessageAssembler:
                 return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
             # 否则进行尺寸和质量压缩
-            logger.bind().info(f"图片 {path} 大小 ({file_size_kb:.2f}KB) 超过限制，正在压缩...")
+            logger.bind().info(t("LOG_IMAGE_COMPRESSING", path=path, file_size_kb=file_size_kb))
 
             scale_factor = (max_size_kb / file_size_kb) ** 0.5
             scale_factor = max(0.3, scale_factor)
@@ -50,7 +51,7 @@ class MessageAssembler:
             img.save(buffer, format="JPEG", quality=80, optimize=True)
 
             final_size = len(buffer.getvalue()) / 1024
-            logger.bind().info(f"图片已压缩至 {new_width}x{new_height}，新大小: {final_size:.2f}KB")
+            logger.bind().info(t("LOG_IMAGE_COMPRESSED", width=new_width, height=new_height, size_kb=final_size))
 
             return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
@@ -107,7 +108,7 @@ class MessageAssembler:
                             else:
                                 content_parts.append(TextPart(text=f"[图片丢失: {attachment}]"))
                         except Exception as e:
-                            logger.bind().error(f"处理图片 {attachment} 失败: {e}")
+                            logger.bind().error(t("LOG_IMAGE_PROCESS_FAILED", attachment=attachment, error=str(e)))
                             content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][图片处理失败: {attachment}][系统提示结束]"))
                     else:
                         content_parts.append(TextPart(text=f"[系统提示,此处不是用户说的话][未开启图像理解无法解析图片: {attachment}][系统提示结束]"))

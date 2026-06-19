@@ -9,6 +9,7 @@ import aiohttp
 
 from app.core import constants
 from app.core.exceptions import EmbeddingException, LLMException, RerankException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import (
     InternalMessage,
@@ -72,7 +73,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         except LLMException:
             raise
         except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=False).error(f"OpenAI 对话接口调用失败: {str(e)}")
+            logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_stream(
@@ -163,7 +164,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                                 try:
                                     parsed = json.loads(data_content)
                                 except Exception as json_err:
-                                    logger.bind(model_id=model_id, base_url=base_url).warning(f"解析 SSE 响应行失败: {raw_line}，错误: {json_err}")
+                                    logger.bind(model_id=model_id, base_url=base_url).warning(t("LOG_OPENAI_SSE_PARSE_FAILED", raw_line=raw_line, error=str(json_err)))
                                     continue
                                 if not first_content_yielded and self._stream_chunk_has_payload(parsed):
                                     first_content_yielded = True
@@ -175,7 +176,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         except LLMException:
             raise
         except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=True).error(f"OpenAI 流式对话接口调用失败: {str(e)}")
+            logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     @staticmethod
@@ -236,9 +237,9 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             raise
         except Exception as e:
             if suppress_error_log:
-                logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(f"向量模型接口携带可选参数调用失败，准备降级重试: {str(e)}")
+                logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(t("LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED", error=str(e)))
             else:
-                logger.bind(model_id=model_id, base_url=base_url).error(f"向量模型接口调用失败: {str(e)}")
+                logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_EMBEDDING_FAILED", error=str(e)))
             raise EmbeddingException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
     @staticmethod
@@ -285,7 +286,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         except RerankException:
             raise
         except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url).error(f"Rerank 接口调用失败: {str(e)}")
+            logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_RERANK_FAILED", error=str(e)))
             raise RerankException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
     async def rerank_texts(
@@ -470,7 +471,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                         )
                     )
                 except Exception as e:
-                    logger.bind(tool_call=tc).warning(f"解析工具调用参数失败: {e}")
+                    logger.bind(tool_call=tc).warning(t("LOG_OPENAI_TOOL_ARGS_PARSE_FAILED", error=str(e)))
 
         return InternalMessage(
             role=MessageRole.ASSISTANT,

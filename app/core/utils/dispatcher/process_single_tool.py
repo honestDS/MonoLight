@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.i18n import t
 from app.core.log import (
     LogManager,
     get_logger,
@@ -95,7 +96,7 @@ async def process_single_tool(
                     session_id=session_id,
                     tool_name=tool_name,
                     duration=f"{duration:.3f}s",
-                ).warning(f"工具 {tool_name} 在执行 {duration:.3f}s 后被中止")
+                ).warning(t("LOG_TOOL_ABORTED", tool_name=tool_name, duration=f"{duration:.3f}s"))
 
                 if not task.done():
                     task.cancel()
@@ -118,7 +119,7 @@ async def process_single_tool(
             uid=uid,
             session_id=session_id,
             tool_name=tool_name,
-        ).warning(f"工具 {tool_name} 响应过大，已截断至上下文限制的一半（context_window_k={context_window_k}）")
+        ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
 
     return InternalMessage(
         role=MessageRole.TOOL,

@@ -204,7 +204,7 @@ async def generate_title(
                     uid=uid,
                     session_id=request.session_id,
                     **channel_log_extra(provider, model_entry),
-                ).warning(f"标题生成渠道调用失败，降级到下一优先级组重试: {_format_exception_message(e)}")
+                ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
 
         selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=f"{profile.id}:CHAT")
         if not selection:
@@ -285,14 +285,14 @@ async def chat_websocket(
         except RuntimeError as e:
             # 拦截断开连接后的发送错误
             if "websocket.send" in str(e) and "websocket.close" in str(e):
-                logger.bind(uid=uid, session_id=session_id).info("用户已断开连接，调度器终止")
+                logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
             else:
-                logger.bind(uid=uid, session_id=session_id).error(f"WebSocket 任务运行时错误: {e}")
+                logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(e)))
         except asyncio.CancelledError:
-            logger.bind(uid=uid, session_id=session_id).info("用户已断开连接，调度器终止")
+            logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
             raise
         except Exception:
-            logger.bind(uid=uid, session_id=session_id).error("WebSocket 任务发生异常", exc_info=True)
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
             try:
                 await websocket.send_json({"type": "error", "message": constants.ERR_INTERNAL_SERVER_ERROR})
             except Exception:
@@ -313,7 +313,7 @@ async def chat_websocket(
 
             if action == "abort":
                 await cancel_all_tasks()
-                logger.bind(uid=uid, session_id=session_id).info("接收到中止信号，生成任务及子任务已取消")
+                logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_ABORT_CANCELLED"))
                 continue
 
             if not message and not attachments:
@@ -343,7 +343,7 @@ async def chat_websocket(
                     # 强制显式清理旧会话锁
                     await ws_chat_adapter.release_session_lock(old_session_id)
 
-                    logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info("检测到会话切换，旧任务已终止且锁已显式清理，正在启动新会话任务。")
+                    logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
                     active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
@@ -359,7 +359,7 @@ async def chat_websocket(
                             message,
                             attachments,
                         )
-                    logger.bind(uid=uid, session_id=session_id).info(f"会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。")
+                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
             else:
                 # 3. 无活跃任务：启动新任务
                 active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -369,7 +369,7 @@ async def chat_websocket(
         await cancel_all_tasks()
     except Exception:
         # 异常处理
-        logger.bind(uid=uid).exception("聊天 WebSocket 发生异常")
+        logger.bind(uid=uid).exception(t("LOG_CHAT_WS_EXCEPTION"))
         try:
             await websocket.send_json({"error": t(constants.ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
@@ -388,4 +388,4 @@ async def chat_websocket(
             try:
                 await ws_chat_adapter.release_session_lock(current_session_id)
             except Exception:
-                logger.bind(uid=uid, session_id=current_session_id).error("释放会话锁失败", exc_info=True)
+                logger.bind(uid=uid, session_id=current_session_id).error(t("LOG_CHAT_WS_RELEASE_LOCK_FAILED"), exc_info=True)

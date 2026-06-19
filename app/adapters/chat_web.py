@@ -56,7 +56,7 @@ class WebChatAdapter(BaseChatAdapter):
                 history=[],
             ).model_dump()
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).error(f"Unexpected error in WebChatAdapter: {str(e)}", exc_info=True)
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_ADAPTER_WEB_UNEXPECTED_ERROR", error=str(e)), exc_info=True)
             return LLMResponse(
                 choices=[
                     LLMChoice(

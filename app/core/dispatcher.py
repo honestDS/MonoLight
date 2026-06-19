@@ -131,7 +131,7 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
+            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
             # 1. 初始保存消息
             initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
@@ -146,7 +146,7 @@ class ChatDispatcher:
                 lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
                 if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(f"【调度器/非流】会话 {session_id} 已有活跃调度器，当前请求进入队列。")
+                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_QUEUED", session_id=session_id))
                     return LLMResponse(
                         choices=[
                             LLMChoice(
@@ -210,7 +210,7 @@ class ChatDispatcher:
                         # 检查新指令并合并
                         new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
-                            logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】检测到追加消息，已合并并重置轮次计数。")
+                            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES"))
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
@@ -252,7 +252,7 @@ class ChatDispatcher:
                                     uid=uid,
                                     session_id=session_id,
                                     **channel_log_extra(chat_provider, model_entry),
-                                ).warning(f"对话渠道调用失败，降级到下一优先级组重试: {_format_exception_message(exc)}")
+                                ).warning(t("LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise
@@ -263,7 +263,7 @@ class ChatDispatcher:
                                 # 避免把图片/音视频内容发往不支持该模态的渠道
                                 _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
-                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
+                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
 
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
@@ -276,7 +276,7 @@ class ChatDispatcher:
                             if not new_user_msgs:
                                 break
 
-                            logger.bind(uid=uid, session_id=session_id).info("【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。")
+                            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_RESPONSE_CONTINUE"))
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
                             current_turn = 0
@@ -337,7 +337,7 @@ class ChatDispatcher:
         except BaseBusinessException:
             raise
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).error("调度器错误", exc_info=True)
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_ERROR"), exc_info=True)
             raise ServerException(message=str(e))
 
     @staticmethod
@@ -355,7 +355,7 @@ class ChatDispatcher:
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db)
 
-            logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 用户消息: {message} 附件列表: {str(attachments)}")
+            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
             # 1. 初始保存消息
             initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
@@ -369,7 +369,7 @@ class ChatDispatcher:
                 lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
                 if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(f"【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。")
+                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_STREAM_QUEUED", session_id=session_id))
                     yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued", "request_id": request_id}
                     yield {"type": "done", "session_id": session_id, "history": [], "request_id": request_id}
                     return
@@ -511,7 +511,7 @@ class ChatDispatcher:
                                     uid=uid,
                                     session_id=session_id,
                                     **channel_log_extra(chat_provider, model_entry),
-                                ).warning(f"流式对话渠道调用失败，降级到下一优先级组重试: {_format_exception_message(exc)}")
+                                ).warning(t("LOG_DISPATCHER_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise
@@ -540,7 +540,7 @@ class ChatDispatcher:
 
                         ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
 
-                        logger.bind(uid=uid, session_id=session_id).info(f"[{username}] 第 {current_turn} 轮 | LLM 响应: {ai_msg.content or '[工具调用]'}")
+                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
 
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
@@ -638,5 +638,5 @@ class ChatDispatcher:
         except BaseBusinessException as bbe:
             yield {"type": "error", "message": t(bbe.message, **bbe.kwargs), "request_id": request_id}
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).error("流式调度器错误", exc_info=True)
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_STREAM_ERROR"), exc_info=True)
             yield {"type": "error", "message": str(e), "request_id": request_id}

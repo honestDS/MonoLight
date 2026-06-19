@@ -46,19 +46,19 @@ async def add_new_user(
     if await user_crud.get_by_username(db, user_in.username):
         raise ParameterException(constants.ERR_USER_NAME_EXISTS)
 
-    try:
-        generated_uid = uuid.uuid4().hex
-        new_user = await user_crud.create(
-            db,
-            obj_in=user_in,
-            update_dict={
-                "uid": generated_uid,
-                "hashed_password": get_password_hash(user_in.password) if user_in.password else None,
-                "is_superuser": False,
-            },
-        )
-    except ValueError as e:
-        raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
+    if user_in.password and len(user_in.password.encode("utf-8")) > 72:
+        return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+
+    generated_uid = uuid.uuid4().hex
+    new_user = await user_crud.create(
+        db,
+        obj_in=user_in,
+        update_dict={
+            "uid": generated_uid,
+            "hashed_password": get_password_hash(user_in.password) if user_in.password else None,
+            "is_superuser": False,
+        },
+    )
 
     return StandardResponse.success(data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED)
 
@@ -104,10 +104,9 @@ async def update_user(
 
     update_dict = {}
     if user_in.password:
-        try:
-            update_dict["hashed_password"] = get_password_hash(user_in.password)
-        except ValueError as e:
-            raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
+        if len(user_in.password.encode("utf-8")) > 72:
+            return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+        update_dict["hashed_password"] = get_password_hash(user_in.password)
 
     if user_in.is_active is not None:
         update_dict["is_active"] = user_in.is_active

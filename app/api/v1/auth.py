@@ -12,7 +12,6 @@ from app.core import constants
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
     AuthException,
-    ParameterException,
 )
 from app.core.security import (
     create_access_token,
@@ -31,16 +30,16 @@ router = APIRouter()
 
 @router.post("/login", response_model=StandardResponse)
 async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(get_db)):
+    if len(request.password.encode("utf-8")) > 72:
+        return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+
     user = await user_crud.get_by_username(db, request.username)
 
     if not user or not user.is_active:
         raise AuthException(constants.ERR_USER_NOT_FOUND_OR_DISABLED)
 
-    try:
-        if not user.hashed_password or not verify_password(request.password, user.hashed_password):
-            raise AuthException(constants.ERR_INVALID_CREDENTIALS)
-    except ValueError as e:
-        raise ParameterException(constants.ERR_VALIDATION_FAILED, message=str(e))
+    if not user.hashed_password or not verify_password(request.password, user.hashed_password):
+        raise AuthException(constants.ERR_INVALID_CREDENTIALS)
 
     access_token = create_access_token(data={"sub": user.username})
     return StandardResponse.success(

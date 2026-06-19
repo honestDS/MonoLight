@@ -86,7 +86,7 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
     dense_candidate_k = max(limit, HYBRID_DENSE_CANDIDATE_K)
     sparse_candidate_k = max(limit, HYBRID_SPARSE_CANDIDATE_K)
 
-    logger.bind(collection_name=collection_name, limit=limit, dense_candidate_k=dense_candidate_k, sparse_candidate_k=sparse_candidate_k, retrieval_stage="hybrid_started").info("混合检索开始：准备并发提交稠密检索和稀疏检索")
+    logger.bind(collection_name=collection_name, limit=limit, dense_candidate_k=dense_candidate_k, sparse_candidate_k=sparse_candidate_k, retrieval_stage="hybrid_started").info(t("LOG_RETRIEVAL_HYBRID_STARTED"))
 
     dense_started = time.perf_counter()
     dense_task = asyncio.to_thread(dense_search, collection_name, query_embedding, dense_candidate_k)
@@ -95,20 +95,20 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
     recall_latency_ms = (time.perf_counter() - dense_started) * 1000
 
     if isinstance(dense_result, Exception):
-        logger.bind(collection_name=collection_name, retrieval_type="dense").error(f"知识库稠密检索失败: {dense_result}")
+        logger.bind(collection_name=collection_name, retrieval_type="dense").error(t("LOG_RETRIEVAL_DENSE_FAILED", error=str(dense_result)))
         if isinstance(dense_result, HTTPException):
             raise dense_result
         raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DENSE_RETRIEVAL_FAILED))
 
     dense_hits = dense_result
-    logger.bind(collection_name=collection_name, candidate_k=dense_candidate_k, hit_count=len(dense_hits), retrieval_type="dense", retrieval_stage="finished").info(f"稠密检索完成：取到 {len(dense_hits)} 条信息")
+    logger.bind(collection_name=collection_name, candidate_k=dense_candidate_k, hit_count=len(dense_hits), retrieval_type="dense", retrieval_stage="finished").info(t("LOG_RETRIEVAL_DENSE_FINISHED", count=len(dense_hits)))
 
     sparse_hits: list[RetrievalHit] = []
     if isinstance(sparse_result, Exception):
-        logger.bind(collection_name=collection_name, retrieval_type="sparse").warning(f"知识库稀疏检索失败，已退化为纯稠密结果: {sparse_result}")
+        logger.bind(collection_name=collection_name, retrieval_type="sparse").warning(t("LOG_RETRIEVAL_SPARSE_FAILED", error=str(sparse_result)))
     else:
         sparse_hits = sparse_result
-        logger.bind(collection_name=collection_name, candidate_k=sparse_candidate_k, hit_count=len(sparse_hits), retrieval_type="sparse", retrieval_stage="finished").info(f"稀疏检索完成：取到 {len(sparse_hits)} 条信息")
+        logger.bind(collection_name=collection_name, candidate_k=sparse_candidate_k, hit_count=len(sparse_hits), retrieval_type="sparse", retrieval_stage="finished").info(t("LOG_RETRIEVAL_SPARSE_FINISHED", count=len(sparse_hits)))
 
     rrf_started = time.perf_counter()
     fused_hits = reciprocal_rank_fusion(
@@ -127,7 +127,7 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
         rrf_fusion_latency_ms=round(rrf_fusion_latency_ms, 2),
         fused_count=len(fused_hits),
         retrieval_stage="fusion_finished",
-    ).info("混合检索候选融合完成")
+    ).info(t("LOG_RETRIEVAL_FUSION_FINISHED"))
 
     return fused_hits
 

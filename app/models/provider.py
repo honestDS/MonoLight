@@ -1,12 +1,10 @@
 """Provider 模型：模型提供商定义，包含多模型条目"""
 
 import enum
-import re
 
 from pydantic import (
     BaseModel,
     ConfigDict,
-    model_validator,
 )
 from pydantic import (
     Field as PydanticField,
@@ -45,22 +43,24 @@ class ProviderModelItem(BaseModel):
     description: str | None = PydanticField(None, description="模型描述")
 
 
-def validate_provider_model_ids(model_ids: list[dict] | None) -> None:
+def validate_provider_model_ids(model_ids: list[dict] | None) -> tuple[str | None, dict]:
     """校验模型条目列表：每项符合 ProviderModelItem，且同一 usage 下 model_id 不重复。"""
     if not model_ids:
-        return
+        return None, {}
 
     seen_model_keys: set[tuple[str, str]] = set()
     for i, item in enumerate(model_ids):
         try:
             validated = ProviderModelItem.model_validate(item)
         except Exception as e:
-            raise ValueError(f"model_ids[{i}] 校验失败: {e}")
+            return "ERR_PROVIDER_MODEL_IDS_ITEM_INVALID", {"index": i, "error": str(e)}
 
         model_key = (validated.usage.value, validated.model_id)
         if model_key in seen_model_keys:
-            raise ValueError(f"同一用途下模型 ID 不能重复: {validated.usage.value}/{validated.model_id}")
+            return "ERR_PROVIDER_MODEL_IDS_DUPLICATED", {"usage": validated.usage.value, "model_id": validated.model_id}
         seen_model_keys.add(model_key)
+
+    return None, {}
 
 
 class ProviderBase(SQLModel):
@@ -74,23 +74,6 @@ class ProviderBase(SQLModel):
         sa_column=Column(JSON),
         description="模型条目列表，每项符合 ProviderModelItem 结构",
     )
-
-    @model_validator(mode="after")
-    def validate_model_ids(self) -> "ProviderBase":
-        """校验 model_ids：每一项符合 ProviderModelItem 结构，且同一 usage 下 model_id 不重复"""
-        validate_provider_model_ids(self.model_ids)
-        return self
-
-    @model_validator(mode="after")
-    def validate_base_url(self) -> "ProviderBase":
-        """base_url 格式校验；含 RERANK 的 model_ids 中的任一模型要求 base_url 必填"""
-        if self.base_url and not re.match(r"^https?://", self.base_url):
-            raise ValueError("base_url must start with http:// or https://")
-        if self.model_ids:
-            has_rerank = any(item.get("usage") == ModelUsage.RERANK for item in self.model_ids)
-            if has_rerank and not self.base_url:
-                raise ValueError("含 RERANK 用途的模型时 base_url 必须配置")
-        return self
 
 
 class ModelProvider(ProviderBase, table=True):
@@ -109,18 +92,6 @@ class ProviderUpdate(SQLModel):
     base_url: str | None = None
     is_active: bool | None = None
     model_ids: list[dict] | None = None
-
-    @model_validator(mode="after")
-    def validate_model_ids(self) -> "ProviderUpdate":
-        """校验部分更新传入的 model_ids，避免绕过 API 层手动校验。"""
-        validate_provider_model_ids(self.model_ids)
-        return self
-
-    @model_validator(mode="after")
-    def validate_base_url(self) -> "ProviderUpdate":
-        if self.base_url and not re.match(r"^https?://", self.base_url):
-            raise ValueError("base_url must start with http:// or https://")
-        return self
 
 
 class ProviderResponse(ProviderBase):

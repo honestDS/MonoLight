@@ -161,7 +161,7 @@ async def embed_chunks(
                 model_id=model_id,
                 model_name=model_id,
                 channel_name=f"{provider.name} / {model_id}",
-            ).warning(f"嵌入渠道调用失败，降级到下一优先级组重试: {t(e.message, default=e.message, **e.kwargs)}")
+            ).warning(t("LOG_EMBEDDING_CHANNEL_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
 
 
 async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> list[KnowledgeBase]:
@@ -216,7 +216,7 @@ async def query_knowledge_base(
             rerank_config = await get_profile_rerank_config(db, profile, excluded_priorities=excluded_rerank_priorities)
         except LLMException as e:
             rerank_error = t(e.message, default=e.message, **e.kwargs)
-            logger.bind(profile_id=profile.id, kb_id=kb_id).warning(f"读取 rerank 配置失败，降级为纯混合检索: {e.message}")
+            logger.bind(profile_id=profile.id, kb_id=kb_id).warning(t("LOG_RERANK_CONFIG_READ_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
             break
 
         if rerank_config is None:
@@ -240,7 +240,7 @@ async def query_knowledge_base(
                 rerank_provider_type=str(rerank_config.provider_type),
                 rerank_model_id=rerank_config.model_id,
                 rerank_latency_ms=round(rerank_latency_ms, 2),
-            ).info("远程 rerank 精排完成")
+            ).info(t("LOG_RERANK_REMOTE_FINISHED"))
             return build_query_test_response(reranked_hits[:final_top_k], retrieval_mode="hybrid_rerank")
 
         except LLMException as e:
@@ -253,7 +253,7 @@ async def query_knowledge_base(
                 rerank_model_id=rerank_config.model_id,
                 rerank_model_name=rerank_config.model_id,
                 rerank_channel_name=f"{getattr(rerank_config, 'provider_name', None)} / {rerank_config.model_id}",
-            ).warning(f"远程 rerank 调用失败，降级到下一优先级组重试: {t(e.message, default=e.message, **e.kwargs)}")
+            ).warning(t("LOG_RERANK_REMOTE_CALL_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
 
     if rerank_attempted and rerank_error and expose_rerank_error:
         raise HTTPException(status_code=502, detail=rerank_error)

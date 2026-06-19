@@ -3,6 +3,7 @@
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.channel_cursor import ChannelCursor
 from app.providers.database import AsyncSessionLocal
@@ -41,7 +42,7 @@ class CRUDChannelCursor:
                 await db.commit()
                 return idx
         except Exception as e:
-            logger.bind(cursor_key=cursor_key).warning(f"读取轮询游标失败，回退使用下标 0: {e}")
+            logger.bind(cursor_key=cursor_key).warning(t("LOG_CHANNEL_CURSOR_READ_FAILED", error=str(e)))
             return 0
 
     async def _get_or_create_locked(self, db, cursor_key: str) -> ChannelCursor | None:

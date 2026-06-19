@@ -1,5 +1,6 @@
 from app.core import constants
 from app.core.exceptions import LLMException
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.schemas import RerankResult
 from app.models.provider import ProviderType
@@ -65,6 +66,6 @@ class RerankClient:
             model_id=model_id,
             result_count=len(results),
             rerank_stage="response",
-        ).info(f"远程 rerank 响应完成：返回 {len(results)} 条结果")
+        ).info(t("LOG_RERANK_RESPONSE_FINISHED", count=len(results)))
 
         return results

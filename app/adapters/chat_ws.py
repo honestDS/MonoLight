@@ -58,7 +58,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 history=[],
             ).model_dump()
         except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).exception(f"Unexpected error in WebSocketChatAdapter: {str(e)}")
+            logger.bind(uid=uid, session_id=session_id).exception(t("LOG_ADAPTER_WS_UNEXPECTED_ERROR", error=str(e)))
             yield LLMResponse(
                 choices=[
                     LLMChoice(
