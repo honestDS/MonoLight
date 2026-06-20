@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
-    ERR_LLM_PROVIDER_NOT_CONFIGURED,
+    ERR_LLM_CHANNEL_NOT_CONFIGURED,
     ERR_PROFILE_NOT_FOUND,
 )
 from app.core.exceptions import (
@@ -28,8 +28,8 @@ async def validate_profile_and_cfg(db: AsyncSession, profile: Profile) -> Profil
     cfg = ProfileConfig.model_validate(profile.configs)
 
     # 校验 chat_channel 存在且配置有效
-    chat_channel = cfg.provider.chat_channel
+    chat_channel = cfg.channel.chat_channel
     if not chat_channel or not chat_channel.rules:
-        raise LLMException(message=ERR_LLM_PROVIDER_NOT_CONFIGURED)
+        raise LLMException(message=ERR_LLM_CHANNEL_NOT_CONFIGURED)
 
     return cfg

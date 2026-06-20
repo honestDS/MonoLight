@@ -156,18 +156,18 @@ async def generate_title(
 
     profile = await profile_crud.get_active(db)
     if not profile:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
+        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
     # 从 chat_channel 中选择一个可用的渠道来生成标题
-    provider_cfg = (profile.configs or {}).get("provider", {})
-    chat_channel_raw = provider_cfg.get("chat_channel")
+    channel_cfg = (profile.configs or {}).get("channel", {})
+    chat_channel_raw = channel_cfg.get("chat_channel")
     if not chat_channel_raw:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
+        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
     try:
         chat_channel = ChannelConfig.model_validate(chat_channel_raw)
     except Exception:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
+        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
     from app.core.channel_router import select_channel
     from app.core.dispatcher import _format_exception_message
@@ -175,40 +175,39 @@ async def generate_title(
     from app.core.log import channel_log_extra
     selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=f"{profile.id}:CHAT")
     if not selection:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
+        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
     excluded_priorities: set[int] = set()
 
     while True:
-        provider, model_entry, _rule = selection
-        if not provider.is_active:
+        channel, model_entry, _rule = selection
+        try:
+            title = await generate_session_title(
+                uid=uid,
+                session_id=request.session_id,
+                first_message=request.first_message,
+                api_key=channel.get_decrypted_api_key(),
+                base_url=channel.base_url,
+                model_id=model_entry["model_id"],
+                protocol=getattr(channel, "protocol", "openai"),
+                max_tokens=model_entry.get("max_tokens") or 200,
+                raise_on_error=True,
+            )
+            return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
+        except LLMException as e:
+            # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
             excluded_priorities.add(_rule.priority)
-        else:
-            try:
-                title = await generate_session_title(
-                    uid=uid,
-                    session_id=request.session_id,
-                    first_message=request.first_message,
-                    api_key=provider.api_key,
-                    base_url=provider.base_url,
-                    model_id=model_entry["model_id"],
-                    protocol=getattr(provider, "protocol", "openai"),
-                    max_tokens=model_entry.get("max_tokens") or 200,
-                    raise_on_error=True,
-                )
-                return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
-            except LLMException as e:
-                # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
-                excluded_priorities.add(_rule.priority)
-                logger.bind(
-                    uid=uid,
-                    session_id=request.session_id,
-                    **channel_log_extra(provider, model_entry),
-                ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
+            if not chat_channel.retry_on_failure:
+                return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+            logger.bind(
+                uid=uid,
+                session_id=request.session_id,
+                **channel_log_extra(channel, model_entry),
+            ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
 
         selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=f"{profile.id}:CHAT")
         if not selection:
-            return StandardResponse.error(message=constants.ERR_NO_VALID_PROVIDER)
+            return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
 
 @router.get("/sessions/history")

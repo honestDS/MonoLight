@@ -45,6 +45,19 @@
   font-weight: bold;
 }
 
+/* 模型列表（tag 标签组） */
+.models-list {
+  gap: 4px;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.text-muted {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
 /* 全局 Element Plus 覆盖 */
 .el-table {
   font-size: 15px !important;

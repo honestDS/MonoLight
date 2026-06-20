@@ -98,14 +98,14 @@ export const promptApi = {
   delete: (id) => request.post(`/prompts/delete?prompt_id=${id}`)
 }
 
-export const providerApi = {
-  list: (params) => request.get('/providers/list', { params }),
-  types: () => request.get('/providers/types'),
-  create: (data) => request.post('/providers/create', data),
-  get: (id) => request.get(`/providers/get?provider_id=${id}`),
-  update: (id, data) => request.post(`/providers/update?provider_id=${id}`, data),
-  delete: (id) => request.post(`/providers/delete?provider_id=${id}`),
-  testEmbeddingDimension: (providerId, modelId) => request.post(`/providers/test-embedding-dimension?provider_id=${providerId}&model_id=${encodeURIComponent(modelId)}`)
+export const channelApi = {
+  list: (params) => request.get('/channels/list', { params }),
+  types: () => request.get('/channels/types'),
+  create: (data) => request.post('/channels/create', data),
+  get: (id) => request.get(`/channels/get?channel_id=${id}`),
+  update: (id, data) => request.post(`/channels/update?channel_id=${id}`, data),
+  delete: (id) => request.post(`/channels/delete?channel_id=${id}`),
+  testEmbeddingDimension: (channelId, modelId) => request.post(`/channels/test-embedding-dimension?channel_id=${channelId}&model_id=${encodeURIComponent(modelId)}`)
 }
 
 export const systemApi = {

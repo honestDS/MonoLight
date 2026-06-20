@@ -2,7 +2,7 @@
 
 ## 1. 设计哲学
 
-MonoLight 采用“管控分离、协议标准、安全优先”的设计理念。系统核心由 Profile 驱动架构、PromptLibrary 提示词资产库、统一模型 Provider、可审计工具链与知识库检索链路组成。系统通过内部标准消息协议隔离前端协议、模型厂商协议和工具执行协议，使对话、Embedding、Rerank、知识库、工具调用和管理控制台可以独立演进。
+MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。系统核心由 Profile 驱动架构、PromptLibrary 提示词资产库、统一模型渠道、可审计工具链与知识库检索链路组成。系统通过内部标准消息协议隔离前端协议、模型厂商协议和工具执行协议，使对话、Embedding、Rerank、知识库、工具调用和管理控制台可以独立演进。
 
 ## 2. 总体目录结构
 
@@ -14,7 +14,7 @@ MonoLight 采用“管控分离、协议标准、安全优先”的设计理念�
   - `adapters/`: 对话通信适配器。
   - `core/`: 调度、上下文、安全、日志、工具、检索、审计、国际化与工具函数。
   - `models/`: SQLModel/Pydantic 领域实体与内部消息模型。
-  - `providers/`: LLM、Embedding、Rerank、Database、Vector Provider。
+  - `providers/`: LLM、Embedding、Rerank、Database、Vector 基础设施 Provider。
   - `schemas/`: API 通用响应与认证请求契约。
   - `transformers/`: 模型协议转换器。
   - `handler.py`: FastAPI 异常处理、中间件与根路由注册。
@@ -61,8 +61,8 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
   - 会话 Markdown 开关设置。
   - 会话标题生成。
 - `profile.py`: Profile 创建、列表、激活、更新与删除。
-- `providers.py`: 模型供应商管理。
-  - Provider 用途区分：`CHAT`、`EMBEDDING`、`RERANK`。
+- `channels.py`: 模型渠道管理。
+  - Channel 用途区分：`CHAT`、`EMBEDDING`、`RERANK`。
   - 提供向量维度检测接口。
 - `prompts.py`: PromptLibrary 提示词资产维护。
 - `files.py`: 文件上传与下载管理，支持对话附件传递。
@@ -139,9 +139,9 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 - `context.py`: 使用 `contextvars` 保存当前请求/会话语言。
 - `locale.py`: 语言标准化。
 - `translator.py`: 翻译加载、查找与回退。
-- `locales/zh` 与 `locales/en`: 后端错误码、通用文案、聊天、LLM、Profile、Prompt、Provider、User、Validation 文案。
+- `locales/zh` 与 `locales/en`: 后端错误码、通用文案、聊天、LLM、Profile、Prompt、Channel、User、Validation 文案。
 
-## 4. 模型协议与 Provider 层
+## 4. 模型协议与渠道层
 
 ### 4.1 Transformer 层 (`app/transformers`)
 
@@ -154,16 +154,16 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
   - 支持 Chat Completions 非流式、SSE 流式、Embeddings、批量向量化、Rerank 兼容调用。
   - 负责 InternalMessage 与 OpenAI 消息格式互转。
 
-### 4.2 Provider 层 (`app/providers`)
+### 4.2 基础设施 Provider 层 (`app/providers`)
 
 - `llm/client.py`: LLM 统一客户端。
   - 持有 Transformer 注册表。
-  - 根据 ProviderType 路由到具体 Transformer。
+  - 根据 ChannelType 路由到具体 Transformer。
   - 返回 InternalResponse。
 - `embedding/client.py`: Embedding 统一客户端。
-  - 根据 ProviderType 分发到实现 `BaseEmbeddingTransformer` 的 Transformer。
+  - 根据 ChannelType 分发到实现 `BaseEmbeddingTransformer` 的 Transformer。
 - `rerank/client.py`: Rerank 统一客户端。
-  - 根据 ProviderType 分发到实现 `BaseRerankTransformer` 的 Transformer。
+  - 根据 ChannelType 分发到实现 `BaseRerankTransformer` 的 Transformer。
 - `database/`
   - `client.py`: SQLAlchemy/SQLModel 异步 Engine、Session 工厂、测试环境数据库 URL 切换与 FastAPI DB 依赖。
   - `bootstrap.py`: 数据库结构同步、默认 Prompt、默认 Profile、默认配置补全。
@@ -206,13 +206,13 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 ### 6.1 领域模型 (`app/models`)
 
 - `user.py`: 用户实体与用户创建、更新、响应模型。
-- `provider.py`: 模型供应商实体。
-  - `ProviderType`: 模型协议类型。
+- `channel.py`: 模型渠道实体。
+  - `ChannelType`: 模型协议类型。
   - `ModelUsage`: 模型用途，包含 `CHAT`、`EMBEDDING`、`RERANK`。
-  - Rerank Provider 要求配置 `base_url`。
+  - Rerank Channel 要求配置 `base_url`。
 - `profile.py`: Profile 实体与 ProfileConfig 嵌套配置。
-  - `provider`: 对话模型、Embedding、Rerank、知识库检索数量、上下文窗口等配置。
-  - `security`: 审计 Provider、审计模型与风险阈值。
+  - `channel`: 对话模型、Embedding、Rerank、知识库检索数量、上下文窗口等配置。
+  - `security`: 审计渠道、审计模型与风险阈值。
   - `tool`: Shell 超时、并发工具数量、最大工具轮次、Firecrawl API Key 等工具配置。
   - `other`: 预留扩展配置。
 - `prompt.py`: PromptLibrary 提示词资产实体。
@@ -258,7 +258,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 - `user.py`: 用户账户管理。
 - `profile.py`: Profile 管理与激活配置查询。
 - `prompt.py`: PromptLibrary 管理。
-- `provider.py`: 模型供应商管理与按名称查询。
+- `channel.py`: 模型渠道管理与按名称查询。
 - `session.py`: 对话会话管理。
 - `active_session.py`: 活跃会话锁管理。
 - `message.py`: 历史消息存储、分页查询、会话列表与会话删除。
@@ -296,7 +296,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
   - 链接渲染使用 Element Plus Link 风格；禁用 linkify-it 裸域名模糊识别，避免中文前缀与域名连写时误识别。
 - `KnowledgeBase.vue`: 知识库管理与检索测试页面。
 - `ProfilesView.vue`: Profile 配置管理页面。
-- `ProvidersView.vue`: 模型供应商管理页面。
+- `ChannelsView.vue`: 模型渠道管理页面。
 - `PromptsView.vue`: PromptLibrary 管理页面。
 - `UsersView.vue`: 用户管理页面。
 - `HistoryLogs.vue`: 历史系统日志页面。
@@ -322,7 +322,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
   - `chat/useSessionManager.js`: 会话管理。
 - `dashboard/src/i18n/`
   - `index.js`: 前端 i18n 初始化。
-  - `locales/zh` 与 `locales/en`: chat、common、historyLogs、knowledgeBase、login、profiles、prompts、providers、realTimeLogs、users 语言包。
+  - `locales/zh` 与 `locales/en`: chat、common、historyLogs、knowledgeBase、login、profiles、prompts、channels、realTimeLogs、users 语言包。
 - `dashboard/src/assets/`
   - `css/`: 前端样式。
   - `svg/`: 图标资源。
@@ -337,10 +337,10 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
   - `test_chat.py`
   - `test_profiles.py`
   - `test_prompts.py`
-  - `test_providers.py`
+  - `test_channels.py`
   - `test_users.py`
 - `tests/unit/`
-  - 核心配置、上下文、调度器、安全、审计、工具、Provider、Schema、Transformer、Embedding、Rerank、混合检索与 Markdown 响应处理单元测试。
+  - 核心配置、上下文、调度器、安全、审计、工具、Channel、Schema、Transformer、Embedding、Rerank、混合检索与 Markdown 响应处理单元测试。
   - 包含 Firecrawl 工具原生异步调用测试、知识库工具测试、Shell 工具测试、OpenAI Transformer 流式/Embedding/Rerank 测试等。
 - 代码质量：
   - Python 使用 Ruff 检查与安全自动修复。

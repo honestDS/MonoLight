@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel as Base
 
 from app.models.profile import Profile
-from app.models.provider import ModelProvider
+from app.models.channel import ModelChannel
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -51,21 +51,21 @@ def mock_audit_profile():
     profile.audit_model_id = "gpt-4-audit"
     profile.audit_threshold = 5
 
-    # 关联 Mock Provider
-    provider = MagicMock(spec=ModelProvider)
-    provider.id = 100
-    provider.api_key = "audit-sk-test"
-    provider.base_url = "http://audit-api.test"
-    profile.provider = provider
+    # 关联 Mock Channel
+    channel = MagicMock(spec=ModelChannel)
+    channel.id = 100
+    channel.api_key = "audit-sk-test"
+    channel.base_url = "http://audit-api.test"
+    profile.channel = channel
     profile.prompt = None
     return profile
 
 
 @pytest.fixture
-def mock_audit_provider():
-    """审计供应商 Mock 夹具"""
-    provider = MagicMock(spec=ModelProvider)
-    provider.id = 100
-    provider.api_key = "audit-sk-test"
-    provider.base_url = "http://audit-api.test"
-    return provider
+def mock_audit_channel():
+    """审计渠道 Mock 夹具"""
+    channel = MagicMock(spec=ModelChannel)
+    channel.id = 100
+    channel.api_key = "audit-sk-test"
+    channel.base_url = "http://audit-api.test"
+    return channel

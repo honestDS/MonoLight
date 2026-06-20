@@ -14,19 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.models.channel import ChannelConfig, ChannelRule
-from app.models.provider import ModelProvider
+from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 
 logger = get_logger(__name__)
 
 
-def _get_model_entry(provider: ModelProvider, model_id: str, expected_usage: str) -> dict | None:
-    """从 Provider 的 model_ids 中查找匹配 model_id 且 usage 一致的条目。
+def _get_model_entry(channel: ModelChannel, model_id: str, expected_usage: str) -> dict | None:
+    """从渠道的 model_ids 中查找匹配 model_id 且 usage 一致的条目。
 
     允许同一 model_id 配置多个不同 usage 的条目，因此匹配时需同时校验 usage，
     避免命中同名但用途不符的条目。
     """
-    for entry in provider.model_ids:
+    for entry in channel.model_ids:
         if entry.get("model_id") == model_id and entry.get("usage") == expected_usage:
             return entry
     return None
@@ -35,11 +34,11 @@ def _get_model_entry(provider: ModelProvider, model_id: str, expected_usage: str
 def _expand_by_weight(rules: list[ChannelRule]) -> list[ChannelRule]:
     """按 weight 展开为轮询序列；weight=0 的渠道不参与轮询。
 
-    展开前先按稳定唯一键 (provider_id, model_id) 排序，使轮询序列与
+    展开前先按稳定唯一键 (channel_id, model_id) 排序，使轮询序列与
     渠道在 rules 列表中的顺序无关：仅调整列表顺序（不改 priority/weight）
     不会影响同优先级组内的加权轮询计算。
     """
-    sorted_rules = sorted(rules, key=lambda r: (r.provider_id, r.model_id))
+    sorted_rules = sorted(rules, key=lambda r: (r.channel_id, r.model_id))
     expanded: list[ChannelRule] = []
     for rule in sorted_rules:
         w = max(int(rule.weight), 0)
@@ -74,7 +73,7 @@ async def select_channel(
     excluded_priorities: set[int] | None = None,
     cursor_key: str | None = None,
     log_selection: bool = True,
-) -> tuple[ModelProvider, dict, ChannelRule] | None:
+) -> tuple[ModelChannel, dict, ChannelRule] | None:
     """从渠道配置中按优先级分组 + 组内加权轮询选择一个可用渠道。
 
     调度策略：按 priority 升序逐组尝试；组内按 weight 加权轮询选出唯一渠道，
@@ -93,19 +92,21 @@ async def select_channel(
             可用性探测等非真实调用场景应传 False 以避免日志噪声
 
     Returns:
-        (provider, model_entry, rule) 三元组，若没有可用渠道则返回 None
+        (channel, model_entry, rule) 三元组，若没有可用渠道则返回 None
     """
     if not channel_cfg or not channel_cfg.rules:
         logger.warning(t("LOG_CHANNEL_CONFIG_EMPTY", expected_usage=expected_usage))
         return None
 
-    from app.core.crud.provider import provider_crud
+    from app.core.crud.channel import channel_crud
 
     excluded_priorities = excluded_priorities or set()
 
-    # 收集所有规则，按 priority 分组；启用状态由模型管理页的模型条目控制
+    # 收集所有启用规则，按 priority 分组；模型条目启用状态在命中后继续校验
     priority_groups: dict[int, list[ChannelRule]] = defaultdict(list)
     for rule in channel_cfg.rules:
+        if not rule.is_enabled:
+            continue
         priority_groups[rule.priority].append(rule)
 
     if not priority_groups:
@@ -121,43 +122,68 @@ async def select_channel(
             continue
 
         group_rules = priority_groups[priority]
+        available_rules: list[tuple[ChannelRule, ModelChannel, dict]] = []
 
-        # 组内按 weight 加权轮询选择一个渠道，不在组内重试
-        selected_rule = await _pick_round_robin(group_rules, cursor_key or "", priority)
+        for rule in group_rules:
+            # 校验渠道存在且有效，禁用渠道不参与本轮加权轮询
+            channel = await channel_crud.get(db, rule.channel_id)
+            if not channel or not channel.is_active:
+                logger.bind(channel_id=rule.channel_id).warning(t("LOG_CHANNEL_PROVIDER_UNAVAILABLE"))
+                continue
+
+            # 校验渠道的 model_ids 中存在 model_id 且 usage 匹配的启用条目
+            model_entry = _get_model_entry(channel, rule.model_id, expected_usage)
+            if not model_entry:
+                logger.bind(
+                    channel_id=channel.id,
+                    model_id=rule.model_id,
+                    expected_usage=expected_usage,
+                ).warning(t("LOG_CHANNEL_MODEL_ENTRY_NOT_FOUND"))
+                continue
+
+            if not model_entry.get("is_enabled", True):
+                logger.bind(
+                    channel_id=channel.id,
+                    model_id=rule.model_id,
+                    expected_usage=expected_usage,
+                ).warning(t("LOG_CHANNEL_MODEL_ENTRY_DISABLED"))
+                continue
+
+            available_rules.append((rule, channel, model_entry))
+
+        if not available_rules:
+            continue
+
+        # 组内按 weight 加权轮询选择一个可用渠道，不在组内做调用失败重试
+        selected_rule = await _pick_round_robin([rule for rule, _, _ in available_rules], cursor_key or "", priority)
         if not selected_rule:
             logger.bind(priority=priority).warning(t("LOG_CHANNEL_ZERO_WEIGHT"))
             continue
 
-        # 校验 Provider 存在且有效
-        provider = await provider_crud.get(db, selected_rule.provider_id)
-        if not provider or not provider.is_active:
-            logger.bind(provider_id=selected_rule.provider_id).warning(t("LOG_CHANNEL_PROVIDER_UNAVAILABLE"))
-            continue
+        selected_channel = None
+        selected_model_entry = None
+        for rule, channel, model_entry in available_rules:
+            if rule == selected_rule:
+                selected_channel = channel
+                selected_model_entry = model_entry
+                break
 
-        # 校验 Provider 的 model_ids 中存在 model_id 且 usage 匹配的条目
-        model_entry = _get_model_entry(provider, selected_rule.model_id, expected_usage)
-        if not model_entry:
-            logger.bind(
-                provider_id=provider.id,
-                model_id=selected_rule.model_id,
-                expected_usage=expected_usage,
-            ).warning(t("LOG_CHANNEL_MODEL_ENTRY_NOT_FOUND"))
+        if not selected_channel or not selected_model_entry:
             continue
 
         if log_selection:
-            channel_name = f"{provider.name} / {selected_rule.model_id}"
+            channel_name = f"{selected_channel.name} / {selected_rule.model_id}"
             logger.bind(
-                provider_id=provider.id,
-                provider_name=provider.name,
+                channel_id=selected_channel.id,
+                channel_name=channel_name,
                 model_id=selected_rule.model_id,
                 model_name=selected_rule.model_id,
-                channel_name=channel_name,
                 priority=priority,
                 expected_usage=expected_usage,
                 call_context=call_context or "unspecified",
             ).info(t("LOG_CHANNEL_SELECTED", channel_name=channel_name))
 
-        return provider, model_entry, selected_rule
+        return selected_channel, selected_model_entry, selected_rule
 
     logger.warning(t("LOG_CHANNEL_ALL_UNAVAILABLE", expected_usage=expected_usage))
     return None

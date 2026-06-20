@@ -29,8 +29,8 @@ logger = get_logger(__name__)
 
 
 def _get_channel_config(profile: Profile, channel_key: str) -> ChannelConfig | None:
-    provider_config = (profile.configs or {}).get("provider", {})
-    channel_raw = provider_config.get(channel_key)
+    channel_config = (profile.configs or {}).get("channel", {})
+    channel_raw = channel_config.get(channel_key)
     if not channel_raw:
         return None
     try:
@@ -51,13 +51,13 @@ async def get_profile_embedding_config(db: AsyncSession, profile: Profile, call_
     """从 Profile 的 embedding_channel 中通过渠道路由获取嵌入配置。
 
     Returns:
-        (provider_type, api_key, base_url, model_id, dimensions)
+        (channel_type, api_key, base_url, model_id, dimensions)
     """
-    provider_config = (profile.configs or {}).get("provider", {})
-    embedding_channel_raw = provider_config.get("embedding_channel")
+    channel_config = (profile.configs or {}).get("channel", {})
+    embedding_channel_raw = channel_config.get("embedding_channel")
 
     if not embedding_channel_raw:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_CHANNEL)
 
     try:
         embedding_channel = ChannelConfig.model_validate(embedding_channel_raw)
@@ -66,17 +66,17 @@ async def get_profile_embedding_config(db: AsyncSession, profile: Profile, call_
 
     selection = await select_channel(db, embedding_channel, "EMBEDDING", call_context=call_context, log_selection=log_selection)
     if not selection:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_CHANNEL)
 
-    provider, model_entry, _rule = selection
+    channel, model_entry, _rule = selection
     model_id = model_entry.get("model_id")
     if not model_id:
         raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
-    if not provider.base_url:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_PROVIDER_NO_URL)
+    if not channel.base_url:
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
 
     dimensions = model_entry.get("embedding_dimensions")
-    return provider.provider_type, provider.api_key, provider.base_url, model_id, dimensions
+    return channel.channel_type, channel.get_decrypted_api_key(), channel.base_url, model_id, dimensions
 
 
 async def is_embedding_profile_available(db: AsyncSession, profile: Profile) -> bool:
@@ -103,17 +103,16 @@ async def embed_chunks(
     batch_size: int,
     call_context: str = "knowledge_base_embedding",
 ) -> list[list[float]]:
-    provider_config = (profile.configs or {}).get("provider", {})
-    embedding_channel_raw = provider_config.get("embedding_channel")
+    channel_config = (profile.configs or {}).get("channel", {})
+    embedding_channel_raw = channel_config.get("embedding_channel")
     if not embedding_channel_raw:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_CHANNEL)
 
     try:
         embedding_channel = ChannelConfig.model_validate(embedding_channel_raw)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    embedding_timeout = get_profile_embedding_timeout(profile)
     excluded_priorities: set[int] = set()
     last_error: LLMException | None = None
 
@@ -129,22 +128,25 @@ async def embed_chunks(
         if not selection:
             if last_error:
                 raise HTTPException(status_code=502, detail=t(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=last_error.message))
-            raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_PROVIDER)
+            raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_CHANNEL)
 
-        provider, model_entry, _rule = selection
+        channel, model_entry, _rule = selection
         model_id = model_entry.get("model_id")
         if not model_id:
             excluded_priorities.add(_rule.priority)
             continue
-        if not provider.base_url:
+        if not channel.base_url:
             excluded_priorities.add(_rule.priority)
             continue
 
+        model_timeout = model_entry.get("embedding_timeout")
+        embedding_timeout = min(float(model_timeout), 600.0) if model_timeout else get_profile_embedding_timeout(profile)
+
         try:
             return await EmbeddingClient.embed_texts(
-                provider_type=provider.provider_type,
-                api_key=provider.api_key,
-                base_url=provider.base_url,
+                channel_type=channel.channel_type,
+                api_key=channel.get_decrypted_api_key(),
+                base_url=channel.base_url,
                 model_id=model_id,
                 input_texts=texts,
                 batch_size=batch_size,
@@ -156,11 +158,10 @@ async def embed_chunks(
             excluded_priorities.add(_rule.priority)
             logger.bind(
                 profile_id=profile.id,
-                provider_id=provider.id,
-                provider_name=provider.name,
+                channel_id=channel.id,
+                channel_name=f"{channel.name} / {model_id}",
                 model_id=model_id,
                 model_name=model_id,
-                channel_name=f"{provider.name} / {model_id}",
             ).warning(t("LOG_EMBEDDING_CHANNEL_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
 
 
@@ -237,7 +238,7 @@ async def query_knowledge_base(
                 kb_id=kb_id,
                 candidate_count=len(fused_hits),
                 final_top_k=final_top_k,
-                rerank_provider_type=str(rerank_config.provider_type),
+                rerank_channel_type=str(rerank_config.channel_type),
                 rerank_model_id=rerank_config.model_id,
                 rerank_latency_ms=round(rerank_latency_ms, 2),
             ).info(t("LOG_RERANK_REMOTE_FINISHED"))
@@ -248,11 +249,11 @@ async def query_knowledge_base(
             rerank_error = t(e.message, default=e.message, **e.kwargs)
             logger.bind(
                 kb_id=kb_id,
-                rerank_provider_id=rerank_config.provider_id,
-                rerank_provider_name=getattr(rerank_config, "provider_name", None),
+                rerank_channel_id=rerank_config.channel_id,
+                rerank_channel_name=getattr(rerank_config, "channel_name", None),
                 rerank_model_id=rerank_config.model_id,
                 rerank_model_name=rerank_config.model_id,
-                rerank_channel_name=f"{getattr(rerank_config, 'provider_name', None)} / {rerank_config.model_id}",
+                rerank_channel_display_name=f"{getattr(rerank_config, 'channel_name', None)} / {rerank_config.model_id}",
             ).warning(t("LOG_RERANK_REMOTE_CALL_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
 
     if rerank_attempted and rerank_error and expose_rerank_error:

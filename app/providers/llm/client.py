@@ -1,4 +1,3 @@
-import logging
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
@@ -11,9 +10,6 @@ from app.models.message import (
     InternalResponse,
 )
 from app.transformers.openai import OpenAITransformer
-
-logger = logging.getLogger(__name__)
-
 
 class LLMClient:
     _transformers = {"openai": OpenAITransformer()}

@@ -3,15 +3,15 @@ import pytest
 from app.core.rerank.knowledge_base import rerank_retrieval_hits
 from app.core.rerank.schemas import RerankConfig
 from app.core.retrieval.schemas import RetrievalHit
-from app.models.provider import ProviderType
+from app.models.channel import ChannelType
 from app.providers.rerank.client import RERANK_MAX_DOCUMENT_CHARS, RerankClient
 
 
 def _make_config() -> RerankConfig:
     return RerankConfig(
-        provider_id=1,
-        provider_name="rerank-provider",
-        provider_type=ProviderType.OPENAI,
+        channel_id=1,
+        channel_name="rerank-channel",
+        channel_type=ChannelType.OPENAI,
         api_key="fake-key",
         base_url="https://api.example.com/v1",
         model_id="rerank-model",
@@ -37,7 +37,7 @@ async def test_rerank_client_truncates_long_documents(monkeypatch):
 
     long_doc = "啊" * (RERANK_MAX_DOCUMENT_CHARS + 100)
     results = await RerankClient.rerank_texts(
-        provider_type=ProviderType.OPENAI,
+        channel_type=ChannelType.OPENAI,
         api_key="fake-key",
         base_url="https://api.example.com/v1",
         model_id="rerank-model",
@@ -53,7 +53,7 @@ async def test_rerank_client_truncates_long_documents(monkeypatch):
 @pytest.mark.asyncio
 async def test_rerank_client_empty_documents_short_circuit():
     results = await RerankClient.rerank_texts(
-        provider_type=ProviderType.OPENAI,
+        channel_type=ChannelType.OPENAI,
         api_key="fake-key",
         base_url="https://api.example.com/v1",
         model_id="rerank-model",

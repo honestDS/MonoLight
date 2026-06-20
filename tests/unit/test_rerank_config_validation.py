@@ -1,13 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models.channel import ChannelConfig
-from app.models.profile import ProfileConfig, ProviderConfig
-from app.models.provider import ModelUsage, ProviderBase, ProviderType, ProviderUpdate, validate_provider_model_ids
+from app.models.channel import ChannelConfig, ChannelBase, ChannelType, ChannelUpdate, ModelUsage, validate_channel_model_ids
+from app.models.profile import ProfileConfig, ChannelGroupConfig
 
 
-def test_provider_config_channel_defaults():
-    cfg = ProviderConfig()
+def test_channel_group_config_defaults():
+    cfg = ChannelGroupConfig()
     assert cfg.chat_channel is None
     assert cfg.embedding_channel is None
     assert cfg.rerank_channel is None
@@ -19,40 +18,40 @@ def test_rerank_channel_candidate_k_upper_bound():
 
 
 def test_profile_config_fills_channel_defaults_for_legacy_configs():
-    legacy = {"provider": {"model_id": "gpt-4o"}}
+    legacy = {"channel": {"chat_channel": None}}
     cfg = ProfileConfig.model_validate(legacy)
-    assert cfg.provider.chat_channel is None
-    assert cfg.provider.embedding_channel is None
-    assert cfg.provider.rerank_channel is None
+    assert cfg.channel.chat_channel is None
+    assert cfg.channel.embedding_channel is None
+    assert cfg.channel.rerank_channel is None
 
 
 def test_rerank_model_entry_without_base_url_is_deferred_to_api_validation():
-    provider = ProviderBase(
-        name="rerank-provider",
-        provider_type=ProviderType.OPENAI,
+    channel = ChannelBase(
+        name="rerank-channel",
+        channel_type=ChannelType.OPENAI,
         api_key="fake-key",
         base_url=None,
         model_ids=[{"model_id": "rerank-model", "usage": ModelUsage.RERANK}],
     )
 
-    assert provider.base_url is None
-    assert provider.model_ids[0]["usage"] == ModelUsage.RERANK
+    assert channel.base_url is None
+    assert channel.model_ids[0]["usage"] == ModelUsage.RERANK
 
 
 def test_rerank_model_entry_with_base_url_ok():
-    provider = ProviderBase(
-        name="rerank-provider",
-        provider_type=ProviderType.OPENAI,
+    channel = ChannelBase(
+        name="rerank-channel",
+        channel_type=ChannelType.OPENAI,
         api_key="fake-key",
         base_url="https://api.example.com/v1",
         model_ids=[{"model_id": "rerank-model", "usage": ModelUsage.RERANK}],
     )
-    assert provider.model_ids[0]["usage"] == ModelUsage.RERANK
-    assert provider.base_url == "https://api.example.com/v1"
+    assert channel.model_ids[0]["usage"] == ModelUsage.RERANK
+    assert channel.base_url == "https://api.example.com/v1"
 
 
-def test_provider_update_allows_same_model_id_for_different_usage():
-    update = ProviderUpdate(
+def test_channel_update_allows_same_model_id_for_different_usage():
+    update = ChannelUpdate(
         model_ids=[
             {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
             {"model_id": "gpt-4o", "usage": ModelUsage.EMBEDDING},
@@ -62,14 +61,14 @@ def test_provider_update_allows_same_model_id_for_different_usage():
     assert len(update.model_ids) == 2
 
 
-def test_provider_model_id_validation_reports_duplicate_model_id_in_same_usage():
-    error_key, error_kwargs = validate_provider_model_ids(
+def test_channel_model_id_validation_reports_duplicate_model_id_in_same_usage():
+    error_key, error_kwargs = validate_channel_model_ids(
         [
             {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
             {"model_id": "gpt-4o", "usage": ModelUsage.CHAT},
         ]
     )
 
-    assert error_key == "ERR_PROVIDER_MODEL_IDS_DUPLICATED"
+    assert error_key == "ERR_CHANNEL_MODEL_IDS_DUPLICATED"
     assert error_kwargs == {"usage": ModelUsage.CHAT.value, "model_id": "gpt-4o"}
 

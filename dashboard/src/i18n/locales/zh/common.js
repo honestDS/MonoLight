@@ -24,7 +24,7 @@ export default {
     knowledge_base: '知识库管理',
     system: '系统配置',
     profiles: '配置管理',
-    providers: '模型管理',
+    channels: '渠道管理',
     prompts: '提示词管理',
     logs: '系统日志',
     realtime_logs: '实时日志',

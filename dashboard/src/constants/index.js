@@ -12,7 +12,7 @@ export const routeNameMap = {
   '/users': 'common.menu.users',
   '/knowledge-base': 'common.menu.knowledge_base',
   '/profiles': 'common.menu.system',
-  '/providers': 'common.menu.system',
+  '/channels': 'common.menu.system',
   '/prompts': 'common.menu.system',
   '/logs/realtime': 'common.menu.logs',
   '/logs/history': 'common.menu.logs'
@@ -30,25 +30,25 @@ const defaultChannelConfig = () => ({
 
 // 默认配置结构（用于 ProfilesView.vue）—— 渠道管理架构
 export const defaultProfileConfigs = () => ({
-  provider: {
+  channel: {
     chat_channel: defaultChannelConfig(),
     embedding_channel: defaultChannelConfig(),
     rerank_channel: defaultChannelConfig(),
   },
-  security: { audit_provider_id: null, audit_model_id: null, audit_threshold: 5 },
+  security: { audit_channel_id: null, audit_model_id: null, audit_threshold: 5 },
   tool: { shell_timeout: 30, max_parallel_tools: 5, executor_max_workers: 10, max_turns: 5, firecrawl_api_key: '' },
   other: {},
 })
 
 // 默认渠道规则
 export const defaultChannelRule = () => ({
-  provider_id: null,
+  channel_id: null,
   model_id: '',
   priority: 1,
   weight: 1,
 })
 
-// 默认模型条目（Provider 下）
+// 默认模型条目（渠道下）
 export const defaultModelEntry = () => ({
   model_id: '',
   usage: 'CHAT',
@@ -63,10 +63,10 @@ export const defaultModelEntry = () => ({
   description: '',
 })
 
-// 默认提供商表单
-export const defaultProviderForm = () => ({
+// 默认渠道表单
+export const defaultChannelForm = () => ({
   name: '',
-  provider_type: 'OPENAI',
+  channel_type: 'OPENAI',
   api_key: '',
   base_url: '',
   is_active: true,

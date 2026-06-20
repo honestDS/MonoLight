@@ -81,6 +81,24 @@
   white-space: nowrap;
 }
 
+.rule-status-tag {
+  flex-shrink: 0;
+  margin-right: 8px;
+}
+
+.channel-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.channel-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 // 拖拽占位/选中态
 .rule-ghost {
   opacity: 0.5;

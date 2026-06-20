@@ -90,7 +90,7 @@ class AuditMiddleware:
 
     @staticmethod
     async def audit(db, profile, cfg, tool_name: str, args: dict, session_id: str = None, uid: str = None) -> str | None:
-        from app.core.crud.provider import provider_crud
+        from app.core.crud.channel import channel_crud
         from app.core.tools import get_registered_tool_names
 
         if tool_name not in get_registered_tool_names():
@@ -165,18 +165,18 @@ class AuditMiddleware:
         if cfg.security.audit_threshold == 0:
             return None
 
-        if not cfg.security.audit_provider_id or cfg.security.audit_provider_id <= 0:
+        if not cfg.security.audit_channel_id or cfg.security.audit_channel_id <= 0:
             return None
 
-        provider = await provider_crud.get(db, cfg.security.audit_provider_id)
-        if not provider:
+        channel = await channel_crud.get(db, cfg.security.audit_channel_id)
+        if not channel:
             return None
         # 审计模型被禁用时跳过安全审计（视为用户主动停用该审计能力），不阻断对话主线
-        if not provider.is_active:
+        if not channel.is_active:
             logger.bind(uid=uid, session_id=session_id, security=True).warning(t("LOG_AUDIT_PROVIDER_DISABLED"))
             return None
 
-        audit_res = await audit_command(command, provider.base_url, provider.api_key, cfg.security.audit_model_id, session_id=session_id, uid=uid)
+        audit_res = await audit_command(command, channel.base_url, channel.get_decrypted_api_key(), cfg.security.audit_model_id, session_id=session_id, uid=uid)
 
         if audit_res is None:
             return json.dumps(

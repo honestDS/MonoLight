@@ -16,9 +16,11 @@
       <el-table-column :resizable="false" prop="name" :label="$t('profiles.profile_name')" min-width="120" sortable></el-table-column>
       <el-table-column :resizable="false" :label="$t('profiles.chat_channel_label')" min-width="200">
         <template #default="scope">
-          <span v-if="scope.row.configs?.provider?.chat_channel?.rules?.length">
-            {{ scope.row.configs.provider.chat_channel.rules.map(r => r.model_id).join(', ') }}
-          </span>
+          <div class="models-list" v-if="scope.row.configs?.channel?.chat_channel?.rules?.length">
+            <el-tag v-for="(r, idx) in scope.row.configs.channel.chat_channel.rules" :key="idx" class="model-tag">
+              {{ r.model_id }}
+            </el-tag>
+          </div>
           <span v-else class="text-muted">{{ $t('profiles.not_set') }}</span>
         </template>
       </el-table-column>
@@ -66,8 +68,8 @@
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.chat_channel') }}</div>
                 <ChannelEditor
-                  :channel="form.configs.provider.chat_channel"
-                  :providers="providers"
+                  :channel="form.configs.channel.chat_channel"
+                  :channels="channels"
                   usage="CHAT"
                   :label="$t('profiles.chat_model')"
                 />
@@ -76,8 +78,8 @@
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.embedding_channel') }}</div>
                 <ChannelEditor
-                  :channel="form.configs.provider.embedding_channel"
-                  :providers="providers"
+                  :channel="form.configs.channel.embedding_channel"
+                  :channels="channels"
                   usage="EMBEDDING"
                   :label="$t('profiles.embedding_model')"
                 />
@@ -86,8 +88,8 @@
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.rerank_channel') }}</div>
                 <ChannelEditor
-                  :channel="form.configs.provider.rerank_channel"
-                  :providers="providers"
+                  :channel="form.configs.channel.rerank_channel"
+                  :channels="channels"
                   usage="RERANK"
                   :label="$t('profiles.rerank_model')"
                 />
@@ -204,7 +206,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { profileApi, providerApi, promptApi } from '../api'
+import { profileApi, channelApi, promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
@@ -214,7 +216,7 @@ import { defaultProfileConfigs } from '../constants'
 const { t } = useI18n()
 
 const profiles = ref([])
-const providers = ref([])
+const channels = ref([])
 const prompts = ref([])
 const loading = ref(false)
 const total = ref(0)
@@ -227,17 +229,17 @@ const activeTab = ref('base')
 
 const auditModelOptions = computed(() => {
   const options = []
-  providers.value
-    .filter(provider => provider.is_active !== false)
-    .forEach(provider => {
-      ;(provider.model_ids || [])
+  channels.value
+    .filter(channel => channel.is_active !== false)
+    .forEach(channel => {
+      ;(channel.model_ids || [])
         .filter(model => model.usage === 'CHAT' && model.model_id)
         .forEach(model => {
           options.push({
-            key: `${provider.id}::${model.model_id}`,
-            provider_id: provider.id,
+            key: `${channel.id}::${model.model_id}`,
+            channel_id: channel.id,
             model_id: model.model_id,
-            label: `${provider.name} / ${model.model_id}`
+            label: `${channel.name} / ${model.model_id}`
           })
         })
     })
@@ -254,19 +256,19 @@ const form = reactive({
 const auditModelKey = computed({
   get() {
     const security = form.configs.security
-    if (!security.audit_provider_id || !security.audit_model_id) return null
-    return `${security.audit_provider_id}::${security.audit_model_id}`
+    if (!security.audit_channel_id || !security.audit_model_id) return null
+    return `${security.audit_channel_id}::${security.audit_model_id}`
   },
   set(key) {
     if (!key) {
-      form.configs.security.audit_provider_id = null
+      form.configs.security.audit_channel_id = null
       form.configs.security.audit_model_id = null
       return
     }
 
     const option = auditModelOptions.value.find(item => item.key === key)
     if (!option) return
-    form.configs.security.audit_provider_id = option.provider_id
+    form.configs.security.audit_channel_id = option.channel_id
     form.configs.security.audit_model_id = option.model_id
   }
 })
@@ -298,19 +300,19 @@ const fetchPrompts = async () => {
   }
 }
 
-const fetchProviders = async () => {
+const fetchChannels = async () => {
   try {
-    const res = await providerApi.list({ page: 1, size: 1000 })
-    providers.value = res.data.data.items || []
+    const res = await channelApi.list({ page: 1, size: 1000 })
+    channels.value = res.data.data.items || []
   } catch (err) {
-    ElMessage.error(err.message || t('profiles.load_providers_failed'))
+    ElMessage.error(err.message || t('profiles.load_channels_failed'))
   }
 }
 
 const handleRefresh = () => {
   currentPage.value = 1
   loadProfiles()
-  fetchProviders()
+  fetchChannels()
   fetchPrompts()
 }
 
@@ -338,12 +340,12 @@ const showDialog = (type, row = null) => {
     form.prompt_id = row.prompt_id
     const base = defaultProfileConfigs()
     if (row.configs) {
-      if (row.configs.provider) {
-        const p = row.configs.provider
+      if (row.configs.channel) {
+        const p = row.configs.channel
         // 深合并渠道配置
-        if (p.chat_channel) Object.assign(base.provider.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
-        if (p.embedding_channel) Object.assign(base.provider.embedding_channel, JSON.parse(JSON.stringify(p.embedding_channel)))
-        if (p.rerank_channel) Object.assign(base.provider.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
+        if (p.chat_channel) Object.assign(base.channel.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
+        if (p.embedding_channel) Object.assign(base.channel.embedding_channel, JSON.parse(JSON.stringify(p.embedding_channel)))
+        if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
       }
       if (row.configs.security) Object.assign(base.security, row.configs.security)
       if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
@@ -373,14 +375,14 @@ const submitForm = async () => {
   const cleanChannel = (ch) => {
     if (ch && ch.rules) {
       ch.rules = ch.rules
-        .filter(r => r.provider_id && r.model_id)
-        .map(({ provider_id, model_id, priority, weight }) => ({ provider_id, model_id, priority, weight }))
+        .filter(r => r.channel_id && r.model_id)
+        .map(({ channel_id, model_id, priority, weight }) => ({ channel_id, model_id, priority, weight }))
         .sort(compareRules)
     }
   }
-  cleanChannel(form.configs.provider.chat_channel)
-  cleanChannel(form.configs.provider.embedding_channel)
-  cleanChannel(form.configs.provider.rerank_channel)
+  cleanChannel(form.configs.channel.chat_channel)
+  cleanChannel(form.configs.channel.embedding_channel)
+  cleanChannel(form.configs.channel.rerank_channel)
 
   submitting.value = true
   try {
@@ -401,7 +403,7 @@ const submitForm = async () => {
 
 onMounted(() => {
   loadProfiles()
-  fetchProviders()
+  fetchChannels()
   fetchPrompts()
 })
 </script>

@@ -48,7 +48,7 @@ async def init_system_data(session: AsyncSession):
 
     # 2. 业务配置初始化
     default_config_obj = ProfileConfig(
-        provider={},
+        channel={},
         security={},
         tool={},
         other={},

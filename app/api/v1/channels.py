@@ -1,0 +1,641 @@
+"""Channel API：渠道管理架构适配版
+
+CRUD 支持 model_ids 字段；移除 usage 字段
+"""
+
+import copy
+import json
+import re
+
+from fastapi import (
+    APIRouter,
+    Depends,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
+from sqlmodel import select
+
+from app.core import constants
+from app.core.crud.channel import channel_crud
+from app.core.crud.profile import profile_crud
+from app.core.exceptions import (
+    ForbiddenException,
+    ParameterException,
+    ResourceNotFoundException,
+)
+from app.core.security import get_current_user
+from app.models.channel import (
+    ChannelCreate,
+    ChannelListResponse,
+    ChannelModelItem,
+    ChannelResponse,
+    ChannelType,
+    ChannelUpdate,
+    ModelUsage,
+    validate_channel_model_ids,
+)
+from app.providers.database import get_db
+from app.providers.embedding import EmbeddingClient
+from app.schemas.response import (
+    PageData,
+    StandardResponse,
+)
+
+router = APIRouter(prefix="/channels", tags=["Channels"], dependencies=[Depends(get_current_user)])
+
+# 渠道用途映射：统一定义，避免重复
+CHANNEL_USAGE_MAP = {
+    "chat_channel": ModelUsage.CHAT.value,
+    "embedding_channel": ModelUsage.EMBEDDING.value,
+    "rerank_channel": ModelUsage.RERANK.value,
+}
+
+
+async def check_admin_privilege(current_user=Depends(get_current_user)):
+    if not getattr(current_user, "is_superuser", False):
+        raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
+    return current_user
+
+
+def _is_same_channel(rule: dict, channel_id: int) -> bool:
+    return str(rule.get("channel_id")) == str(channel_id)
+
+
+def _get_existing_model_ids_by_usage(model_ids: list[dict]) -> dict[str, set[str]]:
+    return {
+        usage.value: {
+            str(item.get("model_id"))
+            for item in model_ids
+            if str(item.get("usage")) == usage.value and item.get("model_id")
+        }
+        for usage in ModelUsage
+    }
+
+
+def _clean_channel_rules_from_configs(
+    configs: dict,
+    channel_id: int,
+    model_ids: list[dict],
+) -> int:
+    existing_model_ids_by_usage = _get_existing_model_ids_by_usage(model_ids)
+    channel_config = configs.get("channel") or {}
+    removed_count = 0
+    profile_changed = False
+
+    for channel_key, usage in CHANNEL_USAGE_MAP.items():
+        channel = channel_config.get(channel_key)
+        if not channel or not isinstance(channel.get("rules"), list):
+            continue
+
+        existing_model_ids = existing_model_ids_by_usage.get(usage, set())
+        old_rules = channel["rules"]
+        new_rules = []
+        rules_changed = False
+        for rule in old_rules:
+            if _is_same_channel(rule, channel_id) and str(rule.get("model_id")) not in existing_model_ids:
+                removed_count += 1
+                rules_changed = True
+                continue
+
+            new_rules.append(rule)
+
+        if rules_changed:
+            channel["rules"] = new_rules
+            profile_changed = True
+
+    return removed_count if profile_changed else 0
+
+
+async def _remove_unavailable_channel_rules(
+    db: AsyncSession,
+    channel_id: int,
+    model_ids: list[dict],
+) -> int:
+    """批量清理Profile中失效的渠道规则。
+
+    采用游标分页避免 offset 窗口错位，调用方负责统一提交事务。
+    """
+    batch_size = 100
+    last_id = 0
+    total_removed = 0
+
+    while True:
+        result = await db.execute(
+            select(profile_crud.model)
+            .where(profile_crud.model.id > last_id)
+            .order_by(profile_crud.model.id.asc())
+            .limit(batch_size)
+        )
+        profiles = list(result.scalars().all())
+        if not profiles:
+            break
+
+        batch_changed = False
+        for profile in profiles:
+            configs = profile.configs or {}
+            profile_removed_count = _clean_channel_rules_from_configs(configs, channel_id, model_ids)
+            if profile_removed_count > 0:
+                profile.configs = configs
+                flag_modified(profile, "configs")
+                db.add(profile)
+                batch_changed = True
+                total_removed += profile_removed_count
+
+        if batch_changed:
+            await db.flush()
+
+        last_id = profiles[-1].id or last_id
+
+    return total_removed
+
+
+def _model_entry_signature(item: dict) -> str:
+    normalized = ChannelModelItem.model_validate(item).model_dump(exclude={"model_id"})
+    return json.dumps(normalized, sort_keys=True, default=str)
+
+
+def _collect_channel_rule_model_ids(configs: dict, channel_id: int) -> dict[str, set[str]]:
+    channel_config = configs.get("channel") or {}
+    refs: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
+
+    for channel_key, usage in CHANNEL_USAGE_MAP.items():
+        channel = channel_config.get(channel_key)
+        if not channel or not isinstance(channel.get("rules"), list):
+            continue
+        for rule in channel["rules"]:
+            if _is_same_channel(rule, channel_id) and rule.get("model_id"):
+                refs[usage].add(str(rule["model_id"]))
+
+    return refs
+
+
+def _build_model_id_rename_index(old_model_ids: list[dict], new_model_ids: list[dict]) -> dict[str, dict]:
+    old_by_usage_and_id = {
+        (str(item.get("usage")), str(item.get("model_id"))): item
+        for item in old_model_ids
+        if item.get("usage") and item.get("model_id")
+    }
+    old_ids_by_usage = {
+        usage.value: {str(item.get("model_id")) for item in old_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")}
+        for usage in ModelUsage
+    }
+    new_ids_by_usage = {
+        usage.value: {str(item.get("model_id")) for item in new_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")}
+        for usage in ModelUsage
+    }
+    new_by_usage_and_signature: dict[tuple[str, str], list[dict]] = {}
+    for item in new_model_ids:
+        usage = str(item.get("usage"))
+        model_id = item.get("model_id")
+        if usage not in new_ids_by_usage or not model_id:
+            continue
+        signature = _model_entry_signature(item)
+        new_by_usage_and_signature.setdefault((usage, signature), []).append(item)
+
+    return {
+        "old_by_usage_and_id": old_by_usage_and_id,
+        "old_ids_by_usage": old_ids_by_usage,
+        "new_ids_by_usage": new_ids_by_usage,
+        "new_by_usage_and_signature": new_by_usage_and_signature,
+    }
+
+
+def _compute_model_id_renames(
+    old_model_ids: list[dict],
+    new_model_ids: list[dict],
+    referenced_model_ids: dict[str, set[str]] | None = None,
+    rename_index: dict[str, dict] | None = None,
+) -> dict[str, dict[str, str]]:
+    # 基于“配置文件实际引用的旧模型 ID”推断重命名，而不是基于位置或数量。
+    # 对每个被 Profile 渠道规则引用的旧 model_id：
+    # - 若旧 model_id 仍存在于新 channel 的同用途模型列表中，则无需同步；
+    # - 若旧 model_id 已消失，则用旧模型条目的非 model_id 配置与新模型条目做精确匹配；
+    # - 仅当匹配到唯一的新 model_id 时，才同步 Profile 引用，避免同配置多候选时误配对。
+    index = rename_index or _build_model_id_rename_index(old_model_ids, new_model_ids)
+    old_by_usage_and_id = index["old_by_usage_and_id"]
+    old_ids_by_usage = index["old_ids_by_usage"]
+    new_ids_by_usage = index["new_ids_by_usage"]
+    new_by_usage_and_signature = index["new_by_usage_and_signature"]
+
+    refs = referenced_model_ids or old_ids_by_usage
+    renames: dict[str, dict[str, str]] = {}
+
+    for usage, model_ids in refs.items():
+        if usage not in old_ids_by_usage:
+            continue
+        for old_mid in model_ids:
+            if old_mid in new_ids_by_usage[usage]:
+                continue
+
+            old_item = old_by_usage_and_id.get((usage, old_mid))
+            if not old_item:
+                continue
+
+            signature = _model_entry_signature(old_item)
+            candidates = [
+                item
+                for item in new_by_usage_and_signature.get((usage, signature), [])
+                if str(item.get("model_id")) not in old_ids_by_usage[usage]
+            ]
+            if len(candidates) != 1:
+                continue
+
+            renames.setdefault(usage, {})[old_mid] = str(candidates[0]["model_id"])
+
+    return renames
+
+
+def _apply_model_id_renames_to_configs(
+    configs: dict,
+    channel_id: int,
+    renames: dict[str, dict[str, str]],
+) -> int:
+    channel_config = configs.get("channel") or {}
+    updated_count = 0
+
+    for channel_key, usage in CHANNEL_USAGE_MAP.items():
+        rename_map = renames.get(usage)
+        if not rename_map:
+            continue
+        channel = channel_config.get(channel_key)
+        if not channel or not isinstance(channel.get("rules"), list):
+            continue
+        for rule in channel["rules"]:
+            if _is_same_channel(rule, channel_id):
+                old_mid = str(rule.get("model_id"))
+                if old_mid in rename_map:
+                    rule["model_id"] = rename_map[old_mid]
+                    updated_count += 1
+
+    return updated_count
+
+
+async def _sync_channel_model_id_renames(
+    db: AsyncSession,
+    channel_id: int,
+    old_model_ids: list[dict],
+    new_model_ids: list[dict],
+) -> int:
+    """批量同步Profile中的模型ID重命名。
+
+    采用游标分页避免 offset 窗口错位，调用方负责统一提交事务。
+    """
+    batch_size = 100
+    last_id = 0
+    total_updated = 0
+    rename_index = _build_model_id_rename_index(old_model_ids, new_model_ids)
+
+    while True:
+        result = await db.execute(
+            select(profile_crud.model)
+            .where(profile_crud.model.id > last_id)
+            .order_by(profile_crud.model.id.asc())
+            .limit(batch_size)
+        )
+        profiles = list(result.scalars().all())
+        if not profiles:
+            break
+
+        batch_changed = False
+        for profile in profiles:
+            configs = profile.configs or {}
+            referenced_model_ids = _collect_channel_rule_model_ids(configs, channel_id)
+            renames = _compute_model_id_renames(old_model_ids, new_model_ids, referenced_model_ids, rename_index)
+            if not renames:
+                continue
+
+            profile_updated_count = _apply_model_id_renames_to_configs(configs, channel_id, renames)
+            if profile_updated_count > 0:
+                profile.configs = configs
+                flag_modified(profile, "configs")
+                db.add(profile)
+                batch_changed = True
+                total_updated += profile_updated_count
+
+        if batch_changed:
+            await db.flush()
+
+        last_id = profiles[-1].id or last_id
+
+    return total_updated
+
+
+def _get_chat_model_ids(model_ids: list[dict]) -> set[str]:
+    return {
+        str(item.get("model_id"))
+        for item in model_ids
+        if str(item.get("usage")) == ModelUsage.CHAT.value and item.get("model_id")
+    }
+
+
+async def _sync_audit_model_id_renames(
+    db: AsyncSession,
+    channel_id: int,
+    old_model_ids: list[dict],
+    new_model_ids: list[dict],
+) -> int:
+    """同步引用该渠道的 Profile 审计模型重命名，调用方负责统一提交事务。"""
+    batch_size = 100
+    last_id = 0
+    total_updated = 0
+    rename_index = _build_model_id_rename_index(old_model_ids, new_model_ids)
+
+    while True:
+        result = await db.execute(
+            select(profile_crud.model)
+            .where(profile_crud.model.id > last_id)
+            .order_by(profile_crud.model.id.asc())
+            .limit(batch_size)
+        )
+        profiles = list(result.scalars().all())
+        if not profiles:
+            break
+
+        batch_changed = False
+        for profile in profiles:
+            configs = profile.configs or {}
+            security_config = configs.get("security") if isinstance(configs.get("security"), dict) else {}
+            audit_model_id = security_config.get("audit_model_id")
+            if str(security_config.get("audit_channel_id")) != str(channel_id) or not audit_model_id:
+                continue
+
+            renames = _compute_model_id_renames(
+                old_model_ids,
+                new_model_ids,
+                {ModelUsage.CHAT.value: {str(audit_model_id)}},
+                rename_index,
+            )
+            new_model_id = renames.get(ModelUsage.CHAT.value, {}).get(str(audit_model_id))
+            if not new_model_id:
+                continue
+
+            security_config["audit_model_id"] = new_model_id
+            configs["security"] = security_config
+            profile.configs = configs
+            flag_modified(profile, "configs")
+            db.add(profile)
+            batch_changed = True
+            total_updated += 1
+
+        if batch_changed:
+            await db.flush()
+
+        last_id = profiles[-1].id or last_id
+
+    return total_updated
+
+
+async def _clear_unavailable_audit_model_refs(
+    db: AsyncSession,
+    channel_id: int,
+    model_ids: list[dict],
+) -> int:
+    """清理引用已不可用审计模型的 Profile 安全配置，调用方负责统一提交事务。"""
+    available_chat_model_ids = _get_chat_model_ids(model_ids)
+    batch_size = 100
+    last_id = 0
+    total_cleared = 0
+
+    while True:
+        result = await db.execute(
+            select(profile_crud.model)
+            .where(profile_crud.model.id > last_id)
+            .order_by(profile_crud.model.id.asc())
+            .limit(batch_size)
+        )
+        profiles = list(result.scalars().all())
+        if not profiles:
+            break
+
+        batch_changed = False
+        for profile in profiles:
+            configs = profile.configs or {}
+            security_config = configs.get("security") if isinstance(configs.get("security"), dict) else {}
+            audit_channel_id = security_config.get("audit_channel_id")
+            audit_model_id = security_config.get("audit_model_id")
+            if str(audit_channel_id) != str(channel_id):
+                continue
+
+            if audit_model_id and str(audit_model_id) in available_chat_model_ids:
+                continue
+
+            if audit_channel_id is None and audit_model_id is None:
+                continue
+
+            security_config["audit_channel_id"] = None
+            security_config["audit_model_id"] = None
+            configs["security"] = security_config
+            profile.configs = configs
+            flag_modified(profile, "configs")
+            db.add(profile)
+            batch_changed = True
+            total_cleared += 1
+
+        if batch_changed:
+            await db.flush()
+
+        last_id = profiles[-1].id or last_id
+
+    return total_cleared
+
+
+@router.post("/create", response_model=StandardResponse)
+async def create_channel(
+    channel_in: ChannelCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
+):
+    validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
+    if validation_error:
+        return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
+
+    if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
+        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_SCHEME)
+
+    if channel_in.model_ids:
+        has_rerank = any(item.get("usage") == ModelUsage.RERANK for item in channel_in.model_ids)
+        if has_rerank and not channel_in.base_url:
+            return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK)
+
+    if await channel_crud.get_by_name(db, channel_in.name):
+        raise ParameterException(constants.ERR_CHANNEL_NAME_EXISTS)
+
+    db_obj = await channel_crud.create(db, obj_in=channel_in)
+
+    return StandardResponse.success(
+        data=ChannelResponse.model_validate(db_obj),
+        message=constants.MSG_CHANNEL_CREATED,
+    )
+
+
+@router.get("/types", response_model=StandardResponse)
+async def get_channel_types():
+    return StandardResponse.success(
+        data={
+            "channel_types": [e.value for e in ChannelType],
+            "model_usages": [e.value for e in ModelUsage],
+        }
+    )
+
+
+@router.get("/list", response_model=StandardResponse)
+async def list_channels(
+    page: int = 1,
+    size: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    channels = await channel_crud.get_multi(db, skip=skip, limit=size)
+    total = await channel_crud.count(db)
+
+    page_data = PageData(
+        items=[ChannelListResponse.model_validate(item) for item in channels],
+        total=total,
+        page=page,
+        size=size,
+    )
+    return StandardResponse.success(data=page_data)
+
+
+@router.get("/get", response_model=StandardResponse)
+async def get_channel(channel_id: int, db: AsyncSession = Depends(get_db)):
+    db_obj = await channel_crud.get(db, channel_id)
+    if not db_obj:
+        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+    return StandardResponse.success(data=ChannelResponse.model_validate(db_obj))
+
+
+@router.post("/update", response_model=StandardResponse)
+async def update_channel(
+    channel_id: int,
+    channel_in: ChannelUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
+):
+    db_obj = await channel_crud.get(db, channel_id)
+    if not db_obj:
+        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+
+    if channel_in.name and channel_in.name != db_obj.name:
+        if await channel_crud.get_by_name(db, channel_in.name):
+            raise ParameterException(constants.ERR_CHANNEL_NAME_EXISTS)
+
+    # 校验 model_ids 合法性（如果传入）
+    if channel_in.model_ids is not None:
+        validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
+        if validation_error:
+            return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
+
+    if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
+        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_SCHEME)
+
+    # 跨字段校验：结合库内既有数据判断 RERANK 的 base_url 必填约束
+    final_model_ids = channel_in.model_ids if channel_in.model_ids is not None else db_obj.model_ids
+    final_base_url = channel_in.base_url if channel_in.base_url is not None else db_obj.base_url
+    if final_model_ids:
+        has_rerank = any(item.get("usage") == ModelUsage.RERANK for item in final_model_ids)
+        if has_rerank and not final_base_url:
+            return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK)
+
+    # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
+    old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
+
+    update_data = channel_in.model_dump(exclude_unset=True)
+    synced_profile_rules = 0
+    removed_profile_rules = 0
+    synced_audit_refs = 0
+    cleared_audit_refs = 0
+
+    try:
+        for field, value in update_data.items():
+            setattr(db_obj, field, value)
+
+        db.add(db_obj)
+        await db.flush()
+        await db.refresh(db_obj)
+
+        if channel_in.model_ids is not None:
+            # 先把绑定该渠道的 profile 渠道规则与审计模型引用中被重命名的 model_id 同步更新，
+            # 再清理失效引用，使重命名后的配置得以保留而非被当作删除清除
+            synced_profile_rules = await _sync_channel_model_id_renames(db, channel_id, old_model_ids, db_obj.model_ids or [])
+            synced_audit_refs = await _sync_audit_model_id_renames(db, channel_id, old_model_ids, db_obj.model_ids or [])
+            removed_profile_rules = await _remove_unavailable_channel_rules(db, channel_id, db_obj.model_ids)
+            cleared_audit_refs = await _clear_unavailable_audit_model_refs(db, channel_id, db_obj.model_ids or [])
+
+        await db.commit()
+        await db.refresh(db_obj)
+    except Exception:
+        await db.rollback()
+        raise
+
+    return StandardResponse.success(
+        data={
+            "channel": ChannelResponse.model_validate(db_obj),
+            "removed_profile_rules": removed_profile_rules,
+            "synced_profile_rules": synced_profile_rules,
+            "synced_audit_refs": synced_audit_refs,
+            "cleared_audit_refs": cleared_audit_refs,
+        },
+        message=constants.MSG_CHANNEL_UPDATED,
+    )
+
+
+@router.post("/delete")
+async def delete_channel(
+    channel_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
+):
+    db_obj = await channel_crud.get(db, channel_id)
+    if not db_obj:
+        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+
+    try:
+        removed_profile_rules = await _remove_unavailable_channel_rules(db, channel_id, [])
+        cleared_audit_refs = await _clear_unavailable_audit_model_refs(db, channel_id, [])
+        await db.delete(db_obj)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    return StandardResponse.success(
+        data={"removed_profile_rules": removed_profile_rules, "cleared_audit_refs": cleared_audit_refs},
+        message=constants.MSG_CHANNEL_DELETED,
+    )
+
+
+@router.post("/test-embedding-dimension")
+async def test_embedding_dimension(
+    channel_id: int,
+    model_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(check_admin_privilege),
+):
+    """自动检测向量模型的输出维度。"""
+    db_obj = await channel_crud.get(db, channel_id)
+    if not db_obj:
+        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+
+    if not db_obj.base_url:
+        raise ParameterException(constants.ERR_CHANNEL_TEST_NO_URL)
+
+    try:
+        res = await EmbeddingClient.get_embeddings(
+            channel_type=db_obj.channel_type,
+            api_key=db_obj.get_decrypted_api_key(),
+            base_url=db_obj.base_url,
+            model_id=model_id,
+            input_texts=["dimension test"],
+        )
+        if "data" in res and len(res["data"]) > 0:
+            dim = len(res["data"][0]["embedding"])
+            return StandardResponse.success(
+                data={"dimension": dim},
+                message=constants.MSG_CHANNEL_TEST_SUCCESS,
+                dim=dim,
+            )
+        else:
+            raise ParameterException(constants.ERR_CHANNEL_TEST_DIMENSION_ERROR)
+    except Exception as e:
+        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, message=str(e))

@@ -1,9 +1,9 @@
 MESSAGES = {
     "ERR_PASSWORD_TOO_LONG_BYTES": "Password must not exceed 72 bytes",
-    "ERR_PROVIDER_BASE_URL_REQUIRED_FOR_RERANK": "base_url is required when model_ids contains RERANK models",
-    "ERR_PROVIDER_BASE_URL_SCHEME": "base_url must start with http:// or https://",
-    "ERR_PROVIDER_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] validation failed: {error}",
-    "ERR_PROVIDER_MODEL_IDS_DUPLICATED": "Model ID cannot be duplicated within the same usage: {usage}/{model_id}",
+    "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK": "base_url is required when model_ids contains RERANK models",
+    "ERR_CHANNEL_BASE_URL_SCHEME": "base_url must start with http:// or https://",
+    "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] validation failed: {error}",
+    "ERR_CHANNEL_MODEL_IDS_DUPLICATED": "Model ID cannot be duplicated within the same usage: {usage}/{model_id}",
     "ERR_VALIDATION_FAILED": "Parameter validation failed",
     "missing": "Missing required field",
     "value_error.missing": "Missing required field",

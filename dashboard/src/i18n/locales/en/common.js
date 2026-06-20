@@ -24,7 +24,7 @@ export default {
     knowledge_base: 'Knowledge Base',
     system: 'System Config',
     profiles: 'Profiles',
-    providers: 'Providers',
+    channels: 'Channels',
     prompts: 'Prompts',
     logs: 'System Logs',
     realtime_logs: 'Real-time Logs',

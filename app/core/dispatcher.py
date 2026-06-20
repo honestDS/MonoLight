@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.channel_router import select_channel
 from app.core.constants import (
-    ERR_CHAT_PROVIDER_NOT_FOUND,
+    ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
 from app.core.crud.active_session import (
@@ -30,6 +30,7 @@ from app.core.crud.profile import (
 from app.core.crud.user import user_crud
 from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.exceptions import (
+    ApiKeyException,
     BaseBusinessException,
     LLMException,
     ServerException,
@@ -82,7 +83,7 @@ def _resolve_chat_params(model_entry: dict, chat_channel) -> dict:
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
         "top_p": model_entry.get("top_p"),
         "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else 2048,
-        "chat_timeout": chat_channel.chat_timeout,
+        "chat_timeout": model_entry.get("chat_timeout") if model_entry.get("chat_timeout") is not None else chat_channel.chat_timeout,
         "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else 4,
     }
 
@@ -165,13 +166,13 @@ class ChatDispatcher:
                         await mark_initial_message_processed(db, initial_msg.id)
 
                     # ========== 渠道路由选择 ==========
-                    chat_channel = cfg.provider.chat_channel
+                    chat_channel = cfg.channel.chat_channel
                     chat_cursor_key = f"{profile.id}:CHAT"
                     selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream", cursor_key=chat_cursor_key)
                     if not selection:
-                        raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
+                        raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 
-                    chat_provider, model_entry, _channel_rule = selection
+                    chat_channel_obj, model_entry, _channel_rule = selection
                     img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                     chat_params = _resolve_chat_params(model_entry, chat_channel)
 
@@ -228,15 +229,15 @@ class ChatDispatcher:
                         while True:
                             try:
                                 response = await LLMClient.generate(
-                                    api_key=chat_provider.api_key,
-                                    base_url=chat_provider.base_url,
+                                    api_key=chat_channel_obj.get_decrypted_api_key(),
+                                    base_url=chat_channel_obj.base_url,
                                     model_id=model_entry["model_id"],
                                     messages=messages,
                                     temperature=chat_params["temperature"],
                                     top_p=chat_params["top_p"],
                                     max_tokens=chat_params["max_tokens"],
                                     tools=current_tools,
-                                    protocol=getattr(chat_provider, "protocol", "openai"),
+                                    protocol=getattr(chat_channel_obj, "protocol", "openai"),
                                     timeout=chat_params["chat_timeout"],
                                 )
                                 # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
@@ -244,6 +245,8 @@ class ChatDispatcher:
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                                 break
+                            except ApiKeyException:
+                                raise
                             except LLMException as exc:
                                 # 仅捕获 LLM 调用相关异常（连接失败/超时/状态码错误/空响应等）做降级，
                                 # 组装、协议转换或代码缺陷类异常向上抛出，避免掩盖真实问题
@@ -251,12 +254,14 @@ class ChatDispatcher:
                                 logger.bind(
                                     uid=uid,
                                     session_id=session_id,
-                                    **channel_log_extra(chat_provider, model_entry),
+                                    **channel_log_extra(chat_channel_obj, model_entry),
                                 ).warning(t("LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
+                                if not chat_channel.retry_on_failure:
+                                    raise
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise
-                                chat_provider, model_entry, _channel_rule = selection
+                                chat_channel_obj, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                                 chat_params = _resolve_chat_params(model_entry, chat_channel)
                                 # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
@@ -394,13 +399,13 @@ class ChatDispatcher:
                         await mark_initial_message_processed(db, initial_msg.id)
 
                     # ========== 渠道路由选择 ==========
-                    chat_channel = cfg.provider.chat_channel
+                    chat_channel = cfg.channel.chat_channel
                     chat_cursor_key = f"{profile.id}:CHAT"
                     selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream", cursor_key=chat_cursor_key)
                     if not selection:
-                        raise LLMException(message=ERR_CHAT_PROVIDER_NOT_FOUND)
+                        raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 
-                    chat_provider, model_entry, _channel_rule = selection
+                    chat_channel_obj, model_entry, _channel_rule = selection
                     img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                     chat_params = _resolve_chat_params(model_entry, chat_channel)
 
@@ -462,15 +467,15 @@ class ChatDispatcher:
                             emitted_chunk = False
                             try:
                                 async for chunk in LLMClient.generate_stream(
-                                    api_key=chat_provider.api_key,
-                                    base_url=chat_provider.base_url,
+                                    api_key=chat_channel_obj.get_decrypted_api_key(),
+                                    base_url=chat_channel_obj.base_url,
                                     model_id=model_entry["model_id"],
                                     messages=messages,
                                     temperature=chat_params["temperature"],
                                     top_p=chat_params["top_p"],
                                     max_tokens=chat_params["max_tokens"],
                                     tools=current_tools,
-                                    protocol=getattr(chat_provider, "protocol", "openai"),
+                                    protocol=getattr(chat_channel_obj, "protocol", "openai"),
                                     timeout=chat_params["chat_timeout"],
                                 ):
                                     choices = chunk.get("choices", [])
@@ -513,6 +518,8 @@ class ChatDispatcher:
                                 if not stream_text and not stream_has_tool:
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                                 break
+                            except ApiKeyException:
+                                raise
                             except LLMException as exc:
                                 # 仅捕获 LLM 调用相关异常做降级；已向前端推送过内容则不可降级，直接抛出
                                 if emitted_chunk:
@@ -521,12 +528,14 @@ class ChatDispatcher:
                                 logger.bind(
                                     uid=uid,
                                     session_id=session_id,
-                                    **channel_log_extra(chat_provider, model_entry),
+                                    **channel_log_extra(chat_channel_obj, model_entry),
                                 ).warning(t("LOG_DISPATCHER_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
+                                if not chat_channel.retry_on_failure:
+                                    raise
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise
-                                chat_provider, model_entry, _channel_rule = selection
+                                chat_channel_obj, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                                 chat_params = _resolve_chat_params(model_entry, chat_channel)
                                 # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩

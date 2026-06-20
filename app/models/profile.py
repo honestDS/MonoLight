@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from app.models.prompt import PromptLibrary
 
 
-class ProviderConfig(BaseModel):
-    """LLM 提供商渠道配置（渠道管理架构）"""
+class ChannelGroupConfig(BaseModel):
+    """渠道管理组配置（渠道管理架构）"""
 
     chat_channel: ChannelConfig | None = PydanticField(None, description="对话渠道配置")
     embedding_channel: ChannelConfig | None = PydanticField(None, description="嵌入渠道配置")
@@ -41,7 +41,7 @@ class ProviderConfig(BaseModel):
 class SecurityConfig(BaseModel):
     """安全审计系统参数配置"""
 
-    audit_provider_id: int | None = PydanticField(None, gt=0, description="执行安全审计的提供商 ID")
+    audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
     audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发审计拦截的风险评分阈值（0-7）")
 
@@ -70,7 +70,7 @@ class OtherConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Profile 详细配置模型，负责数据的标准化与校验"""
 
-    provider: ProviderConfig
+    channel: ChannelGroupConfig
     security: SecurityConfig
     tool: ToolConfig
     other: OtherConfig
@@ -80,12 +80,12 @@ class ProfileConfig(BaseModel):
     def data_pump(cls, data: Any) -> Any:
         """数据泵：将扁平或非标准的字典数据映射到结构化的嵌套配置模型中"""
         schema_map = {
-            "provider": [
+            "channel": [
                 "chat_channel",
                 "embedding_channel",
                 "rerank_channel",
             ],
-            "security": ["audit_provider_id", "audit_model_id", "audit_threshold"],
+            "security": ["audit_channel_id", "audit_model_id", "audit_threshold"],
             "tool": [
                 "shell_timeout",
                 "max_parallel_tools",
@@ -103,17 +103,17 @@ PROFILE_EXAMPLE = {
     "name": "test2",
     "prompt_id": 1,
     "configs": {
-        "provider": {
+        "channel": {
             "chat_channel": {
                 "chat_timeout": 60.0,
                 "rules": [
-                    {"provider_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 100},
+                    {"channel_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 100},
                 ],
             },
             "embedding_channel": {
                 "embedding_timeout": 30.0,
                 "rules": [
-                    {"provider_id": 1, "model_id": "text-embedding-3-small", "priority": 1, "weight": 100},
+                    {"channel_id": 1, "model_id": "text-embedding-3-small", "priority": 1, "weight": 100},
                 ],
             },
             "rerank_channel": {
@@ -121,12 +121,12 @@ PROFILE_EXAMPLE = {
                 "rerank_candidate_k": 20,
                 "kb_query_top_k": 5,
                 "rules": [
-                    {"provider_id": 1, "model_id": "bge-reranker-large", "priority": 1, "weight": 100},
+                    {"channel_id": 1, "model_id": "bge-reranker-large", "priority": 1, "weight": 100},
                 ],
             },
         },
         "security": {
-            "audit_provider_id": 1,
+            "audit_channel_id": 1,
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
         },

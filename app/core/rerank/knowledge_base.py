@@ -28,8 +28,8 @@ async def get_profile_rerank_config(
 
     未配置或路由无结果时返回 None（视为不走 rerank）。
     """
-    provider_config = (profile.configs or {}).get("provider", {})
-    rerank_channel_raw = provider_config.get("rerank_channel")
+    channel_config = (profile.configs or {}).get("channel", {})
+    rerank_channel_raw = channel_config.get("rerank_channel")
 
     if not rerank_channel_raw:
         return None
@@ -54,20 +54,20 @@ async def get_profile_rerank_config(
     if not selection:
         return None
 
-    provider, model_entry, _rule = selection
+    channel, model_entry, _rule = selection
 
-    if not provider.base_url:
-        raise RerankException(constants.ERR_PROFILE_RERANK_PROVIDER_NO_URL)
+    if not channel.base_url:
+        raise RerankException(constants.ERR_PROFILE_RERANK_CHANNEL_NO_URL)
 
     return RerankConfig(
-        provider_id=provider.id,
-        provider_name=provider.name,
-        provider_type=provider.provider_type,
-        api_key=provider.api_key,
-        base_url=provider.base_url,
+        channel_id=channel.id,
+        channel_name=channel.name,
+        channel_type=channel.channel_type,
+        api_key=channel.get_decrypted_api_key(),
+        base_url=channel.base_url,
         model_id=model_entry["model_id"],
         candidate_k=rerank_channel.rerank_candidate_k,
-        timeout=rerank_channel.rerank_timeout,
+        timeout=model_entry.get("rerank_timeout") if model_entry.get("rerank_timeout") is not None else rerank_channel.rerank_timeout,
         priority=_rule.priority,
     )
 
@@ -84,7 +84,7 @@ async def rerank_retrieval_hits(
 
     documents = [hit.content for hit in hits]
     results = await RerankClient.rerank_texts(
-        provider_type=config.provider_type,
+        channel_type=config.channel_type,
         api_key=config.api_key,
         base_url=config.base_url,
         model_id=config.model_id,

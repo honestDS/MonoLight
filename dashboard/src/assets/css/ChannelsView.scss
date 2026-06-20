@@ -1,20 +1,13 @@
 @import "./common.scss";
 
-.provider-settings-shell {
+.channel-settings-shell {
   border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   padding: 16px 16px 12px;
   background: #fff;
 }
 
-.models-list{
-  gap: 4px;
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-
-.provider-settings-title {
+.channel-settings-title {
   color: var(--el-color-primary);
   font-weight: 600;
   font-size: 14px;
@@ -23,25 +16,25 @@
   border-left: 3px solid var(--el-color-primary);
 }
 
-.provider-settings-body {
+.channel-settings-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.provider-settings-form {
+.channel-settings-form {
   .el-form-item {
     margin-bottom: 12px;
   }
 }
 
-.provider-settings-row--fields {
+.channel-settings-row--fields {
   display: flex;
   flex-wrap: wrap;
   gap: 0 12px;
 }
 
-.provider-settings-row--fields .el-form-item {
+.channel-settings-row--fields .el-form-item {
   flex: 1 1 calc(50% - 12px);
   min-width: 240px;
 }
@@ -97,7 +90,3 @@
   gap: 0 12px;
 }
 
-.text-muted {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}

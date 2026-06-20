@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import constants
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
+from app.core.crud.channel import channel_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
@@ -25,6 +26,7 @@ from app.models.profile import (
     ProfileResponse,
     ProfileUpdate,
 )
+from app.models.channel import ModelUsage
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -44,34 +46,74 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
-async def validate_channel_configs(provider_config: dict) -> None:
-    """校验 provider 配置中的渠道配置合法性。
+async def validate_audit_model_config(db: AsyncSession, security_config: dict) -> None:
+    """校验安全审计模型必须指向渠道下的 CHAT 模型。"""
+    audit_channel_id = security_config.get("audit_channel_id")
+    audit_model_id = security_config.get("audit_model_id")
+    if not audit_channel_id or not audit_model_id:
+        return
+
+    channel = await channel_crud.get(db, audit_channel_id)
+    if not channel:
+        raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+
+    is_chat_model = any(
+        item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT
+        for item in (channel.model_ids or [])
+    )
+    if not is_chat_model:
+        raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+
+
+async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: ChannelConfig, expected_usage: ModelUsage) -> None:
+    """校验渠道规则引用的模型条目用途与所在配置组一致。"""
+    for rule in channel_config_obj.rules:
+        channel = await channel_crud.get(db, rule.channel_id)
+        if not channel:
+            raise ParameterException(constants.ERR_CHANNEL_NOT_FOUND)
+
+        matched_model = None
+        for item in channel.model_ids or []:
+            if str(item.get("model_id")) == rule.model_id:
+                matched_model = item
+                if str(item.get("usage")) == expected_usage.value:
+                    break
+
+        if not matched_model:
+            raise ParameterException(constants.ERR_CHANNEL_MODEL_NOT_FOUND)
+
+        actual_usage = str(matched_model.get("usage"))
+        if actual_usage != expected_usage.value:
+            raise ParameterException(constants.ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
+
+
+async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> None:
+    """校验 channel 配置中的渠道配置合法性。
 
     - chat_channel：至少需要一条启用规则
     - embedding_channel：可选，有配置则校验
     - rerank_channel：可选，有配置则校验
+    - 每条规则必须引用对应用途的模型条目
     """
-    chat_channel = provider_config.get("chat_channel")
-    if chat_channel:
-        try:
-            ChannelConfig.model_validate(chat_channel)
-        except Exception as e:
-            raise ParameterException(f"chat_channel 校验失败: {e}")
+    channel_usage_map = {
+        "chat_channel": ModelUsage.CHAT,
+        "embedding_channel": ModelUsage.EMBEDDING,
+        "rerank_channel": ModelUsage.RERANK,
+    }
 
-    embedding_channel = provider_config.get("embedding_channel")
-    if embedding_channel:
-        try:
-            ChannelConfig.model_validate(embedding_channel)
-        except Exception as e:
-            raise ParameterException(f"embedding_channel 校验失败: {e}")
+    for channel_key, expected_usage in channel_usage_map.items():
+        channel_raw = channel_config.get(channel_key)
+        if not channel_raw:
+            continue
 
-    rerank_channel = provider_config.get("rerank_channel")
-    if rerank_channel:
         try:
-            rerank_config = ChannelConfig.model_validate(rerank_channel)
+            channel_config_obj = ChannelConfig.model_validate(channel_raw)
         except Exception as e:
-            raise ParameterException(f"rerank_channel 校验失败: {e}")
-        if rerank_config.rerank_candidate_k < rerank_config.kb_query_top_k:
+            raise ParameterException(f"{channel_key} 校验失败: {e}")
+
+        await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
+
+        if expected_usage == ModelUsage.RERANK and channel_config_obj.rerank_candidate_k < channel_config_obj.kb_query_top_k:
             raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
@@ -81,8 +123,9 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    provider_config = profile_in.configs.get("provider", {})
-    await validate_channel_configs(provider_config)
+    channel_config = profile_in.configs.get("channel", {})
+    await validate_channel_configs(db, channel_config)
+    await validate_audit_model_config(db, profile_in.configs.get("security", {}))
 
     if await profile_crud.get_by_name(db, profile_in.name):
         raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
@@ -135,10 +178,11 @@ async def activate_profile(
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
     # 校验 chat_channel 配置存在
-    provider_config = profile.configs.get("provider", {})
-    chat_channel = provider_config.get("chat_channel")
+    channel_config = profile.configs.get("channel", {})
+    chat_channel = channel_config.get("chat_channel")
     if not chat_channel or not chat_channel.get("rules"):
-        raise ParameterException(constants.ERR_ACTIVATE_NO_PROVIDER)
+        raise ParameterException(constants.ERR_ACTIVATE_NO_CHANNEL)
+    await validate_channel_configs(db, channel_config)
 
     await db.execute(update(profile_crud.model).values(is_active=False))
     profile.is_active = True
@@ -158,8 +202,9 @@ async def update_profile(
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
     if profile_in.configs:
-        provider_config = profile_in.configs.get("provider", {})
-        await validate_channel_configs(provider_config)
+        channel_config = profile_in.configs.get("channel", {})
+        await validate_channel_configs(db, channel_config)
+        await validate_audit_model_config(db, profile_in.configs.get("security", {}))
 
     if profile_in.name and profile_in.name != db_profile.name:
         if await profile_crud.get_by_name(db, profile_in.name):

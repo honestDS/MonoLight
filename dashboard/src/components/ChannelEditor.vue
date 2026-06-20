@@ -70,7 +70,17 @@
           :key="item.key"
           :label="item.label"
           :value="item.key"
-        />
+        >
+          <div class="channel-option">
+            <span class="channel-option-label">{{ item.label }}</span>
+            <el-tag v-if="item.channel_disabled" type="warning" size="small">
+              {{ $t('profiles.channel_disabled') }}
+            </el-tag>
+            <el-tag v-else-if="item.model_disabled" type="warning" size="small">
+              {{ $t('profiles.model_disabled') }}
+            </el-tag>
+          </div>
+        </el-option>
       </el-select>
     </el-form-item>
 
@@ -78,6 +88,7 @@
       <div class="channel-hint-item text-muted">{{ $t('profiles.priority_hint') }}</div>
       <div class="channel-hint-item text-muted">{{ $t('profiles.weight_hint') }}</div>
       <div class="channel-hint-item text-muted">{{ $t('profiles.drag_hint') }}</div>
+      <div class="channel-hint-item text-muted">{{ $t('profiles.disabled_rule_hint') }}</div>
     </div>
 
     <draggable
@@ -99,6 +110,9 @@
             </span>
             <span class="rule-priority-tag">P{{ element.priority || 1 }}</span>
             <span class="rule-name">{{ getRuleLabel(element) }}</span>
+            <el-tag v-if="getRuleStatus(element)" :type="getRuleStatus(element).type" size="small" class="rule-status-tag">
+              {{ $t(getRuleStatus(element).labelKey) }}
+            </el-tag>
             <el-button type="text" class="remove" @click="removeRule(element)">
               {{ $t('profiles.remove') }}
             </el-button>
@@ -139,12 +153,12 @@ import { defaultChannelRule } from '../constants'
 
 const props = defineProps({
   channel: { type: Object, required: true },
-  providers: { type: Array, required: true },
+  channels: { type: Array, required: true },
   usage: { type: String, required: true },
   label: { type: String, default: '' }
 })
 
-const getRuleKey = (rule) => `${rule.provider_id}::${rule.model_id}`
+const getRuleKey = (rule) => `${rule.channel_id}::${rule.model_id}`
 
 const compareRules = (left, right) => {
   return (left.priority || 1) - (right.priority || 1)
@@ -154,8 +168,6 @@ const sortRules = () => {
   if (!props.channel.rules) return
   props.channel.rules = [...props.channel.rules].sort(compareRules)
 }
-
-const sortedRules = computed(() => [...(props.channel.rules || [])].sort(compareRules))
 
 // 判断某规则是否为其所在优先级组的第一条（用于视觉分组分隔）
 const isGroupStart = (rule) => {
@@ -167,25 +179,26 @@ const isGroupStart = (rule) => {
 
 const modelOptions = computed(() => {
   const options = []
-  props.providers
-    .filter(provider => provider.is_active !== false)
-    .forEach(provider => {
-      ;(provider.model_ids || [])
+  props.channels
+    .forEach(channel => {
+      ;(channel.model_ids || [])
         .filter(model => model.usage === props.usage && model.model_id)
         .forEach(model => {
           options.push({
-            key: `${provider.id}::${model.model_id}`,
-            provider_id: provider.id,
-            provider_name: provider.name,
+            key: `${channel.id}::${model.model_id}`,
+            channel_id: channel.id,
+            channel_name: channel.name,
             model_id: model.model_id,
-            label: `${provider.name} / ${model.model_id}`
+            label: `${channel.name} / ${model.model_id}`,
+            channel_disabled: channel.is_active === false,
+            model_disabled: model.is_enabled === false
           })
         })
     })
   return options
 })
 
-// 新增/移除模型时，默认给每条规则权重 1（轮询配额语义下表示各用一次）
+// 新增/移除模型时，默认给每条规则权重 1
 const rebalanceWeights = (rules) => {
   rules.forEach(rule => {
     if (rule.weight === undefined || rule.weight === null) rule.weight = 1
@@ -206,7 +219,7 @@ const selectedRuleKeys = computed({
         if (!option) return null
         return existingRuleMap.get(key) || {
           ...defaultChannelRule(),
-          provider_id: option.provider_id,
+          channel_id: option.channel_id,
           model_id: option.model_id
         }
       })
@@ -217,9 +230,33 @@ const selectedRuleKeys = computed({
   }
 })
 
+const findRuleChannel = (rule) => {
+  return props.channels.find(item => item.id === rule.channel_id)
+}
+
+const findRuleModel = (rule) => {
+  const channel = findRuleChannel(rule)
+  return channel?.model_ids?.find(item => item.model_id === rule.model_id && item.usage === props.usage)
+}
+
 const getRuleLabel = (rule) => {
-  const option = modelOptions.value.find(item => item.provider_id === rule.provider_id && item.model_id === rule.model_id)
-  return option?.label || `${rule.provider_id} / ${rule.model_id}`
+  const channel = findRuleChannel(rule)
+  const model = findRuleModel(rule)
+  if (channel && model) return `${channel.name} / ${model.model_id}`
+  return `${rule.channel_id} / ${rule.model_id}`
+}
+
+const getRuleStatus = (rule) => {
+  const channel = findRuleChannel(rule)
+  if (!channel) return { type: 'danger', labelKey: 'profiles.channel_missing' }
+
+  const model = findRuleModel(rule)
+  if (!model) return { type: 'danger', labelKey: 'profiles.model_missing' }
+
+  if (channel.is_active === false) return { type: 'warning', labelKey: 'profiles.channel_disabled' }
+  if (model.is_enabled === false) return { type: 'warning', labelKey: 'profiles.model_disabled' }
+
+  return null
 }
 
 const removeRule = (rule) => {
@@ -237,9 +274,8 @@ const handlePriorityChange = () => {
   sortRules()
 }
 
-// 拖拽结束后，根据落点目标项的优先级处理：
+// 拖拽结束后仅调整优先级，不表示同一优先级组内的轮询顺序
 // - 目标优先级组只有目标项一项（无重复）：交换被拖动项与目标项的优先级
-//   例如把 P6 拖到唯一的 P3 处：P6 → 3，P3 → 6
 // - 目标优先级组有多项（重复）：被拖动项直接改成该目标优先级，归入该组
 const onDragEnd = (evt) => {
   const rules = props.channel.rules || []
@@ -276,7 +312,7 @@ const onDragEnd = (evt) => {
   sortRules()
 }
 
-// 初始化时按 priority 排序一次；后续排序由 priority 输入变更、增删规则、拖拽吸附显式触发
+// 初始化时按 priority 排序一次；后续排序由 priority 输入变更、增删规则、拖拽调整优先级后显式触发
 onMounted(() => {
   sortRules()
 })

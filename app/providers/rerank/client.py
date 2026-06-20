@@ -3,7 +3,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.schemas import RerankResult
-from app.models.provider import ProviderType
+from app.models.channel import ChannelType
 from app.transformers.base import BaseRerankTransformer
 from app.transformers.openai import OpenAITransformer
 
@@ -15,14 +15,14 @@ logger = get_logger(__name__)
 
 class RerankClient:
     _transformers: dict[str, BaseRerankTransformer] = {
-        ProviderType.OPENAI.value.lower(): OpenAITransformer(),
+        ChannelType.OPENAI.value.lower(): OpenAITransformer(),
     }
 
     @classmethod
-    def get_transformer(cls, provider_type: ProviderType | str) -> BaseRerankTransformer:
-        transformer = cls._transformers.get(str(provider_type).lower())
+    def get_transformer(cls, channel_type: ChannelType | str) -> BaseRerankTransformer:
+        transformer = cls._transformers.get(str(channel_type).lower())
         if not transformer:
-            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported rerank provider {provider_type}")
+            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported rerank channel {channel_type}")
         return transformer
 
     @staticmethod
@@ -33,7 +33,7 @@ class RerankClient:
     @classmethod
     async def rerank_texts(
         cls,
-        provider_type: ProviderType | str,
+        channel_type: ChannelType | str,
         api_key: str,
         base_url: str,
         model_id: str,
@@ -46,7 +46,7 @@ class RerankClient:
         if not documents:
             return []
 
-        transformer = cls.get_transformer(provider_type)
+        transformer = cls.get_transformer(channel_type)
         truncated_documents = cls._truncate_documents(documents)
 
         raw_results = await transformer.rerank_texts(
@@ -62,7 +62,7 @@ class RerankClient:
         results = [RerankResult(index=item["index"], relevance_score=item["relevance_score"]) for item in raw_results]
 
         logger.bind(
-            provider_type=str(provider_type),
+            channel_type=str(channel_type),
             model_id=model_id,
             result_count=len(results),
             rerank_stage="response",

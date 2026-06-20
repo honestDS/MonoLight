@@ -35,6 +35,11 @@ class ServerException(BaseBusinessException):
         super().__init__(code=code, message=message, **kwargs)
 
 
+class ApiKeyException(BaseBusinessException):
+    def __init__(self, message: str = "API Key 加解密异常", code: int = 500, **kwargs):
+        super().__init__(code=code, message=message, **kwargs)
+
+
 class LLMException(BaseBusinessException):
     def __init__(self, message: str = "大模型调用异常", code: int = 502, **kwargs):
         super().__init__(code=code, message=message, **kwargs)

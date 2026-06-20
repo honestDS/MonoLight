@@ -21,6 +21,8 @@ from app.models.profile import (
 load_dotenv()
 logger = get_logger(__name__)
 
+MAX_TOOL_RESULT_CONTEXT_CHARS = 12000
+
 
 class ContextManager:
     @classmethod
@@ -130,6 +132,8 @@ class ContextManager:
 
         # B. 工具链一致性审计 (ID 匹配审计)
         audited_msgs = []
+        truncated_tool_results = 0
+        truncated_tool_result_chars = 0
         # 使用 set 记录已经作为工具链一部分被处理掉的消息对象 ID，防止重复添加
         consumed_msg_ids = set()
 
@@ -159,6 +163,11 @@ class ContextManager:
                 audited_msgs.append(msg)
                 # 先添加已有的工具响应
                 for mt in matched_tools:
+                    original_len = len(mt.content or "")
+                    cls._truncate_tool_result(mt)
+                    if len(mt.content or "") < original_len:
+                        truncated_tool_results += 1
+                        truncated_tool_result_chars += original_len - len(mt.content or "")
                     audited_msgs.append(mt)
                     consumed_msg_ids.add(id(mt))
 
@@ -189,6 +198,14 @@ class ContextManager:
                 audited_msgs.append(msg)
                 i += 1
 
+        if truncated_tool_results:
+            logger.bind(uid=uid, session_id=session_id).info(
+                "TEMP_CONTEXT_TOOL_RESULTS_TRUNCATED count={} removed_chars={} max_chars={}",
+                truncated_tool_results,
+                truncated_tool_result_chars,
+                MAX_TOOL_RESULT_CONTEXT_CHARS,
+            )
+
         # 计算压缩后的 Token 数
         final_history_tokens = 0
         for fm in audited_msgs:
@@ -200,3 +217,12 @@ class ContextManager:
             "before": current_msg_tokens + raw_history_tokens + dropped_history_tokens,
             "after": current_msg_tokens + final_history_tokens,
         }
+
+    @staticmethod
+    def _truncate_tool_result(msg: InternalMessage) -> None:
+        content = msg.content or ""
+        if len(content) <= MAX_TOOL_RESULT_CONTEXT_CHARS:
+            return
+
+        omitted_chars = len(content) - MAX_TOOL_RESULT_CONTEXT_CHARS
+        msg.content = content[:MAX_TOOL_RESULT_CONTEXT_CHARS] + f"\n\n[Tool result truncated: omitted {omitted_chars} characters.]"

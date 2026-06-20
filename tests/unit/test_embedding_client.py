@@ -1,7 +1,7 @@
 import pytest
 
 from app.core.exceptions import LLMException
-from app.models.provider import ProviderType
+from app.models.channel import ChannelType
 from app.providers.embedding import EmbeddingClient
 
 
@@ -18,14 +18,14 @@ def stub_embedding_transformers(monkeypatch):
     monkeypatch.setattr(
         EmbeddingClient,
         "_transformers",
-        {ProviderType.OPENAI.value.lower(): StubEmbeddingTransformer()},
+        {ChannelType.OPENAI.value.lower(): StubEmbeddingTransformer()},
     )
 
 
 @pytest.mark.asyncio
-async def test_embedding_client_get_embeddings_dispatches_by_provider_type(stub_embedding_transformers):
+async def test_embedding_client_get_embeddings_dispatches_by_channel_type(stub_embedding_transformers):
     result = await EmbeddingClient.get_embeddings(
-        provider_type=ProviderType.OPENAI,
+        channel_type=ChannelType.OPENAI,
         api_key="key",
         base_url="https://example.com/v1",
         model_id="embedding-model",
@@ -39,9 +39,9 @@ async def test_embedding_client_get_embeddings_dispatches_by_provider_type(stub_
 
 
 @pytest.mark.asyncio
-async def test_embedding_client_embed_texts_dispatches_by_provider_type_string(stub_embedding_transformers):
+async def test_embedding_client_embed_texts_dispatches_by_channel_type_string(stub_embedding_transformers):
     result = await EmbeddingClient.embed_texts(
-        provider_type="openai",
+        channel_type="openai",
         api_key="key",
         base_url="https://example.com/v1",
         model_id="embedding-model",
@@ -53,8 +53,8 @@ async def test_embedding_client_embed_texts_dispatches_by_provider_type_string(s
     assert result == [[1.0, 2.0, 3.0]]
 
 
-def test_embedding_client_rejects_unsupported_provider():
+def test_embedding_client_rejects_unsupported_channel():
     with pytest.raises(LLMException) as exc_info:
         EmbeddingClient.get_transformer("unsupported")
 
-    assert "Unsupported embedding provider unsupported" in str(exc_info.value)
+    assert exc_info.value.kwargs["detail"] == "Unsupported embedding channel unsupported"

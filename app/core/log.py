@@ -213,14 +213,13 @@ def get_logger(name: str):
     return logger.bind(name=name)
 
 
-def channel_log_extra(provider, model_entry: dict) -> dict:
+def channel_log_extra(channel, model_entry: dict) -> dict:
     """构造渠道相关日志扩展信息：渠道名、模型名等"""
     model_id = model_entry["model_id"]
-    provider_name = getattr(provider, "name", None)
+    channel_name = getattr(channel, "name", None)
     return {
-        "provider_id": provider.id,
-        "provider_name": provider_name,
+        "channel_id": channel.id,
+        "channel_name": f"{channel_name} / {model_id}",
         "model_id": model_id,
         "model_name": model_id,
-        "channel_name": f"{provider_name} / {model_id}",
     }

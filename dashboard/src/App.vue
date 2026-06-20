@@ -33,8 +33,8 @@
             <el-menu-item index="/profiles">
               <span>{{ $t('common.menu.profiles') }}</span>
             </el-menu-item>
-            <el-menu-item index="/providers">
-              <span>{{ $t('common.menu.providers') }}</span>
+            <el-menu-item index="/channels">
+              <span>{{ $t('common.menu.channels') }}</span>
             </el-menu-item>
             <el-menu-item index="/prompts">
               <span>{{ $t('common.menu.prompts') }}</span>
