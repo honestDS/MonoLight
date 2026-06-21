@@ -120,7 +120,7 @@ def _is_encrypted_api_key(text: str) -> bool:
 @event.listens_for(ModelChannel, "before_update")
 def encrypt_api_key_before_save(mapper, connection, target):
     """在插入或更新前加密API密钥
-    
+
     优化：仅在api_key字段实际变更时执行加密检测，避免不必要的解密尝试。
     使用SQLAlchemy的get_history()检测字段是否被修改。
     """

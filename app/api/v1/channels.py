@@ -62,14 +62,7 @@ def _is_same_channel(rule: dict, channel_id: int) -> bool:
 
 
 def _get_existing_model_ids_by_usage(model_ids: list[dict]) -> dict[str, set[str]]:
-    return {
-        usage.value: {
-            str(item.get("model_id"))
-            for item in model_ids
-            if str(item.get("usage")) == usage.value and item.get("model_id")
-        }
-        for usage in ModelUsage
-    }
+    return {usage.value: {str(item.get("model_id")) for item in model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
 
 
 def _clean_channel_rules_from_configs(
@@ -120,12 +113,7 @@ async def _remove_unavailable_channel_rules(
     total_removed = 0
 
     while True:
-        result = await db.execute(
-            select(profile_crud.model)
-            .where(profile_crud.model.id > last_id)
-            .order_by(profile_crud.model.id.asc())
-            .limit(batch_size)
-        )
+        result = await db.execute(select(profile_crud.model).where(profile_crud.model.id > last_id).order_by(profile_crud.model.id.asc()).limit(batch_size))
         profiles = list(result.scalars().all())
         if not profiles:
             break
@@ -170,19 +158,9 @@ def _collect_channel_rule_model_ids(configs: dict, channel_id: int) -> dict[str,
 
 
 def _build_model_id_rename_index(old_model_ids: list[dict], new_model_ids: list[dict]) -> dict[str, dict]:
-    old_by_usage_and_id = {
-        (str(item.get("usage")), str(item.get("model_id"))): item
-        for item in old_model_ids
-        if item.get("usage") and item.get("model_id")
-    }
-    old_ids_by_usage = {
-        usage.value: {str(item.get("model_id")) for item in old_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")}
-        for usage in ModelUsage
-    }
-    new_ids_by_usage = {
-        usage.value: {str(item.get("model_id")) for item in new_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")}
-        for usage in ModelUsage
-    }
+    old_by_usage_and_id = {(str(item.get("usage")), str(item.get("model_id"))): item for item in old_model_ids if item.get("usage") and item.get("model_id")}
+    old_ids_by_usage = {usage.value: {str(item.get("model_id")) for item in old_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
+    new_ids_by_usage = {usage.value: {str(item.get("model_id")) for item in new_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
     new_by_usage_and_signature: dict[tuple[str, str], list[dict]] = {}
     for item in new_model_ids:
         usage = str(item.get("usage"))
@@ -232,11 +210,7 @@ def _compute_model_id_renames(
                 continue
 
             signature = _model_entry_signature(old_item)
-            candidates = [
-                item
-                for item in new_by_usage_and_signature.get((usage, signature), [])
-                if str(item.get("model_id")) not in old_ids_by_usage[usage]
-            ]
+            candidates = [item for item in new_by_usage_and_signature.get((usage, signature), []) if str(item.get("model_id")) not in old_ids_by_usage[usage]]
             if len(candidates) != 1:
                 continue
 
@@ -286,12 +260,7 @@ async def _sync_channel_model_id_renames(
     rename_index = _build_model_id_rename_index(old_model_ids, new_model_ids)
 
     while True:
-        result = await db.execute(
-            select(profile_crud.model)
-            .where(profile_crud.model.id > last_id)
-            .order_by(profile_crud.model.id.asc())
-            .limit(batch_size)
-        )
+        result = await db.execute(select(profile_crud.model).where(profile_crud.model.id > last_id).order_by(profile_crud.model.id.asc()).limit(batch_size))
         profiles = list(result.scalars().all())
         if not profiles:
             break
@@ -321,11 +290,7 @@ async def _sync_channel_model_id_renames(
 
 
 def _get_chat_model_ids(model_ids: list[dict]) -> set[str]:
-    return {
-        str(item.get("model_id"))
-        for item in model_ids
-        if str(item.get("usage")) == ModelUsage.CHAT.value and item.get("model_id")
-    }
+    return {str(item.get("model_id")) for item in model_ids if str(item.get("usage")) == ModelUsage.CHAT.value and item.get("model_id")}
 
 
 async def _sync_audit_model_id_renames(
@@ -341,12 +306,7 @@ async def _sync_audit_model_id_renames(
     rename_index = _build_model_id_rename_index(old_model_ids, new_model_ids)
 
     while True:
-        result = await db.execute(
-            select(profile_crud.model)
-            .where(profile_crud.model.id > last_id)
-            .order_by(profile_crud.model.id.asc())
-            .limit(batch_size)
-        )
+        result = await db.execute(select(profile_crud.model).where(profile_crud.model.id > last_id).order_by(profile_crud.model.id.asc()).limit(batch_size))
         profiles = list(result.scalars().all())
         if not profiles:
             break
@@ -397,12 +357,7 @@ async def _clear_unavailable_audit_model_refs(
     total_cleared = 0
 
     while True:
-        result = await db.execute(
-            select(profile_crud.model)
-            .where(profile_crud.model.id > last_id)
-            .order_by(profile_crud.model.id.asc())
-            .limit(batch_size)
-        )
+        result = await db.execute(select(profile_crud.model).where(profile_crud.model.id > last_id).order_by(profile_crud.model.id.asc()).limit(batch_size))
         profiles = list(result.scalars().all())
         if not profiles:
             break

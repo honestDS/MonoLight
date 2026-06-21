@@ -11,6 +11,7 @@ from app.models.message import (
 )
 from app.transformers.openai import OpenAITransformer
 
+
 class LLMClient:
     _transformers = {"openai": OpenAITransformer()}
 

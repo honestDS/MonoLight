@@ -9,7 +9,7 @@ from app.core.channel_router import (
     _get_model_entry,
     select_channel,
 )
-from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, ModelUsage
+from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 
 
 def test_expand_by_weight_stable_order():
@@ -159,9 +159,7 @@ async def test_select_channel_model_entry_disabled(monkeypatch):
 
     monkeypatch.setattr(channel_crud, "get", AsyncMock(return_value=channel))
 
-    channel_config = ChannelConfig(
-        rules=[ChannelRule(channel_id=1, model_id="gpt-4o", priority=1, weight=100)]
-    )
+    channel_config = ChannelConfig(rules=[ChannelRule(channel_id=1, model_id="gpt-4o", priority=1, weight=100)])
 
     async def mock_pick_round_robin(rules, cursor_key, priority):
         return ChannelRule(channel_id=1, model_id="gpt-4o", priority=1, weight=100)

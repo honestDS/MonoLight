@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models.channel import ChannelConfig, ChannelBase, ChannelType, ChannelUpdate, ModelUsage, validate_channel_model_ids
-from app.models.profile import ProfileConfig, ChannelGroupConfig
+from app.models.channel import ChannelBase, ChannelConfig, ChannelType, ChannelUpdate, ModelUsage, validate_channel_model_ids
+from app.models.profile import ChannelGroupConfig, ProfileConfig
 
 
 def test_channel_group_config_defaults():
@@ -71,4 +71,3 @@ def test_channel_model_id_validation_reports_duplicate_model_id_in_same_usage():
 
     assert error_key == "ERR_CHANNEL_MODEL_IDS_DUPLICATED"
     assert error_kwargs == {"usage": ModelUsage.CHAT.value, "model_id": "gpt-4o"}
-

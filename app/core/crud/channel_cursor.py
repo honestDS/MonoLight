@@ -64,4 +64,3 @@ class CRUDChannelCursor:
 
 
 channel_cursor_crud = CRUDChannelCursor()
-

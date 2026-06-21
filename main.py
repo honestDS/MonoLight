@@ -7,12 +7,12 @@ from fastapi import FastAPI
 
 import app.warning_filters  # noqa: F401
 from app.api.v1.auth import router as auth_router
+from app.api.v1.channels import router as channel_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.files import router as files_router
 from app.api.v1.knowledge_base import router as knowledge_base_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
-from app.api.v1.channels import router as channel_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core.log import LogManager, get_logger

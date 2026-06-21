@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel as Base
 
-from app.models.profile import Profile
 from app.models.channel import ModelChannel
+from app.models.profile import Profile
 
 
 @pytest.fixture(scope="session", autouse=True)

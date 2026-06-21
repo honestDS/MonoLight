@@ -173,6 +173,7 @@ async def generate_title(
     from app.core.dispatcher import _format_exception_message
     from app.core.exceptions import LLMException
     from app.core.log import channel_log_extra
+
     selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=f"{profile.id}:CHAT")
     if not selection:
         return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)

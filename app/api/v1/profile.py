@@ -11,22 +11,21 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import constants
+from app.core.crud.channel import channel_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
-from app.core.crud.channel import channel_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
     ResourceNotFoundException,
 )
 from app.core.security import get_current_user
-from app.models.channel import ChannelConfig
+from app.models.channel import ChannelConfig, ModelUsage
 from app.models.profile import (
     ProfileCreate,
     ProfileResponse,
     ProfileUpdate,
 )
-from app.models.channel import ModelUsage
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -57,10 +56,7 @@ async def validate_audit_model_config(db: AsyncSession, security_config: dict) -
     if not channel:
         raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
 
-    is_chat_model = any(
-        item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT
-        for item in (channel.model_ids or [])
-    )
+    is_chat_model = any(item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT for item in (channel.model_ids or []))
     if not is_chat_model:
         raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
 
