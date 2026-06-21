@@ -20,37 +20,42 @@ async def fetch_and_merge_new_user_messages(
     """
     检索并合并未处理的新产生用户消息
     """
-    raw_msgs = await message_crud.get_unprocessed_messages(db, session_id=session_id, uid=uid)
+    raw_messages = await message_crud.get_unprocessed_messages(db, session_id=session_id, uid=uid)
     # 仅处理未标记的用户消息
-    user_msgs = [m for m in raw_msgs if m.role == MessageRole.USER]
-    if not user_msgs:
+    user_messages = []
+    for message in raw_messages:
+        if message.role == MessageRole.USER:
+            user_messages.append(message)
+    if not user_messages:
         return []
 
     # 获取数据库记录的ID集合以便更新
-    msg_ids = [m.id for m in user_msgs if m.id is not None]
+    message_ids = []
+    for message in user_messages:
+        if message.id is not None:
+            message_ids.append(message.id)
 
     # 合并内容与附件
     merged_content = []
     merged_attachments = []
-    for m in user_msgs:
-        if m.content:
-            merged_content.append(str(m.content).strip())
-        if m.attachments:
-            merged_attachments.extend(m.attachments)
+    for message in user_messages:
+        if message.content:
+            merged_content.append(str(message.content).strip())
+        if message.attachments:
+            merged_attachments.extend(message.attachments)
 
     # 标记为已处理 (通过 ORM 对象属性更新方式)
-    if user_msgs:
-        for m in user_msgs:
-            m.is_processed = True
-            db.add(m)
-        await db.commit()
+    for message in user_messages:
+        message.is_processed = True
+        db.add(message)
+    await db.commit()
 
     # 返回合并后的单条 InternalMessage
-    combined_msg = InternalMessage(
-        id=msg_ids[-1] if msg_ids else None,  # 使用最后一条的 ID
+    combined_message = InternalMessage(
+        id=message_ids[-1] if message_ids else None,  # 使用最后一条的 ID
         role=MessageRole.USER,
         content="\n".join(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
-    await append_session_markdown_instruction(db, session_id, combined_msg)
-    return [combined_msg]
+    await append_session_markdown_instruction(db, session_id, combined_message)
+    return [combined_message]

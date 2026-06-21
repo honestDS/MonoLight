@@ -38,11 +38,11 @@ def _expand_by_weight(rules: list[ChannelRule]) -> list[ChannelRule]:
     渠道在 rules 列表中的顺序无关：仅调整列表顺序（不改 priority/weight）
     不会影响同优先级组内的加权轮询计算。
     """
-    sorted_rules = sorted(rules, key=lambda r: (r.channel_id, r.model_id))
+    sorted_rules = sorted(rules, key=lambda rule: (rule.channel_id, rule.model_id))
     expanded: list[ChannelRule] = []
     for rule in sorted_rules:
-        w = max(int(rule.weight), 0)
-        expanded.extend([rule] * w)
+        rule_weight = max(int(rule.weight), 0)
+        expanded.extend([rule] * rule_weight)
     return expanded
 
 
@@ -61,8 +61,8 @@ async def _pick_round_robin(rules: list[ChannelRule], cursor_key: str, priority:
 
     from app.core.crud.channel_cursor import channel_cursor_crud
 
-    idx = await channel_cursor_crud.next_index(f"{cursor_key}:{priority}", len(expanded))
-    return expanded[idx]
+    cursor_index = await channel_cursor_crud.next_index(f"{cursor_key}:{priority}", len(expanded))
+    return expanded[cursor_index]
 
 
 async def select_channel(
@@ -155,7 +155,10 @@ async def select_channel(
             continue
 
         # 组内按 weight 加权轮询选择一个可用渠道，不在组内做调用失败重试
-        selected_rule = await _pick_round_robin([rule for rule, _, _ in available_rules], cursor_key or "", priority)
+        available_channel_rules = []
+        for rule, _channel, _model_entry in available_rules:
+            available_channel_rules.append(rule)
+        selected_rule = await _pick_round_robin(available_channel_rules, cursor_key or "", priority)
         if not selected_rule:
             logger.bind(priority=priority).warning(t("LOG_CHANNEL_ZERO_WEIGHT"))
             continue

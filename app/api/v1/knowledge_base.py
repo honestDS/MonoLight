@@ -105,11 +105,20 @@ async def list_knowledge_bases(
 
     result_profiles = await db.execute(select(Profile))
     profiles = result_profiles.scalars().all()
-    profile_options = [KnowledgeBaseProfileOption.model_validate(p) for p in profiles]
-    available_profiles = [KnowledgeBaseProfileOption.model_validate(p) for p in profiles if await is_embedding_profile_available(db, p)]
+    profile_options = []
+    available_profiles = []
+    for profile in profiles:
+        profile_option = KnowledgeBaseProfileOption.model_validate(profile)
+        profile_options.append(profile_option)
+        if await is_embedding_profile_available(db, profile):
+            available_profiles.append(profile_option)
+
+    knowledge_base_items = []
+    for knowledge_base in kbs:
+        knowledge_base_items.append(KnowledgeBaseResponse.model_validate(knowledge_base))
 
     data = KnowledgeBaseListResponse(
-        items=[KnowledgeBaseResponse.model_validate(kb) for kb in kbs],
+        items=knowledge_base_items,
         total=total,
         profiles=profile_options,
         available_profiles=available_profiles,
@@ -222,16 +231,18 @@ async def import_document(
 
     embeddings = await embed_chunks(db, profile, chunks, batch_size, call_context="knowledge_base_document_import_embedding")
     document_uuid = uuid.uuid4().hex
-    chunk_ids = [f"kb_{kb.id}_doc_{document_uuid}_chunk_{index}" for index in range(len(chunks))]
-    metadatas = [
-        {
-            "knowledge_base_id": kb.id,
-            "document_uuid": document_uuid,
-            "filename": file.filename or "未命名文档",
-            "chunk_index": index,
-        }
-        for index in range(len(chunks))
-    ]
+    chunk_ids = []
+    metadatas = []
+    for chunk_index in range(len(chunks)):
+        chunk_ids.append(f"kb_{kb.id}_doc_{document_uuid}_chunk_{chunk_index}")
+        metadatas.append(
+            {
+                "knowledge_base_id": kb.id,
+                "document_uuid": document_uuid,
+                "filename": file.filename or "未命名文档",
+                "chunk_index": chunk_index,
+            }
+        )
 
     try:
         collection = get_or_create_collection(kb.collection_name)
@@ -284,9 +295,13 @@ async def list_documents(
     total_result = await db.execute(select(func.count()).select_from(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
     total = total_result.scalar() or 0
 
+    document_items = []
+    for document in documents:
+        document_items.append(KnowledgeBaseDocumentResponse.model_validate(document))
+
     return StandardResponse.success(
         data=KnowledgeBaseDocumentListResponse(
-            items=[KnowledgeBaseDocumentResponse.model_validate(item) for item in documents],
+            items=document_items,
             total=total,
         )
     )

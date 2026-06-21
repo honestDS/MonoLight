@@ -34,7 +34,11 @@ TOOL_EXECUTOR_MAP = {
 
 
 def get_registered_tool_names():
-    return [schema["function"]["name"] for schema in ALL_TOOLS_SCHEMAS] + [KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]]
+    registered_tool_names = []
+    for schema in ALL_TOOLS_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
+    registered_tool_names.append(KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"])
+    return registered_tool_names
 
 
 async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None) -> tuple[list[dict[str, Any]], list[int]]:
@@ -56,24 +60,30 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
         if not is_embedding_available:
             return base_tools, whitelist_ids
 
-        kbs = await list_available_knowledge_bases(db, profile)
-        valid_kbs = [kb for kb in kbs if isinstance(kb.id, int)]
-        if valid_kbs:
-            whitelist_ids = build_knowledge_base_whitelist(valid_kbs)
+        knowledge_bases = await list_available_knowledge_bases(db, profile)
+        valid_knowledge_bases = []
+        for knowledge_base in knowledge_bases:
+            if isinstance(knowledge_base.id, int):
+                valid_knowledge_bases.append(knowledge_base)
+        if valid_knowledge_bases:
+            whitelist_ids = build_knowledge_base_whitelist(valid_knowledge_bases)
             if whitelist_ids:
                 # 动态定制知识库查询工具的 Schema
-                kb_tool = copy.deepcopy(KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA)
+                knowledge_base_tool = copy.deepcopy(KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA)
                 # 限制可选的 enum 范围
-                parameters = kb_tool["function"]["parameters"]
-                kb_id_prop = parameters["properties"]["knowledge_base_id"]
-                kb_id_prop["type"] = "string"
-                kb_id_prop["enum"] = [str(kb_id) for kb_id in whitelist_ids]
+                parameters = knowledge_base_tool["function"]["parameters"]
+                knowledge_base_id_property = parameters["properties"]["knowledge_base_id"]
+                knowledge_base_id_property["type"] = "string"
+                allowed_knowledge_base_ids = []
+                for knowledge_base_id in whitelist_ids:
+                    allowed_knowledge_base_ids.append(str(knowledge_base_id))
+                knowledge_base_id_property["enum"] = allowed_knowledge_base_ids
 
                 # 动态生成描述信息
-                mapping_desc = ", ".join([f"ID {kb.id}: {kb.name}" for kb in valid_kbs])
-                kb_id_prop["description"] = f"The id of an allowed knowledge base. Must be one of the ids allowed by the current runtime whitelist. Available options mapping: {mapping_desc}."
+                mapping_description = ", ".join(f"ID {knowledge_base.id}: {knowledge_base.name}" for knowledge_base in valid_knowledge_bases)
+                knowledge_base_id_property["description"] = f"The id of an allowed knowledge base. Must be one of the ids allowed by the current runtime whitelist. Available options mapping: {mapping_description}."
 
-                base_tools.append(kb_tool)
+                base_tools.append(knowledge_base_tool)
     except Exception as e:
         logger.warning(f"Failed to build dynamic tools for profile {getattr(profile, 'id', None)}: {e}")
 

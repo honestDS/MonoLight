@@ -16,7 +16,12 @@ class TextSplitter:
         if not normalized_text:
             return []
 
-        paragraphs = [item.strip() for item in re.split(r"\n\s*\n+", normalized_text) if item.strip()]
+        paragraphs: list[str] = []
+        for raw_paragraph in re.split(r"\n\s*\n+", normalized_text):
+            paragraph = raw_paragraph.strip()
+            if paragraph:
+                paragraphs.append(paragraph)
+
         chunks: list[str] = []
         current = ""
 
@@ -39,7 +44,11 @@ class TextSplitter:
         if current:
             chunks.append(current.strip())
 
-        return [chunk for chunk in chunks if chunk]
+        non_empty_chunks = []
+        for chunk in chunks:
+            if chunk:
+                non_empty_chunks.append(chunk)
+        return non_empty_chunks
 
     def _split_long_text(self, text: str) -> list[str]:
         chunks: list[str] = []

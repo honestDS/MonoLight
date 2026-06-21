@@ -59,15 +59,15 @@ async def build_system_prompt(
             is_embedding_available = await is_embedding_profile_available(db, profile)
 
         if not is_embedding_available:
-            kbs = []
+            knowledge_bases = []
         else:
-            kbs = await list_available_knowledge_bases(db, profile)
-        if kbs:
-            kb_items = build_knowledge_base_prompt_items(kbs)
+            knowledge_bases = await list_available_knowledge_bases(db, profile)
+        if knowledge_bases:
+            knowledge_base_items = build_knowledge_base_prompt_items(knowledge_bases)
             # 序列化为美化后的 JSON
-            kb_json_str = json.dumps(kb_items, ensure_ascii=False, indent=2)
-            kb_part = KNOWLEDGE_BASES_WRAPPER.format(content=kb_json_str)
-            full_parts.append(kb_part)
+            knowledge_base_json = json.dumps(knowledge_base_items, ensure_ascii=False, indent=2)
+            knowledge_base_part = KNOWLEDGE_BASES_WRAPPER.format(content=knowledge_base_json)
+            full_parts.append(knowledge_base_part)
     except Exception:
         # 即使查询知识库失败，也不影响正常对话
         pass
@@ -80,15 +80,19 @@ def inject_system_prompt_text(messages: list[InternalMessage], full_prompt: str)
     """
     将已构造的系统提示词文本注入消息列表顶部（清除原有 System 消息）。
     """
-    messages = [m for m in messages if m.role != MessageRole.SYSTEM]
-    messages.insert(
+    non_system_messages = []
+    for message in messages:
+        if message.role != MessageRole.SYSTEM:
+            non_system_messages.append(message)
+
+    non_system_messages.insert(
         0,
         InternalMessage(
             role=MessageRole.SYSTEM,
             content=full_prompt,
         ),
     )
-    return messages
+    return non_system_messages
 
 
 async def inject_system_prompt(

@@ -174,19 +174,25 @@ async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> 
 
 def build_knowledge_base_prompt_items(kbs: list[KnowledgeBase]) -> list[dict[str, Any]]:
     """将知识库实体转换为系统提示词清单项"""
-    return [
-        {
-            "id": kb.id,
-            "name": kb.name,
-            "description": kb.description or "",
-        }
-        for kb in kbs
-    ]
+    prompt_items = []
+    for knowledge_base in kbs:
+        prompt_items.append(
+            {
+                "id": knowledge_base.id,
+                "name": knowledge_base.name,
+                "description": knowledge_base.description or "",
+            }
+        )
+    return prompt_items
 
 
 def build_knowledge_base_whitelist(kbs: list[KnowledgeBase]) -> list[int]:
     """生成当前 Profile 可用知识库 ID 白名单"""
-    return [kb.id for kb in kbs if kb.id is not None]
+    whitelist_ids = []
+    for knowledge_base in kbs:
+        if knowledge_base.id is not None:
+            whitelist_ids.append(knowledge_base.id)
+    return whitelist_ids
 
 
 async def query_knowledge_base(
@@ -247,13 +253,14 @@ async def query_knowledge_base(
         except LLMException as e:
             excluded_rerank_priorities.add(rerank_config.priority)
             rerank_error = t(e.message, default=e.message, **e.kwargs)
+            rerank_channel_name = getattr(rerank_config, "channel_name", None)
             logger.bind(
                 kb_id=kb_id,
-                rerank_channel_id=rerank_config.channel_id,
-                rerank_channel_name=getattr(rerank_config, "channel_name", None),
+                rerank_channel_id=getattr(rerank_config, "channel_id", None),
+                rerank_channel_name=rerank_channel_name,
                 rerank_model_id=rerank_config.model_id,
                 rerank_model_name=rerank_config.model_id,
-                rerank_channel_display_name=f"{getattr(rerank_config, 'channel_name', None)} / {rerank_config.model_id}",
+                rerank_channel_display_name=f"{rerank_channel_name} / {rerank_config.model_id}",
             ).warning(t("LOG_RERANK_REMOTE_CALL_FAILED", error=t(e.message, default=e.message, **e.kwargs)))
 
     if rerank_attempted and rerank_error and expose_rerank_error:

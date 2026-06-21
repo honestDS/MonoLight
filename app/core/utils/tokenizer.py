@@ -21,8 +21,8 @@ def estimate_tokens(text: str) -> int:
     except Exception:
         # 降级：如果 tiktoken 解析失败或未安装，使用更符合实际的预估值
         # 一个汉字通常占 1~2 个 Token，一个英文单词通常占 1.3 个 Token（英文字母约为 0.25~0.3）
-        chinese_count = len([c for c in text if "\u4e00" <= c <= "\u9fff"])
+        chinese_count = sum(1 for character in text if "\u4e00" <= character <= "\u9fff")
         other_count = len(text) - chinese_count
-        c_coeff = float(os.getenv("TOKEN_COEFF_CHINESE", 1.5))
-        o_coeff = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
-        return int(chinese_count * c_coeff + other_count * o_coeff)
+        chinese_token_coefficient = float(os.getenv("TOKEN_COEFF_CHINESE", 1.5))
+        other_token_coefficient = float(os.getenv("TOKEN_COEFF_OTHER", 0.3))
+        return int(chinese_count * chinese_token_coefficient + other_count * other_token_coefficient)

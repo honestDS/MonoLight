@@ -15,12 +15,14 @@ def standardize_config(data: Any, schema_map: dict[str, list]) -> Any:
     # 1. 字段深度扫描：建立全路径扁平化索引
     flat_pool: dict[str, Any] = {}
 
-    def _scan(d: dict):
-        for k, v in d.items():
-            if isinstance(v, dict) and k in list(schema_map.keys()) + ["configs"]:
-                _scan(v)
+    nested_config_keys = set(schema_map.keys()) | {"configs"}
+
+    def _scan(config_data: dict):
+        for key, value in config_data.items():
+            if isinstance(value, dict) and key in nested_config_keys:
+                _scan(value)
             else:
-                flat_pool[k] = v
+                flat_pool[key] = value
 
     _scan(data)
 

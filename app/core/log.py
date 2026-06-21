@@ -31,7 +31,10 @@ class LogManager:
 
                 # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
                 # 排除 name, uid, session_id，因为它们已经有专门的字段
-                extra_data = {k: v for k, v in record["extra"].items() if k not in ["name", "uid", "session_id"]}
+                extra_data = {}
+                for extra_key, extra_value in record["extra"].items():
+                    if extra_key not in ["name", "uid", "session_id"]:
+                        extra_data[extra_key] = extra_value
 
                 # 使用系统本地时间戳推送给前端
                 local_now = get_local_time()
@@ -64,7 +67,10 @@ class LogManager:
 
                 # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
                 # 排除 name, uid, session_id，因为它们已经有专门的列
-                extra_data = {k: v for k, v in record["extra"].items() if k not in ["name", "uid", "session_id"]}
+                extra_data = {}
+                for extra_key, extra_value in record["extra"].items():
+                    if extra_key not in ["name", "uid", "session_id"]:
+                        extra_data[extra_key] = extra_value
                 extra_json = json.dumps(extra_data, default=str) if extra_data else None
 
                 # 优先使用 extra 中的 name 作为 module
@@ -199,7 +205,11 @@ class LogManager:
     @staticmethod
     def log_tool_call(turn: int, tool_name: str, command: str, session_id: str = "default", uid: str = None):
         # 记录工具调用日志
-        lines = [line.strip() for line in command.splitlines() if line.strip()]
+        lines = []
+        for raw_line in command.splitlines():
+            line = raw_line.strip()
+            if line:
+                lines.append(line)
         log_cmd = lines if len(lines) > 1 else command.strip()
         logger.bind(tool_call=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_CALL", turn=turn, tool_name=tool_name, args=log_cmd))
 
