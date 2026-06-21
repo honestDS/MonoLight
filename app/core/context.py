@@ -8,6 +8,7 @@ from app.core.crud.message import message_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result_with_stats
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -20,8 +21,6 @@ from app.models.profile import (
 
 load_dotenv()
 logger = get_logger(__name__)
-
-MAX_TOOL_RESULT_CONTEXT_CHARS = 12000
 
 
 class ContextManager:
@@ -58,6 +57,7 @@ class ContextManager:
             parsed_history=parsed_history,
             limit_tokens=limit_tokens,
             current_msg_tokens=current_msg_tokens,
+            context_window_k=context_window_k,
         )
 
         # 3. 压缩日志记录：仅当确实发生压缩（Token 真正减少）时才记录，避免误导性日志
@@ -81,6 +81,7 @@ class ContextManager:
         parsed_history: list[InternalMessage],
         limit_tokens: float,
         current_msg_tokens: int,
+        context_window_k: int,
     ) -> tuple[list[InternalMessage], dict]:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
@@ -90,21 +91,38 @@ class ContextManager:
         raw_history_tokens = 0
         dropped_history_tokens = 0
         is_hard_truncated = False
+        tool_truncation_stats: dict[int, int] = {}
+        final_token_cache: dict[int, int] = {}
 
-        # 反向装载（从新到旧）：窗口已满后继续累计被丢弃消息的 Token，
-        # 以便压缩日志的 before 反映完整历史规模，而非仅窗口内保留部分。
+        # 反向装载（从新到旧）：窗口已满后继续累计被丢弃消息的原始 Token，
+        # 以便压缩日志的 before 反映数据库中的完整历史规模，而非仅窗口内保留部分。
         for msg in parsed_history:
-            msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
-            msg_tokens = estimate_tokens(msg_str)
+            if is_hard_truncated:
+                msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
+                dropped_history_tokens += estimate_tokens(msg_str)
+                continue
 
-            if is_hard_truncated or current_total + msg_tokens > limit_tokens:
+            if msg.role == MessageRole.TOOL:
+                truncation = truncate_tool_result_with_stats(msg.content or "", context_window_k)
+                msg.content = truncation.content
+                original_msg_tokens = truncation.original_tokens
+                msg_tokens = truncation.final_tokens
+                if truncation.truncated:
+                    tool_truncation_stats[id(msg)] = truncation.removed_chars
+            else:
+                msg_str = json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")
+                original_msg_tokens = estimate_tokens(msg_str)
+                msg_tokens = original_msg_tokens
+
+            if current_total + msg_tokens > limit_tokens:
                 is_hard_truncated = True
-                dropped_history_tokens += msg_tokens
+                dropped_history_tokens += original_msg_tokens
                 continue
 
             temp_msgs.insert(0, msg)
+            final_token_cache[id(msg)] = msg_tokens
             current_total += msg_tokens
-            raw_history_tokens += msg_tokens
+            raw_history_tokens += original_msg_tokens
 
         # A. 原子化轮次对齐 (保留所有窗口内的 SYSTEM 消息，并从第一个 USER 开始对齐后续消息)
         system_msgs = [m for m in temp_msgs if m.role == MessageRole.SYSTEM]
@@ -132,8 +150,6 @@ class ContextManager:
 
         # B. 工具链一致性审计 (ID 匹配审计)
         audited_msgs = []
-        truncated_tool_results = 0
-        truncated_tool_result_chars = 0
         # 使用 set 记录已经作为工具链一部分被处理掉的消息对象 ID，防止重复添加
         consumed_msg_ids = set()
 
@@ -163,11 +179,6 @@ class ContextManager:
                 audited_msgs.append(msg)
                 # 先添加已有的工具响应
                 for mt in matched_tools:
-                    original_len = len(mt.content or "")
-                    cls._truncate_tool_result(mt)
-                    if len(mt.content or "") < original_len:
-                        truncated_tool_results += 1
-                        truncated_tool_result_chars += original_len - len(mt.content or "")
                     audited_msgs.append(mt)
                     consumed_msg_ids.add(id(mt))
 
@@ -198,17 +209,32 @@ class ContextManager:
                 audited_msgs.append(msg)
                 i += 1
 
-        if truncated_tool_results:
+        final_truncated_tool_result_chars = 0
+        final_truncated_tool_results = 0
+        for fm in audited_msgs:
+            removed_chars = tool_truncation_stats.get(id(fm))
+            if removed_chars is not None:
+                final_truncated_tool_results += 1
+                final_truncated_tool_result_chars += removed_chars
+
+        if final_truncated_tool_results:
             logger.bind(uid=uid, session_id=session_id).info(
-                "TEMP_CONTEXT_TOOL_RESULTS_TRUNCATED count={} removed_chars={} max_chars={}",
-                truncated_tool_results,
-                truncated_tool_result_chars,
-                MAX_TOOL_RESULT_CONTEXT_CHARS,
+                t(
+                    "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED",
+                    count=final_truncated_tool_results,
+                    removed_chars=final_truncated_tool_result_chars,
+                    context_window_k=context_window_k,
+                )
             )
 
-        # 计算压缩后的 Token 数
+        # 计算压缩后的 Token 数。扫描阶段已计算过的消息直接复用缓存，虚拟补偿消息再估算。
         final_history_tokens = 0
         for fm in audited_msgs:
+            cached_tokens = final_token_cache.get(id(fm))
+            if cached_tokens is not None:
+                final_history_tokens += cached_tokens
+                continue
+
             fm_str = json.dumps(fm.model_dump()) if fm.tool_calls else (fm.content or "")
             final_history_tokens += estimate_tokens(fm_str)
 
@@ -217,12 +243,3 @@ class ContextManager:
             "before": current_msg_tokens + raw_history_tokens + dropped_history_tokens,
             "after": current_msg_tokens + final_history_tokens,
         }
-
-    @staticmethod
-    def _truncate_tool_result(msg: InternalMessage) -> None:
-        content = msg.content or ""
-        if len(content) <= MAX_TOOL_RESULT_CONTEXT_CHARS:
-            return
-
-        omitted_chars = len(content) - MAX_TOOL_RESULT_CONTEXT_CHARS
-        msg.content = content[:MAX_TOOL_RESULT_CONTEXT_CHARS] + f"\n\n[Tool result truncated: omitted {omitted_chars} characters.]"

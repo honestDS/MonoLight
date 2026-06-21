@@ -26,6 +26,7 @@ MESSAGES = {
     "LOG_CONTEXT_COMPRESSED": "上下文压缩. Tokens: {before} -> {after} (预留系统词 {reserved_tokens})",
     "LOG_CONTEXT_ORPHAN_TOOL_RESULT": "Orphan tool result. ID: {tool_call_id}",
     "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE": "Tool chain incomplete. Required: {required_ids}, Found: {found_ids}. Injecting virtual compensation.",
+    "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED": "历史扫描阶段发现 {count} 条工具响应过大，已按上下文窗口预截断，移除字符数 {removed_chars}，context_window_k={context_window_k}",
     "LOG_DISPATCHER_ERROR": "调度器错误",
     "LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES": "【调度器/非流】检测到追加消息，已合并并重置轮次计数。",
     "LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED": "对话渠道调用失败，降级到下一优先级组重试: {error}",

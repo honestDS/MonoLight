@@ -26,6 +26,7 @@ MESSAGES = {
     "LOG_CONTEXT_COMPRESSED": "Context compressed. Tokens: {before} -> {after} (reserved system tokens {reserved_tokens})",
     "LOG_CONTEXT_ORPHAN_TOOL_RESULT": "Orphan tool result. ID: {tool_call_id}",
     "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE": "Tool chain incomplete. Required: {required_ids}, Found: {found_ids}. Injecting virtual compensation.",
+    "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED": "Historical scan found {count} oversized tool responses and pre-truncated them for the context window, removed_chars={removed_chars}, context_window_k={context_window_k}",
     "LOG_DISPATCHER_ERROR": "Dispatcher error",
     "LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES": "[Dispatcher/Non-stream] Additional messages detected, merged and reset turn counter.",
     "LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED": "Chat channel call failed, retrying next priority group: {error}",

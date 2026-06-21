@@ -19,7 +19,7 @@ from app.core.tools import (
     TOOL_EXECUTOR_MAP,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
-from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result_with_stats
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -113,8 +113,9 @@ async def process_single_tool(
     LogManager.log_tool_result(turn, cmd_result, session_id, uid)
 
     # 工具响应过大保护：超过模型上下文限制一半时截断，避免撑爆上下文导致请求超时
-    cmd_result, truncated = truncate_tool_result(cmd_result, context_window_k)
-    if truncated:
+    truncation = truncate_tool_result_with_stats(cmd_result, context_window_k)
+    cmd_result = truncation.content
+    if truncation.truncated:
         get_logger("dispatcher").bind(
             uid=uid,
             session_id=session_id,
