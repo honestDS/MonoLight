@@ -1,7 +1,4 @@
-/**
- * 会话管理 composable
- * 封装会话列表、选择会话、新建会话等会话管理逻辑
- */
+// 会话管理 composable：列表、选择与新建会话
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
@@ -36,10 +33,7 @@ export function useSessionManager() {
 
   // ==================== 会话管理方法 ====================
   
-  /**
-   * 设置加载历史记录的回调函数
-   * @param {Function} callback - 回调函数，签名为 (sessionId, page, pageSize) => Promise
-   */
+  // 设置加载历史记录回调；callback 签名为 (sessionId, page, pageSize) => Promise
   const setLoadHistoryCallback = (callback) => {
     loadHistoryCallback = callback
   }
@@ -62,13 +56,7 @@ export function useSessionManager() {
   // 使用删除确认组合式函数
   const { handleDelete: handleDeleteSession } = useDeleteConfirm(chatApi.deleteSession, loadSessions)
 
-  /**
-   * 选择会话
-   * @param {Object} session - 会话对象
-   * @param {boolean} disconnect - 是否断开连接，默认为 true
-   * @param {Function} disconnectCallback - 断开连接的回调函数
-   * @param {boolean} loadHistory - 是否重新加载历史记录
-   */
+  // 选择会话；disconnect 控制是否断开连接，loadHistory 控制是否重载历史
   const selectSession = (session, disconnectCallback = null, disconnect = true, loadHistory = true) => {
     if (disconnect && disconnectCallback) {
       disconnectCallback()
@@ -90,10 +78,7 @@ export function useSessionManager() {
     }
   }
 
-  /**
-   * 加载会话历史记录
-   * @param {number} pageCount - 页数
-   */
+  // 加载会话历史记录；pageCount 为页数
   const loadSessionHistory = async (pageCount = 1) => {
     if (!currentSessionId.value || historyLoading.value || !hasMore.value) return
     
@@ -120,10 +105,7 @@ export function useSessionManager() {
     }
   }
 
-  /**
-   * 新建会话
-   * @param {Function} disconnectCallback - 断开连接的回调函数
-   */
+  // 新建会话，可传入断开连接回调
   const createNewSession = (disconnectCallback = null) => {
     // 断开连接（如果有回调）
     if (disconnectCallback) {
@@ -134,10 +116,7 @@ export function useSessionManager() {
     sessionCreating.value = true
   }
 
-  /**
-   * 获取按最后活跃时间排序的会话列表
-   * @returns {Array} 排序后的会话列表
-   */
+  // 获取按最后活跃时间排序的会话列表
   const getSortedSessions = () => {
     return [...sessions.value].sort((a, b) =>
       new Date(b.last_active) - new Date(a.last_active)
@@ -155,20 +134,16 @@ export function useSessionManager() {
     loadedPageCount = 0
   }
 
-  /**
-   * 检查是否还有更多历史记录
-   * @returns {boolean}
-   */
+  // 检查是否还有更多历史记录
   const checkHasMore = () => {
     return loadedPageCount >= 2 ? (hasMore.value = false, false) : hasMore.value
   }
 
-  /**
-   * 异步请求生成并更新会话标题
-   * @param {string} sessionId - 会话ID
-   * @param {string} firstMessage - 第一条消息内容
-   */
-  const updateSessionTitle = async (sessionId, firstMessage) => {
+  // 异步生成并更新会话标题
+  const updateSessionTitle = async (
+    sessionId, // 会话 ID
+    firstMessage // 第一条消息内容
+  ) => {
     if (!sessionId) return
     
     // 格式化当前时间为 YYYY-MM-DD HH:mm:ss (与后端保持一致)

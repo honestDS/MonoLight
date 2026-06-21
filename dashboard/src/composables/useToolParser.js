@@ -1,7 +1,4 @@
-/**
- * 工具调用解析 composable
- * 提供聊天消息中工具调用的解析功能
- */
+// 工具调用解析 composable
 import { ref } from 'vue'
 import {
   isToolCall,

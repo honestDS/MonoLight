@@ -1,7 +1,4 @@
-/**
- * 聊天通信 composable
- * 封装 HTTP 和 WebSocket 两种通信模式
- */
+// 聊天通信 composable：封装 HTTP 与 WebSocket 通信
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
@@ -40,9 +37,7 @@ export function useChatTransport() {
 
   // ==================== WebSocket 相关方法 ====================
   
-  /**
-   * 处理 WebSocket 消息
-   */
+  // 处理 WebSocket 消息
   const handleWsMessage = (data, options = {}) => {
     const { 
       onContent, 
@@ -188,9 +183,7 @@ export function useChatTransport() {
     }
   }
 
-  /**
-   * 断开 WebSocket 连接
-   */
+  // 断开 WebSocket 连接
   const disconnectWebSocket = () => {
     wsManager.disconnect()
     wsConnected.value = false

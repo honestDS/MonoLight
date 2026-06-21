@@ -65,18 +65,19 @@ async def system_logs_websocket(
         history_logs.reverse()
 
         # 历史日志集中一次性推送，使用 type=history 标识批量消息，避免逐条发送的网络开销
-        history_payload = [
-            {
-                "timestamp": log.created_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                "level": log.level,
-                "module": log.module,
-                "message": log.message,
-                "uid": log.uid,
-                "session_id": log.session_id,
-                "extra": log.extra,
-            }
-            for log in history_logs
-        ]
+        history_payload = []
+        for log in history_logs:
+            history_payload.append(
+                {
+                    "timestamp": log.created_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                    "level": log.level,
+                    "module": log.module,
+                    "message": log.message,
+                    "uid": log.uid,
+                    "session_id": log.session_id,
+                    "extra": log.extra,
+                }
+            )
         await websocket.send_json({"type": "history", "logs": history_payload})
 
         # 2. 保持连接，等待广播器推送（保持心跳或等待断开）

@@ -1,7 +1,4 @@
-/**
- * 公共工具函数
- * 提供在各组件间复用的工具函数
- */
+// 公共工具函数
 import i18n from '../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)

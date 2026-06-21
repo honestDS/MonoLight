@@ -1,11 +1,6 @@
 import { createI18n } from 'vue-i18n'
 
-/**
- * 自动加载 locales 目录下按语言/页面拆分的语言包
- * 目录结构约定：locales/{语言}/{命名空间}.js
- * 例如 locales/zh/chat.js 会被组装为 messages.zh.chat
- * 后期新增页面只需在对应语言目录下新增同名文件，无需修改本文件
- */
+// 自动加载 locales/{语言}/{命名空间}.js 语言包
 const loadLocaleMessages = () => {
   const context = require.context('./locales', true, /[A-Za-z0-9-_]+\.js$/)
   const messages = {}
@@ -51,9 +46,10 @@ const i18n = createI18n({
 
 /**
  * 切换语言并持久化
- * @param {string} locale - 目标语言
  */
-export const setLocale = (locale) => {
+export const setLocale = (
+  locale // 目标语言
+) => {
   i18n.global.locale.value = locale
   localStorage.setItem('locale', locale)
 }

@@ -5,11 +5,12 @@ const t = (key, ...args) => i18n.global.t(key, ...args)
 
 /**
  * 删除确认组合式函数
- * @param {Function} apiDelete - 删除API函数
- * @param {Function} onSuccess - 成功后的回调（通常是刷新列表）
- * @param {Object} options - 删除确认文案配置
  */
-export function useDeleteConfirm(apiDelete, onSuccess, options = {}) {
+export function useDeleteConfirm(
+  apiDelete, // 删除 API 函数
+  onSuccess, // 成功后的回调
+  options = {} // 删除确认文案配置
+) {
   const handleDelete = async (id, name, extraOptions = {}) => {
     const mergedOptions = { ...options, ...extraOptions }
     const confirmMessage = mergedOptions.message || t('common.delete_named_confirm', { name })

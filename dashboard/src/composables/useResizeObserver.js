@@ -1,7 +1,4 @@
-/**
- * ResizeObserver 防抖补丁
- * 修复 ResizeObserver loop completed with undelivered notifications 错误
- */
+// ResizeObserver 防抖补丁，避免 loop completed with undelivered notifications 错误
 import { debounce } from '../utils'
 
 let observerPatchApplied = false

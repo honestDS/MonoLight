@@ -108,13 +108,9 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        # 流式：超时仅作用于首字生成阶段（建立连接、等待响应头、读取到首个有效内容块的整个累计耗时）。
-        # 首字之后的逐块生成不再判定超时，避免长回答被中途切断。
-        # 注意：
-        # 1. “首字”指首个真正产出（yield）的有效数据块，而非首个原始字节块；某些服务端在生成内容前会先发送
-        #    空行/注释/keep-alive/role-only 空块，若以首个字节块解除超时会导致超时提前失效。
-        # 2. reasoning/agent 类模型常在“思考完成后”才返回 HTTP 响应头，该等待发生在 session.post() 阶段，
-        #    因此首字超时必须同时覆盖 post 阶段，不能仅依赖 aiohttp 的 connect 超时（其仅约束 TCP 连接建立）。
+        # 首字超时覆盖建立连接、等待响应头和首个有效内容块。
+        # 首字之后不再判定超时，避免长回答被中途切断。
+        # 空行、keep-alive 与 role-only 空块不视为首字。
         loop = asyncio.get_event_loop()
         started_at = loop.time()
         deadline = started_at + timeout
@@ -434,17 +430,19 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
                 item = {"role": msg.role.value, "content": msg.content}
 
             if msg.tool_calls:
-                item["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
+                tool_calls = []
+                for tool_call in msg.tool_calls:
+                    tool_calls.append(
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": json.dumps(tool_call.arguments),
+                            },
+                        }
+                    )
+                item["tool_calls"] = tool_calls
             if msg.tool_call_id:
                 item["tool_call_id"] = msg.tool_call_id
             provider_msgs.append(item)

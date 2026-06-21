@@ -83,16 +83,17 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
     is_admin = getattr(current_user, "is_superuser", False)
     sessions = await message_crud.get_user_sessions(db, uid=uid, is_admin=is_admin)
 
-    data = [
-        {
-            "session_id": row.session_id,
-            "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
-            "username": row.username,
-            "title": row.title,
-            "enable_markdown": row.enable_markdown,
-        }
-        for row in sessions
-    ]
+    data = []
+    for row in sessions:
+        data.append(
+            {
+                "session_id": row.session_id,
+                "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
+                "username": row.username,
+                "title": row.title,
+                "enable_markdown": row.enable_markdown,
+            }
+        )
     return StandardResponse.success(data=data, message=constants.MSG_SESSION_LIST_SUCCESS)
 
 

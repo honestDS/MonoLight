@@ -62,7 +62,13 @@ def _is_same_channel(rule: dict, channel_id: int) -> bool:
 
 
 def _get_existing_model_ids_by_usage(model_ids: list[dict]) -> dict[str, set[str]]:
-    return {usage.value: {str(item.get("model_id")) for item in model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
+    result: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
+    for item in model_ids:
+        item_usage = str(item.get("usage"))
+        item_model_id = item.get("model_id")
+        if item_model_id and item_usage in result:
+            result[item_usage].add(str(item_model_id))
+    return result
 
 
 def _clean_channel_rules_from_configs(
@@ -144,7 +150,7 @@ def _model_entry_signature(item: dict) -> str:
 
 def _collect_channel_rule_model_ids(configs: dict, channel_id: int) -> dict[str, set[str]]:
     channel_config = configs.get("channel") or {}
-    refs: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
+    referenced_model_ids_by_usage: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
 
     for channel_key, usage in CHANNEL_USAGE_MAP.items():
         channel = channel_config.get(channel_key)
@@ -152,15 +158,33 @@ def _collect_channel_rule_model_ids(configs: dict, channel_id: int) -> dict[str,
             continue
         for rule in channel["rules"]:
             if _is_same_channel(rule, channel_id) and rule.get("model_id"):
-                refs[usage].add(str(rule["model_id"]))
+                referenced_model_ids_by_usage[usage].add(str(rule["model_id"]))
 
-    return refs
+    return referenced_model_ids_by_usage
 
 
 def _build_model_id_rename_index(old_model_ids: list[dict], new_model_ids: list[dict]) -> dict[str, dict]:
-    old_by_usage_and_id = {(str(item.get("usage")), str(item.get("model_id"))): item for item in old_model_ids if item.get("usage") and item.get("model_id")}
-    old_ids_by_usage = {usage.value: {str(item.get("model_id")) for item in old_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
-    new_ids_by_usage = {usage.value: {str(item.get("model_id")) for item in new_model_ids if str(item.get("usage")) == usage.value and item.get("model_id")} for usage in ModelUsage}
+    old_by_usage_and_id: dict[tuple[str, str], dict] = {}
+    for item in old_model_ids:
+        item_usage = item.get("usage")
+        item_model_id = item.get("model_id")
+        if item_usage and item_model_id:
+            old_by_usage_and_id[(str(item_usage), str(item_model_id))] = item
+
+    old_ids_by_usage: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
+    for item in old_model_ids:
+        item_usage = str(item.get("usage"))
+        item_model_id = item.get("model_id")
+        if item_model_id and item_usage in old_ids_by_usage:
+            old_ids_by_usage[item_usage].add(str(item_model_id))
+
+    new_ids_by_usage: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
+    for item in new_model_ids:
+        item_usage = str(item.get("usage"))
+        item_model_id = item.get("model_id")
+        if item_model_id and item_usage in new_ids_by_usage:
+            new_ids_by_usage[item_usage].add(str(item_model_id))
+
     new_by_usage_and_signature: dict[tuple[str, str], list[dict]] = {}
     for item in new_model_ids:
         usage = str(item.get("usage"))
@@ -184,37 +208,37 @@ def _compute_model_id_renames(
     referenced_model_ids: dict[str, set[str]] | None = None,
     rename_index: dict[str, dict] | None = None,
 ) -> dict[str, dict[str, str]]:
-    # 基于“配置文件实际引用的旧模型 ID”推断重命名，而不是基于位置或数量。
-    # 对每个被 Profile 渠道规则引用的旧 model_id：
-    # - 若旧 model_id 仍存在于新 channel 的同用途模型列表中，则无需同步；
-    # - 若旧 model_id 已消失，则用旧模型条目的非 model_id 配置与新模型条目做精确匹配；
-    # - 仅当匹配到唯一的新 model_id 时，才同步 Profile 引用，避免同配置多候选时误配对。
+    # 仅对配置实际引用且已消失的旧模型 ID，按非 model_id 配置精确匹配唯一新模型。
     index = rename_index or _build_model_id_rename_index(old_model_ids, new_model_ids)
     old_by_usage_and_id = index["old_by_usage_and_id"]
     old_ids_by_usage = index["old_ids_by_usage"]
     new_ids_by_usage = index["new_ids_by_usage"]
     new_by_usage_and_signature = index["new_by_usage_and_signature"]
 
-    refs = referenced_model_ids or old_ids_by_usage
+    referenced_ids_by_usage = referenced_model_ids or old_ids_by_usage
     renames: dict[str, dict[str, str]] = {}
 
-    for usage, model_ids in refs.items():
+    for usage, model_ids in referenced_ids_by_usage.items():
         if usage not in old_ids_by_usage:
             continue
-        for old_mid in model_ids:
-            if old_mid in new_ids_by_usage[usage]:
+        for old_model_id in model_ids:
+            if old_model_id in new_ids_by_usage[usage]:
                 continue
 
-            old_item = old_by_usage_and_id.get((usage, old_mid))
+            old_item = old_by_usage_and_id.get((usage, old_model_id))
             if not old_item:
                 continue
 
             signature = _model_entry_signature(old_item)
-            candidates = [item for item in new_by_usage_and_signature.get((usage, signature), []) if str(item.get("model_id")) not in old_ids_by_usage[usage]]
+            candidates = []
+            for item in new_by_usage_and_signature.get((usage, signature), []):
+                new_model_id = str(item.get("model_id"))
+                if new_model_id not in old_ids_by_usage[usage]:
+                    candidates.append(item)
             if len(candidates) != 1:
                 continue
 
-            renames.setdefault(usage, {})[old_mid] = str(candidates[0]["model_id"])
+            renames.setdefault(usage, {})[old_model_id] = str(candidates[0]["model_id"])
 
     return renames
 
@@ -236,9 +260,9 @@ def _apply_model_id_renames_to_configs(
             continue
         for rule in channel["rules"]:
             if _is_same_channel(rule, channel_id):
-                old_mid = str(rule.get("model_id"))
-                if old_mid in rename_map:
-                    rule["model_id"] = rename_map[old_mid]
+                old_model_id = str(rule.get("model_id"))
+                if old_model_id in rename_map:
+                    rule["model_id"] = rename_map[old_model_id]
                     updated_count += 1
 
     return updated_count
@@ -290,7 +314,11 @@ async def _sync_channel_model_id_renames(
 
 
 def _get_chat_model_ids(model_ids: list[dict]) -> set[str]:
-    return {str(item.get("model_id")) for item in model_ids if str(item.get("usage")) == ModelUsage.CHAT.value and item.get("model_id")}
+    result: set[str] = set()
+    for item in model_ids:
+        if str(item.get("usage")) == ModelUsage.CHAT.value and item.get("model_id"):
+            result.add(str(item.get("model_id")))
+    return result
 
 
 async def _sync_audit_model_id_renames(
@@ -576,19 +604,19 @@ async def test_embedding_dimension(
         raise ParameterException(constants.ERR_CHANNEL_TEST_NO_URL)
 
     try:
-        res = await EmbeddingClient.get_embeddings(
+        embedding_response = await EmbeddingClient.get_embeddings(
             channel_type=db_obj.channel_type,
             api_key=db_obj.get_decrypted_api_key(),
             base_url=db_obj.base_url,
             model_id=model_id,
             input_texts=["dimension test"],
         )
-        if "data" in res and len(res["data"]) > 0:
-            dim = len(res["data"][0]["embedding"])
+        if "data" in embedding_response and len(embedding_response["data"]) > 0:
+            dimension = len(embedding_response["data"][0]["embedding"])
             return StandardResponse.success(
-                data={"dimension": dim},
+                data={"dimension": dimension},
                 message=constants.MSG_CHANNEL_TEST_SUCCESS,
-                dim=dim,
+                dim=dimension,
             )
         else:
             raise ParameterException(constants.ERR_CHANNEL_TEST_DIMENSION_ERROR)

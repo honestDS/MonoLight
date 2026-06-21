@@ -1,7 +1,4 @@
-/**
- * WebSocket 管理模块
- * 提供连接管理、心跳保活、自动重连等能力
- */
+// WebSocket 管理：连接、心跳与自动重连
 import { ref, onUnmounted } from 'vue'
 import { chatApi } from '../api'
 import { ElMessage } from 'element-plus'

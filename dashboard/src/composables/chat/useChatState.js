@@ -1,7 +1,4 @@
-/**
- * 聊天状态管理 composable
- * 封装消息列表、输入框、加载状态等基础状态管理
- */
+// 聊天状态管理 composable
 import { ref, nextTick } from 'vue'
 
 export function useChatState() {
@@ -14,10 +11,7 @@ export function useChatState() {
 
   // ==================== 消息操作方法 ====================
   
-  /**
-   * 添加消息到列表
-   * @param {Object} msg - 消息对象
-   */
+  // 添加消息到列表；msg 为消息对象
   const addMessage = (msg) => {
     if (msg && msg.role !== 'thinking') {
       const firstThinkingIdx = messages.value.findIndex(m => m.role === 'thinking')
@@ -29,19 +23,12 @@ export function useChatState() {
     messages.value.push(msg)
   }
 
-  /**
-   * 根据 ID 查找消息索引
-   * @param {number|string} id - 消息 ID
-   * @returns {number} 消息索引，未找到返回 -1
-   */
+  // 根据消息 ID 查找索引，未找到返回 -1
   const findMessageIndex = (id) => {
     return messages.value.findIndex(m => m.id === id)
   }
 
-  /**
-   * 根据 ID 移除消息
-   * @param {number|string} id - 消息 ID
-   */
+  // 根据消息 ID 移除消息
   const removeMessage = (id) => {
     const index = findMessageIndex(id)
     if (index !== -1) {
@@ -49,12 +36,7 @@ export function useChatState() {
     }
   }
 
-  /**
-   * 在指定位置插入消息
-   * @param {number} index - 插入位置
-   * @param {Object|Object[]} msg - 消息对象或消息数组
-   * @param {boolean} clearFirst - 是否先清空消息列表
-   */
+  // 在指定位置插入消息；clearFirst 为 true 时先清空列表
   const insertMessage = (index, msg, clearFirst = false) => {
     if (clearFirst) {
       messages.value = []
@@ -87,10 +69,7 @@ export function useChatState() {
     }
   }
 
-  /**
-   * 滚动到指定消息位置
-   * @param {string|number} msgId - 消息 ID
-   */
+  // 滚动到指定消息位置
   const scrollToMessage = (msgId) => {
     // 默认滚动到底部，可扩展为滚动到指定消息
     scrollToBottom()

@@ -1,8 +1,4 @@
-/**
- * 聊天会话管理 composable
- * 组合消息状态、会话管理、通信层、消息处理等模块
- * 保持与原有 API 兼容
- */
+// 聊天会话管理 composable，聚合状态、会话、通信与消息处理
 import { nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
@@ -359,10 +355,7 @@ export function useChatSession() {
 
   // ==================== 会话选择 ====================
   
-  /**
-   * 选择会话
-   * @param {Object} session - 会话对象
-   */
+  // 选择会话；session 为会话对象
   const selectSession = (session) => {
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()

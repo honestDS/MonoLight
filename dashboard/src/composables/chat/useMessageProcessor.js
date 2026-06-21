@@ -1,7 +1,4 @@
-/**
- * 消息处理 composable
- * 封装 AI 响应解析、工具调用处理等消息处理逻辑
- */
+// 消息处理 composable：AI 响应解析与工具调用处理
 import { nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
@@ -10,9 +7,7 @@ import { isToolCall, isToolResult } from '../../utils'
 export function useMessageProcessor() {
   // ==================== 消息处理方法 ====================
 
-  /**
-   * 处理流式的增量文本推送事件
-   */
+  // 处理流式的增量文本推送事件
   const processStreamContent = (messagesRef, text, turn, thinkingId, finishReason, responseId, requestId) => {
     // 识别排队状态
     if (finishReason === 'queued') {
@@ -108,9 +103,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 处理流式下的工具调用开始（推送 tool_call 占位）
-   */
+  // 处理流式下的工具调用开始，推送 tool_call 占位
   const processStreamToolStart = (messagesRef, toolCall, thinkingId, responseId, requestId) => {
     const contentObj = {
       role: 'assistant',
@@ -172,9 +165,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 处理流式下的工具调用结束（推送 tool 返回结果）
-   */
+  // 处理流式下的工具调用结束，推送 tool 返回结果
   const processStreamToolEnd = (messagesRef, toolEnd, responseId, requestId) => {
     const contentObj = {
       role: 'tool',
@@ -199,9 +190,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 处理流式下的业务错误事件
-   */
+  // 处理流式下的业务错误事件
   const processStreamError = (messagesRef, errorMessage, thinkingId) => {
     removeThinkingMessage(messagesRef, thinkingId)
 
@@ -219,9 +208,7 @@ export function useMessageProcessor() {
     }
   }
   
-  /**
-   * 处理完整的 AI 响应消息（WS 和 HTTP 共用）
-   */
+  // 处理完整的 AI 响应消息，WS 和 HTTP 共用
   const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
@@ -273,9 +260,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 处理工具调用消息
-   */
+  // 处理工具调用消息
   const handleToolCallMessage = (messagesRef, toolCall, scrollToBottom) => {
     const lastMsg = messagesRef.value[messagesRef.value.length - 1]
     if (lastMsg && lastMsg.role === 'tool_call') {
@@ -288,9 +273,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 处理新会话创建
-   */
+  // 处理新会话创建
   const handleNewSession = async (sessionsRef, selectSession, thinkingId, disconnect = true) => {
     const res = await chatApi.sessionsList()
     sessionsRef.value = res.data.data || []
@@ -304,9 +287,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 清理残留 thinking 消息
-   */
+  // 清理残留 thinking 消息
   const cleanupThinkingMessage = (messagesRef) => {
     for (let i = messagesRef.value.length - 1; i >= 0; i--) {
       if (messagesRef.value[i].role === 'thinking') {
@@ -315,27 +296,21 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 添加用户消息
-   */
+  // 添加用户消息
   const addUserMessage = (messagesRef, content) => {
     const userMsgId = Date.now()
     messagesRef.value.push({ id: userMsgId, role: 'user', content: content, created_at: Date.now() / 1000 })
     return userMsgId
   }
 
-  /**
-   * 添加 thinking 占位符消息
-   */
+  // 添加 thinking 占位符消息
   const addThinkingMessage = (messagesRef) => {
     const thinkingId = Date.now() + 1
     messagesRef.value.push({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
     return thinkingId
   }
 
-  /**
-   * 移除 thinking 占位符消息
-   */
+  // 移除 thinking 占位符消息
   const removeThinkingMessage = (messagesRef, thinkingId) => {
     const thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId && m.role === 'thinking')
     if (thinkingIndex !== -1) {
@@ -343,9 +318,7 @@ export function useMessageProcessor() {
     }
   }
 
-  /**
-   * 内部方法：按位置插入 AI 消息
-   */
+  // 按 thinking 位置插入 AI 消息
   const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId) => {
     if (!aiMessages || aiMessages.length === 0) return
     let insertAt = -1

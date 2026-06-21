@@ -1,6 +1,6 @@
 """对话调度器：渠道管理架构适配版
 
-对话调度走 chat_channel：路由选择 → 从 model_entry 读取参数 → LLMClient 调用 → 失败降级重试
+对话调度走 chat_channel：路由选择 -> 从 model_entry 读取参数 -> LLMClient 调用 -> 失败降级重试
 """
 
 import asyncio
