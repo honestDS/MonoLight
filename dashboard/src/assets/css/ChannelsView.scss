@@ -90,3 +90,18 @@
   gap: 0 12px;
 }
 
+.embedding-dimension-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .el-input-number {
+    flex: 1;
+    min-width: 120px;
+  }
+
+  .el-button {
+    flex-shrink: 0;
+  }
+}
+

@@ -15,6 +15,6 @@ MESSAGES = {
     "ERR_API_KEY_DECRYPT_FAILED": "API Key 解密失败：密文无效或加密密钥不匹配",
     "ERR_API_KEY_DECRYPT_EMPTY": "API Key 解密失败：解密后的 API Key 为空",
     "ERR_RERANK_FORMAT_ERROR": "Rerank 接口返回格式异常：缺少 results 列表",
-    "ERR_EMBEDDING_COUNT_MISMATCH": "向量模型返回数量与文本数量不一致",
-    "ERR_EMBEDDING_DIMENSION_MISMATCH": "向量模型实际输出维度为 {actual}，与配置的 {expected} 不一致",
+    "ERR_EMBEDDING_COUNT_MISMATCH": "嵌入模型返回数量与文本数量不一致",
+    "ERR_EMBEDDING_DIMENSION_MISMATCH": "嵌入模型实际输出维度为 {actual}，与配置的 {expected} 不一致",
 }

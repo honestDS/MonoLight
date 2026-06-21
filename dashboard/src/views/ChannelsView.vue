@@ -133,7 +133,12 @@
               <template v-if="entry.usage === 'EMBEDDING'">
                 <div class="model-entry-field model-entry-field-half">
                   <el-form-item :label="$t('channels.embedding_dimensions')">
-                    <el-input-number v-model="entry.embedding_dimensions" :min="1" controls-position="right" />
+                    <div class="embedding-dimension-row">
+                      <el-input-number v-model="entry.embedding_dimensions" :min="1" controls-position="right" />
+                      <el-button type="primary" plain :loading="detectingDimensionIndex === idx" @click="detectEmbeddingDimension(entry, idx)">
+                        {{ $t('channels.auto_detect') }}
+                      </el-button>
+                    </div>
                   </el-form-item>
                 </div>
               </template>
@@ -183,6 +188,7 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
+const detectingDimensionIndex = ref(null)
 
 const getModelUsageLabel = (value) => {
   const map = {
@@ -258,6 +264,31 @@ const handleToggleActive = async (row) => {
     fetchChannels()
   } catch (err) {
     ElMessage.error(err.message || t('channels.action_failed'))
+  }
+}
+
+const detectEmbeddingDimension = async (entry, idx) => {
+  if (!isEdit.value || !currentId.value) {
+    return ElMessage.warning(t('channels.detect_save_first'))
+  }
+  if (!entry.model_id || !entry.model_id.trim()) {
+    modelIdErrors.value[idx] = t('channels.model_id_required')
+    return ElMessage.warning(t('channels.detect_warn'))
+  }
+
+  detectingDimensionIndex.value = idx
+  try {
+    const res = await channelApi.testEmbeddingDimension(currentId.value, entry.model_id.trim())
+    const dimension = res.data?.data?.dimension
+    if (!dimension) {
+      return ElMessage.error(t('channels.detect_failed'))
+    }
+    entry.embedding_dimensions = dimension
+    ElMessage.success(t('channels.detect_success', { dim: dimension }))
+  } catch (err) {
+    ElMessage.error(err.message || t('channels.detect_failed'))
+  } finally {
+    detectingDimensionIndex.value = null
   }
 }
 

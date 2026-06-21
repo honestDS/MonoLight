@@ -192,7 +192,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 
 - `app/api/v1/knowledge_base.py`: 知识库 API 编排入口。
 - `app/core/embedding/knowledge_base.py`
-  - 读取 Profile 中的向量模型配置。
+  - 读取 Profile 中的嵌入模型配置。
   - 调用 EmbeddingClient 生成向量。
   - 查询当前 Profile 可用知识库。
   - 构造知识库目录提示词。

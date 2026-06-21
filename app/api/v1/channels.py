@@ -19,10 +19,12 @@ from app.core import constants
 from app.core.crud.channel import channel_crud
 from app.core.crud.profile import profile_crud
 from app.core.exceptions import (
+    BaseBusinessException,
     ForbiddenException,
     ParameterException,
     ResourceNotFoundException,
 )
+from app.core.i18n import t
 from app.core.security import get_current_user
 from app.models.channel import (
     ChannelCreate,
@@ -595,7 +597,7 @@ async def test_embedding_dimension(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    """自动检测向量模型的输出维度。"""
+    """自动检测嵌入模型的输出维度。"""
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
         raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
@@ -620,5 +622,10 @@ async def test_embedding_dimension(
             )
         else:
             raise ParameterException(constants.ERR_CHANNEL_TEST_DIMENSION_ERROR)
+    except ParameterException:
+        raise
+    except BaseBusinessException as e:
+        detail = t(e.message, default=e.message, **e.kwargs)
+        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=detail) from e
     except Exception as e:
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, message=str(e))
+        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e

@@ -51,7 +51,7 @@ async def build_system_prompt(
         full_parts.append(instruction_part)
 
     # 2. 查询该 Profile 关联的可用知识库并注入
-    # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
+    # 嵌入模型不可用（未配置或已禁用）时，知识库检索无法工作，
     # 不注入知识库目录提示词，保持与工具暴露逻辑一致。
     try:
         is_embedding_available = embedding_profile_available

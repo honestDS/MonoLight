@@ -14,7 +14,7 @@ MESSAGES = {
     "ERR_CHANNEL_RERANK_NO_URL": "usage 为 RERANK 时 base_url 必须配置",
     "ERR_CHANNEL_TEST_NO_URL": "该渠道未配置 Base URL，无法执行自动检测。",
     "ERR_CHANNEL_TEST_DIMENSION_ERROR": "模型返回的数据结构异常，无法获取维度。",
-    "ERR_CHANNEL_TEST_FAILED": "检测失败: {message}",
+    "ERR_CHANNEL_TEST_FAILED": "检测失败: {detail}",
     "ERR_CHANNEL_MODEL_NOT_FOUND": "渠道中未找到对应模型条目",
     "ERR_CHANNEL_USAGE_MISMATCH": "模型用途不匹配：期望 {expected}，实际 {actual}",
     "ERR_CHANNEL_MODEL_DISABLED": "模型条目已禁用",

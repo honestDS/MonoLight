@@ -51,7 +51,7 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
     whitelist_ids = []
 
     try:
-        # 向量模型不可用（未配置或已禁用）时，知识库检索无法工作，
+        # 嵌入模型不可用（未配置或已禁用）时，知识库检索无法工作，
         # 不向 LLM 暴露知识库查询工具，避免模型调用必然失败的工具。
         is_embedding_available = embedding_profile_available
         if is_embedding_available is None:

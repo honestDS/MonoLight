@@ -46,14 +46,14 @@ class LLMException(BaseBusinessException):
 
 
 class EmbeddingException(LLMException):
-    """向量模型调用异常。
+    """嵌入模型调用异常。
 
     属于非主线（对话）流程的异常类型，便于在调用方按类型区分处理：
     通常仅记录日志并降级，不应中断对话主线调用。
     继承自 LLMException 以兼容既有 `except LLMException` 捕获逻辑。
     """
 
-    def __init__(self, message: str = "向量模型调用异常", code: int = 502, **kwargs):
+    def __init__(self, message: str = "嵌入模型调用异常", code: int = 502, **kwargs):
         super().__init__(message=message, code=code, **kwargs)
 
 

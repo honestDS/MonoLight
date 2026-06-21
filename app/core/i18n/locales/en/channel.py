@@ -14,7 +14,7 @@ MESSAGES = {
     "ERR_CHANNEL_RERANK_NO_URL": "base_url must be configured when usage is RERANK",
     "ERR_CHANNEL_TEST_NO_URL": "This channel has no Base URL configured, auto-detection cannot be performed.",
     "ERR_CHANNEL_TEST_DIMENSION_ERROR": "The model returned an abnormal data structure, dimensions cannot be obtained.",
-    "ERR_CHANNEL_TEST_FAILED": "Detection failed: {message}",
+    "ERR_CHANNEL_TEST_FAILED": "Detection failed: {detail}",
     "ERR_CHANNEL_MODEL_NOT_FOUND": "Corresponding model entry not found in channel",
     "ERR_CHANNEL_USAGE_MISMATCH": "Model usage mismatch: expected {expected}, actual {actual}",
     "ERR_CHANNEL_MODEL_DISABLED": "Model entry is disabled",
