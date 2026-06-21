@@ -19,7 +19,7 @@ from app.core.tools import (
     TOOL_EXECUTOR_MAP,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
-from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result_with_stats
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -112,18 +112,23 @@ async def process_single_tool(
 
     LogManager.log_tool_result(turn, cmd_result, session_id, uid)
 
-    # 工具响应过大保护：超过模型上下文限制一半时截断，避免撑爆上下文导致请求超时
-    truncation = truncate_tool_result_with_stats(cmd_result, context_window_k)
-    cmd_result = truncation.content
-    if truncation.truncated:
+    tool_msg = InternalMessage(
+        role=MessageRole.TOOL,
+        tool_call_id=tool_call.id,
+        content=cmd_result,
+    )
+    truncation_stats = truncate_tool_messages_for_budget(
+        tool_msgs=[tool_msg],
+        context_window_k=context_window_k,
+        budget_tokens=max(1, (context_window_k * 1024) // 2),
+        uid=uid,
+        session_id=session_id,
+    )
+    if truncation_stats.truncated_count:
         get_logger("dispatcher").bind(
             uid=uid,
             session_id=session_id,
             tool_name=tool_name,
         ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
 
-    return InternalMessage(
-        role=MessageRole.TOOL,
-        tool_call_id=tool_call.id,
-        content=cmd_result,
-    )
+    return tool_msg

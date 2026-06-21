@@ -12,8 +12,8 @@ MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。�
 - `app/`: 后端应用主体。
   - `api/`: HTTP 与 WebSocket API 路由。
   - `adapters/`: 对话通信适配器。
-  - `core/`: 调度、上下文、安全、日志、工具、检索、审计、国际化与工具函数。
-  - `models/`: SQLModel/Pydantic 领域实体与内部消息模型。
+  - `core/`: 调度、渠道路由、上下文、安全、加密、日志、工具、检索、审计、国际化与工具函数。
+  - `models/`: SQLModel/Pydantic 领域实体、渠道轮询游标与内部消息模型。
   - `providers/`: LLM、Embedding、Rerank、Database、Vector 基础设施 Provider。
   - `schemas/`: API 通用响应与认证请求契约。
   - `transformers/`: 模型协议转换器。
@@ -47,6 +47,10 @@ MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。�
   - `background_log_cleaner`: 每 24 小时清理超过保留期的系统日志。
 - `app/core/paths.py`
   - 统一维护数据目录、临时目录、SQLite 数据库路径、ChromaDB 持久化路径、日志路径与 favicon 路径。
+- `app/core/crypto.py`
+  - 使用环境变量 `MONOLIGH_ENCRYPTION_KEY` 提供 32 字节密钥。
+  - 通过 XOR + Base64 对渠道 API Key 做轻量加密存储。
+  - 提供 API Key 解密、加密与日志脱敏工具。
 
 ### 3.1 API 层 (`app/api/v1`)
 
@@ -62,7 +66,10 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
   - 会话标题生成。
 - `profile.py`: Profile 创建、列表、激活、更新与删除。
 - `channels.py`: 模型渠道管理。
-  - Channel 用途区分：`CHAT`、`EMBEDDING`、`RERANK`。
+  - Channel 维护 `model_ids` 模型条目列表，模型条目按 `CHAT`、`EMBEDDING`、`RERANK` 区分用途。
+  - 创建、更新、删除渠道时校验模型条目、Rerank `base_url`、渠道名称与 URL 协议。
+  - 渠道模型 ID 重命名时批量同步 Profile 中的渠道规则与审计模型引用。
+  - 渠道模型条目删除或渠道删除时清理 Profile 中失效的渠道规则与审计模型引用。
   - 提供向量维度检测接口。
 - `prompts.py`: PromptLibrary 提示词资产维护。
 - `files.py`: 文件上传与下载管理，支持对话附件传递。
@@ -79,6 +86,11 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 
 ### 3.3 调度控制层 (`app/core`)
 
+- `channel_router.py`: 渠道路由器。
+  - 基于 Profile 中的 `ChannelConfig.rules` 按优先级分组选择渠道。
+  - 同一优先级组内按 `weight` 展开并加权轮询。
+  - 通过数据库持久化游标支持多 worker 共享轮询位置。
+  - 渠道或模型条目不可用时跳过，调用失败后由调用方排除当前优先级并降级到下一组。
 - `dispatcher.py`: 核心对话调度器。
   - 支持非流式与流式调度。
   - 管理会话锁状态。
@@ -90,6 +102,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
   - 处理工具结果落库与助手消息保存。
 - `context.py`: 上下文管理器，按 Profile 上下文窗口配置装载并截断历史消息。
 - `security.py`: 密码哈希、JWT 创建与当前用户解析。
+- `crypto.py`: API Key 加密、解密与脱敏工具。
 - `exceptions.py`: 业务异常体系。
 - `log.py`: 基于 loguru 的日志系统，支持控制台/文件/数据库日志与 WebSocket 广播。
 - `log_broadcaster.py`: 实时日志广播器。
@@ -109,6 +122,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 - `handle_parallel_tool_limit.py`: 并行工具调用限流与提示。
 - `audit_tool_call.py`: 工具调用审计入口。
 - `process_single_tool.py`: 单个工具执行、运行时上下文注入与结果处理。
+- `truncate_tool_result.py`: 按字符估算 Token 并截断过长工具结果，返回截断统计信息。
 - `process_markdown_response.py`: 在禁用 Markdown 的会话中剥离助手消息 Markdown 标记；使用 Python-Markdown `fenced_code` 扩展处理代码块。
 - `save_message.py`: 通用消息保存。
 - `save_initial_message.py`: 保存初始用户消息。
@@ -158,7 +172,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 
 - `llm/client.py`: LLM 统一客户端。
   - 持有 Transformer 注册表。
-  - 根据 ChannelType 路由到具体 Transformer。
+  - 根据 `protocol` 路由到具体 Transformer，当前注册 OpenAI 兼容 Transformer。
   - 返回 InternalResponse。
 - `embedding/client.py`: Embedding 统一客户端。
   - 根据 ChannelType 分发到实现 `BaseEmbeddingTransformer` 的 Transformer。
@@ -206,14 +220,21 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 ### 6.1 领域模型 (`app/models`)
 
 - `user.py`: 用户实体与用户创建、更新、响应模型。
-- `channel.py`: 模型渠道实体。
-  - `ChannelType`: 模型协议类型。
+- `channel.py`: 模型渠道实体、模型条目与渠道规则配置。
+  - `ChannelType`: 模型协议类型，当前包含 `OPENAI`。
   - `ModelUsage`: 模型用途，包含 `CHAT`、`EMBEDDING`、`RERANK`。
-  - Rerank Channel 要求配置 `base_url`。
+  - `ChannelModelItem`: 渠道下单个模型条目的完整配置，包含模型 ID、用途、多模态能力、上下文窗口、生成参数、超时与向量维度等字段。
+  - `ModelChannel`: 渠道数据库实体，保存渠道名称、协议类型、加密 API Key、Base URL、启用状态与模型条目列表。
+  - `ChannelRule`: Profile 中引用渠道模型条目的路由规则，包含 `channel_id`、`model_id`、`priority`、`weight` 与启用状态。
+  - `ChannelConfig`: 按用途独立的渠道配置，包含失败重试、各类超时、Rerank 候选数量、知识库返回数量与路由规则。
+  - Rerank 模型条目要求所属 Channel 配置 `base_url`。
+- `channel_cursor.py`: 渠道加权轮询游标实体。
+  - `cursor_key` 形如 `{profile_id}:{usage}:{priority}`，用于标识一个优先级组的轮询游标。
+  - `position` 保存下一次取用的展开序列下标，支持多 worker 共享轮询位置。
 - `profile.py`: Profile 实体与 ProfileConfig 嵌套配置。
-  - `channel`: 对话模型、Embedding、Rerank、知识库检索数量、上下文窗口等配置。
-  - `security`: 审计渠道、审计模型与风险阈值。
-  - `tool`: Shell 超时、并发工具数量、最大工具轮次、Firecrawl API Key 等工具配置。
+  - `channel`: `ChannelGroupConfig`，按用途分为 `chat_channel`、`embedding_channel`、`rerank_channel`，每组使用 `ChannelConfig` 维护路由规则、超时与知识库检索参数。
+  - `security`: 审计渠道 ID、审计模型 ID 与风险阈值。
+  - `tool`: Shell 超时、并发工具数量、最大工具轮次、Firecrawl API Key、工具执行器线程池大小等工具配置。
   - `other`: 预留扩展配置。
 - `prompt.py`: PromptLibrary 提示词资产实体。
 - `message.py`: InternalMessage、InternalToolCall、InternalResponse、消息持久化实体与 ChatCompletionRequest。
@@ -259,6 +280,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 - `profile.py`: Profile 管理与激活配置查询。
 - `prompt.py`: PromptLibrary 管理。
 - `channel.py`: 模型渠道管理与按名称查询。
+- `channel_cursor.py`: 渠道加权轮询游标管理，使用独立异步会话推进轮询位置。
 - `session.py`: 对话会话管理。
 - `active_session.py`: 活跃会话锁管理。
 - `message.py`: 历史消息存储、分页查询、会话列表与会话删除。
@@ -267,7 +289,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 ## 9. 标准通信规程
 
 - 内部对话协议：调度器、LLMClient、Transformer 与工具链之间使用 InternalMessage、InternalToolCall、InternalResponse，避免直接透传前端或厂商原始结构。
-- 模型供应商协议：当前实现以 OpenAI 兼容协议为主，对话、Embedding 与 Rerank 能力分别通过 LLMClient、EmbeddingClient、RerankClient 分发。
+- 模型供应商协议：当前实现以 OpenAI 兼容协议为主，对话通过 LLMClient 按 `protocol` 分发，Embedding 与 Rerank 通过对应客户端按 ChannelType 分发。
 - 知识库工具协议：系统提示词只注入可用知识库目录；模型必须通过动态工具 `query_knowledge_base` 检索内容；工具侧再次校验运行时白名单。
 - Markdown 输出协议：会话级 Markdown 开关通过调度器向当前用户消息追加输出指令；保存助手消息时按会话配置剥离或保留 Markdown；前端 Markdown 模式使用 `markdown-it` 渲染。
 - 工具审计协议：高风险工具在执行前进入 AuditMiddleware；审计结果可放行、要求动态确认、拒绝或按风险阈值拦截。
@@ -307,6 +329,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 
 - `dashboard/src/components/`
   - `BaseDataTable.vue`: 通用数据表格。
+  - `ChannelEditor.vue`: 渠道规则编辑组件，用于在 Profile 中维护按用途分组的渠道路由规则。
   - `LanguageSwitcher.vue`: 语言切换组件。
   - `StatusTag.vue`: 状态标签。
   - `VirtualizedCode.vue`: 长文本/代码虚拟化展示。
@@ -337,10 +360,11 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
   - `test_chat.py`
   - `test_profiles.py`
   - `test_prompts.py`
-  - `test_channels.py`
+  - `test_providers.py`
   - `test_users.py`
 - `tests/unit/`
-  - 核心配置、上下文、调度器、安全、审计、工具、Channel、Schema、Transformer、Embedding、Rerank、混合检索与 Markdown 响应处理单元测试。
+  - 核心配置、上下文、调度器、安全、审计、渠道路由、Provider、工具、Channel、Schema、Transformer、Embedding、Rerank、混合检索与 Markdown 响应处理单元测试。
+  - 包含渠道加权轮询、模型 ID 重命名同步、Rerank 配置校验、OpenAI 流式超时等专项测试。
   - 包含 Firecrawl 工具原生异步调用测试、知识库工具测试、Shell 工具测试、OpenAI Transformer 流式/Embedding/Rerank 测试等。
 - 代码质量：
   - Python 使用 Ruff 检查与安全自动修复。

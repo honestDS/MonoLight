@@ -17,6 +17,8 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.core import constants
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
+from app.core.dispatcher import ChatDispatcher
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.i18n.context import set_current_locale
 from app.core.i18n.locale import normalize_locale
@@ -24,6 +26,7 @@ from app.core.log import (
     get_logger,
 )
 from app.core.security import get_current_user
+from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.session import generate_session_title
 from app.models.channel import ChannelConfig
 from app.models.message import (
@@ -175,7 +178,7 @@ async def generate_title(
     from app.core.exceptions import LLMException
     from app.core.log import channel_log_extra
 
-    selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=f"{profile.id}:CHAT")
+    selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
     if not selection:
         return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
@@ -207,7 +210,7 @@ async def generate_title(
                 **channel_log_extra(channel, model_entry),
             ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
 
-        selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=f"{profile.id}:CHAT")
+        selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
         if not selection:
             return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
@@ -348,10 +351,13 @@ async def chat_websocket(
                     active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
-                    from app.core.utils.dispatcher.save_initial_message import save_initial_message
-
                     async with AsyncSessionLocal() as db:
                         profile = await profile_crud.get_active(db)
+                        try:
+                            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+                        except BaseBusinessException as exc:
+                            await websocket.send_json({"type": "error", "message": t(exc.message, **exc.kwargs), "request_id": request_id})
+                            continue
                         await save_initial_message(
                             db,
                             session_id,

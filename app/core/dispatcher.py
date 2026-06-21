@@ -21,6 +21,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_LLM_EMPTY_RESPONSE,
 )
+from app.core.context import ContextManager
 from app.core.crud.active_session import (
     active_session_crud,
 )
@@ -47,7 +48,9 @@ from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
+from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
+from app.core.utils.dispatcher.markdown_instruction import append_session_markdown_instruction
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
@@ -55,6 +58,7 @@ from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -119,6 +123,47 @@ def _reassemble_multimodal_messages(
 
 class ChatDispatcher:
     @staticmethod
+    async def validate_initial_message_before_save(
+        db: AsyncSession,
+        message: str | list[dict[str, Any]],
+        uid: str,
+        session_id: str,
+        profile,
+        attachments: list[str] | None = None,
+    ) -> None:
+        cfg = await validate_profile_and_cfg(db, profile)
+        chat_channel = cfg.channel.chat_channel
+        selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_preflight", cursor_key=None, log_selection=False)
+        if not selection:
+            raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
+
+        chat_channel_obj, model_entry, _channel_rule = selection
+        img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
+        chat_params = _resolve_chat_params(model_entry, chat_channel)
+        embedding_profile_available = await is_embedding_profile_available(db, profile)
+        system_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
+        tools, _allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available)
+
+        initial_msg = InternalMessage(role=MessageRole.USER, content=message, attachments=attachments)
+        await append_session_markdown_instruction(db, session_id, initial_msg)
+        if initial_msg.attachments or isinstance(initial_msg.content, list):
+            initial_msg = MessageAssembler.assemble(
+                initial_msg,
+                image_understanding=img_understanding,
+                audio_understanding=audio_understanding,
+                video_understanding=video_understanding,
+                is_history=False,
+            )
+
+        ContextManager.validate_latest_user_message_budget(
+            message=initial_msg,
+            context_window_k=chat_params["context_window_k"],
+            max_tokens=chat_params["max_tokens"],
+            system_tokens=estimate_tokens(system_prompt),
+            tools=tools,
+        )
+
+    @staticmethod
     async def dispatch(
         db: AsyncSession,
         message: str | list[dict[str, Any]],
@@ -133,6 +178,8 @@ class ChatDispatcher:
             profile = await profile_crud.get_active(db)
 
             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
+
+            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
             # 1. 初始保存消息
             initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
@@ -228,11 +275,19 @@ class ChatDispatcher:
                         excluded_priorities: set[int] = set()
                         while True:
                             try:
+                                request_messages = ContextManager.trim_messages_for_model_request(
+                                    messages=messages,
+                                    uid=uid,
+                                    session_id=session_id,
+                                    context_window_k=chat_params["context_window_k"],
+                                    max_tokens=chat_params["max_tokens"],
+                                    tools=current_tools,
+                                )
                                 response = await LLMClient.generate(
                                     api_key=chat_channel_obj.get_decrypted_api_key(),
                                     base_url=chat_channel_obj.base_url,
                                     model_id=model_entry["model_id"],
-                                    messages=messages,
+                                    messages=request_messages,
                                     temperature=chat_params["temperature"],
                                     top_p=chat_params["top_p"],
                                     max_tokens=chat_params["max_tokens"],
@@ -373,6 +428,8 @@ class ChatDispatcher:
 
             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
+            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+
             # 1. 初始保存消息
             initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
 
@@ -466,11 +523,19 @@ class ChatDispatcher:
                         while True:
                             emitted_chunk = False
                             try:
+                                request_messages = ContextManager.trim_messages_for_model_request(
+                                    messages=messages,
+                                    uid=uid,
+                                    session_id=session_id,
+                                    context_window_k=chat_params["context_window_k"],
+                                    max_tokens=chat_params["max_tokens"],
+                                    tools=current_tools,
+                                )
                                 async for chunk in LLMClient.generate_stream(
                                     api_key=chat_channel_obj.get_decrypted_api_key(),
                                     base_url=chat_channel_obj.base_url,
                                     model_id=model_entry["model_id"],
-                                    messages=messages,
+                                    messages=request_messages,
                                     temperature=chat_params["temperature"],
                                     top_p=chat_params["top_p"],
                                     max_tokens=chat_params["max_tokens"],

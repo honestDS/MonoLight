@@ -6,10 +6,13 @@ MESSAGES = {
     "MSG_SESSION_UPDATED": "会话设置已更新",
     "ERR_NO_VALID_CHANNEL": "未配置有效的模型渠道",
     "ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED": "消息内容或附件不能为空",
+    "ERR_CHAT_INPUT_TOO_LONG": "输入内容超过当前模型可用上下文预算，请缩短消息或降低输出长度后重试",
+    "ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED": "当前模型上下文预算已被系统提示词、工具定义或输出长度占满，请调整 Profile 配置后重试",
     "ERR_CHANNEL_EMBEDDING_ONLY_FOR_TITLE": "当前模型渠道仅支持向量化，无法生成会话标题",
     "ERR_CHANNEL_DISABLED_FOR_TITLE": "对话模型渠道已被禁用，无法生成会话标题",
     "MSG_TITLE_GENERATED": "标题生成成功",
     "MSG_NEW_SESSION": "新会话",
     "MSG_TITLE_GENERATE_FAILED": "无法生成标题，将使用默认标题",
     "MSG_MESSAGE_LIST_SUCCESS": "会话历史记录获取成功",
+    "MSG_TOOL_RESULT_TRUNCATED": "\n\n[工具响应内容过大，已省略后半部分。请基于以上部分结果作答，或调整工具调用参数后重新查询]",
 }

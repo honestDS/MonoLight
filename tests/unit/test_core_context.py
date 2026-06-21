@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core.constants import ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED, ERR_CHAT_INPUT_TOO_LONG
 from app.core.context import ContextManager
+from app.core.exceptions import ParameterException
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result, truncate_tool_result_with_stats
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole
@@ -91,10 +93,7 @@ def test_context_tool_result_uses_shared_token_truncation():
         ),
         InternalMessage(role=MessageRole.USER, content="run tool"),
     ]
-    expected_before = sum(
-        estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or ""))
-        for msg in parsed_history
-    )
+    expected_before = sum(estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")) for msg in parsed_history)
 
     messages, log_data = ContextManager._strategy_atomic_truncate(
         uid="u1",
@@ -104,10 +103,7 @@ def test_context_tool_result_uses_shared_token_truncation():
         current_msg_tokens=0,
         context_window_k=1,
     )
-    expected_after = sum(
-        estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or ""))
-        for msg in messages
-    )
+    expected_after = sum(estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")) for msg in messages)
 
     assert expected_truncated is True
     assert messages[2].role == MessageRole.TOOL
@@ -115,3 +111,115 @@ def test_context_tool_result_uses_shared_token_truncation():
     assert log_data["before"] == expected_before
     assert log_data["after"] == expected_after
     assert log_data["before"] > log_data["after"]
+
+
+def test_trim_messages_for_model_request_keeps_latest_user_message():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(role=MessageRole.USER, content="old" * 2000),
+        InternalMessage(role=MessageRole.ASSISTANT, content="old response" * 2000),
+        InternalMessage(role=MessageRole.USER, content="latest question"),
+    ]
+
+    trimmed = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="u1",
+        session_id="s1",
+        context_window_k=1,
+        max_tokens=200,
+        safety_margin_tokens=100,
+    )
+
+    assert trimmed[-1].role == MessageRole.USER
+    assert trimmed[-1].content == "latest question"
+
+
+def test_trim_messages_for_model_request_does_not_mutate_source_messages():
+    large_tool_content = "工具响应内容" * 2000
+    messages = [
+        InternalMessage(role=MessageRole.USER, content="run tool"),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=None,
+            tool_calls=[InternalToolCall(id="call_1", name="demo_tool", arguments={})],
+        ),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call_1", content=large_tool_content),
+    ]
+
+    trimmed = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="u1",
+        session_id="s1",
+        context_window_k=1,
+        max_tokens=200,
+        safety_margin_tokens=100,
+    )
+
+    assert messages[-1].content == large_tool_content
+    assert trimmed[0].role == MessageRole.USER
+    assert trimmed[1].role == MessageRole.ASSISTANT
+    assert trimmed[-1].role == MessageRole.TOOL
+    assert trimmed[-1].content != large_tool_content
+
+
+def test_truncate_tool_result_with_stats_respects_explicit_limit_when_notice_fits():
+    limit_tokens = 80
+    result = truncate_tool_result_with_stats("工具响应内容" * 2000, context_window_k=1, limit_tokens=limit_tokens)
+
+    assert result.truncated is True
+    assert result.final_tokens <= limit_tokens
+
+
+def test_trim_messages_for_model_request_rejects_oversized_latest_user_message():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(role=MessageRole.USER, content="超长输入" * 2000),
+    ]
+
+    with pytest.raises(ParameterException) as exc_info:
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="u1",
+            session_id="s1",
+            context_window_k=1,
+            max_tokens=900,
+            safety_margin_tokens=100,
+        )
+
+    assert exc_info.value.message == ERR_CHAT_INPUT_TOO_LONG
+
+
+def test_trim_messages_for_model_request_rejects_exhausted_context_budget():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(role=MessageRole.USER, content="latest question"),
+    ]
+
+    with pytest.raises(ParameterException) as exc_info:
+        ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid="u1",
+            session_id="s1",
+            context_window_k=1,
+            max_tokens=2000,
+            safety_margin_tokens=100,
+        )
+
+    assert exc_info.value.message == ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
+
+
+def test_audit_tool_chain_injects_missing_tool_result():
+    messages = [
+        InternalMessage(role=MessageRole.USER, content="run tool"),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=None,
+            tool_calls=[InternalToolCall(id="call_1", name="demo_tool", arguments={})],
+        ),
+    ]
+
+    audited = ContextManager.audit_tool_chain(messages, uid="u1", session_id="s1")
+
+    assert len(audited) == 3
+    assert audited[-1].role == MessageRole.TOOL
+    assert audited[-1].tool_call_id == "call_1"

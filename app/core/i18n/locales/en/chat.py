@@ -6,10 +6,13 @@ MESSAGES = {
     "MSG_SESSION_UPDATED": "Session settings updated",
     "ERR_NO_VALID_CHANNEL": "No valid model channel configured",
     "ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED": "Message content or attachments cannot be empty",
+    "ERR_CHAT_INPUT_TOO_LONG": "The input exceeds the available context budget of the current model. Please shorten the message or reduce the output length and try again.",
+    "ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED": "The current model context budget is exhausted by system prompts, tool definitions, or output length. Please adjust the Profile configuration and try again.",
     "ERR_CHANNEL_EMBEDDING_ONLY_FOR_TITLE": "The current model channel only supports embedding, cannot generate session title",
     "ERR_CHANNEL_DISABLED_FOR_TITLE": "Chat model channel has been disabled, cannot generate session title",
     "MSG_TITLE_GENERATED": "Title generated successfully",
     "MSG_NEW_SESSION": "New Session",
     "MSG_TITLE_GENERATE_FAILED": "Unable to generate title, default title will be used",
     "MSG_MESSAGE_LIST_SUCCESS": "Session history retrieved successfully",
+    "MSG_TOOL_RESULT_TRUNCATED": "\n\n[The tool response is too large, so the latter part has been omitted. Please answer based on the visible result above, or adjust the tool call parameters and query again.]",
 }
