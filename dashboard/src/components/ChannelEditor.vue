@@ -212,16 +212,25 @@ const selectedRuleKeys = computed({
   set(keys) {
     if (!props.channel.rules) props.channel.rules = []
     const existingRuleMap = new Map(props.channel.rules.map(rule => [getRuleKey(rule), rule]))
+    let nextChatPriority = Math.max(0, ...props.channel.rules.map(rule => rule.priority || 1)) + 1
 
     const rules = keys
       .map(key => {
         const option = modelOptions.value.find(item => item.key === key)
         if (!option) return null
-        return existingRuleMap.get(key) || {
+        const existingRule = existingRuleMap.get(key)
+        if (existingRule) return existingRule
+
+        const rule = {
           ...defaultChannelRule(),
           channel_id: option.channel_id,
           model_id: option.model_id
         }
+        if (props.usage === 'CHAT') {
+          rule.priority = nextChatPriority
+          nextChatPriority += 1
+        }
+        return rule
       })
       .filter(Boolean)
 

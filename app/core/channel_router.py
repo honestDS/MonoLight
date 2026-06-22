@@ -12,6 +12,8 @@ from collections import defaultdict
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crud.channel import channel_crud
+from app.core.crud.channel_cursor import channel_cursor_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
@@ -47,7 +49,7 @@ def _expand_by_weight(rules: list[ChannelRule]) -> list[ChannelRule]:
 
 
 async def _pick_round_robin(rules: list[ChannelRule], cursor_key: str, priority: int) -> ChannelRule | None:
-    """按 weight 加权轮询选取一条规则，并推进持久化游标。
+    """按 weight 加权轮询选取一条规则，并推进组内权重游标。
 
     若 cursor_key 为空则视为"探测"调用，取展开序列首项且不推进游标。
     游标位置持久化在数据库（channel_cursor 表，由游标 CRUD 用独立会话管理），支持多 worker 共享。
@@ -58,8 +60,6 @@ async def _pick_round_robin(rules: list[ChannelRule], cursor_key: str, priority:
 
     if not cursor_key:
         return expanded[0]
-
-    from app.core.crud.channel_cursor import channel_cursor_crud
 
     cursor_index = await channel_cursor_crud.next_index(f"{cursor_key}:{priority}", len(expanded))
     return expanded[cursor_index]
@@ -87,7 +87,7 @@ async def select_channel(
         call_context: 调用场景，用于区分主对话、标题生成、知识库检索等日志来源
         excluded_priorities: 本次调用中已失败或需跳过的优先级组集合
         cursor_key: 加权轮询游标键（建议为 "{profile_id}:{usage}"）；
-            传入时按轮询推进游标，不传时取组内首项且不推进（用于可用性探测）
+            传入时推进该优先级组内的权重游标，不传时取组内首项且不推进（用于可用性探测）
         log_selection: 是否在选中渠道后记录"选择渠道"日志；
             可用性探测等非真实调用场景应传 False 以避免日志噪声
 
@@ -97,8 +97,6 @@ async def select_channel(
     if not channel_cfg or not channel_cfg.rules:
         logger.warning(t("LOG_CHANNEL_CONFIG_EMPTY", expected_usage=expected_usage))
         return None
-
-    from app.core.crud.channel import channel_crud
 
     excluded_priorities = excluded_priorities or set()
 

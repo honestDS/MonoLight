@@ -7,8 +7,11 @@ import pytest
 from app.core.channel_router import (
     _expand_by_weight,
     _get_model_entry,
+    _pick_round_robin,
     select_channel,
 )
+from app.core.crud.channel import channel_crud
+from app.core.crud.channel_cursor import channel_cursor_crud
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 
 
@@ -106,8 +109,6 @@ async def test_select_channel_priority_fallback(monkeypatch):
             return channel_2
         return None
 
-    from app.core.crud.channel import channel_crud
-
     monkeypatch.setattr(channel_crud, "get", mock_get)
 
     # 配置：两个优先级组
@@ -155,8 +156,6 @@ async def test_select_channel_model_entry_disabled(monkeypatch):
         ],
     )
 
-    from app.core.crud.channel import channel_crud
-
     monkeypatch.setattr(channel_crud, "get", AsyncMock(return_value=channel))
 
     channel_config = ChannelConfig(rules=[ChannelRule(channel_id=1, model_id="gpt-4o", priority=1, weight=100)])
@@ -191,3 +190,21 @@ def test_expand_by_weight_correct_repetition():
     channel_ids = [r.channel_id for r in expanded]
     assert channel_ids.count(1) == 3
     assert channel_ids.count(2) == 2
+
+
+@pytest.mark.asyncio
+async def test_pick_round_robin_advances_weight_cursor(monkeypatch):
+    """测试真实选择渠道会推进组内权重游标"""
+    rules = [
+        ChannelRule(channel_id=1, model_id="model-a", priority=1, weight=1),
+        ChannelRule(channel_id=2, model_id="model-b", priority=1, weight=1),
+    ]
+
+    next_index = AsyncMock(return_value=1)
+    monkeypatch.setattr(channel_cursor_crud, "next_index", next_index)
+
+    selected_rule = await _pick_round_robin(rules, "profile-1:CHAT", 1)
+
+    assert selected_rule is not None
+    assert selected_rule.channel_id == 2
+    next_index.assert_awaited_once_with("profile-1:CHAT:1", 2)
