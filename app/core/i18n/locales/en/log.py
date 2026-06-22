@@ -75,4 +75,5 @@ MESSAGES = {
     "LOG_TOOL_RESULT": "Turn {turn} | Result: {result}",
     "LOG_TOOL_RESULT_TRUNCATED": "Tool {tool_name} response is too large and was truncated to half of context limit (context_window_k={context_window_k})",
     "LOG_WS_ACTIVE_TASK_SAVED": "Session {session_id} has an active task; message saved to database for dynamic append.",
+    "MSG_LOG_MESSAGE_TRUNCATED": "...[Log truncated, original length {original_length} chars]",
 }

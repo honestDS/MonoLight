@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +69,11 @@ async def system_logs_websocket(
         # 历史日志集中一次性推送，使用 type=history 标识批量消息，避免逐条发送的网络开销
         history_payload = []
         for log in history_logs:
+            extra_str = log.extra or ""
+            try:
+                extra_dict = json.loads(extra_str) if extra_str else {}
+            except json.JSONDecodeError:
+                extra_dict = {}
             history_payload.append(
                 {
                     "timestamp": log.created_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -75,7 +82,7 @@ async def system_logs_websocket(
                     "message": log.message,
                     "uid": log.uid,
                     "session_id": log.session_id,
-                    "extra": log.extra,
+                    "extra": extra_dict,
                 }
             )
         await websocket.send_json({"type": "history", "logs": history_payload})

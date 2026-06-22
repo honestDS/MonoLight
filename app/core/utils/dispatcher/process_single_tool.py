@@ -110,8 +110,6 @@ async def process_single_tool(
                 ensure_ascii=False,
             )
 
-    LogManager.log_tool_result(turn, cmd_result, session_id, uid)
-
     tool_msg = InternalMessage(
         role=MessageRole.TOOL,
         tool_call_id=tool_call.id,
@@ -130,5 +128,9 @@ async def process_single_tool(
             session_id=session_id,
             tool_name=tool_name,
         ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
+
+    # 使用原始工具结果记录日志，确保文件日志保留完整数据用于审计；
+    # ws/db sink 中的字符级截断仅影响前端推送与数据库存储，不影响文件日志
+    LogManager.log_tool_result(turn, cmd_result, session_id, uid)
 
     return tool_msg

@@ -75,4 +75,5 @@ MESSAGES = {
     "LOG_TOOL_RESULT": "Turn {turn} | 结果: {result}",
     "LOG_TOOL_RESULT_TRUNCATED": "工具 {tool_name} 响应过大，已截断至上下文限制的一半（context_window_k={context_window_k}）",
     "LOG_WS_ACTIVE_TASK_SAVED": "会话 {session_id} 存在活跃任务，消息已保存至数据库以待动态追加。",
+    "MSG_LOG_MESSAGE_TRUNCATED": "...[日志已截断，原始长度 {original_length} 字符]",
 }

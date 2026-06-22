@@ -7,6 +7,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from app.core import constants
 from app.core.i18n import t
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
@@ -14,6 +15,19 @@ from app.core.utils.time import get_local_time
 
 class LogManager:
     _configured = False
+
+    @staticmethod
+    def _truncate_tool_log_message(record: dict) -> str:
+        """对工具类日志的超大 message 做字符级截断。
+
+        仅用于 ws_sink 和 db_sink，避免超大工具结果撑大数据库存储体积与前端广播 payload；
+        文件 sink 直接使用 record["message"] 原文写入，不受此截断影响，保留完整数据用于审计。
+        """
+        message = record["message"]
+        is_tool_log = "tool_call" in record["extra"] or "tool_result" in record["extra"]
+        if is_tool_log and message and len(message) > constants.LOG_MESSAGE_MAX_LENGTH:
+            message = message[: constants.LOG_MESSAGE_MAX_LENGTH] + t(constants.MSG_LOG_MESSAGE_TRUNCATED, original_length=len(message))
+        return message
 
     @classmethod
     def setup(cls, log_path: str = str(DEFAULT_LOG_FILE_PATH), level: str = "INFO"):
@@ -40,11 +54,16 @@ class LogManager:
                 local_now = get_local_time()
                 # 优先使用 extra 中的 name 作为 module
                 module_name = record["extra"].get("name") or record["name"]
+
+                # 仅对工具类日志（tool_call / tool_result）的超大 message 做截断，
+                # 避免工具结果撑大实时推送 payload 导致前端卡顿
+                log_message = cls._truncate_tool_log_message(record)
+
                 log_entry = {
                     "timestamp": local_now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     "level": record["level"].name,
                     "module": module_name,
-                    "message": record["message"],
+                    "message": log_message,
                     "uid": uid,
                     "session_id": session_id,
                     "extra": extra_data,
@@ -76,10 +95,14 @@ class LogManager:
                 # 优先使用 extra 中的 name 作为 module
                 module_name = record["extra"].get("name") or record["name"]
 
+                # 仅对工具类日志（tool_call / tool_result）的超大 message 做截断，
+                # 避免工具结果撑大数据库存储体积
+                db_log_message = cls._truncate_tool_log_message(record)
+
                 log_entry = SystemLogCreate(
                     level=record["level"].name,
                     module=module_name,
-                    message=record["message"],
+                    message=db_log_message,
                     uid=uid,
                     session_id=session_id,
                     extra=extra_json,
