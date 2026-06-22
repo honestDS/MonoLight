@@ -2,7 +2,7 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from app.schemas.message import InternalMessage, InternalResponse, MessageRole
+from app.models.message import InternalMessage, InternalResponse, MessageRole
 
 from app.core.middleware.auditor import audit_command
 

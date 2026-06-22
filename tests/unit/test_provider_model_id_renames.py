@@ -1,28 +1,28 @@
-from app.api.v1.providers import (
+from app.api.v1.channels import (
     _apply_model_id_renames_to_configs,
-    _collect_provider_rule_model_ids,
+    _collect_channel_rule_model_ids,
     _compute_model_id_renames,
 )
 
 
-def test_collect_provider_rule_model_ids_reads_profile_channel_refs():
+def test_collect_channel_rule_model_ids_reads_profile_channel_refs():
     configs = {
-        "provider": {
+        "channel": {
             "chat_channel": {
                 "rules": [
-                    {"provider_id": 1, "model_id": "chat-a", "priority": 1, "weight": 1},
-                    {"provider_id": 2, "model_id": "other-provider-model", "priority": 1, "weight": 1},
+                    {"channel_id": 1, "model_id": "chat-a", "priority": 1, "weight": 1},
+                    {"channel_id": 2, "model_id": "other-channel-model", "priority": 1, "weight": 1},
                 ],
             },
             "embedding_channel": {
                 "rules": [
-                    {"provider_id": 1, "model_id": "embedding-a", "priority": 1, "weight": 1},
+                    {"channel_id": 1, "model_id": "embedding-a", "priority": 1, "weight": 1},
                 ],
             },
         },
     }
 
-    assert _collect_provider_rule_model_ids(configs, provider_id=1) == {
+    assert _collect_channel_rule_model_ids(configs, channel_id=1) == {
         "CHAT": {"chat-a"},
         "EMBEDDING": {"embedding-a"},
         "RERANK": set(),
@@ -112,17 +112,17 @@ def test_compute_model_id_renames_does_not_cross_usage():
 
 def test_apply_model_id_renames_updates_referenced_profile_rules():
     configs = {
-        "provider": {
+        "channel": {
             "chat_channel": {
                 "rules": [
-                    {"provider_id": 1, "model_id": "chat-old-a", "priority": 1, "weight": 1},
-                    {"provider_id": 1, "model_id": "chat-old-b", "priority": 1, "weight": 1},
-                    {"provider_id": 2, "model_id": "other-provider-model", "priority": 1, "weight": 1},
+                    {"channel_id": 1, "model_id": "chat-old-a", "priority": 1, "weight": 1},
+                    {"channel_id": 1, "model_id": "chat-old-b", "priority": 1, "weight": 1},
+                    {"channel_id": 2, "model_id": "other-channel-model", "priority": 1, "weight": 1},
                 ],
             },
             "embedding_channel": {
                 "rules": [
-                    {"provider_id": 1, "model_id": "embedding-old", "priority": 1, "weight": 1},
+                    {"channel_id": 1, "model_id": "embedding-old", "priority": 1, "weight": 1},
                 ],
             },
         },
@@ -137,10 +137,10 @@ def test_apply_model_id_renames_updates_referenced_profile_rules():
         },
     }
 
-    updated_count = _apply_model_id_renames_to_configs(configs, provider_id=1, renames=renames)
+    updated_count = _apply_model_id_renames_to_configs(configs, channel_id=1, renames=renames)
 
     assert updated_count == 3
-    assert configs["provider"]["chat_channel"]["rules"][0]["model_id"] == "chat-new-a"
-    assert configs["provider"]["chat_channel"]["rules"][1]["model_id"] == "chat-new-b"
-    assert configs["provider"]["chat_channel"]["rules"][2]["model_id"] == "other-provider-model"
-    assert configs["provider"]["embedding_channel"]["rules"][0]["model_id"] == "embedding-new"
+    assert configs["channel"]["chat_channel"]["rules"][0]["model_id"] == "chat-new-a"
+    assert configs["channel"]["chat_channel"]["rules"][1]["model_id"] == "chat-new-b"
+    assert configs["channel"]["chat_channel"]["rules"][2]["model_id"] == "other-channel-model"
+    assert configs["channel"]["embedding_channel"]["rules"][0]["model_id"] == "embedding-new"

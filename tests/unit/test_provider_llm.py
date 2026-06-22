@@ -21,51 +21,44 @@ def _mock_chat_response():
     }
 
 
-def _encrypted_key(monkeypatch, plain_text: str = "plain-key") -> str:
-    from app.core.crypto import encrypt_api_key
-
-    monkeypatch.setenv("MONOLIGH_ENCRYPTION_KEY", "00" * 32)
-    return encrypt_api_key(plain_text)
-
-
 @pytest.mark.asyncio
-async def test_generate_success(monkeypatch):
-    encrypted_key = _encrypted_key(monkeypatch)
+async def test_generate_success():
+    plain_key = "plain-key"
     with patch(
         "app.transformers.openai.OpenAITransformer.generate",
         AsyncMock(return_value=_mock_chat_response()),
     ) as mock_generate:
-        result = await LLMClient.generate(api_key=encrypted_key, base_url="u", model_id="m", messages=[])
+        result = await LLMClient.generate(api_key=plain_key, base_url="u", model_id="m", messages=[])
         assert result.message.content == "hello"
-        assert mock_generate.await_args.kwargs["api_key"] == "plain-key"
+        assert mock_generate.await_args.kwargs["api_key"] == plain_key
 
 
 @pytest.mark.asyncio
-async def test_generate_connection_error(monkeypatch):
+async def test_generate_connection_error():
     from app.core.exceptions import LLMException
 
-    encrypted_key = _encrypted_key(monkeypatch)
+    plain_key = "plain-key"
     with patch(
         "app.transformers.openai.OpenAITransformer.generate",
         AsyncMock(side_effect=LLMException("Connection Error")),
     ):
         with pytest.raises(LLMException) as exc:
-            await LLMClient.generate(api_key=encrypted_key, base_url="u", model_id="m", messages=[])
+            await LLMClient.generate(api_key=plain_key, base_url="u", model_id="m", messages=[])
         assert "Connection Error" in str(exc.value)
 
 
 @pytest.mark.asyncio
-async def test_generate_decrypts_encrypted_api_key_once(monkeypatch):
-    encrypted_key = _encrypted_key(monkeypatch)
+async def test_generate_passes_caller_api_key_to_transformer():
+    plain_key = "plain-key"
 
     with patch(
         "app.transformers.openai.OpenAITransformer.generate",
         AsyncMock(return_value=_mock_chat_response()),
     ) as mock_generate:
-        result = await LLMClient.generate(api_key=encrypted_key, base_url="u", model_id="m", messages=[])
+        result = await LLMClient.generate(api_key=plain_key, base_url="u", model_id="m", messages=[])
 
     assert result.message.content == "hello"
-    assert mock_generate.await_args.kwargs["api_key"] == "plain-key"
+    assert mock_generate.await_args.kwargs["api_key"] == plain_key
 
 
 def test_decrypt_api_key_fails_without_encryption_key(monkeypatch):

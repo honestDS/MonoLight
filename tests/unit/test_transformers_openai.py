@@ -1,6 +1,6 @@
 import json
 
-from app.schemas.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 from app.transformers.openai import OpenAITransformer
 
@@ -39,6 +39,6 @@ def test_openai_from_provider():
         "usage": {"total_tokens": 100},
     }
     res = OpenAITransformer.from_provider(resp_data)
-    assert res.message.content == "hello"
-    assert res.message.tool_calls[0].name == "shell"
-    assert res.usage["total_tokens"] == 100
+    assert res.content == "hello"
+    assert res.tool_calls[0].name == "shell"
+    assert res.tool_calls[0].arguments == {"cmd": "ls"}
