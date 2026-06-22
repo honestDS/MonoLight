@@ -36,8 +36,8 @@ export default {
     copy_all: 'Copy All Code',
     copy_success: 'Copied successfully',
     copy_failed: 'Copy failed',
-    showing: 'Showing {limit} / {total} lines',
-    expand_more: 'Expand More (+100 lines)',
+    showing: 'Showing {limit} / {total} segments',
+    expand_more: 'View More (+100)',
     expand_all: 'Expand All'
   },
   status: {

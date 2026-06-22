@@ -13,10 +13,10 @@
 
     <div class="code-main" :style="{ maxHeight: maxHeight + 'px' }">
       <div class="code-layout">
-        <div v-for="(line, index) in visibleLines" :key="index" class="code-line">
-          <div class="line-number">{{ index + 1 }}</div>
+        <div v-for="(segment, index) in visibleSegments" :key="index" class="code-line">
+          <div class="line-number">{{ segment.isContinuation ? '' : segment.sourceLineNumber }}</div>
           <div class="line-content">
-            <pre><code>{{ line || ' ' }}</code></pre>
+            <pre><code>{{ segment.text || ' ' }}</code></pre>
           </div>
         </div>
       </div>
@@ -24,7 +24,7 @@
     
     <!-- 操作按钮 (悬浮在右下角) -->
     <div v-if="hasMore" class="expand-actions">
-      <div class="stats-info">{{ $t('common.code.showing', { limit: limit, total: allLines.length }) }}</div>
+      <div class="stats-info">{{ $t('common.code.showing', { limit: limit, total: displaySegments.length }) }}</div>
       <el-button-group>
         <el-button size="small" plain @click="expandMore">{{ $t('common.code.expand_more') }}</el-button>
         <el-button size="small" type="primary" @click="expandAll">{{ $t('common.code.expand_all') }}</el-button>
@@ -52,7 +52,10 @@ const props = defineProps({
 
 const { t } = useI18n()
 
-const limit = ref(100)
+const PAGE_SIZE = 100
+const MAX_CHARS_PER_DISPLAY_LINE = 160
+
+const limit = ref(PAGE_SIZE)
 
 // 尝试格式化 JSON
 const formattedContent = computed(() => {
@@ -68,32 +71,50 @@ const formattedContent = computed(() => {
   return props.content
 })
 
-const allLines = computed(() => {
+const sourceLines = computed(() => {
   return formattedContent.value.split('\n')
 })
 
-const visibleLines = computed(() => {
-  return allLines.value.slice(0, limit.value)
+const displaySegments = computed(() => {
+  return sourceLines.value.flatMap((line, lineIndex) => {
+    if (line.length <= MAX_CHARS_PER_DISPLAY_LINE) {
+      return [{
+        text: line,
+        sourceLineNumber: lineIndex + 1,
+        isContinuation: false
+      }]
+    }
+
+    const segments = []
+    for (let start = 0; start < line.length; start += MAX_CHARS_PER_DISPLAY_LINE) {
+      segments.push({
+        text: line.slice(start, start + MAX_CHARS_PER_DISPLAY_LINE),
+        sourceLineNumber: lineIndex + 1,
+        isContinuation: start > 0
+      })
+    }
+    return segments
+  })
 })
 
-const visibleText = computed(() => {
-  return visibleLines.value.join('\n')
+const visibleSegments = computed(() => {
+  return displaySegments.value.slice(0, limit.value)
 })
 
 const hasMore = computed(() => {
-  return allLines.value.length > limit.value
+  return displaySegments.value.length > limit.value
 })
 
 const expandMore = () => {
-  limit.value += 100
+  limit.value += PAGE_SIZE
 }
 
 const expandAll = () => {
-  limit.value = allLines.value.length
+  limit.value = displaySegments.value.length
 }
 
 const reset = () => {
-  limit.value = 100
+  limit.value = PAGE_SIZE
 }
 
 const copyContent = async () => {

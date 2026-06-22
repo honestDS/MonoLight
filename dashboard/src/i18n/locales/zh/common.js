@@ -36,8 +36,8 @@ export default {
     copy_all: '复制全部代码',
     copy_success: '复制成功',
     copy_failed: '复制失败',
-    showing: '已显示 {limit} / {total} 行',
-    expand_more: '继续展开 (+100行)',
+    showing: '已显示 {limit} / {total} 段',
+    expand_more: '查看更多(+100)',
     expand_all: '展开全部'
   },
   status: {
