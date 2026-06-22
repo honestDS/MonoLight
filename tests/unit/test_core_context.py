@@ -8,7 +8,7 @@ from app.core.context import ContextManager
 from app.core.exceptions import ParameterException
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result, truncate_tool_result_with_stats
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole
+from app.models.message import ImagePart, InternalMessage, InternalToolCall, Message, MessageRole, TextPart
 from app.models.profile import Profile
 
 
@@ -93,7 +93,7 @@ def test_context_tool_result_uses_shared_token_truncation():
         ),
         InternalMessage(role=MessageRole.USER, content="run tool"),
     ]
-    expected_before = sum(estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")) for msg in parsed_history)
+    expected_before = sum(estimate_tokens(ContextManager._message_token_text(msg)) for msg in parsed_history)
 
     messages, log_data = ContextManager._strategy_atomic_truncate(
         uid="u1",
@@ -103,7 +103,7 @@ def test_context_tool_result_uses_shared_token_truncation():
         current_msg_tokens=0,
         context_window_k=1,
     )
-    expected_after = sum(estimate_tokens(json.dumps(msg.model_dump()) if msg.tool_calls else (msg.content or "")) for msg in messages)
+    expected_after = sum(estimate_tokens(ContextManager._message_token_text(msg)) for msg in messages)
 
     assert expected_truncated is True
     assert messages[2].role == MessageRole.TOOL
@@ -139,6 +139,24 @@ def test_context_alignment_keeps_complete_assistant_tool_chain_without_leading_u
     assert any(msg.role == MessageRole.TOOL and msg.tool_call_id == "call_1" for msg in messages)
     assert any(msg.role == MessageRole.ASSISTANT and msg.tool_calls for msg in messages)
     assert log_data["after"] > estimate_tokens("new response") + estimate_tokens("new question")
+
+
+def test_message_token_text_serializes_multimodal_parts():
+    message = InternalMessage(
+        role=MessageRole.USER,
+        content=[
+            TextPart(text="请看这张图"),
+            ImagePart(image_url={"url": "data:image/jpeg;base64,abc"}),
+        ],
+    )
+
+    token_text = ContextManager._message_token_text(message)
+    parsed = json.loads(token_text)
+
+    assert parsed == [
+        {"type": "text", "text": "请看这张图"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
 
 
 def test_trim_messages_for_model_request_keeps_latest_user_message():

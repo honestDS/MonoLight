@@ -1,3 +1,4 @@
+import json
 from typing import (
     Any,
 )
@@ -14,6 +15,21 @@ from app.models.message import (
     MessageRole,
     MessageType,
 )
+
+
+def _to_storable_content(content: Any, msg_type: MessageType) -> str:
+    if msg_type == MessageType.TEXT and hasattr(content, "content"):
+        payload = content.content
+        if isinstance(payload, str) or payload is None:
+            return payload or ""
+        if hasattr(content, "model_dump"):
+            payload = content.model_dump(mode="json", include={"content"}).get("content")
+        return json.dumps(payload, ensure_ascii=False)
+
+    if hasattr(content, "model_dump_json"):
+        return content.model_dump_json(exclude_none=True)
+
+    return str(content)
 
 
 async def save_message(
@@ -36,24 +52,7 @@ async def save_message(
         "uid": uid,
         "role": role,
         "type": msg_type,
-        "content": (
-            content.content
-            if (
-                msg_type == MessageType.TEXT
-                and hasattr(
-                    content,
-                    "content",
-                )
-            )
-            else (
-                content.model_dump_json(exclude_none=True)
-                if hasattr(
-                    content,
-                    "model_dump_json",
-                )
-                else str(content)
-            )
-        ),
+        "content": _to_storable_content(content, msg_type),
         "attachments": attachments_to_save,
         "profile_id": profile_id,
         "is_processed": is_processed,

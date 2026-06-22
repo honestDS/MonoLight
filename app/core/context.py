@@ -220,14 +220,24 @@ class ContextManager:
         return [*system_msgs, *audited_non_system]
 
     @staticmethod
+    def _to_jsonable(value):
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if isinstance(value, list):
+            return [ContextManager._to_jsonable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: ContextManager._to_jsonable(item) for key, item in value.items()}
+        return value
+
+    @staticmethod
     def _message_token_text(msg: InternalMessage) -> str:
         if msg.tool_calls:
-            return json.dumps(msg.model_dump(), ensure_ascii=False)
+            return msg.model_dump_json(exclude_none=True)
         if isinstance(msg.content, str):
             return msg.content
         if msg.content is None:
             return ""
-        return json.dumps(msg.content, ensure_ascii=False)
+        return json.dumps(ContextManager._to_jsonable(msg.content), ensure_ascii=False)
 
     @staticmethod
     def _find_protected_tail_start(non_system_msgs: list[InternalMessage]) -> int:
