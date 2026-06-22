@@ -48,7 +48,6 @@ export default {
   top_p: 'Top P',
   max_tokens: 'Max Tokens',
   context_window_k: 'Context Window K',
-  chat_timeout: 'Chat Timeout (s)',
   image_understanding: 'Image Understanding',
   audio_understanding: 'Audio Understanding',
   video_understanding: 'Video Understanding',

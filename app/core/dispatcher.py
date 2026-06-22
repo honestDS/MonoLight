@@ -87,7 +87,7 @@ def _resolve_chat_params(model_entry: dict, chat_channel) -> dict:
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
         "top_p": model_entry.get("top_p"),
         "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else 2048,
-        "chat_timeout": model_entry.get("chat_timeout") if model_entry.get("chat_timeout") is not None else chat_channel.chat_timeout,
+        "chat_timeout": chat_channel.chat_timeout,
         "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else 4,
     }
 

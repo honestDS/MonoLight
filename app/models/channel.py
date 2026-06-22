@@ -44,7 +44,6 @@ class ChannelModelItem(BaseModel):
     temperature: float | None = PydanticField(None, ge=0, le=2.0, description="采样温度，CHAT 专属")
     top_p: float | None = PydanticField(None, ge=0, le=1.0, description="核采样阈值，CHAT 专属")
     max_tokens: int | None = PydanticField(None, ge=0, description="单次生成最大 Token 数，CHAT 专属")
-    chat_timeout: float | None = PydanticField(None, gt=0, le=600, description="对话模型调用超时（秒），CHAT 专属")
     embedding_dimensions: int | None = PydanticField(None, gt=0, description="向量输出维度，EMBEDDING 专属")
     embedding_timeout: float | None = PydanticField(None, gt=0, le=600, description="嵌入模型调用超时（秒），EMBEDDING 专属")
     rerank_timeout: float | None = PydanticField(None, gt=0, le=120, description="重排模型调用超时（秒），RERANK 专属")

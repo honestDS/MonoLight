@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.dispatcher import ChatDispatcher
+from app.core.dispatcher import ChatDispatcher, _resolve_chat_params
 from app.core.exceptions import LLMException
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
 
@@ -55,6 +55,21 @@ async def test_audit_tool_call_blocked(mock_profile):
         res_json = await audit_tool_call(db, mock_profile, MagicMock(), "execute_shell", {"command": "rm -rf /"}, [])
     res = json.loads(res_json)
     assert res["error"] == "Security Blocked"
+
+
+def test_resolve_chat_params_uses_profile_chat_timeout():
+    chat_channel = MagicMock(chat_timeout=180)
+    model_entry = {
+        "model_id": "primary-model",
+        "context_window_k": 8,
+        "max_tokens": 1024,
+    }
+
+    params = _resolve_chat_params(model_entry, chat_channel)
+
+    assert params["chat_timeout"] == 180
+    assert params["context_window_k"] == 8
+    assert params["max_tokens"] == 1024
 
 
 @pytest.mark.asyncio

@@ -445,7 +445,7 @@ async def create_channel(
     if await channel_crud.get_by_name(db, channel_in.name):
         raise ParameterException(constants.ERR_CHANNEL_NAME_EXISTS)
 
-    db_obj = await channel_crud.create(db, obj_in=channel_in)
+    db_obj = await channel_crud.create_with_plain_api_key(db, obj_in=channel_in)
 
     return StandardResponse.success(
         data=ChannelResponse.model_validate(db_obj),
@@ -532,8 +532,11 @@ async def update_channel(
     cleared_audit_refs = 0
 
     try:
+        api_key = update_data.pop("api_key", None)
         for field, value in update_data.items():
             setattr(db_obj, field, value)
+        if api_key is not None:
+            db_obj.set_api_key_plaintext(api_key)
 
         db.add(db_obj)
         await db.flush()

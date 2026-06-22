@@ -113,6 +113,34 @@ def test_context_tool_result_uses_shared_token_truncation():
     assert log_data["before"] > log_data["after"]
 
 
+def test_context_alignment_keeps_complete_assistant_tool_chain_without_leading_user():
+    tool_content = "工具响应内容" * 2000
+    parsed_history = [
+        InternalMessage(role=MessageRole.ASSISTANT, content="new response"),
+        InternalMessage(role=MessageRole.USER, content="new question"),
+        InternalMessage(role=MessageRole.TOOL, tool_call_id="call_1", content=tool_content),
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=None,
+            tool_calls=[InternalToolCall(id="call_1", name="demo_tool", arguments={})],
+        ),
+        InternalMessage(role=MessageRole.USER, content="old question" * 1000),
+    ]
+
+    messages, log_data = ContextManager._strategy_atomic_truncate(
+        uid="u1",
+        session_id="s1",
+        parsed_history=[msg.model_copy(deep=True) for msg in parsed_history],
+        limit_tokens=100000,
+        current_msg_tokens=0,
+        context_window_k=1,
+    )
+
+    assert any(msg.role == MessageRole.TOOL and msg.tool_call_id == "call_1" for msg in messages)
+    assert any(msg.role == MessageRole.ASSISTANT and msg.tool_calls for msg in messages)
+    assert log_data["after"] > estimate_tokens("new response") + estimate_tokens("new question")
+
+
 def test_trim_messages_for_model_request_keeps_latest_user_message():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="system"),

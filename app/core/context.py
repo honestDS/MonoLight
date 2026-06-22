@@ -337,16 +337,8 @@ class ContextManager:
         # A. 原子化轮次对齐 (保留所有窗口内的 SYSTEM 消息，并从第一个 USER 开始对齐后续消息)
         system_msgs = [m for m in temp_msgs if m.role == MessageRole.SYSTEM]
 
-        first_user_idx = -1
-        for idx, m in enumerate(temp_msgs):
-            if m.role == MessageRole.USER:
-                first_user_idx = idx
-                break
-
-        # 提取从第一个 USER 开始的所有消息
-        user_onwards = temp_msgs[first_user_idx:] if first_user_idx != -1 else []
-
-        # 合并：保持 SYSTEM 在前，随后跟随对齐后的对话流（去重处理）
+        # 合并：保持 SYSTEM 在前，随后保留窗口内已装载的完整消息序列。
+        # 孤儿 TOOL 结果由 audit_tool_chain 过滤，避免因第一个 USER 刚好被窗口截断而丢弃其后的完整 assistant/tool 链路。
         aligned_msgs = []
         added_ids = set()
 
@@ -354,7 +346,7 @@ class ContextManager:
             aligned_msgs.append(m)
             added_ids.add(id(m))
 
-        for m in user_onwards:
+        for m in temp_msgs:
             if id(m) not in added_ids:
                 aligned_msgs.append(m)
 
