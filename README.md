@@ -21,10 +21,8 @@ MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（Gene
 > 所有参与本项目贡献的 AI Agent 必须严格遵守以下开发标准与架构原则：
 > 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
 > 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
-> 3. 参考 [API.json](./API.json) 以确保编写集成测试时接口访问的准确性
-> 3. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
-> 4. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
-> 5. 如果修改了API接口，必须通过http://服务器IP:端口号/openapi.json 重新拉取最新的文档内容并更新项目跟目录下的API.json文件
+> 2. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
+> 3. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
 
 ## 1. 核心特性
 - **多类型数据库支持**: 支持sqlite(默认)、mysql、postgresql数据库。
