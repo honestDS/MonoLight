@@ -27,6 +27,49 @@ logger = get_logger(__name__)
 
 
 class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTransformer):
+    async def list_models(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> list[dict[str, Any]]:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{base_url.rstrip('/')}/models"
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.get(url, headers=headers) as resp:
+                    txt = await resp.text()
+                    if resp.status != 200:
+                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                    parsed = json.loads(txt)
+        except LLMException:
+            raise
+        except Exception as e:
+            logger.bind(base_url=base_url).error(t("LOG_MODEL_LIST_FAILED", error=str(e)))
+            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+
+        raw_models = parsed.get("data")
+        if not isinstance(raw_models, list):
+            raise LLMException(constants.ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR)
+
+        models = []
+        for item in raw_models:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            models.append(
+                {
+                    "id": str(item["id"]),
+                    "owned_by": item.get("owned_by"),
+                    "created": item.get("created"),
+                }
+            )
+        return models
+
     async def generate(
         self,
         api_key: str,

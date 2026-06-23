@@ -48,6 +48,7 @@ MESSAGES = {
     "LOG_OPENAI_CHAT_FAILED": "OpenAI chat API call failed: {error}",
     "LOG_OPENAI_EMBEDDING_FAILED": "Embedding model API call failed: {error}",
     "LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED": "Embedding model API call with optional parameters failed, preparing fallback retry: {error}",
+    "LOG_MODEL_LIST_FAILED": "Model list API call failed: {error}",
     "LOG_OPENAI_RERANK_FAILED": "Rerank API call failed: {error}",
     "LOG_OPENAI_SSE_PARSE_FAILED": "Failed to parse SSE response line: {raw_line}, error: {error}",
     "LOG_OPENAI_STREAM_CHAT_FAILED": "OpenAI streaming chat API call failed: {error}",

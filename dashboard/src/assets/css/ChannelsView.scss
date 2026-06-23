@@ -90,6 +90,72 @@
   gap: 0 12px;
 }
 
+.channel-model-detect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.channel-model-detect-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.channel-model-detect-popper {
+  max-width: min(520px, calc(100vw - 32px));
+
+  .el-select-dropdown__item {
+    max-width: 100%;
+  }
+}
+
+.detected-model-option {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.detected-model-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detected-model-meta {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-width: 0;
+}
+
+.detected-model-selected {
+  flex-shrink: 0;
+  padding: 0 6px;
+  color: var(--el-color-success);
+  font-size: 12px;
+  line-height: 18px;
+  background: var(--el-color-success-light-9);
+  border: 1px solid var(--el-color-success-light-5);
+  border-radius: 999px;
+}
+
+.detected-model-owner {
+  flex-shrink: 1;
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .embedding-dimension-row {
   display: flex;
   align-items: center;

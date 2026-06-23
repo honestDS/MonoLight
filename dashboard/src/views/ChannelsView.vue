@@ -61,6 +61,32 @@
                 <el-form-item :label="$t('channels.api_key')">
                   <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
                 </el-form-item>
+                <el-form-item :label="$t('channels.detect_model_list')">
+                  <div class="channel-model-detect-row">
+                    <el-button type="primary" plain :loading="detectingModels" @click="detectModelList">
+                      {{ $t('channels.detect_model_list') }}
+                    </el-button>
+                    <el-select
+                      class="channel-model-detect-select"
+                      popper-class="channel-model-detect-popper"
+                      filterable
+                      clearable
+                      fit-input-width
+                      :placeholder="$t('channels.select_detected_model')"
+                      :disabled="detectedModels.length === 0"
+                      @change="fillModelIdFromDetectedModel">
+                      <el-option v-for="model in detectedModels" :key="model.id" :label="model.id" :value="model.id">
+                        <div class="detected-model-option">
+                          <span class="detected-model-name" :title="model.id">{{ model.id }}</span>
+                          <span class="detected-model-meta">
+                            <span v-if="isDetectedModelSelected(model.id)" class="detected-model-selected">{{ $t('channels.model_selected') }}</span>
+                            <span v-if="model.owned_by" class="detected-model-owner" :title="model.owned_by">{{ model.owned_by }}</span>
+                          </span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                  </div>
+                </el-form-item>
                 <el-form-item :label="$t('channels.base_url')">
                   <el-input v-model="form.base_url" :placeholder="$t('channels.base_url_placeholder')" />
                 </el-form-item>
@@ -164,7 +190,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, reactive } from 'vue'
+import { ref, onMounted, reactive, watch } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -188,6 +214,8 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
+const detectedModels = ref([])
+const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
 
 const getModelUsageLabel = (value) => {
@@ -209,6 +237,66 @@ const addModelEntry = () => {
 const removeModelEntry = (idx) => {
   form.model_ids.splice(idx, 1)
   modelIdErrors.value.splice(idx, 1)
+}
+
+const resetDetectedModels = () => {
+  detectedModels.value = []
+}
+
+const isDetectedModelSelected = (modelId) => {
+  return form.model_ids.some(entry => (entry.model_id || '').trim() === modelId)
+}
+
+const fillModelIdFromDetectedModel = (modelId) => {
+  if (!modelId) return
+  let targetIndex = form.model_ids.findIndex(entry => !entry.model_id || !entry.model_id.trim())
+  if (targetIndex < 0) {
+    form.model_ids.push(defaultModelEntry())
+    modelIdErrors.value.push('')
+    targetIndex = form.model_ids.length - 1
+  }
+  form.model_ids[targetIndex].model_id = modelId
+  modelIdErrors.value[targetIndex] = ''
+}
+
+watch(
+  () => [form.channel_type, form.base_url, form.api_key],
+  () => {
+    resetDetectedModels()
+  }
+)
+
+const detectModelList = async () => {
+  if (!form.channel_type) {
+    return ElMessage.warning(t('channels.select_type'))
+  }
+  if (!form.base_url || !form.base_url.trim()) {
+    return ElMessage.warning(t('channels.model_list_base_url_required'))
+  }
+  if (!form.api_key || !form.api_key.trim()) {
+    return ElMessage.warning(t('channels.model_list_api_key_required'))
+  }
+
+  detectingModels.value = true
+  try {
+    const payload = {
+      channel_type: form.channel_type,
+      api_key: form.api_key || null,
+      base_url: form.base_url || null
+    }
+    const res = await channelApi.models(payload)
+    const models = res.data?.data?.models || []
+    detectedModels.value = Array.isArray(models) ? models : []
+    if (detectedModels.value.length === 0) {
+      ElMessage.warning(t('channels.model_list_empty'))
+      return
+    }
+    ElMessage.success(t('channels.model_list_success', { count: detectedModels.value.length }))
+  } catch (err) {
+    ElMessage.error(err.message || t('channels.model_list_failed'))
+  } finally {
+    detectingModels.value = false
+  }
 }
 
 const fetchChannels = async () => {
@@ -319,6 +407,7 @@ const openCreateDialog = () => {
   const df = defaultChannelForm()
   Object.keys(df).forEach(k => { form[k] = df[k] })
   modelIdErrors.value = []
+  resetDetectedModels()
   dialogVisible.value = true
 }
 
@@ -334,6 +423,7 @@ const handleEdit = (row) => {
     ? JSON.parse(JSON.stringify(row.model_ids))
     : []
   modelIdErrors.value = form.model_ids.map(() => '')
+  resetDetectedModels()
   dialogVisible.value = true
 }
 

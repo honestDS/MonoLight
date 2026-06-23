@@ -9,7 +9,12 @@ import re
 
 from fastapi import (
     APIRouter,
+    Body,
     Depends,
+)
+from pydantic import (
+    BaseModel,
+    Field as PydanticField,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -38,6 +43,7 @@ from app.models.channel import (
 )
 from app.providers.database import get_db
 from app.providers.embedding import EmbeddingClient
+from app.providers.llm.client import LLMClient
 from app.schemas.response import (
     PageData,
     StandardResponse,
@@ -51,6 +57,13 @@ CHANNEL_USAGE_MAP = {
     "embedding_channel": ModelUsage.EMBEDDING.value,
     "rerank_channel": ModelUsage.RERANK.value,
 }
+
+
+class ChannelModelListRequest(BaseModel):
+    channel_type: ChannelType | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout: float = PydanticField(30.0, gt=0, le=120)
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -488,6 +501,42 @@ async def get_channel(channel_id: int, db: AsyncSession = Depends(get_db)):
     if not db_obj:
         raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
     return StandardResponse.success(data=ChannelResponse.model_validate(db_obj))
+
+
+@router.post("/models", response_model=StandardResponse)
+async def list_channel_models(
+    payload: ChannelModelListRequest = Body(...),
+    _admin: dict = Depends(check_admin_privilege),
+):
+    """按渠道类型检测模型列表。"""
+    channel_type = payload.channel_type
+    api_key = payload.api_key
+    base_url = payload.base_url
+
+    if not channel_type:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+    if not base_url:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_URL)
+    if not api_key:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
+
+    try:
+        models = await LLMClient.list_models(
+            protocol=channel_type.value if isinstance(channel_type, ChannelType) else str(channel_type),
+            api_key=api_key,
+            base_url=base_url,
+            timeout=payload.timeout,
+        )
+    except BaseBusinessException as e:
+        detail = t(e.message, default=e.message, **e.kwargs)
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_FAILED, detail=detail) from e
+    except Exception as e:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_FAILED, detail=str(e)) from e
+
+    return StandardResponse.success(
+        data={"models": models},
+        message=constants.MSG_CHANNEL_MODEL_LIST_SUCCESS,
+    )
 
 
 @router.post("/update", response_model=StandardResponse)
