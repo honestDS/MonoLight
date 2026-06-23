@@ -111,6 +111,8 @@ export const channelApi = {
 }
 
 export const systemApi = {
+  // 获取后端可用语言列表
+  i18nLocales: () => request.get('/system/i18n/locales'),
   // 获取历史系统日志
   logsHistory: (params) => request.get('/system/logs', { params }),
   // 系统日志实时 WS 接口

@@ -7,7 +7,7 @@ from app.api.v1.users import check_admin_privilege
 from app.core import constants
 from app.core.crud.log import system_log_crud
 from app.core.i18n.context import set_current_locale
-from app.core.i18n.locale import normalize_locale
+from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
 from app.models.system_log import SystemLogResponse
@@ -20,6 +20,15 @@ from app.schemas.response import (
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/system", tags=["System Monitoring"], dependencies=[Depends(check_admin_privilege)])
+
+
+@router.get("/i18n/locales", response_model=StandardResponse)
+async def get_i18n_locales():
+    data = {
+        "default": DEFAULT_LOCALE,
+        "items": list(get_available_locales()),
+    }
+    return StandardResponse.success(data=data)
 
 
 @router.get("/logs", response_model=StandardResponse)

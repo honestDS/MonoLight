@@ -22,6 +22,7 @@ from app.core.exceptions import (
 from app.core.security import get_current_user
 from app.models.channel import ChannelConfig, ModelUsage
 from app.models.profile import (
+    ProfileConfig,
     ProfileCreate,
     ProfileResponse,
     ProfileUpdate,
@@ -119,6 +120,7 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
+    profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
     channel_config = profile_in.configs.get("channel", {})
     await validate_channel_configs(db, channel_config)
     await validate_audit_model_config(db, profile_in.configs.get("security", {}))
@@ -198,6 +200,7 @@ async def update_profile(
         raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
 
     if profile_in.configs:
+        profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
         channel_config = profile_in.configs.get("channel", {})
         await validate_channel_configs(db, channel_config)
         await validate_audit_model_config(db, profile_in.configs.get("security", {}))

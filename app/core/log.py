@@ -3,14 +3,49 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import Token
 from pathlib import Path
 
 from loguru import logger
 
 from app.core import constants
 from app.core.i18n import t
+from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
+from app.core.i18n.locale import DEFAULT_LOCALE
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
+
+
+def get_profile_log_locale(profile: object | None) -> str:
+    if not profile:
+        return DEFAULT_LOCALE
+
+    try:
+        from app.models.profile import ProfileConfig
+
+        cfg = ProfileConfig.model_validate(getattr(profile, "configs", {}) or {})
+        return cfg.other.log_locale
+    except Exception:
+        return DEFAULT_LOCALE
+
+
+def set_profile_log_locale(profile: object | None) -> Token[str | None]:
+    return set_current_log_locale(get_profile_log_locale(profile))
+
+
+def reset_profile_log_locale(token: Token[str | None]) -> None:
+    reset_current_log_locale(token)
+
+
+@contextmanager
+def profile_log_locale(profile: object | None) -> Iterator[None]:
+    token = set_current_log_locale(get_profile_log_locale(profile))
+    try:
+        yield
+    finally:
+        reset_current_log_locale(token)
 
 
 class LogManager:

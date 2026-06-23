@@ -9,11 +9,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core import constants
+from app.core.crud.profile import profile_crud
 from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.i18n.context import set_current_locale
 from app.core.i18n.locale import normalize_locale
+from app.core.log import reset_profile_log_locale, set_profile_log_locale
 from app.core.paths import FAVICON_PATH
+from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
 
 
@@ -100,7 +103,14 @@ async def locale_middleware(request: Request, call_next):
     # HTTP 请求从 Accept-Language 读取语言；WebSocket 握手不经过 HTTP 中间件，
     # 其语言在对应的 WS handler 内通过 query 参数单独设置
     set_current_locale(normalize_locale(request.headers.get("Accept-Language")))
-    return await call_next(request)
+    log_locale_token = None
+    try:
+        async with AsyncSessionLocal() as db:
+            log_locale_token = set_profile_log_locale(await profile_crud.get_active(db))
+        return await call_next(request)
+    finally:
+        if log_locale_token is not None:
+            reset_profile_log_locale(log_locale_token)
 
 
 async def root():

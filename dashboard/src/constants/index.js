@@ -33,7 +33,7 @@ export const defaultProfileConfigs = () => ({
   },
   security: { audit_channel_id: null, audit_model_id: null, audit_threshold: 5 },
   tool: { shell_timeout: 30, max_parallel_tools: 5, executor_max_workers: 10, max_turns: 5, firecrawl_api_key: '' },
-  other: {},
+  other: { log_locale: 'zh' },
 })
 
 // 默认渠道规则

@@ -186,10 +186,20 @@
           <!-- 其他设置 -->
           <el-tab-pane :label="$t('profiles.other_settings')" name="other">
             <div class="tab-pane-content">
-              <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.other_settings') }}</div>
-                <div class="help-text">{{ $t('profiles.no_other_settings') }}</div>
-              </div>
+                <div class="settings-section">
+                  <div class="settings-section-title">{{ $t('profiles.log_storage_settings') }}</div>
+                  <el-form-item :label="$t('profiles.log_locale')">
+                    <el-select v-model="form.configs.other.log_locale" class="full-width-input">
+                      <el-option
+                        v-for="item in logLocaleOptions"
+                        :key="item.value"
+                        :label="item.label"
+                        :value="item.value"
+                      ></el-option>
+                    </el-select>
+                    <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
+                  </el-form-item>
+                </div>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -206,18 +216,20 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { profileApi, channelApi, promptApi } from '../api'
+import { profileApi, channelApi, promptApi, systemApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import ChannelEditor from '../components/ChannelEditor.vue'
 import { defaultProfileConfigs } from '../constants'
+import { SUPPORT_LOCALES } from '../i18n'
 
 const { t } = useI18n()
 
 const profiles = ref([])
 const channels = ref([])
 const prompts = ref([])
+const backendLocales = ref([])
 const loading = ref(false)
 const total = ref(0)
 const currentPage = ref(1)
@@ -226,6 +238,17 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
+
+const logLocaleOptions = computed(() => {
+  const localeItems = backendLocales.value.length ? backendLocales.value : ['zh']
+  return localeItems.map(value => {
+    const matched = SUPPORT_LOCALES.find(item => item.value === value)
+    return {
+      value,
+      label: matched ? matched.label : value
+    }
+  })
+})
 
 const auditModelOptions = computed(() => {
   const options = []
@@ -300,6 +323,15 @@ const fetchPrompts = async () => {
   }
 }
 
+const fetchBackendLocales = async () => {
+  try {
+    const res = await systemApi.i18nLocales()
+    backendLocales.value = res.data.data.items || []
+  } catch (err) {
+    backendLocales.value = ['zh']
+  }
+}
+
 const fetchChannels = async () => {
   try {
     const res = await channelApi.list({ page: 1, size: 1000 })
@@ -314,6 +346,7 @@ const handleRefresh = () => {
   loadProfiles()
   fetchChannels()
   fetchPrompts()
+  fetchBackendLocales()
 }
 
 const handleSizeChange = () => {
@@ -405,6 +438,7 @@ onMounted(() => {
   loadProfiles()
   fetchChannels()
   fetchPrompts()
+  fetchBackendLocales()
 })
 </script>
 

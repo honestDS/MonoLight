@@ -3,7 +3,7 @@ import pkgutil
 from typing import Any
 
 from app.core.i18n import locales
-from app.core.i18n.context import get_current_locale
+from app.core.i18n.context import get_current_locale, get_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
 
 # 内存中缓存所有翻译资源: { "zh": { "MSG_XYZ": "...", ... }, "en": { ... } }
@@ -36,6 +36,10 @@ def _load_translations() -> None:
 _load_translations()
 
 
+def _is_log_key(key: str) -> bool:
+    return key.startswith("LOG_") or key.startswith("MSG_LOG_") or key.startswith("ERR_LOG_")
+
+
 def t(key: str, locale: str | None = None, default: str | None = None, **params: Any) -> str:
     """
     翻译函数
@@ -45,7 +49,7 @@ def t(key: str, locale: str | None = None, default: str | None = None, **params:
     :param params: 占位符参数，用于 str.format 填充
     :return: 翻译后的文案
     """
-    target_locale = locale or get_current_locale()
+    target_locale = locale or (get_current_log_locale() if _is_log_key(key) else None) or get_current_locale()
 
     # 1. 尝试从目标语言获取
     lang_dict = _translations.get(target_locale)

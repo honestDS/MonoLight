@@ -411,7 +411,6 @@ class ChatDispatcher:
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_ERROR"), exc_info=True)
             raise ServerException(message=str(e))
-
     @staticmethod
     async def dispatch_stream(
         db: AsyncSession,

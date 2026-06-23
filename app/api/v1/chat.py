@@ -24,6 +24,9 @@ from app.core.i18n.context import set_current_locale
 from app.core.i18n.locale import normalize_locale
 from app.core.log import (
     get_logger,
+    profile_log_locale,
+    reset_profile_log_locale,
+    set_profile_log_locale,
 )
 from app.core.security import get_current_user
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
@@ -159,60 +162,61 @@ async def generate_title(
     uid = getattr(current_user, "uid", None)
 
     profile = await profile_crud.get_active(db)
-    if not profile:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+    with profile_log_locale(profile):
+        if not profile:
+            return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
-    # 从 chat_channel 中选择一个可用的渠道来生成标题
-    channel_cfg = (profile.configs or {}).get("channel", {})
-    chat_channel_raw = channel_cfg.get("chat_channel")
-    if not chat_channel_raw:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+        # 从 chat_channel 中选择一个可用的渠道来生成标题
+        channel_cfg = (profile.configs or {}).get("channel", {})
+        chat_channel_raw = channel_cfg.get("chat_channel")
+        if not chat_channel_raw:
+            return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
-    try:
-        chat_channel = ChannelConfig.model_validate(chat_channel_raw)
-    except Exception:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
-
-    from app.core.channel_router import select_channel
-    from app.core.dispatcher import _format_exception_message
-    from app.core.exceptions import LLMException
-    from app.core.log import channel_log_extra
-
-    selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
-    if not selection:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
-
-    excluded_priorities: set[int] = set()
-
-    while True:
-        channel, model_entry, _rule = selection
         try:
-            title = await generate_session_title(
-                uid=uid,
-                session_id=request.session_id,
-                first_message=request.first_message,
-                api_key=channel.get_decrypted_api_key(),
-                base_url=channel.base_url,
-                model_id=model_entry["model_id"],
-                protocol=getattr(channel, "protocol", "openai"),
-                max_tokens=model_entry.get("max_tokens") or 200,
-                raise_on_error=True,
-            )
-            return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
-        except LLMException as e:
-            # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
-            excluded_priorities.add(_rule.priority)
-            if not chat_channel.retry_on_failure:
-                return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
-            logger.bind(
-                uid=uid,
-                session_id=request.session_id,
-                **channel_log_extra(channel, model_entry),
-            ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
+            chat_channel = ChannelConfig.model_validate(chat_channel_raw)
+        except Exception:
+            return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
-        selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
+        from app.core.channel_router import select_channel
+        from app.core.dispatcher import _format_exception_message
+        from app.core.exceptions import LLMException
+        from app.core.log import channel_log_extra
+
+        selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
         if not selection:
             return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+
+        excluded_priorities: set[int] = set()
+
+        while True:
+            channel, model_entry, _rule = selection
+            try:
+                title = await generate_session_title(
+                    uid=uid,
+                    session_id=request.session_id,
+                    first_message=request.first_message,
+                    api_key=channel.get_decrypted_api_key(),
+                    base_url=channel.base_url,
+                    model_id=model_entry["model_id"],
+                    protocol=getattr(channel, "protocol", "openai"),
+                    max_tokens=model_entry.get("max_tokens") or 200,
+                    raise_on_error=True,
+                )
+                return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
+            except LLMException as e:
+                # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
+                excluded_priorities.add(_rule.priority)
+                if not chat_channel.retry_on_failure:
+                    return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+                logger.bind(
+                    uid=uid,
+                    session_id=request.session_id,
+                    **channel_log_extra(channel, model_entry),
+                ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
+
+            selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
+            if not selection:
+                return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
 
 @router.get("/sessions/history")
@@ -249,6 +253,9 @@ async def chat_websocket(
     set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
 
     uid = getattr(current_user, "uid", None)
+    log_locale_token = None
+    async with AsyncSessionLocal() as db:
+        log_locale_token = set_profile_log_locale(await profile_crud.get_active(db))
 
     # 用于追踪当前是否有正在运行的调度任务
     active_task: asyncio.Task | None = None
@@ -353,20 +360,21 @@ async def chat_websocket(
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
                     async with AsyncSessionLocal() as db:
                         profile = await profile_crud.get_active(db)
-                        try:
-                            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-                        except BaseBusinessException as exc:
-                            await websocket.send_json({"type": "error", "message": t(exc.message, **exc.kwargs), "request_id": request_id})
-                            continue
-                        await save_initial_message(
-                            db,
-                            session_id,
-                            uid,
-                            profile,
-                            message,
-                            attachments,
-                        )
-                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
+                        with profile_log_locale(profile):
+                            try:
+                                await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+                            except BaseBusinessException as exc:
+                                await websocket.send_json({"type": "error", "message": t(exc.message, **exc.kwargs), "request_id": request_id})
+                                continue
+                            await save_initial_message(
+                                db,
+                                session_id,
+                                uid,
+                                profile,
+                                message,
+                                attachments,
+                            )
+                            logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
             else:
                 # 3. 无活跃任务：启动新任务
                 active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -387,6 +395,9 @@ async def chat_websocket(
         except RuntimeError:
             pass
     finally:
+        if log_locale_token is not None:
+            reset_profile_log_locale(log_locale_token)
+
         # 确保任务被取消并释放锁
         await cancel_all_tasks()
 

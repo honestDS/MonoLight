@@ -23,6 +23,7 @@ from sqlmodel import (
     SQLModel,
 )
 
+from app.core.i18n.locale import DEFAULT_LOCALE, normalize_locale
 from app.core.utils.config import standardize_config
 from app.models.channel import ChannelConfig
 
@@ -64,7 +65,12 @@ class ToolConfig(BaseModel):
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
-    pass
+    log_locale: str = PydanticField(DEFAULT_LOCALE, description="系统日志存储语言")
+
+    @model_validator(mode="after")
+    def normalize_log_locale(self) -> "OtherConfig":
+        self.log_locale = normalize_locale(self.log_locale)
+        return self
 
 
 class ProfileConfig(BaseModel):
@@ -93,7 +99,7 @@ class ProfileConfig(BaseModel):
                 "firecrawl_api_key",
                 "executor_max_workers",
             ],
-            "other": [],
+            "other": ["log_locale"],
         }
         return standardize_config(data, schema_map)
 
@@ -137,7 +143,7 @@ PROFILE_EXAMPLE = {
             "firecrawl_api_key": "",
             "executor_max_workers": 10,
         },
-        "other": {},
+        "other": {"log_locale": DEFAULT_LOCALE},
     },
 }
 
