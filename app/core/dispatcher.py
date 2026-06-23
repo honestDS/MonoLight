@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -50,7 +51,7 @@ from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_an
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
-from app.core.utils.dispatcher.markdown_instruction import append_session_markdown_instruction
+from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_instructions
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
@@ -144,11 +145,11 @@ class ChatDispatcher:
         system_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
         tools, _allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available)
 
-        initial_msg = InternalMessage(role=MessageRole.USER, content=message, attachments=attachments)
-        await append_session_markdown_instruction(db, session_id, initial_msg)
-        if initial_msg.attachments or isinstance(initial_msg.content, list):
-            initial_msg = MessageAssembler.assemble(
-                initial_msg,
+        validation_msg = InternalMessage(role=MessageRole.USER, content=copy.deepcopy(message), attachments=copy.deepcopy(attachments))
+        user_runtime_instructions = await build_user_runtime_instructions(db, session_id)
+        if validation_msg.attachments or isinstance(validation_msg.content, list):
+            validation_msg = MessageAssembler.assemble(
+                validation_msg,
                 image_understanding=img_understanding,
                 audio_understanding=audio_understanding,
                 video_understanding=video_understanding,
@@ -156,10 +157,10 @@ class ChatDispatcher:
             )
 
         ContextManager.validate_latest_user_message_budget(
-            message=initial_msg,
+            message=validation_msg,
             context_window_k=chat_params["context_window_k"],
             max_tokens=chat_params["max_tokens"],
-            system_tokens=estimate_tokens(system_prompt),
+            system_tokens=estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions),
             tools=tools,
         )
 

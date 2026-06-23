@@ -10,7 +10,7 @@ from app.core.context import (
     ContextManager,
 )
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import append_session_markdown_instruction
+from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instruction_text, build_user_runtime_instructions
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -38,7 +38,8 @@ async def prepare_messages(
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
     system_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
-    reserved_tokens = estimate_tokens(system_prompt)
+    user_runtime_instructions = await build_user_runtime_instructions(db, session_id) if is_first_iter else ""
+    reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
 
     # 获取上下文
     # 第一轮必须锚定在当前消息，确保上下文一致性
@@ -54,8 +55,9 @@ async def prepare_messages(
         reserved_tokens=reserved_tokens,
     )
     if is_first_iter:
-        await append_session_markdown_instruction(db, session_id, initial_msg)
-        messages.append(initial_msg)
+        current_msg = initial_msg.model_copy(deep=True)
+        append_user_runtime_instruction_text(current_msg, user_runtime_instructions)
+        messages.append(current_msg)
 
     # 动态组装含有附件的多模态消息（默认不启用多模态，由 dispatcher 在渠道选择后重新处理）
     for idx, m in enumerate(messages):

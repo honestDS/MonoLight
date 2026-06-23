@@ -12,10 +12,9 @@ from app.core.log import (
 )
 from app.core.prompts import (
     KNOWLEDGE_BASES_WRAPPER,
-    SYSTEM_CONTEXT_WRAPPER,
     SYSTEM_INSTRUCTIONS_WRAPPER,
+    SYSTEM_RUNTIME_CONTEXT_POLICY,
 )
-from app.core.utils.system import get_full_system_context
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -38,12 +37,7 @@ async def build_system_prompt(
     抽离构造逻辑，便于在上下文压缩前预先计算系统提示词的 Token 数，
     从而将其计入压缩预算，避免系统消息未被纳入窗口计算导致实际请求超限。
     """
-    system_context = get_full_system_context()
-
-    # 构造系统提示词
-    context_part = SYSTEM_CONTEXT_WRAPPER.format(context=system_context)
-
-    full_parts = [context_part]
+    full_parts = [SYSTEM_RUNTIME_CONTEXT_POLICY]
 
     # 1. 如果 Profile 关联了 Prompt，则包裹后放入后续部分
     if profile.prompt and profile.prompt.content:
@@ -85,13 +79,14 @@ def inject_system_prompt_text(messages: list[InternalMessage], full_prompt: str)
         if message.role != MessageRole.SYSTEM:
             non_system_messages.append(message)
 
-    non_system_messages.insert(
-        0,
-        InternalMessage(
-            role=MessageRole.SYSTEM,
-            content=full_prompt,
-        ),
-    )
+    if full_prompt.strip():
+        non_system_messages.insert(
+            0,
+            InternalMessage(
+                role=MessageRole.SYSTEM,
+                content=full_prompt,
+            ),
+        )
     return non_system_messages
 
 
@@ -102,8 +97,7 @@ async def inject_system_prompt(
     embedding_profile_available: bool | None = None,
 ) -> list[InternalMessage]:
     """
-    注入系统提示词。无论是否关联 Profile Prompt，环境上下文都会注入。
-    通过结构化标签隔离系统信息与环境上下文。
+    注入系统提示词。
     若 Profile 有可用知识库，在尾部注入结构化知识库目录。
     """
     full_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)

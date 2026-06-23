@@ -12,6 +12,7 @@ from app.core.embedding.knowledge_base import (
     query_knowledge_base,
 )
 from app.core.exceptions import LLMException
+from app.core.prompts import SYSTEM_RUNTIME_CONTEXT_POLICY
 from app.core.retrieval.schemas import RetrievalHit
 from app.core.tools import get_tools_for_profile
 from app.core.tools.knowledge_base_query import KnowledgeBaseQueryExecutor
@@ -95,7 +96,9 @@ async def test_dynamic_tools_and_prompt_injection(db_session: AsyncSession):
     # 1.2 测试提示词注入不包含 <available_knowledge_bases>
     messages = [InternalMessage(role=MessageRole.USER, content="hello")]
     messages_injected = await inject_system_prompt(db_session, profile_no_kb, messages)
+    assert messages_injected[0].role == MessageRole.SYSTEM
     system_msg = messages_injected[0].content
+    assert SYSTEM_RUNTIME_CONTEXT_POLICY in system_msg
     assert "<available_knowledge_bases>" not in system_msg
 
     # 2. 创建有向量库的 Profile
@@ -120,7 +123,9 @@ async def test_dynamic_tools_and_prompt_injection(db_session: AsyncSession):
 
     # 2.2 测试提示词注入包含 <available_knowledge_bases>
     messages_injected = await inject_system_prompt(db_session, profile_with_kb, messages, embedding_profile_available=True)
+    assert messages_injected[0].role == MessageRole.SYSTEM
     system_msg = messages_injected[0].content
+    assert SYSTEM_RUNTIME_CONTEXT_POLICY in system_msg
     assert "<available_knowledge_bases>" in system_msg
     assert f'"id": {kb.id}' in system_msg
     assert "My Special KB" in system_msg
