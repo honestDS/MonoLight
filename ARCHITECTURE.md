@@ -35,7 +35,7 @@ MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。�
   - 在 `lifespan` 中通过 `app.providers.database.bootstrap.init_system_data` 初始化数据库结构与系统种子数据。
   - 初始化 LogManager。
   - 启动 `background_log_cleaner` 后台日志清理任务。
-  - 注册 API Router 与全局 Handler。
+  - 注册 API Router 与全局 Handler，业务 API 统一挂载在 `/api/v1` 下。
   - 通过 `APP_PORT` 环境变量启动 Uvicorn。
 - `app/handler.py`
   - 注册 `/` 与 `/favicon.ico`。
@@ -49,7 +49,7 @@ MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。�
   - 统一维护数据目录、临时目录、SQLite 数据库路径、ChromaDB 持久化路径、日志路径与 favicon 路径。
 - `app/core/crypto.py`
   - 使用环境变量 `MONOLIGH_ENCRYPTION_KEY` 提供 32 字节密钥。
-  - 通过 XOR + Base64 对渠道 API Key 做轻量加密存储。
+  - 通过 XOR + Base64 对渠道 API Key 做轻量加密存储，并以 `enc:v1:` 前缀标识当前密文版本。
   - 提供 API Key 解密、加密与日志脱敏工具。
 
 ### 3.1 API 层 (`app/api/v1`)
@@ -57,7 +57,7 @@ MonoLight 采用"管控分离、协议标准、安全优先"的设计理念。�
 API 层负责外部请求鉴权、路由分发、请求参数接收与统一响应包装。
 
 - `auth.py`: 登录认证、JWT 令牌签发与管理员账号重置。
-- `users.py`: 用户账户管理。
+- `users.py`: 用户账户管理，实际由 `main.py` 挂载到 `/api/v1/admin/user/*`。
 - `chat.py`: 核心对话接口。
   - HTTP Chat Completions。
   - WebSocket 流式对话。
@@ -74,7 +74,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
 - `prompts.py`: PromptLibrary 提示词资产维护。
 - `files.py`: 文件上传与下载管理，支持对话附件传递。
 - `knowledge_base.py`: 知识库 CRUD、文档导入、文本分块、向量写入、检索测试、文档查看与删除。
-- `system.py`: 系统日志查询与实时日志 WebSocket 推送。
+- `system.py`: 系统日志查询、实时日志 WebSocket 推送与后端可用语言列表接口。
 
 ### 3.2 通信适配层 (`app/adapters`)
 
@@ -235,7 +235,7 @@ API 层负责外部请求鉴权、路由分发、请求参数接收与统一响�
   - `channel`: `ChannelGroupConfig`，按用途分为 `chat_channel`、`embedding_channel`、`rerank_channel`，每组使用 `ChannelConfig` 维护路由规则、超时与知识库检索参数。
   - `security`: 审计渠道 ID、审计模型 ID 与风险阈值。
   - `tool`: Shell 超时、并发工具数量、最大工具轮次、Firecrawl API Key、工具执行器线程池大小等工具配置。
-  - `other`: 预留扩展配置。
+  - `other`: 杂项系统配置，当前包含 `log_locale` 系统日志存储语言。
 - `prompt.py`: PromptLibrary 提示词资产实体。
 - `message.py`: InternalMessage、InternalToolCall、InternalResponse、消息持久化实体与 ChatCompletionRequest。
 - `session.py`: 对话会话实体，包含 `enable_markdown`。
@@ -295,7 +295,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 - 工具审计协议：高风险工具在执行前进入 AuditMiddleware；审计结果可放行、要求动态确认、拒绝或按风险阈值拦截。
 - 数据隔离协议：认证用户由 `get_current_user` 解析；消息、会话、工具执行、临时目录与日志链路携带 uid/session_id。
 - API 响应协议：管理类接口统一使用 StandardResponse；对话补全接口返回 OpenAI 风格 LLMResponse。
-- 国际化协议：后端基于 `Accept-Language` 设置请求语言；WebSocket 在对应 handler 中单独设置语言上下文；前端通过 vue-i18n 管理多语言词条。
+- 国际化协议：后端基于 `Accept-Language` 设置请求语言；WebSocket 通过 `lang` 查询参数在对应 handler 中单独设置语言上下文；前端通过 vue-i18n 管理多语言词条，并通过 `/api/v1/system/i18n/locales` 获取后端可用语言列表。
 
 ## 10. 前端展现层 (`dashboard`)
 
@@ -306,7 +306,7 @@ CRUD 层位于业务逻辑与关系型数据库之间，封装通用异步持久
 - `dashboard/src/main.js`: Vue 应用入口，注册 Pinia、Router、Element Plus、Element Plus Icons 与 i18n。
 - `dashboard/src/App.vue`: 根组件。
 - `dashboard/src/router/index.js`: 前端路由。
-- `dashboard/src/api/index.js`: axios API 客户端封装。
+- `dashboard/src/api/index.js`: axios API 客户端封装，默认使用 `/api/v1` 基础路径，自动附加 Bearer Token 与 `Accept-Language` 请求头，并维护聊天/系统日志 WebSocket 地址。
 - `dashboard/src/constants/index.js`: 前端默认配置常量。
 - `dashboard/src/utils/index.js`: 前端通用工具函数。
 
