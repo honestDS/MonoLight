@@ -14,6 +14,8 @@ from fastapi import (
 )
 from pydantic import (
     BaseModel,
+)
+from pydantic import (
     Field as PydanticField,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
