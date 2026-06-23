@@ -106,6 +106,7 @@ export const channelApi = {
   update: (id, data) => request.post(`/channels/update?channel_id=${id}`, data),
   delete: (id) => request.post(`/channels/delete?channel_id=${id}`),
   models: (data) => request.post('/channels/models', data),
+  testChat: (data) => request.post('/channels/test-chat', data),
   testEmbeddingDimension: (channelId, modelId) => request.post(`/channels/test-embedding-dimension?channel_id=${channelId}&model_id=${encodeURIComponent(modelId)}`)
 }
 

@@ -41,7 +41,7 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="50%" class="standard-dialog" center align-center>
+    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="50%" class="standard-dialog dialog-with-scroll-body" center align-center>
       <el-form :model="form" label-width="120px" size="default">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->

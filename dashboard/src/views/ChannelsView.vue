@@ -43,7 +43,7 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="isEdit ? $t('channels.edit_channel') : $t('channels.create_channel')" v-model="dialogVisible" width="65%" class="standard-dialog" center align-center>
+    <el-dialog :title="isEdit ? $t('channels.edit_channel') : $t('channels.create_channel')" v-model="dialogVisible" width="65%" class="standard-dialog dialog-with-scroll-body" center align-center :close-on-click-modal="true">
       <div class="channel-settings-shell">
         <div class="channel-settings-title">{{ $t('channels.channel_settings') }}</div>
         <div class="channel-settings-body">
@@ -61,12 +61,16 @@
                 <el-form-item :label="$t('channels.api_key')">
                   <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
                 </el-form-item>
-                <el-form-item :label="$t('channels.detect_model_list')">
+                <el-form-item>
                   <div class="channel-model-detect-row">
                     <el-button type="primary" plain :loading="detectingModels" @click="detectModelList">
                       {{ $t('channels.detect_model_list') }}
                     </el-button>
                     <el-select
+                      v-model="selectedDetectedModels"
+                      multiple
+                      collapse-tags
+                      collapse-tags-tooltip
                       class="channel-model-detect-select"
                       popper-class="channel-model-detect-popper"
                       filterable
@@ -74,7 +78,7 @@
                       fit-input-width
                       :placeholder="$t('channels.select_detected_model')"
                       :disabled="detectedModels.length === 0"
-                      @change="fillModelIdFromDetectedModel">
+                      @change="handleDetectedModelChange">
                       <el-option v-for="model in detectedModels" :key="model.id" :label="model.id" :value="model.id">
                         <div class="detected-model-option">
                           <span class="detected-model-name" :title="model.id">{{ model.id }}</span>
@@ -97,9 +101,14 @@
           <div v-for="(entry, idx) in form.model_ids" :key="idx" class="model-entry-card">
             <div class="model-entry-header">
               <span>{{ $t('channels.model_entry') }} #{{ idx + 1 }}</span>
-              <el-button type="text" class="remove" @click="removeModelEntry(idx)">
-                {{ $t('channels.remove') }}
-              </el-button>
+              <div class="model-entry-actions">
+                <el-button type="text" :loading="testingChatIndex === idx" :disabled="entry.usage !== 'CHAT'" @click="testChatModel(entry, idx)">
+                  {{ $t('channels.test') }}
+                </el-button>
+                <el-button type="text" class="remove" @click="removeModelEntry(idx)">
+                  {{ $t('channels.remove') }}
+                </el-button>
+              </div>
             </div>
 
             <div class="model-entry-fields">
@@ -214,9 +223,11 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
+const selectedDetectedModels = ref([])
 const detectedModels = ref([])
 const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
+const testingChatIndex = ref(null)
 
 const getModelUsageLabel = (value) => {
   const map = {
@@ -240,31 +251,50 @@ const removeModelEntry = (idx) => {
 }
 
 const resetDetectedModels = () => {
+  selectedDetectedModels.value = []
   detectedModels.value = []
+  _previousDetectedSelection = []
 }
 
 const isDetectedModelSelected = (modelId) => {
   return form.model_ids.some(entry => (entry.model_id || '').trim() === modelId)
 }
 
-const fillModelIdFromDetectedModel = (modelId) => {
-  if (!modelId) return
-  let targetIndex = form.model_ids.findIndex(entry => !entry.model_id || !entry.model_id.trim())
-  if (targetIndex < 0) {
-    form.model_ids.push(defaultModelEntry())
-    modelIdErrors.value.push('')
-    targetIndex = form.model_ids.length - 1
-  }
-  form.model_ids[targetIndex].model_id = modelId
-  modelIdErrors.value[targetIndex] = ''
-}
+let _previousDetectedSelection = []
 
+const handleDetectedModelChange = (values) => {
+  const added = values.filter(v => !_previousDetectedSelection.includes(v))
+
+  for (const id of added) {
+    const exists = form.model_ids.some(entry => (entry.model_id || '').trim() === id)
+    if (exists) continue
+
+    let targetIndex = form.model_ids.findIndex(entry => !entry.model_id || !entry.model_id.trim())
+    if (targetIndex < 0) {
+      form.model_ids.push(defaultModelEntry())
+      modelIdErrors.value.push('')
+      targetIndex = form.model_ids.length - 1
+    }
+    form.model_ids[targetIndex].model_id = id
+    modelIdErrors.value[targetIndex] = ''
+  }
+
+  syncDetectedSelection()
+}
 watch(
   () => [form.channel_type, form.base_url, form.api_key],
   () => {
     resetDetectedModels()
   }
 )
+
+const syncDetectedSelection = () => {
+  const matched = detectedModels.value
+    .filter(m => form.model_ids.some(e => (e.model_id || '').trim() === m.id))
+    .map(m => m.id)
+  selectedDetectedModels.value = matched
+  _previousDetectedSelection = [...matched]
+}
 
 const detectModelList = async () => {
   if (!form.channel_type) {
@@ -292,6 +322,7 @@ const detectModelList = async () => {
       return
     }
     ElMessage.success(t('channels.model_list_success', { count: detectedModels.value.length }))
+    syncDetectedSelection()
   } catch (err) {
     ElMessage.error(err.message || t('channels.model_list_failed'))
   } finally {
@@ -339,10 +370,16 @@ const showConfigImpactWarning = async (data) => {
     messages.push(t('channels.audit_refs_cleared', { count: clearedAuditRefs }))
   }
 
-  await ElMessageBox.alert(messages.join('\n'), t('channels.config_refs_changed_title'), {
-    type: 'warning',
-    confirmButtonText: t('channels.confirm')
-  })
+  try {
+    await ElMessageBox.alert(messages.join('\n'), t('channels.config_refs_changed_title'), {
+      type: 'warning',
+      confirmButtonText: t('channels.confirm')
+    })
+  } catch (action) {
+    if (action !== 'cancel' && action !== 'close') {
+      console.error(t('channels.config_refs_changed_title'), action)
+    }
+  }
 }
 
 const handleToggleActive = async (row) => {
@@ -352,6 +389,93 @@ const handleToggleActive = async (row) => {
     fetchChannels()
   } catch (err) {
     ElMessage.error(err.message || t('channels.action_failed'))
+  }
+}
+
+const formatErrorDetail = (err) => {
+  const detail = err.response?.data
+  if (detail && typeof detail === 'object') {
+    return detail.message || detail.error || JSON.stringify(detail)
+  }
+  return err.message || t('channels.chat_test_failed')
+}
+
+const formatUsage = (usage) => {
+  if (!usage) return '-'
+  if (typeof usage === 'string') return usage
+  try {
+    const keys = ['prompt_tokens', 'completion_tokens', 'total_tokens']
+    const parts = keys
+      .filter(k => usage[k] !== undefined && usage[k] !== null)
+      .map(k => `${k}: ${usage[k]}`)
+    if (parts.length > 0) return parts.join(', ')
+    return JSON.stringify(usage)
+  } catch {
+    return String(usage)
+  }
+}
+
+const testChatModel = async (entry, idx) => {
+  if (entry.usage !== 'CHAT') {
+    return ElMessage.warning(t('channels.chat_test_chat_only'))
+  }
+  if (!form.channel_type) {
+    return ElMessage.warning(t('channels.select_type'))
+  }
+  if (!form.base_url || !form.base_url.trim()) {
+    return ElMessage.warning(t('channels.model_list_base_url_required'))
+  }
+  if (!form.api_key || !form.api_key.trim()) {
+    return ElMessage.warning(t('channels.model_list_api_key_required'))
+  }
+  if (!entry.model_id || !entry.model_id.trim()) {
+    modelIdErrors.value[idx] = t('channels.model_id_required')
+    return ElMessage.warning(t('channels.model_id_required'))
+  }
+
+  testingChatIndex.value = idx
+  try {
+    const res = await channelApi.testChat({
+      channel_type: form.channel_type,
+      api_key: form.api_key || null,
+      base_url: form.base_url || null,
+      model_id: entry.model_id.trim(),
+      temperature: entry.temperature,
+      top_p: entry.top_p,
+      max_tokens: entry.max_tokens || 0
+    })
+    ElMessage.success(t('channels.chat_test_success'))
+    const data = res.data?.data || {}
+    const content = [
+      `${t('channels.chat_test_model')}: ${data.model || '-'}`,
+      `${t('channels.chat_test_reply')}: ${data.reply || '-'}`,
+      `${t('channels.chat_test_usage')}: ${formatUsage(data.usage)}`
+    ].join('\n')
+    try {
+      await ElMessageBox.alert(content, t('channels.chat_test_result_title'), {
+        confirmButtonText: t('channels.confirm'),
+        closeOnClickModal: true,
+        customClass: 'chat-test-result-box'
+      })
+    } catch (action) {
+      if (action !== 'cancel' && action !== 'close') {
+        console.error(t('channels.chat_test_result_title'), action)
+      }
+    }
+  } catch (err) {
+    try {
+      await ElMessageBox.alert(formatErrorDetail(err), t('channels.chat_test_failed'), {
+        type: 'error',
+        confirmButtonText: t('channels.confirm'),
+        closeOnClickModal: true
+      })
+    } catch (action) {
+      if (action !== 'cancel' && action !== 'close') {
+        console.error(t('channels.chat_test_failed'), action)
+      }
+    }
+  } finally {
+    testingChatIndex.value = null
   }
 }
 

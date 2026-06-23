@@ -41,6 +41,7 @@ from app.models.channel import (
     ModelUsage,
     validate_channel_model_ids,
 )
+from app.models.message import InternalMessage, MessageRole
 from app.providers.database import get_db
 from app.providers.embedding import EmbeddingClient
 from app.providers.llm.client import LLMClient
@@ -64,6 +65,17 @@ class ChannelModelListRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     timeout: float = PydanticField(30.0, gt=0, le=120)
+
+
+class ChannelChatTestRequest(BaseModel):
+    channel_type: ChannelType | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model_id: str | None = None
+    temperature: float | None = PydanticField(None, ge=0, le=2.0)
+    top_p: float | None = PydanticField(None, ge=0, le=1.0)
+    max_tokens: int | None = PydanticField(None, ge=0)
+    timeout: float = PydanticField(60.0, gt=0, le=600)
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -536,6 +548,58 @@ async def list_channel_models(
     return StandardResponse.success(
         data={"models": models},
         message=constants.MSG_CHANNEL_MODEL_LIST_SUCCESS,
+    )
+
+
+@router.post("/test-chat", response_model=StandardResponse)
+async def test_channel_chat(
+    payload: ChannelChatTestRequest = Body(...),
+    _admin: dict = Depends(check_admin_privilege),
+):
+    channel_type = payload.channel_type
+    api_key = payload.api_key
+    base_url = payload.base_url
+    model_id = payload.model_id
+
+    if not channel_type:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+    if not base_url:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_URL)
+    if not api_key:
+        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
+    if not model_id or not model_id.strip():
+        raise ParameterException(constants.ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
+
+    try:
+        response = await LLMClient.generate(
+            protocol=channel_type.value if isinstance(channel_type, ChannelType) else str(channel_type),
+            api_key=api_key,
+            base_url=base_url,
+            model_id=model_id.strip(),
+            messages=[InternalMessage(role=MessageRole.USER, content="你好")],
+            temperature=payload.temperature if payload.temperature is not None else 0.7,
+            max_tokens=payload.max_tokens or 0,
+            top_p=payload.top_p,
+            timeout=payload.timeout,
+        )
+        content = response.message.content
+        if isinstance(content, str):
+            reply = content.strip()
+        else:
+            reply = json.dumps(content, ensure_ascii=False) if content else ""
+        if not reply:
+            raise ParameterException(constants.ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE)
+    except ParameterException:
+        raise
+    except BaseBusinessException as e:
+        detail = t(e.message, default=e.message, **e.kwargs)
+        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=detail) from e
+    except Exception as e:
+        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
+
+    return StandardResponse.success(
+        data={"model": response.model, "reply": reply, "usage": response.usage},
+        message=constants.MSG_CHANNEL_CHAT_TEST_SUCCESS,
     )
 
 

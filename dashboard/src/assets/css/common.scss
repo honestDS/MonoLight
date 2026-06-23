@@ -58,6 +58,25 @@
   font-size: 13px;
 }
 
+.dialog-with-scroll-body {
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  margin-top: 32px !important;
+  margin-bottom: 32px !important;
+
+  .el-dialog__body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .el-dialog__header,
+  .el-dialog__footer {
+    flex-shrink: 0;
+  }
+}
+
 /* 全局 Element Plus 覆盖 */
 .el-table {
   font-size: 15px !important;
