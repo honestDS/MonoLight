@@ -1,7 +1,6 @@
 import json
 
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
-
 from app.transformers.openai import OpenAITransformer
 
 

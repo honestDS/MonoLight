@@ -32,22 +32,8 @@ def append_text_instruction(message: InternalMessage, instruction: str) -> Inter
     return message
 
 
-def append_markdown_instruction(message: InternalMessage, enable_markdown: bool) -> InternalMessage:
-    return append_text_instruction(message, build_markdown_instruction(enable_markdown))
-
-
 def build_runtime_environment_instruction() -> str:
     return "\n\n" + SYSTEM_CONTEXT_WRAPPER.format(context=get_full_system_context())
-
-
-def append_runtime_environment_instruction(message: InternalMessage) -> InternalMessage:
-    return append_text_instruction(message, build_runtime_environment_instruction())
-
-
-async def append_session_markdown_instruction(db: AsyncSession, session_id: str, message: InternalMessage) -> InternalMessage:
-    session = await session_crud.get_by_session_id(db, session_id)
-    enable_markdown = session.enable_markdown if session else False
-    return append_markdown_instruction(message, enable_markdown)
 
 
 async def build_user_runtime_instructions(db: AsyncSession, session_id: str) -> str:
