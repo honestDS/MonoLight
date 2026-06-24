@@ -102,7 +102,7 @@
             <div class="model-entry-header">
               <span>{{ $t('channels.model_entry') }} #{{ idx + 1 }}</span>
               <div class="model-entry-actions">
-                <el-button type="text" :loading="testingChatIndex === idx" :disabled="entry.usage !== 'CHAT'" @click="testChatModel(entry, idx)">
+                <el-button type="text" :loading="testingModelIndex === idx" :disabled="!isTestableModel(entry)" @click="testModel(entry, idx)">
                   {{ $t('channels.test') }}
                 </el-button>
                 <el-button type="text" class="remove" @click="removeModelEntry(idx)">
@@ -178,6 +178,28 @@
                 </div>
               </template>
 
+              <template v-if="entry.usage === 'IMAGE_GENERATION'">
+                <div class="model-entry-field model-entry-field-half">
+                  <el-form-item :label="$t('channels.image_generation_size')">
+                    <el-select v-model="entry.size" class="full-width-input">
+                      <el-option label="1024x1024" value="1024x1024" />
+                      <el-option label="1024x1536" value="1024x1536" />
+                      <el-option label="1536x1024" value="1536x1024" />
+                    </el-select>
+                  </el-form-item>
+                </div>
+                <div class="model-entry-field model-entry-field-half">
+                  <el-form-item :label="$t('channels.image_generation_quality')">
+                    <el-select v-model="entry.quality" class="full-width-input">
+                      <el-option :label="$t('channels.image_generation_quality_auto')" value="auto" />
+                      <el-option :label="$t('channels.image_generation_quality_low')" value="low" />
+                      <el-option :label="$t('channels.image_generation_quality_medium')" value="medium" />
+                      <el-option :label="$t('channels.image_generation_quality_high')" value="high" />
+                    </el-select>
+                  </el-form-item>
+                </div>
+              </template>
+
               <div class="model-entry-field model-entry-field-half">
                 <el-form-item :label="$t('channels.description')">
                   <el-input v-model="entry.description" :placeholder="$t('channels.description_placeholder')" />
@@ -227,13 +249,14 @@ const selectedDetectedModels = ref([])
 const detectedModels = ref([])
 const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
-const testingChatIndex = ref(null)
+const testingModelIndex = ref(null)
 
 const getModelUsageLabel = (value) => {
   const map = {
     CHAT: t('channels.chat_model'),
     EMBEDDING: t('channels.embedding_model'),
-    RERANK: t('channels.rerank_model')
+    RERANK: t('channels.rerank_model'),
+    IMAGE_GENERATION: t('channels.image_generation_model')
   }
   return map[value] || value
 }
@@ -400,6 +423,20 @@ const formatErrorDetail = (err) => {
   return err.message || t('channels.chat_test_failed')
 }
 
+const isTestableModel = (entry) => {
+  return entry.usage === 'CHAT' || entry.usage === 'IMAGE_GENERATION'
+}
+
+const testModel = async (entry, idx) => {
+  if (entry.usage === 'CHAT') {
+    return testChatModel(entry, idx)
+  }
+  if (entry.usage === 'IMAGE_GENERATION') {
+    return testImageGenerationModel(entry, idx)
+  }
+  return ElMessage.warning(t('channels.model_test_supported_only'))
+}
+
 const formatUsage = (usage) => {
   if (!usage) return '-'
   if (typeof usage === 'string') return usage
@@ -433,7 +470,7 @@ const testChatModel = async (entry, idx) => {
     return ElMessage.warning(t('channels.model_id_required'))
   }
 
-  testingChatIndex.value = idx
+  testingModelIndex.value = idx
   try {
     const res = await channelApi.testChat({
       channel_type: form.channel_type,
@@ -475,7 +512,71 @@ const testChatModel = async (entry, idx) => {
       }
     }
   } finally {
-    testingChatIndex.value = null
+    testingModelIndex.value = null
+  }
+}
+
+const testImageGenerationModel = async (entry, idx) => {
+  if (entry.usage !== 'IMAGE_GENERATION') {
+    return ElMessage.warning(t('channels.image_generation_test_image_only'))
+  }
+  if (!form.channel_type) {
+    return ElMessage.warning(t('channels.select_type'))
+  }
+  if (!form.base_url || !form.base_url.trim()) {
+    return ElMessage.warning(t('channels.model_list_base_url_required'))
+  }
+  if (!form.api_key || !form.api_key.trim()) {
+    return ElMessage.warning(t('channels.model_list_api_key_required'))
+  }
+  if (!entry.model_id || !entry.model_id.trim()) {
+    modelIdErrors.value[idx] = t('channels.model_id_required')
+    return ElMessage.warning(t('channels.model_id_required'))
+  }
+
+  testingModelIndex.value = idx
+  try {
+    const res = await channelApi.testImageGeneration({
+      channel_type: form.channel_type,
+      api_key: form.api_key || null,
+      base_url: form.base_url || null,
+      model_id: entry.model_id.trim(),
+      size: entry.size || '1024x1024',
+      quality: entry.quality || 'auto'
+    })
+    ElMessage.success(t('channels.image_generation_test_success'))
+    const data = res.data?.data || {}
+    const image = data.image || {}
+    const imageUrl = image.url || (image.b64_json ? `data:image/png;base64,${image.b64_json}` : '')
+    const content = imageUrl
+      ? `<div class="image-test-result"><p>${t('channels.chat_test_model')}: ${data.model || '-'}</p><img src="${imageUrl}" alt="image generation test result" /></div>`
+      : `${t('channels.chat_test_model')}: ${data.model || '-'}`
+    try {
+      await ElMessageBox.alert(content, t('channels.image_generation_test_result_title'), {
+        dangerouslyUseHTMLString: Boolean(imageUrl),
+        confirmButtonText: t('channels.confirm'),
+        closeOnClickModal: true,
+        customClass: 'image-test-result-box'
+      })
+    } catch (action) {
+      if (action !== 'cancel' && action !== 'close') {
+        console.error(t('channels.image_generation_test_result_title'), action)
+      }
+    }
+  } catch (err) {
+    try {
+      await ElMessageBox.alert(formatErrorDetail(err), t('channels.image_generation_test_failed'), {
+        type: 'error',
+        confirmButtonText: t('channels.confirm'),
+        closeOnClickModal: true
+      })
+    } catch (action) {
+      if (action !== 'cancel' && action !== 'close') {
+        console.error(t('channels.image_generation_test_failed'), action)
+      }
+    }
+  } finally {
+    testingModelIndex.value = null
   }
 }
 

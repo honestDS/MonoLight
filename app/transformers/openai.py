@@ -19,6 +19,7 @@ from app.models.message import (
 
 from .base import (
     BaseEmbeddingTransformer,
+    BaseImageGenerationTransformer,
     BaseRerankTransformer,
     BaseTransformer,
 )
@@ -26,7 +27,7 @@ from .base import (
 logger = get_logger(__name__)
 
 
-class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTransformer):
+class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer):
     async def list_models(
         self,
         api_key: str,
@@ -117,6 +118,62 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
+            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+
+    async def generate_image(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        prompt: str,
+        size: str = "1024x1024",
+        n: int = 1,
+        quality: str | None = None,
+        response_format: str | None = None,
+        style: str | None = None,
+        timeout: float = 60.0,
+        **kwargs,
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "prompt": prompt,
+            "n": n,
+            "size": size,
+        }
+
+        optional_fields = {
+            "quality": quality,
+            "response_format": response_format,
+            "style": style,
+            "user": kwargs.get("user"),
+            "background": kwargs.get("background"),
+            "moderation": kwargs.get("moderation"),
+            "output_compression": kwargs.get("output_compression"),
+            "output_format": kwargs.get("output_format"),
+        }
+        payload.update({key: value for key, value in optional_fields.items() if value is not None})
+
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
+
+        url = f"{self._normalize_image_base_url(base_url)}/images/generations"
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    txt = await resp.text()
+                    if resp.status != 200:
+                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                    return json.loads(txt)
+        except LLMException:
+            raise
+        except Exception as e:
+            logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_IMAGE_GENERATION_FAILED", error=str(e)))
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_stream(
@@ -263,7 +320,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         if "user" in kwargs:
             payload["user"] = kwargs["user"]
 
-        url = f"{self.normalize_embedding_base_url(base_url)}/embeddings"
+        url = f"{self._normalize_embedding_base_url(base_url)}/embeddings"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -282,11 +339,15 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
             raise EmbeddingException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
     @staticmethod
-    def normalize_embedding_base_url(base_url: str) -> str:
+    def _normalize_embedding_base_url(base_url: str) -> str:
         return base_url.rstrip("/").removesuffix("/embeddings")
 
     @staticmethod
-    def normalize_rerank_base_url(base_url: str) -> str:
+    def _normalize_image_base_url(base_url: str) -> str:
+        return base_url.rstrip("/").removesuffix("/images/generations").removesuffix("/images")
+
+    @staticmethod
+    def _normalize_rerank_base_url(base_url: str) -> str:
         # 允许用户把 base_url 配到服务根路径、/v1 或 /v1/rerank，统一归一化为不含 /rerank 后缀的基础路径
         return base_url.rstrip("/").removesuffix("/rerank")
 
@@ -313,7 +374,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         if top_n is not None:
             payload["top_n"] = top_n
 
-        url = f"{self.normalize_rerank_base_url(base_url)}/rerank"
+        url = f"{self._normalize_rerank_base_url(base_url)}/rerank"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -385,7 +446,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseRerankTra
         if not input_texts:
             return []
 
-        normalized_base_url = self.normalize_embedding_base_url(base_url)
+        normalized_base_url = self._normalize_embedding_base_url(base_url)
         embeddings: list[list[float]] = []
         dimensions_supported: bool | None = None
 

@@ -5,6 +5,7 @@ import enum
 from pydantic import (
     BaseModel,
     ConfigDict,
+    model_validator,
 )
 from pydantic import (
     Field as PydanticField,
@@ -26,6 +27,20 @@ class ModelUsage(enum.StrEnum):
     CHAT = "CHAT"
     EMBEDDING = "EMBEDDING"
     RERANK = "RERANK"
+    IMAGE_GENERATION = "IMAGE_GENERATION"
+
+
+class ImageGenerationSize(enum.StrEnum):
+    SIZE_1024X1024 = "1024x1024"
+    SIZE_1024X1536 = "1024x1536"
+    SIZE_1536X1024 = "1536x1024"
+
+
+class ImageGenerationQuality(enum.StrEnum):
+    AUTO = "auto"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class ChannelType(enum.StrEnum):
@@ -36,7 +51,7 @@ class ChannelModelItem(BaseModel):
     """渠道下单个模型条目的完整配置"""
 
     model_id: str = PydanticField(..., min_length=1, description="模型唯一标识符")
-    usage: ModelUsage = PydanticField(..., description="模型用途：CHAT/EMBEDDING/RERANK")
+    usage: ModelUsage = PydanticField(..., description="模型用途：CHAT/EMBEDDING/RERANK/IMAGE_GENERATION")
     image_understanding: bool = PydanticField(False, description="是否支持图像理解")
     audio_understanding: bool = PydanticField(False, description="是否支持音频理解")
     video_understanding: bool = PydanticField(False, description="是否支持视频理解")
@@ -45,10 +60,18 @@ class ChannelModelItem(BaseModel):
     top_p: float | None = PydanticField(None, ge=0, le=1.0, description="核采样阈值，CHAT 专属")
     max_tokens: int | None = PydanticField(None, ge=0, description="单次生成最大 Token 数，CHAT 专属")
     embedding_dimensions: int | None = PydanticField(None, gt=0, description="向量输出维度，EMBEDDING 专属")
+    size: ImageGenerationSize | None = PydanticField(None, description="生成图片尺寸，IMAGE_GENERATION 专属")
+    quality: ImageGenerationQuality | None = PydanticField(None, description="生成图片质量，IMAGE_GENERATION 专属")
     embedding_timeout: float | None = PydanticField(None, gt=0, le=600, description="嵌入模型调用超时（秒），EMBEDDING 专属")
     rerank_timeout: float | None = PydanticField(None, gt=0, le=120, description="重排模型调用超时（秒），RERANK 专属")
     is_enabled: bool = PydanticField(True, description="是否启用该模型条目")
     description: str | None = PydanticField(None, description="模型描述")
+
+    @model_validator(mode="after")
+    def validate_image_generation_fields(self):
+        if self.usage != ModelUsage.IMAGE_GENERATION and (self.size is not None or self.quality is not None):
+            raise ValueError("size and quality are only allowed for IMAGE_GENERATION model usage")
+        return self
 
 
 def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None, dict]:

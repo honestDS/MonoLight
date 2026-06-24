@@ -71,3 +71,51 @@ def test_channel_model_id_validation_reports_duplicate_model_id_in_same_usage():
 
     assert error_key == "ERR_CHANNEL_MODEL_IDS_DUPLICATED"
     assert error_kwargs == {"usage": ModelUsage.CHAT.value, "model_id": "gpt-4o"}
+
+
+def test_image_generation_model_entry_accepts_valid_size_and_quality():
+    error_key, error_kwargs = validate_channel_model_ids(
+        [
+            {
+                "model_id": "gpt-image-1",
+                "usage": ModelUsage.IMAGE_GENERATION,
+                "size": "1024x1024",
+                "quality": "auto",
+            }
+        ]
+    )
+
+    assert error_key is None
+    assert error_kwargs == {}
+
+
+def test_image_generation_model_entry_rejects_invalid_size():
+    error_key, error_kwargs = validate_channel_model_ids(
+        [
+            {
+                "model_id": "gpt-image-1",
+                "usage": ModelUsage.IMAGE_GENERATION,
+                "size": "512x512",
+                "quality": "auto",
+            }
+        ]
+    )
+
+    assert error_key == "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID"
+    assert error_kwargs["index"] == 0
+
+
+def test_non_image_generation_model_entry_rejects_image_generation_fields():
+    error_key, error_kwargs = validate_channel_model_ids(
+        [
+            {
+                "model_id": "gpt-4o",
+                "usage": ModelUsage.CHAT,
+                "size": "1024x1024",
+                "quality": "auto",
+            }
+        ]
+    )
+
+    assert error_key == "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID"
+    assert error_kwargs["index"] == 0

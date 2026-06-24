@@ -71,6 +71,8 @@ export const defaultModelEntry = () => ({
   top_p: 1,
   max_tokens: 2048,
   embedding_dimensions: null,
+  size: '1024x1024',
+  quality: 'auto',
   description: '',
 })
 

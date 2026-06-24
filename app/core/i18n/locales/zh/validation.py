@@ -1,5 +1,6 @@
 MESSAGES = {
     "ERR_PASSWORD_TOO_LONG_BYTES": "密码不能超过 72 字节",
+    "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS": "配置模型条目时 base_url 必须配置",
     "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK": "含 RERANK 用途的模型时 base_url 必须配置",
     "ERR_CHANNEL_BASE_URL_SCHEME": "base_url 必须以 http:// 或 https:// 开头",
     "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] 校验失败: {error}",

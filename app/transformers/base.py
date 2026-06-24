@@ -97,6 +97,25 @@ class BaseEmbeddingTransformer(ABC):
         pass
 
 
+class BaseImageGenerationTransformer(ABC):
+    @abstractmethod
+    async def generate_image(
+        self,
+        api_key: str,
+        base_url: str,
+        model_id: str,
+        prompt: str,
+        size: str = "1024x1024",
+        n: int = 1,
+        quality: str | None = None,
+        response_format: str | None = None,
+        style: str | None = None,
+        timeout: float = 60.0,
+        **kwargs,
+    ) -> dict[str, Any]:
+        pass
+
+
 class BaseRerankTransformer(ABC):
     @abstractmethod
     async def get_rerank(
