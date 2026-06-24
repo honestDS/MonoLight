@@ -284,6 +284,13 @@
                     <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
                   </el-form-item>
                 </div>
+                <div class="settings-section">
+                  <div class="settings-section-title">{{ $t('profiles.temp_storage_settings') }}</div>
+                  <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
+                    <el-input-number v-model="form.configs.other.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
+                  </el-form-item>
+                </div>
             </div>
           </el-tab-pane>
         </el-tabs>

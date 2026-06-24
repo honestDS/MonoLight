@@ -21,7 +21,7 @@ from app.core.utils.time import get_local_time
 from app.handler import register_handlers
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.bootstrap import init_system_data
-from app.tasks import background_log_cleaner
+from app.tasks import background_log_cleaner, background_temp_cleaner
 
 
 @asynccontextmanager
@@ -40,14 +40,17 @@ async def lifespan(app: FastAPI):
     get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
 
     cleaner_task = asyncio.create_task(background_log_cleaner(7))
+    temp_cleaner_task = asyncio.create_task(background_temp_cleaner())
 
     yield
 
     cleaner_task.cancel()
-    try:
-        await cleaner_task
-    except asyncio.CancelledError:
-        pass
+    temp_cleaner_task.cancel()
+    for task in (cleaner_task, temp_cleaner_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def register_routers(app: FastAPI) -> None:

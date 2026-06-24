@@ -71,6 +71,7 @@ class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
     log_locale: str = PydanticField(DEFAULT_LOCALE, description="系统日志存储语言")
+    temp_dir_max_size_mb: int = PydanticField(1024, ge=1, le=1048576, description="单个临时目录大小上限（MB）")
 
     @model_validator(mode="after")
     def normalize_log_locale(self) -> "OtherConfig":
@@ -112,7 +113,7 @@ class ProfileConfig(BaseModel):
                 "file_send_blocked_extensions",
                 "executor_max_workers",
             ],
-            "other": ["log_locale"],
+            "other": ["log_locale", "temp_dir_max_size_mb"],
         }
         return standardize_config(data, schema_map)
 
@@ -162,7 +163,7 @@ PROFILE_EXAMPLE = {
             "file_send_blocked_extensions": [],
             "executor_max_workers": 10,
         },
-        "other": {"log_locale": DEFAULT_LOCALE},
+        "other": {"log_locale": DEFAULT_LOCALE, "temp_dir_max_size_mb": 1024},
     },
 }
 

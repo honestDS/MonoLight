@@ -45,7 +45,10 @@ export const defaultProfileConfigs = () => ({
     file_send_max_total_size_mb: 100,
     file_send_blocked_extensions: []
   },
-  other: { log_locale: 'zh' },
+  other: {
+    log_locale: 'zh',
+    temp_dir_max_size_mb: 1024
+  },
 })
 
 // 默认渠道规则
