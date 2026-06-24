@@ -26,7 +26,7 @@ async def test_default_profile_initialization_with_timeout(db_session):
                     "stream": False,
                 },
                 "security": {"audit_threshold": 5},
-                "tool": {"shell_timeout": 30.0},
+                "tool": {"tool_timeout": 30.0},
                 "other": {"context_window_k": 4},
             },
             is_active=True,
@@ -37,10 +37,10 @@ async def test_default_profile_initialization_with_timeout(db_session):
         profile = default_profile
 
     assert profile.configs is not None
-    # 兼容性检查：确保 configs 是 dict 且包含 tool.shell_timeout
+    # 兼容性检查：确保 configs 是 dict 且包含 tool.tool_timeout
     configs = profile.configs
     if isinstance(configs, str):
         import json
 
         configs = json.loads(configs)
-    assert configs["tool"]["shell_timeout"] == 30.0
+    assert configs["tool"]["tool_timeout"] == 30.0

@@ -151,18 +151,102 @@
                       <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
                     </el-form-item>
                   </el-col>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.tool_timeout')">
+                      <el-input-number v-model="form.configs.tool.tool_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
+                      <div class="help-text mt-5">{{ $t('profiles.tool_timeout_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
                 </el-row>
               </div>
 
               <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.shell_config') }}</div>
+                <div class="settings-section-title">{{ $t('profiles.tool_visibility_config') }}</div>
+                <el-form-item :label="$t('profiles.enabled_tools')">
+                  <el-select
+                    v-model="form.configs.tool.enabled_tools"
+                    multiple
+                    class="full-width-input"
+                    :placeholder="$t('profiles.enabled_tools_placeholder')"
+                  >
+                    <el-option
+                      v-for="item in toolOptions"
+                      :key="item.value"
+                      :label="item.label"
+                      :value="item.value"
+                    ></el-option>
+                  </el-select>
+                  <div class="help-text mt-5">{{ $t('profiles.enabled_tools_hint') }}</div>
+                </el-form-item>
+              </div>
+
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.file_send_config') }}</div>
+                <el-form-item :label="$t('profiles.allowed_file_send_dirs')">
+                  <div class="tag-input-panel full-width-input">
+                    <el-input
+                      v-model="allowedFileSendDirInput"
+                      :placeholder="$t('profiles.allowed_file_send_dirs_placeholder')"
+                      @keyup.enter="addAllowedFileSendDir"
+                    >
+                      <template #append>
+                        <el-button @click="addAllowedFileSendDir">{{ $t('profiles.add') }}</el-button>
+                      </template>
+                    </el-input>
+                    <div v-if="form.configs.tool.allowed_file_send_dirs.length" class="tag-list">
+                      <el-tag
+                        v-for="item in form.configs.tool.allowed_file_send_dirs"
+                        :key="item"
+                        closable
+                        @close="removeAllowedFileSendDir(item)"
+                      >
+                        {{ item }}
+                      </el-tag>
+                    </div>
+                  </div>
+                  <div class="help-text mt-5">{{ $t('profiles.allowed_file_send_dirs_hint') }}</div>
+                </el-form-item>
                 <el-row :gutter="20">
-                  <el-col :span="12">
-                    <el-form-item :label="$t('profiles.shell_timeout')">
-                      <el-input-number v-model="form.configs.tool.shell_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.file_send_max_count')">
+                      <el-input-number v-model="form.configs.tool.file_send_max_count" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.file_send_max_single_size_mb')">
+                      <el-input-number v-model="form.configs.tool.file_send_max_single_size_mb" :min="1" :max="1024" class="full-width-input" controls-position="right"></el-input-number>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
+                    <el-form-item :label="$t('profiles.file_send_max_total_size_mb')">
+                      <el-input-number v-model="form.configs.tool.file_send_max_total_size_mb" :min="1" :max="4096" class="full-width-input" controls-position="right"></el-input-number>
                     </el-form-item>
                   </el-col>
                 </el-row>
+                <el-form-item :label="$t('profiles.file_send_blocked_extensions')">
+                  <div class="tag-input-panel full-width-input">
+                    <el-input
+                      v-model="fileSendBlockedExtensionInput"
+                      :placeholder="$t('profiles.file_send_blocked_extensions_placeholder')"
+                      @keyup.enter="addFileSendBlockedExtension"
+                    >
+                      <template #append>
+                        <el-button @click="addFileSendBlockedExtension">{{ $t('profiles.add') }}</el-button>
+                      </template>
+                    </el-input>
+                    <div v-if="form.configs.tool.file_send_blocked_extensions.length" class="tag-list">
+                      <el-tag
+                        v-for="item in form.configs.tool.file_send_blocked_extensions"
+                        :key="item"
+                        closable
+                        @close="removeFileSendBlockedExtension(item)"
+                      >
+                        {{ item }}
+                      </el-tag>
+                    </div>
+                  </div>
+                  <div class="help-text mt-5">{{ $t('profiles.file_send_blocked_extensions_hint') }}</div>
+                </el-form-item>
               </div>
 
               <div class="settings-section">
@@ -230,6 +314,7 @@ const profiles = ref([])
 const channels = ref([])
 const prompts = ref([])
 const backendLocales = ref([])
+const toolOptions = ref([])
 const loading = ref(false)
 const total = ref(0)
 const currentPage = ref(1)
@@ -238,6 +323,8 @@ const dialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
 const activeTab = ref('base')
+const allowedFileSendDirInput = ref('')
+const fileSendBlockedExtensionInput = ref('')
 
 const logLocaleOptions = computed(() => {
   const localeItems = backendLocales.value.length ? backendLocales.value : ['zh']
@@ -305,6 +392,7 @@ const loadProfiles = async () => {
     })
     profiles.value = res.data.data.items || []
     total.value = res.data.data.total || 0
+    toolOptions.value = res.data.data.meta?.tool_options || []
   } catch (err) {
     ElMessage.error(err.message || t('profiles.load_failed'))
   } finally {
@@ -354,6 +442,48 @@ const handleSizeChange = () => {
   loadProfiles()
 }
 
+const addUniqueListValue = (targetList, rawValue, normalizeValue = value => value) => {
+  const value = normalizeValue((rawValue || '').trim())
+  if (!value || targetList.includes(value)) return false
+  targetList.push(value)
+  return true
+}
+
+const addAllowedFileSendDir = () => {
+  if (addUniqueListValue(form.configs.tool.allowed_file_send_dirs, allowedFileSendDirInput.value)) {
+    allowedFileSendDirInput.value = ''
+  }
+}
+
+const removeAllowedFileSendDir = (value) => {
+  form.configs.tool.allowed_file_send_dirs = form.configs.tool.allowed_file_send_dirs.filter(item => item !== value)
+}
+
+const normalizeExtension = (value) => {
+  if (!value) return ''
+  return value.startsWith('.') ? value.toLowerCase() : `.${value.toLowerCase()}`
+}
+
+const addFileSendBlockedExtension = () => {
+  if (addUniqueListValue(form.configs.tool.file_send_blocked_extensions, fileSendBlockedExtensionInput.value, normalizeExtension)) {
+    fileSendBlockedExtensionInput.value = ''
+  }
+}
+
+const removeFileSendBlockedExtension = (value) => {
+  form.configs.tool.file_send_blocked_extensions = form.configs.tool.file_send_blocked_extensions.filter(item => item !== value)
+}
+
+const migrateToolConfig = (toolConfig) => {
+  if (!toolConfig || toolConfig.tool_timeout !== undefined) return toolConfig
+  if (toolConfig.tool_timeout !== undefined) {
+    toolConfig.tool_timeout = toolConfig.tool_timeout
+  } else if (toolConfig.tool_timeout !== undefined) {
+    toolConfig.tool_timeout = toolConfig.tool_timeout
+  }
+  return toolConfig
+}
+
 const handleActivate = async (id) => {
   try {
     const res = await profileApi.activate(id)
@@ -367,12 +497,15 @@ const handleActivate = async (id) => {
 const showDialog = (type, row = null) => {
   dialogType.value = type
   activeTab.value = 'base'
+  allowedFileSendDirInput.value = ''
+  fileSendBlockedExtensionInput.value = ''
   if (type === 'edit' && row) {
     form.id = row.id
     form.name = row.name
     form.prompt_id = row.prompt_id
     const base = defaultProfileConfigs()
     if (row.configs) {
+      if (row.configs.tool) migrateToolConfig(row.configs.tool)
       if (row.configs.channel) {
         const p = row.configs.channel
         // 深合并渠道配置
@@ -416,6 +549,8 @@ const submitForm = async () => {
   cleanChannel(form.configs.channel.chat_channel)
   cleanChannel(form.configs.channel.embedding_channel)
   cleanChannel(form.configs.channel.rerank_channel)
+  addAllowedFileSendDir()
+  addFileSendBlockedExtension()
 
   submitting.value = true
   try {

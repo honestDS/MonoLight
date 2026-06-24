@@ -42,6 +42,17 @@ class PageData[T](BaseModel):
     total: int
     page: int
     size: int
+    meta: dict[str, Any] | None = None
+
+
+class SentFile(BaseModel):
+    id: str
+    name: str
+    mime_type: str
+    size: int
+    download_url: str
+    previewable: bool = False
+    description: str | None = None
 
 
 class LLMChoiceMessage(BaseModel):
@@ -58,3 +69,4 @@ class LLMChoice(BaseModel):
 class LLMResponse(BaseModel):
     choices: list[LLMChoice]
     history: list[dict] | None = None
+    files: list[SentFile] | None = None

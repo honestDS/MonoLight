@@ -19,4 +19,10 @@ MESSAGES = {
     "ERR_PROFILE_AUDIT_MODEL_NOT_CHAT": "Security audit model must be a chat model",
     "ERR_KB_NOT_FOUND_FOR_QUERY": "Knowledge base not found",
     "ERR_KB_NOT_IN_PROFILE": "No permission to query knowledge bases that do not belong to the current profile",
+    "TOOL_EXECUTE_SHELL_LABEL": "Execute Shell",
+    "TOOL_WRITE_FILE_LABEL": "Write File",
+    "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl Search",
+    "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl Scrape",
+    "TOOL_SEND_FILE_TO_USER_LABEL": "Send File to User",
+    "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "Query Knowledge Base",
 }

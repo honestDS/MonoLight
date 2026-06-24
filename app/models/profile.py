@@ -50,17 +50,22 @@ class SecurityConfig(BaseModel):
 class ToolConfig(BaseModel):
     """Agent 工具调用参数配置"""
 
-    shell_timeout: float = PydanticField(30.0, gt=0, description="Shell 指令执行的超时时间（秒）")
+    tool_timeout: float = PydanticField(30.0, gt=0, description="工具执行超时时间（秒）")
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
+    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
+    allowed_file_send_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 允许发送文件的安全目录白名单，目录必须使用绝对路径")
+    file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
+    file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
+    file_send_max_total_size_mb: int = PydanticField(100, ge=1, le=4096, description="send_file_to_user 单次发送总大小上限（MB）")
+    file_send_blocked_extensions: list[str] = PydanticField(default_factory=list, description="send_file_to_user 禁止发送的文件后缀列表，例如 .pem、.key")
     executor_max_workers: int = PydanticField(
         default_factory=lambda: (os.cpu_count() or 1) * 5,
         ge=1,
         le=100,
         description="工具执行器线程池最大线程数",
     )
-
 
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
@@ -93,10 +98,18 @@ class ProfileConfig(BaseModel):
             ],
             "security": ["audit_channel_id", "audit_model_id", "audit_threshold"],
             "tool": [
-                "shell_timeout",
+                "tool_timeout",
+                "tool_timeout",
+                "tool_timeout",
                 "max_parallel_tools",
                 "max_turns",
                 "firecrawl_api_key",
+                "enabled_tools",
+                "allowed_file_send_dirs",
+                "file_send_max_count",
+                "file_send_max_single_size_mb",
+                "file_send_max_total_size_mb",
+                "file_send_blocked_extensions",
                 "executor_max_workers",
             ],
             "other": ["log_locale"],
@@ -137,10 +150,16 @@ PROFILE_EXAMPLE = {
             "audit_threshold": 5,
         },
         "tool": {
-            "shell_timeout": 30,
+            "tool_timeout": 30,
             "max_parallel_tools": 5,
             "max_turns": 5,
             "firecrawl_api_key": "",
+            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "query_knowledge_base"],
+            "allowed_file_send_dirs": [],
+            "file_send_max_count": 10,
+            "file_send_max_single_size_mb": 50,
+            "file_send_max_total_size_mb": 100,
+            "file_send_blocked_extensions": [],
             "executor_max_workers": 10,
         },
         "other": {"log_locale": DEFAULT_LOCALE},

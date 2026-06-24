@@ -41,3 +41,31 @@
 .el-form-item__content {
   gap: 10px;
 }
+
+.tag-input-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tag-input-panel {
+  .el-input-group__append {
+    padding: 0;
+  }
+
+  .el-input-group__append .el-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: var(--el-component-size);
+    padding: 0 16px;
+    margin: 0;
+  }
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

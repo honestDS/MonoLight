@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from app.core import constants
 from app.core.paths import TEMP_DIR, get_user_temp_dir
 from app.core.security import get_current_user
+from app.core.tools.send_file_to_user import resolve_file_token
 
 router = APIRouter()
 
@@ -59,3 +60,18 @@ async def download_file(path: str):
     # 去除 uuid 前缀以显示原始文件名 (8位uuid + _)
     display_name = filename[9:] if len(filename) > 9 and filename[8] == "_" else filename
     return FileResponse(path, filename=display_name)
+
+
+@router.get("/download-sent")
+async def download_sent_file(token: str):
+    """
+    通过 send_file_to_user 生成的签名 token 下载文件，不暴露服务器真实路径。
+    """
+    try:
+        path = resolve_file_token(token)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail="Invalid file token") from exc
+
+    return FileResponse(path, filename=path.name)

@@ -13,13 +13,25 @@ def test_profile_config_standardization():
                 {"channel_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 1},
             ],
         },
-        "shell_timeout": 45.0,
+        "tool_timeout": 45.0,
+        "enabled_tools": ["send_file_to_user"],
+        "allowed_file_send_dirs": ["D:/safe"],
+        "file_send_max_count": 3,
+        "file_send_max_single_size_mb": 8,
+        "file_send_max_total_size_mb": 16,
+        "file_send_blocked_extensions": [".pem"],
         "audit_threshold": 3,
     }
     cfg = ProfileConfig.model_validate(old_data)
     assert cfg.channel.chat_channel.chat_timeout == 45.0
     assert cfg.channel.chat_channel.rules[0].model_id == "gpt-4o"
-    assert cfg.tool.shell_timeout == 45.0
+    assert cfg.tool.tool_timeout == 45.0
+    assert cfg.tool.enabled_tools == ["send_file_to_user"]
+    assert cfg.tool.allowed_file_send_dirs == ["D:/safe"]
+    assert cfg.tool.file_send_max_count == 3
+    assert cfg.tool.file_send_max_single_size_mb == 8
+    assert cfg.tool.file_send_max_total_size_mb == 16
+    assert cfg.tool.file_send_blocked_extensions == [".pem"]
     assert cfg.security.audit_threshold == 3
 
 
@@ -28,7 +40,14 @@ def test_profile_config_defaults():
     cfg = ProfileConfig.model_validate(data)
     assert cfg.channel.chat_channel.chat_timeout == 60.0
     assert cfg.security.audit_threshold == 5
-    assert cfg.tool.shell_timeout == 30.0
+    assert cfg.tool.tool_timeout == 30.0
+    assert "send_file_to_user" in cfg.tool.enabled_tools
+    assert "query_knowledge_base" in cfg.tool.enabled_tools
+    assert cfg.tool.allowed_file_send_dirs == []
+    assert cfg.tool.file_send_max_count == 10
+    assert cfg.tool.file_send_max_single_size_mb == 50
+    assert cfg.tool.file_send_max_total_size_mb == 100
+    assert cfg.tool.file_send_blocked_extensions == []
     assert cfg.other.log_locale == DEFAULT_LOCALE
 
 

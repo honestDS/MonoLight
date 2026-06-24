@@ -30,6 +30,24 @@ from app.models.profile import (
 )
 
 
+def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
+    enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
+    if not isinstance(enabled_tools, list):
+        return False
+    return tool_name in {name for name in enabled_tools if isinstance(name, str)}
+
+
+def _build_tool_disabled_result(tool_name: str) -> str:
+    return json.dumps(
+        {
+            "error": f"Tool {tool_name} is not enabled in the active profile",
+            "tool_name": tool_name,
+            "status": "failed",
+        },
+        ensure_ascii=False,
+    )
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -49,16 +67,19 @@ async def process_single_tool(
 
     LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id, uid)
 
-    cmd_result = await audit_tool_call(
-        db,
-        profile,
-        cfg,
-        tool_name,
-        args,
-        messages,
-        session_id=session_id,
-        uid=uid,
-    )
+    if _is_tool_enabled(tool_name, cfg):
+        cmd_result = await audit_tool_call(
+            db,
+            profile,
+            cfg,
+            tool_name,
+            args,
+            messages,
+            session_id=session_id,
+            uid=uid,
+        )
+    else:
+        cmd_result = _build_tool_disabled_result(tool_name)
 
     if cmd_result is None:
         executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)

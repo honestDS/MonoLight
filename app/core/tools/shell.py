@@ -57,7 +57,7 @@ class ShellExecutor(BaseExecutor):
                 profile = await profile_crud.get_active(session)
                 if profile and profile.configs:
                     cfg = ProfileConfig.model_validate(profile.configs)
-                    return cfg.tool.shell_timeout
+                    return cfg.tool.tool_timeout
         except Exception as e:
             self.logger.error(t("LOG_SHELL_PROFILE_TIMEOUT_FAILED", error=str(e)))
         return 30.0

@@ -11,17 +11,25 @@ from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
 from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
+from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
 
 logger = get_logger(__name__)
 
 # Tool Registry
-ALL_TOOLS_SCHEMAS = [
+CONFIGURABLE_TOOL_SCHEMAS = [
     SHELL_TOOL_SCHEMA,
     FILE_WRITER_TOOL_SCHEMA,
     FIRECRAWL_SEARCH_TOOL_SCHEMA,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA,
+    SEND_FILE_TO_USER_TOOL_SCHEMA,
 ]
+
+CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
+    KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
+]
+
+ALL_TOOLS_SCHEMAS = CONFIGURABLE_TOOL_SCHEMAS
 
 # Tool Executor Mapping
 TOOL_EXECUTOR_MAP = {
@@ -29,25 +37,41 @@ TOOL_EXECUTOR_MAP = {
     FILE_WRITER_TOOL_SCHEMA["function"]["name"]: FileWriterExecutor,
     FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"]: FirecrawlSearchExecutor,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"]: FirecrawlScrapeExecutor,
+    SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
 }
 
 
 def get_registered_tool_names():
     registered_tool_names = []
-    for schema in ALL_TOOLS_SCHEMAS:
+    for schema in CONFIGURABLE_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
-    registered_tool_names.append(KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"])
+    for schema in CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
     return registered_tool_names
+
+
+def _get_enabled_tool_names(profile: Profile) -> set[str]:
+    configs = profile.configs or {}
+    tool_config = configs.get("tool", {}) if isinstance(configs, dict) else {}
+    enabled_tools = tool_config.get("enabled_tools")
+    if enabled_tools is None:
+        return set(get_registered_tool_names())
+    if not isinstance(enabled_tools, list):
+        return set()
+    return {name for name in enabled_tools if isinstance(name, str)}
 
 
 async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None) -> tuple[list[dict[str, Any]], list[int]]:
     """
-    根据 Profile 动态生成工具列表和可用知识库白名单。
-    如果 Profile 没有可用知识库，则不暴露知识库检索工具，也不提供白名单。
-    同时，如果知识库可用，为 query_knowledge_base 的 knowledge_base_id 字段动态增加 enum 和描述映射约束。
+    根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
+    query_knowledge_base 属于动态工具：只有被启用、嵌入模型可用且存在可用知识库时才暴露，并会注入运行时知识库白名单。
     """
-    base_tools = copy.deepcopy(ALL_TOOLS_SCHEMAS)
+    enabled_tool_names = _get_enabled_tool_names(profile)
+    base_tools = []
+    for schema in CONFIGURABLE_TOOL_SCHEMAS:
+        if schema["function"]["name"] in enabled_tool_names:
+            base_tools.append(copy.deepcopy(schema))
     whitelist_ids = []
 
     try:
@@ -57,7 +81,7 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
         if is_embedding_available is None:
             is_embedding_available = await is_embedding_profile_available(db, profile)
 
-        if not is_embedding_available:
+        if not is_embedding_available or KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"] not in enabled_tool_names:
             return base_tools, whitelist_ids
 
         knowledge_bases = await list_available_knowledge_bases(db, profile)

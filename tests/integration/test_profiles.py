@@ -61,7 +61,7 @@ async def test_profile_management_full_flow():
                     "audit_provider_id": provider_id,
                     "audit_model_id": "gpt-3.5-turbo",
                 },
-                "tool": {"shell_timeout": 30.0},
+                "tool": {"tool_timeout": 30.0},
                 "other": {},
             },
         }

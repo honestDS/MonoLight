@@ -19,4 +19,10 @@ MESSAGES = {
     "ERR_PROFILE_AUDIT_MODEL_NOT_CHAT": "安全审计模型必须选择对话类模型",
     "ERR_KB_NOT_FOUND_FOR_QUERY": "知识库不存在",
     "ERR_KB_NOT_IN_PROFILE": "无权查询不属于当前配置的知识库",
+    "TOOL_EXECUTE_SHELL_LABEL": "执行 Shell",
+    "TOOL_WRITE_FILE_LABEL": "写入文件",
+    "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl 搜索",
+    "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl 抓取",
+    "TOOL_SEND_FILE_TO_USER_LABEL": "发送文件给用户",
+    "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "查询知识库",
 }

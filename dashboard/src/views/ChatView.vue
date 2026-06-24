@@ -95,7 +95,7 @@
                   <template v-if="isImageFile(att)">
                     <el-image 
                       :src="fileApi.getDownloadUrl(att)" 
-                      :preview-src-list="[fileApi.getDownloadUrl(att)]"
+                      :preview-src-list="getAttachmentImageUrls(msg)"
                       :hide-on-click-modal="true"
                       class="msg-attachment-image"
                       @load="handleImageLoad"
@@ -111,17 +111,17 @@
               </div>
 
               <!-- 消息主体内容 -->
-              <div class="content markdown-body" v-if="typeof msg.content === 'string' && msg.content.trim() && currentSessionEnableMarkdown">
+              <div class="content markdown-body" v-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && currentSessionEnableMarkdown">
                 <!-- 当处于 queued 时显示 Loading 动画图标 -->
                 <div class="queued-indicator" v-if="msg.status === 'queued'">
                   <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div><div v-html="renderMarkdown(msg.content)"></div>
+                </div><div v-html="renderMarkdown(getMessageText(msg))"></div>
               </div>
-              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof msg.content === 'string' && msg.content.trim() && !currentSessionEnableMarkdown">
+              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && !currentSessionEnableMarkdown">
                 <!-- 当处于 queued 时显示 Loading 动画图标 -->
                 <div class="queued-indicator" v-if="msg.status === 'queued'">
                   <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div><template v-for="(part, idx) in renderTextWithLinks(msg.content)" :key="idx">
+                </div><template v-for="(part, idx) in renderTextWithLinks(getMessageText(msg))" :key="idx">
                   <el-link
                     v-if="part.type === 'link'"
                     :href="part.href"
@@ -152,8 +152,8 @@
                     </template>
                   </div>
                   <div v-else-if="part.type === 'image_url'" class="image-part">
-                    <el-image 
-                      :src="part.image_url.url" 
+                    <el-image
+                      :src="part.image_url.url"
                       :preview-src-list="[part.image_url.url]"
                       :hide-on-click-modal="true"
                       class="msg-image"
@@ -161,6 +161,27 @@
                     ></el-image>
                   </div>
                   <div v-else class="text-part">{{ JSON.stringify(part) }}</div>
+                </div>
+              </div>
+
+              <div class="message-attachments message-sent-files" v-if="getMessageFiles(msg).length > 0">
+                <div v-for="file in getMessageFiles(msg)" :key="file.id" class="message-attachment-item">
+                  <template v-if="isPreviewImage(file)">
+                    <el-image
+                      :src="getSentFileUrl(file)"
+                      :preview-src-list="getSentFileImageUrls(msg)"
+                      :hide-on-click-modal="true"
+                      class="msg-attachment-image"
+                      @load="handleImageLoad"
+                    ></el-image>
+                  </template>
+                  <template v-else>
+                    <a :href="getSentFileUrl(file)" target="_blank" rel="noopener noreferrer" class="msg-attachment-file">
+                      <img src="@/assets/svg/document.svg" class="icon-document" />
+                      <span class="file-name" :title="file.name">{{ file.name }}</span>
+                      <span class="sent-file-meta">{{ file.mime_type }} · {{ formatFileSize(file.size) }}</span>
+                    </a>
+                  </template>
                 </div>
               </div>
             </template>
@@ -607,8 +628,56 @@ const isImageFile = (path) => {
 const getFilename = (path) => {
   if (!path) return t('chat.unknown_file')
   const name = path.split(/[/\\]/).pop()
-  // 去除 8位uuid_ 前缀
+  // 去除 8 位 uuid_ 前缀
   return name.length > 9 && name[8] === '_' ? name.substring(9) : name
+}
+
+const getSentFileUrl = (file) => {
+  return fileApi.resolveDownloadUrl(file?.download_url)
+}
+
+const getAttachmentImageUrls = (msg) => {
+  return (msg.attachments || [])
+    .filter(isImageFile)
+    .map(att => fileApi.getDownloadUrl(att))
+}
+
+const getSentFileImageUrls = (msg) => {
+  return getMessageFiles(msg)
+    .filter(isPreviewImage)
+    .map(getSentFileUrl)
+}
+
+const parseAssistantFilesContent = (content) => {
+  try {
+    const parsed = typeof content === 'string' ? JSON.parse(content) : content
+    if (parsed && parsed.type === 'assistant_files') {
+      return parsed
+    }
+  } catch {}
+  return null
+}
+
+const getMessageText = (msg) => {
+  const parsed = parseAssistantFilesContent(msg.content)
+  if (parsed) return parsed.text || ''
+  return msg.content
+}
+
+const getMessageFiles = (msg) => {
+  const parsed = parseAssistantFilesContent(msg.content)
+  return msg.files || parsed?.files || []
+}
+
+const isPreviewImage = (file) => {
+  return file?.previewable && file?.mime_type?.startsWith('image/')
+}
+
+const formatFileSize = (size) => {
+  if (!Number.isFinite(size)) return '-'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 // 消息角色映射到CSS类名的辅助函数

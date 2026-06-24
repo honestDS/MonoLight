@@ -294,6 +294,31 @@ export function useChatSession() {
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
 
+        if (data.files && data.files.length > 0) {
+          const newMessages = [...chatState.messages.value]
+          let targetIdx = -1
+
+          if (data.response_id) {
+            targetIdx = newMessages.findLastIndex(m => m.response_id === data.response_id && m.role === 'assistant' && !isToolCall(m))
+          }
+
+          if (targetIdx === -1 && requestIdParam) {
+            targetIdx = newMessages.findLastIndex(m => m.request_id === requestIdParam && m.role === 'assistant' && !isToolCall(m))
+          }
+
+          if (targetIdx === -1 && !data.response_id && !requestIdParam) {
+            targetIdx = newMessages.findLastIndex(m => m.role === 'assistant' && !isToolCall(m))
+          }
+
+          if (targetIdx !== -1) {
+            newMessages[targetIdx] = { ...newMessages[targetIdx], files: data.files }
+            chatState.messages.value = newMessages
+          } else {
+            messageProcessor.processAiResponse(chatState.messages, data, thinkingId, chatState.scrollToBottom)
+            return
+          }
+        }
+
         // 以下是原先在 type === 'done' (完全结束) 时的逻辑
         // 精确清理对应的 thinking 占位符
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)

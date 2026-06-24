@@ -24,7 +24,7 @@ def mock_profile():
             "audit_model_id": "audit",
             "audit_threshold": 5,
         },
-        "tool": {"shell_timeout": 30.0},
+        "tool": {"tool_timeout": 30.0},
         "other": {"context_window_k": 4},
     }
     p.provider = MagicMock()

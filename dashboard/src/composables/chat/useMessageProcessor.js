@@ -212,6 +212,7 @@ export function useMessageProcessor() {
   const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
+    const responseFiles = response.files || []
     const aiCreatedAt = response.choices?.[0]?.created_at || null
     const role = response.choices?.[0]?.message?.role || ''
     const finishReason = response.choices?.[0]?.finish_reason
@@ -250,6 +251,10 @@ export function useMessageProcessor() {
       finalAiMsg = { id: thinkingId || Date.now(), role: 'assistant', content: aiContent, created_at: aiCreatedAt }
     } else {
       finalAiMsg = { id: thinkingId || Date.now(), role: role, content: aiContent, created_at: aiCreatedAt }
+    }
+
+    if (responseFiles.length > 0) {
+      finalAiMsg.files = responseFiles
     }
 
     aiMessagesToInsert.push(finalAiMsg)

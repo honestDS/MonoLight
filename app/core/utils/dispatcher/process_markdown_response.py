@@ -1,3 +1,4 @@
+import json
 import re
 from html.parser import HTMLParser
 
@@ -64,8 +65,14 @@ def process_markdown_response(ai_msg: InternalMessage, enable_markdown: bool) ->
     if enable_markdown or not ai_msg.content:
         return ai_msg
 
-    # 执行 Markdown 剥离
+    # 文件发送结构需要保持 JSON 原文，便于历史消息恢复文件卡片
     if isinstance(ai_msg.content, str):
+        try:
+            parsed = json.loads(ai_msg.content)
+            if isinstance(parsed, dict) and parsed.get("type") == "assistant_files":
+                return ai_msg
+        except Exception:
+            pass
         ai_msg.content = remove_markdown(ai_msg.content)
 
     return ai_msg

@@ -1,0 +1,85 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
+from app.core.utils.dispatcher.process_single_tool import process_single_tool
+from app.models.message import MessageRole
+
+
+def _patch_process_single_tool_side_effects(monkeypatch):
+    monkeypatch.setattr(process_single_tool_module.LogManager, "log_tool_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(process_single_tool_module.LogManager, "log_tool_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        process_single_tool_module,
+        "truncate_tool_messages_for_budget",
+        lambda *args, **kwargs: SimpleNamespace(truncated_count=0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_returns_error_when_tool_disabled(monkeypatch):
+    _patch_process_single_tool_side_effects(monkeypatch)
+
+    async def fail_audit(*args, **kwargs):
+        raise AssertionError("audit should not run for disabled tools")
+
+    monkeypatch.setattr(process_single_tool_module, "audit_tool_call", fail_audit)
+
+    tool_call = SimpleNamespace(id="call_1", name="execute_shell", arguments={"cmd": "pwd"})
+    cfg = SimpleNamespace(tool=SimpleNamespace(enabled_tools=[]))
+
+    tool_msg = await process_single_tool(
+        tool_call=tool_call,
+        db=None,
+        profile=SimpleNamespace(id=1),
+        cfg=cfg,
+        messages=[],
+        username="tester",
+        session_id="session_1",
+        turn=1,
+        uid="user_1",
+    )
+    payload = json.loads(tool_msg.content)
+
+    assert tool_msg.role == MessageRole.TOOL
+    assert tool_msg.tool_call_id == "call_1"
+    assert payload == {
+        "error": "Tool execute_shell is not enabled in the active profile",
+        "tool_name": "execute_shell",
+        "status": "failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_applies_enabled_tools_before_knowledge_base_whitelist(monkeypatch):
+    _patch_process_single_tool_side_effects(monkeypatch)
+
+    async def allow_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(process_single_tool_module, "audit_tool_call", allow_audit)
+
+    tool_call = SimpleNamespace(id="call_2", name="query_knowledge_base", arguments={"knowledge_base_id": 123, "query": "hello"})
+    cfg = SimpleNamespace(tool=SimpleNamespace(enabled_tools=["query_knowledge_base"]))
+
+    tool_msg = await process_single_tool(
+        tool_call=tool_call,
+        db=None,
+        profile=SimpleNamespace(id=1),
+        cfg=cfg,
+        messages=[],
+        username="tester",
+        session_id="session_1",
+        turn=1,
+        uid="user_1",
+        allowed_knowledge_base_ids=[],
+    )
+    payload = json.loads(tool_msg.content)
+
+    assert tool_msg.role == MessageRole.TOOL
+    assert tool_msg.tool_call_id == "call_2"
+    assert payload == {
+        "error": "Unauthorized knowledge_base_id: 123. It is not in the whitelist of allowed knowledge bases.",
+    }

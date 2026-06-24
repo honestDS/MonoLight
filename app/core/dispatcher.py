@@ -46,6 +46,7 @@ from app.core.prompts import (
     PROMPT_MAX_TURNS_REACHED,
 )
 from app.core.tools import get_tools_for_profile
+from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
@@ -97,6 +98,31 @@ def _format_exception_message(exc: Exception) -> str:
     if isinstance(exc, BaseBusinessException):
         return t(exc.message, default=exc.message, **exc.kwargs)
     return str(exc)
+
+
+def _extract_files_to_user(tool_responses: list[InternalMessage]) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for tool_response in tool_responses:
+        if not isinstance(tool_response.content, str):
+            continue
+        try:
+            payload = json.loads(tool_response.content)
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "files_to_user":
+            continue
+        for file_item in payload.get("files") or []:
+            if not isinstance(file_item, dict):
+                continue
+            file_id = file_item.get("id")
+            if not file_id or file_id in seen_ids:
+                continue
+            seen_ids.add(file_id)
+            files.append(file_item)
+
+    return files
 
 
 def _reassemble_multimodal_messages(
@@ -187,6 +213,7 @@ class ChatDispatcher:
 
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []
+            files_to_user: list[dict[str, Any]] = []
             is_first_iter = True
 
             # 2. 分布式会话状态机
@@ -335,6 +362,16 @@ class ChatDispatcher:
                                 )
                                 _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
+                        if not ai_msg.tool_calls and files_to_user:
+                            ai_msg.content = json.dumps(
+                                {
+                                    "type": "assistant_files",
+                                    "text": ai_msg.content or "",
+                                    "files": files_to_user,
+                                },
+                                ensure_ascii=False,
+                            )
+
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
 
                         messages.append(ai_msg)
@@ -390,6 +427,7 @@ class ChatDispatcher:
                         tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
+                        files_to_user.extend(_extract_files_to_user(tool_responses))
                         for tool_res in tool_responses:
                             await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
 
@@ -404,6 +442,7 @@ class ChatDispatcher:
             return LLMResponse(
                 choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
                 history=[m.model_dump(exclude_none=True) for m in turn_messages],
+                files=files_to_user or None,
             ).model_dump()
 
         except BaseBusinessException:
@@ -435,6 +474,8 @@ class ChatDispatcher:
             initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
 
             turn_messages: list[InternalMessage] = []
+            files_to_user: list[dict[str, Any]] = []
+            final_response_id: str | None = None
             is_first_iter = True
 
             # 2. 分布式会话状态机
@@ -519,6 +560,7 @@ class ChatDispatcher:
                         current_content_chunks = []
 
                         response_id = str(uuid.uuid4())
+                        final_response_id = response_id
 
                         excluded_priorities: set[int] = set()
                         while True:
@@ -637,6 +679,15 @@ class ChatDispatcher:
                             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
                         ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
+                        if not ai_msg.tool_calls and files_to_user:
+                            ai_msg.content = json.dumps(
+                                {
+                                    "type": "assistant_files",
+                                    "text": ai_msg.content or "",
+                                    "files": files_to_user,
+                                },
+                                ensure_ascii=False,
+                            )
 
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
 
@@ -710,13 +761,14 @@ class ChatDispatcher:
                         tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
+                        files_to_user.extend(_extract_files_to_user(tool_responses))
                         for tool_res in tool_responses:
                             await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
                             tool_name = next((tc.name for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), "unknown")
                             yield {
                                 "type": "tool_end",
                                 "name": tool_name,
-                                "result": tool_res.content,
+                                "result": sanitize_files_to_user_result(tool_res.content),
                                 "tool_call_id": tool_res.tool_call_id,
                                 "response_id": response_id,
                                 "request_id": request_id,
@@ -731,7 +783,7 @@ class ChatDispatcher:
                 if not new_user_msgs:
                     break
 
-            yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages], "request_id": request_id}
+            yield {"type": "done", "session_id": session_id, "history": [m.model_dump(exclude_none=True) for m in turn_messages], "files": files_to_user or None, "response_id": final_response_id, "request_id": request_id}
 
         except BaseBusinessException as bbe:
             yield {"type": "error", "message": t(bbe.message, **bbe.kwargs), "request_id": request_id}

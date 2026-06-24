@@ -3,14 +3,16 @@ import i18n from '../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
+const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8001/api/v1'
+const API_BASE_URL = process.env.VUE_APP_API_BASE_URL || DEFAULT_API_BASE_URL
+const API_ORIGIN = new URL(API_BASE_URL, window.location.origin).origin
+
 const request = axios.create({
-  baseURL: 'http://127.0.0.1:8001/api/v1',
-  timeout: 120000  // 聊天接口timeout设为2分钟
+  baseURL: API_BASE_URL,
+  timeout: 120000
 })
 
-// WebSocket 独立配置
-const WS_BASE_URL = '127.0.0.1:8001'
-const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws'
+const WS_BASE_URL = process.env.VUE_APP_WS_BASE_URL || API_ORIGIN.replace(/^http/, 'ws')
 
 request.interceptors.request.use(config => {
   const token = localStorage.getItem('token')
@@ -63,7 +65,7 @@ export const chatApi = {
     // 聊天 WS 接口
     createWebSocket(token) {
         const lang = localStorage.getItem('locale') || 'zh'
-        const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/chat/ws?token=${token}&lang=${lang}`
+        const wsUrl = `${WS_BASE_URL}/api/v1/chat/ws?token=${token}&lang=${lang}`
         console.log('WebSocket connecting to:', wsUrl)
         return new WebSocket(wsUrl)
     },
@@ -118,7 +120,7 @@ export const systemApi = {
   // 系统日志实时 WS 接口
   createLogsWebSocket: (token) => {
     const lang = localStorage.getItem('locale') || 'zh'
-    const wsUrl = `${WS_PROTOCOL}://${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}&lang=${lang}`
+    const wsUrl = `${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}&lang=${lang}`
     console.log('System Logs WebSocket connecting to:', wsUrl)
     return new WebSocket(wsUrl)
   }
@@ -136,7 +138,12 @@ export const fileApi = {
     })
   },
   getDownloadUrl: (path) => {
-    return `http://127.0.0.1:8001/api/v1/download?path=${encodeURIComponent(path)}`
+    return `${API_BASE_URL}/download?path=${encodeURIComponent(path)}`
+  },
+  resolveDownloadUrl: (url) => {
+    if (!url) return '#'
+    if (/^https?:\/\//i.test(url)) return url
+    return `${API_ORIGIN}${url.startsWith('/') ? url : `/${url}`}`
   }
 }
 

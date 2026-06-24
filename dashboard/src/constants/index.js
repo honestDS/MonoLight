@@ -32,7 +32,19 @@ export const defaultProfileConfigs = () => ({
     rerank_channel: defaultChannelConfig(),
   },
   security: { audit_channel_id: null, audit_model_id: null, audit_threshold: 5 },
-  tool: { shell_timeout: 30, max_parallel_tools: 5, executor_max_workers: 10, max_turns: 5, firecrawl_api_key: '' },
+  tool: {
+    tool_timeout: 30,
+    max_parallel_tools: 5,
+    executor_max_workers: 10,
+    max_turns: 5,
+    firecrawl_api_key: '',
+    enabled_tools: ['execute_shell', 'write_file', 'firecrawl_search', 'firecrawl_scrape', 'send_file_to_user', 'query_knowledge_base'],
+    allowed_file_send_dirs: [],
+    file_send_max_count: 10,
+    file_send_max_single_size_mb: 50,
+    file_send_max_total_size_mb: 100,
+    file_send_blocked_extensions: []
+  },
   other: { log_locale: 'zh' },
 })
 

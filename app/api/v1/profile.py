@@ -19,6 +19,7 @@ from app.core.exceptions import (
     ParameterException,
     ResourceNotFoundException,
 )
+from app.core.i18n import t
 from app.core.security import get_current_user
 from app.models.channel import ChannelConfig, ModelUsage
 from app.models.profile import (
@@ -38,6 +39,20 @@ router = APIRouter(
     tags=["Profile Management"],
     dependencies=[Depends(get_current_user)],
 )
+
+
+PROFILE_TOOL_OPTIONS = [
+    {"value": "execute_shell", "label_key": "TOOL_EXECUTE_SHELL_LABEL"},
+    {"value": "write_file", "label_key": "TOOL_WRITE_FILE_LABEL"},
+    {"value": "firecrawl_search", "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
+    {"value": "firecrawl_scrape", "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
+    {"value": "send_file_to_user", "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
+    {"value": "query_knowledge_base", "label_key": "TOOL_QUERY_KNOWLEDGE_BASE_LABEL"},
+]
+
+
+def get_profile_tool_options() -> list[dict[str, str]]:
+    return [{"value": item["value"], "label": t(item["label_key"], default=item["value"])} for item in PROFILE_TOOL_OPTIONS]
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -161,6 +176,7 @@ async def list_profiles(
         total=total,
         page=page,
         size=size,
+        meta={"tool_options": get_profile_tool_options()},
     )
     return StandardResponse.success(data=page_data)
 

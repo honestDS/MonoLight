@@ -3,3 +3,17 @@
 .el-collapse {
   max-width: 100%;
 }
+
+.message-item.ai .message-sent-files {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
+.message-sent-files .msg-attachment-file {
+  gap: 6px;
+}
+
+.message-sent-files .sent-file-meta {
+  color: #909399;
+  font-size: 12px;
+}
