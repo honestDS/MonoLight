@@ -362,6 +362,8 @@ async def test_image_generation_uses_model_entry_size_and_quality_by_default(tmp
     captured_kwargs = {}
 
     async def mock_select_channel(*args, **kwargs):
+        if 1 in (kwargs.get("excluded_priorities") or set()):
+            return None
         channel = SimpleNamespace(
             id=1,
             name="image-channel",
@@ -384,8 +386,13 @@ async def test_image_generation_uses_model_entry_size_and_quality_by_default(tmp
             "data": [{"url": "https://example.com/generated.png"}],
         }
 
+    async def mock_download_remote_image(self, url):
+        assert url == "https://example.com/generated.png"
+        return b"fake-png-bytes", "image/png"
+
     monkeypatch.setattr("app.core.tools.image_generation.select_channel", mock_select_channel)
     monkeypatch.setattr("app.core.tools.image_generation.ImageGenerationClient.generate_image", mock_generate_image)
+    monkeypatch.setattr("app.core.tools.image_generation.ImageGenerationExecutor._download_remote_image", mock_download_remote_image)
 
     executor = ImageGenerationExecutor(project_root=str(tmp_path), uid="test_user")
     executor.set_config(
@@ -404,7 +411,67 @@ async def test_image_generation_uses_model_entry_size_and_quality_by_default(tmp
     result = json.loads(result_json)
 
     assert result["status"] == "success"
+    assert result["type"] == "files_to_user"
     assert captured_kwargs["size"] == "1024x1536"
     assert captured_kwargs["quality"] == "high"
     assert result["size"] == "1024x1536"
     assert result["quality"] == "high"
+    assert len(result["files"]) == 1
+    generated_file = result["files"][0]
+    assert "path" not in generated_file
+    generated_path = resolve_file_token(generated_file["id"])
+    assert generated_path.is_file()
+    assert generated_path.read_bytes() == b"fake-png-bytes"
+    assert generated_file["name"].endswith(".png")
+    assert generated_file["mime_type"] == "image/png"
+    assert generated_file["previewable"] is True
+
+
+@pytest.mark.asyncio
+async def test_image_generation_rejects_downloaded_non_image_content_type(tmp_path, monkeypatch, encryption_key):
+    async def mock_select_channel(*args, **kwargs):
+        if 1 in (kwargs.get("excluded_priorities") or set()):
+            return None
+        channel = SimpleNamespace(
+            id=1,
+            name="image-channel",
+            channel_type=ChannelType.OPENAI,
+            base_url="https://api.example.com/v1",
+            get_decrypted_api_key=lambda: "fake-key",
+        )
+        model_entry = {"model_id": "gpt-image-1"}
+        rule = SimpleNamespace(priority=1)
+        return channel, model_entry, rule
+
+    async def mock_generate_image(**kwargs):
+        return {
+            "model": kwargs["model_id"],
+            "data": [{"url": "https://example.com/generated.bin"}],
+        }
+
+    async def mock_download_remote_image(self, url):
+        assert url == "https://example.com/generated.bin"
+        return b"not-an-image", "application/octet-stream"
+
+    monkeypatch.setattr("app.core.tools.image_generation.select_channel", mock_select_channel)
+    monkeypatch.setattr("app.core.tools.image_generation.ImageGenerationClient.generate_image", mock_generate_image)
+    monkeypatch.setattr("app.core.tools.image_generation.ImageGenerationExecutor._download_remote_image", mock_download_remote_image)
+
+    executor = ImageGenerationExecutor(project_root=str(tmp_path), uid="test_user")
+    executor.set_config(
+        SimpleNamespace(
+            channel=SimpleNamespace(
+                image_generation_channel=ChannelConfig(
+                    rules=[ChannelRule(channel_id=1, model_id="gpt-image-1", priority=1, weight=100)],
+                ),
+            ),
+            tool=SimpleNamespace(image_generation_timeout=60.0),
+        ),
+    )
+    executor.set_runtime_context(db=object(), profile=SimpleNamespace(id=1))
+
+    result_json = await executor.execute(prompt="draw a cat")
+    result = json.loads(result_json)
+
+    assert result["status"] == "failed"
+    assert "unsupported content type" in result["error"]

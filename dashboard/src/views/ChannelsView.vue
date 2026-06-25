@@ -626,6 +626,23 @@ const handleSizeChange = () => {
   fetchChannels()
 }
 
+const buildModelEntryPayload = (entry) => {
+  const payload = {
+    ...entry,
+    model_id: (entry.model_id || '').trim()
+  }
+
+  if (payload.usage !== 'IMAGE_GENERATION') {
+    delete payload.size
+    delete payload.quality
+  } else {
+    payload.size = payload.size || '1024x1024'
+    payload.quality = payload.quality || 'auto'
+  }
+
+  return payload
+}
+
 const openCreateDialog = () => {
   isEdit.value = false
   currentId.value = null
@@ -689,7 +706,7 @@ const submitForm = async () => {
       api_key: form.api_key,
       base_url: form.base_url || null,
       is_active: form.is_active,
-      model_ids: form.model_ids
+      model_ids: form.model_ids.map(buildModelEntryPayload)
     }
     if (isEdit.value) {
       const res = await channelApi.update(currentId.value, payload)

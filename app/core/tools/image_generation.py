@@ -1,9 +1,12 @@
 import base64
 import json
+import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+import aiohttp
 
 from app.core.channel_router import select_channel
 from app.core.exceptions import BaseBusinessException
@@ -57,9 +60,7 @@ class ImageGenerationExecutor(BaseExecutor):
         image_dir.mkdir(parents=True, exist_ok=True)
         return image_dir
 
-    async def _save_base64_image(self, b64_json: str) -> dict[str, Any]:
-        image_bytes = base64.b64decode(b64_json)
-        file_name = f"generated_image_{uuid.uuid4().hex}.png"
+    async def _write_image_file(self, image_bytes: bytes, file_name: str, mime_type: str) -> dict[str, Any]:
         image_path = (self._get_generated_image_dir() / file_name).resolve()
 
         def write_image():
@@ -71,11 +72,33 @@ class ImageGenerationExecutor(BaseExecutor):
             "id": token,
             "name": file_name,
             "description": "Generated image",
-            "mime_type": "image/png",
+            "mime_type": mime_type,
             "size": len(image_bytes),
             "download_url": f"/api/v1/download-sent?token={quote(token)}",
             "previewable": True,
         }
+
+    async def _save_base64_image(self, b64_json: str) -> dict[str, Any]:
+        image_bytes = base64.b64decode(b64_json)
+        return await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}.png", "image/png")
+
+    async def _download_remote_image(self, url: str) -> tuple[bytes, str]:
+        client_timeout = aiohttp.ClientTimeout(total=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0))
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                image_bytes = await response.read()
+                return image_bytes, content_type or "application/octet-stream"
+
+    async def _save_downloaded_image(self, url: str) -> dict[str, Any]:
+        image_bytes, content_type = await self._download_remote_image(url)
+        if not content_type.startswith("image/"):
+            raise ValueError(f"Downloaded image has unsupported content type: {content_type}")
+        extension = mimetypes.guess_extension(content_type) or ".img"
+        if extension == ".jpe":
+            extension = ".jpg"
+        return await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}{extension}", content_type)
 
     async def execute(
         self,
@@ -153,20 +176,20 @@ class ImageGenerationExecutor(BaseExecutor):
                 model_name = response.get("model", model_entry["model_id"]) if isinstance(response, dict) else model_entry["model_id"]
 
                 if image.get("url"):
+                    file_item = await self._save_downloaded_image(str(image["url"]))
                     return json.dumps(
                         {
                             "status": "success",
-                            "type": "generated_image",
+                            "type": "files_to_user",
+                            "files": [file_item],
+                            "errors": [],
                             "model": model_name,
                             "channel_id": channel.id,
                             "channel_name": channel.name,
                             "prompt": prompt_text,
                             "size": resolved_size,
                             "quality": resolved_quality,
-                            "image": {
-                                "url": image.get("url"),
-                                "revised_prompt": image.get("revised_prompt"),
-                            },
+                            "message": "Image generated successfully. The generated image file will be automatically appended after the assistant reply in the chat UI.",
                         },
                         ensure_ascii=False,
                     )

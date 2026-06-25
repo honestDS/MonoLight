@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from app.api.v1.channels import _normalize_channel_model_ids
 from app.models.channel import ChannelBase, ChannelConfig, ChannelType, ChannelUpdate, ModelUsage, validate_channel_model_ids
 from app.models.profile import ChannelGroupConfig, ProfileConfig
 
@@ -119,3 +120,31 @@ def test_non_image_generation_model_entry_rejects_image_generation_fields():
 
     assert error_key == "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID"
     assert error_kwargs["index"] == 0
+
+
+def test_normalize_channel_model_ids_removes_image_generation_fields_from_chat_entry():
+    model_ids = [
+        {
+            "model_id": "claude-opus-4-8",
+            "usage": ModelUsage.CHAT,
+            "image_understanding": False,
+            "audio_understanding": False,
+            "video_understanding": False,
+            "context_window_k": 4,
+            "temperature": 0.7,
+            "top_p": 1,
+            "max_tokens": 2048,
+            "embedding_dimensions": None,
+            "size": "1024x1024",
+            "quality": "auto",
+            "description": "",
+        }
+    ]
+
+    normalized_model_ids = _normalize_channel_model_ids(model_ids)
+    error_key, error_kwargs = validate_channel_model_ids(normalized_model_ids)
+
+    assert "size" not in normalized_model_ids[0]
+    assert "quality" not in normalized_model_ids[0]
+    assert error_key is None
+    assert error_kwargs == {}

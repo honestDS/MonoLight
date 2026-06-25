@@ -104,6 +104,17 @@ def _is_same_channel(rule: dict, channel_id: int) -> bool:
     return str(rule.get("channel_id")) == str(channel_id)
 
 
+def _normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
+    normalized_model_ids = []
+    for item in model_ids or []:
+        normalized_item = copy.deepcopy(item)
+        if str(normalized_item.get("usage")) != ModelUsage.IMAGE_GENERATION.value:
+            normalized_item.pop("size", None)
+            normalized_item.pop("quality", None)
+        normalized_model_ids.append(normalized_item)
+    return normalized_model_ids
+
+
 def _get_existing_model_ids_by_usage(model_ids: list[dict]) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {usage.value: set() for usage in ModelUsage}
     for item in model_ids:
@@ -471,6 +482,7 @@ async def create_channel(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
+    channel_in.model_ids = _normalize_channel_model_ids(channel_in.model_ids)
     validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
     if validation_error:
         return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
@@ -688,6 +700,7 @@ async def update_channel(
 
     # 校验 model_ids 合法性（如果传入）
     if channel_in.model_ids is not None:
+        channel_in.model_ids = _normalize_channel_model_ids(channel_in.model_ids)
         validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
         if validation_error:
             return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
