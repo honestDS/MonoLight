@@ -48,7 +48,7 @@
         <div class="channel-settings-title">{{ $t('channels.channel_settings') }}</div>
         <div class="channel-settings-body">
           <div class="channel-settings-top">
-            <el-form :model="form" label-width="100px" class="channel-settings-form">
+            <el-form :model="form" class="channel-settings-form">
               <div class="channel-settings-row channel-settings-row--fields">
                 <el-form-item :label="$t('channels.channel_name')">
                   <el-input v-model="form.name" :placeholder="$t('channels.channel_name_placeholder')" />

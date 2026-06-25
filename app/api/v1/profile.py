@@ -1,6 +1,6 @@
 """Profile API：渠道管理架构适配版
 
-CRUD 支持 chat_channel/embedding_channel/rerank_channel；activate 校验适配
+CRUD 支持 chat_channel/embedding_channel/rerank_channel/image_generation_channel；activate 校验适配
 """
 
 from fastapi import (
@@ -47,6 +47,7 @@ PROFILE_TOOL_OPTIONS = [
     {"value": "firecrawl_search", "label_key": "TOOL_FIRECRAWL_SEARCH_LABEL"},
     {"value": "firecrawl_scrape", "label_key": "TOOL_FIRECRAWL_SCRAPE_LABEL"},
     {"value": "send_file_to_user", "label_key": "TOOL_SEND_FILE_TO_USER_LABEL"},
+    {"value": "generate_image", "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
     {"value": "query_knowledge_base", "label_key": "TOOL_QUERY_KNOWLEDGE_BASE_LABEL"},
 ]
 
@@ -105,12 +106,14 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
     - chat_channel：至少需要一条启用规则
     - embedding_channel：可选，有配置则校验
     - rerank_channel：可选，有配置则校验
+    - image_generation_channel：可选，有配置则校验
     - 每条规则必须引用对应用途的模型条目
     """
     channel_usage_map = {
         "chat_channel": ModelUsage.CHAT,
         "embedding_channel": ModelUsage.EMBEDDING,
         "rerank_channel": ModelUsage.RERANK,
+        "image_generation_channel": ModelUsage.IMAGE_GENERATION,
     }
 
     for channel_key, expected_usage in channel_usage_map.items():

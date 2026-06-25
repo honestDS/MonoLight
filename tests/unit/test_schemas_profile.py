@@ -41,7 +41,9 @@ def test_profile_config_defaults():
     assert cfg.channel.chat_channel.chat_timeout == 60.0
     assert cfg.security.audit_threshold == 5
     assert cfg.tool.tool_timeout == 30.0
+    assert cfg.tool.image_generation_timeout == 60.0
     assert "send_file_to_user" in cfg.tool.enabled_tools
+    assert "generate_image" in cfg.tool.enabled_tools
     assert "query_knowledge_base" in cfg.tool.enabled_tools
     assert cfg.tool.allowed_file_send_dirs == []
     assert cfg.tool.file_send_max_count == 10

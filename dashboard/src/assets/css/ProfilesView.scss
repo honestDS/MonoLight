@@ -69,3 +69,68 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+
+.scheduling-control-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .el-form-item {
+    margin-bottom: 0;
+  }
+
+  .el-form-item__content {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .full-width-input {
+    flex: 1 1 240px;
+    width: auto;
+  }
+
+  .help-text {
+    flex: 1 1 100%;
+  }
+}
+
+.profile-dialog {
+  .el-dialog__body {
+    overflow: hidden;
+  }
+
+  .el-form,
+  .el-tabs {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .el-tabs {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .el-tabs__header {
+    flex-shrink: 0;
+  }
+
+  .el-tabs__content {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .el-tab-pane {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .tab-pane-content {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+}

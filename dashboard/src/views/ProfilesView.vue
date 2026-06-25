@@ -41,8 +41,8 @@
       </el-table-column>
     </BaseDataTable>
 
-    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="50%" class="standard-dialog dialog-with-scroll-body" center align-center>
-      <el-form :model="form" label-width="120px" size="default">
+    <el-dialog :title="dialogType === 'create' ? $t('profiles.create_profile') : $t('profiles.edit_profile')" v-model="dialogVisible" width="50%" class="standard-dialog dialog-with-scroll-body profile-dialog" center align-center>
+      <el-form :model="form" size="default" label-position="top">
         <el-tabs v-model="activeTab">
           <!-- 基础设置 -->
           <el-tab-pane :label="$t('profiles.base_settings')" name="base">
@@ -95,6 +95,16 @@
                 />
               </div>
 
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.image_generation_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.channel.image_generation_channel"
+                  :channels="channels"
+                  usage="IMAGE_GENERATION"
+                  :label="$t('profiles.image_generation_model')"
+                />
+              </div>
+
 
             </div>
           </el-tab-pane>
@@ -104,7 +114,7 @@
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.security_settings') }}</div>
-                <el-form-item :label="$t('profiles.audit_model_id')">
+                <el-form-item :label="$t('profiles.audit_model_id')" label-width="auto">
                   <el-select
                     v-model="auditModelKey"
                     :placeholder="$t('profiles.audit_model_hint')"
@@ -120,7 +130,7 @@
                     ></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.audit_threshold')">
+                <el-form-item :label="$t('profiles.audit_threshold')" label-width="auto">
                   <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
                   <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
                 </el-form-item>
@@ -133,31 +143,27 @@
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.scheduling_control') }}</div>
-                <el-row :gutter="20">
-                  <el-col :span="8">
-                    <el-form-item :label="$t('profiles.max_parallel_tools')">
-                      <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                      <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="$t('profiles.executor_max_workers')">
-                      <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
-                      <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="$t('profiles.max_turns')">
-                      <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="$t('profiles.tool_timeout')">
-                      <el-input-number v-model="form.configs.tool.tool_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
-                      <div class="help-text mt-5">{{ $t('profiles.tool_timeout_hint') }}</div>
-                    </el-form-item>
-                  </el-col>
-                </el-row>
+                <div class="scheduling-control-list">
+                  <el-form-item :label="$t('profiles.max_parallel_tools')">
+                    <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
+                  </el-form-item>
+                  <el-form-item :label="$t('profiles.executor_max_workers')">
+                    <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
+                  </el-form-item>
+                  <el-form-item :label="$t('profiles.max_turns')">
+                    <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                  </el-form-item>
+                  <el-form-item :label="$t('profiles.tool_timeout')">
+                    <el-input-number v-model="form.configs.tool.tool_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.tool_timeout_hint') }}</div>
+                  </el-form-item>
+                  <el-form-item :label="$t('profiles.image_generation_tool_timeout')">
+                    <el-input-number v-model="form.configs.tool.image_generation_timeout" :min="1" :max="600" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.image_generation_tool_timeout_hint') }}</div>
+                  </el-form-item>
+                </div>
               </div>
 
               <div class="settings-section">
@@ -519,6 +525,7 @@ const showDialog = (type, row = null) => {
         if (p.chat_channel) Object.assign(base.channel.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
         if (p.embedding_channel) Object.assign(base.channel.embedding_channel, JSON.parse(JSON.stringify(p.embedding_channel)))
         if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
+        if (p.image_generation_channel) Object.assign(base.channel.image_generation_channel, JSON.parse(JSON.stringify(p.image_generation_channel)))
       }
       if (row.configs.security) Object.assign(base.security, row.configs.security)
       if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
@@ -556,6 +563,7 @@ const submitForm = async () => {
   cleanChannel(form.configs.channel.chat_channel)
   cleanChannel(form.configs.channel.embedding_channel)
   cleanChannel(form.configs.channel.rerank_channel)
+  cleanChannel(form.configs.channel.image_generation_channel)
   addAllowedFileSendDir()
   addFileSendBlockedExtension()
 

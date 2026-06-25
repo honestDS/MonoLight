@@ -24,5 +24,6 @@ MESSAGES = {
     "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl 搜索",
     "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl 抓取",
     "TOOL_SEND_FILE_TO_USER_LABEL": "发送文件给用户",
+    "TOOL_GENERATE_IMAGE_LABEL": "生成图像",
     "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "查询知识库",
 }

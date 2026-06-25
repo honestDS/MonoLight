@@ -2,7 +2,7 @@
   <div class="channel-editor">
     <div class="channel-editor-config">
       <div v-if="usage === 'CHAT'" class="channel-editor-config-item">
-        <el-form-item :label="$t('profiles.chat_timeout')" label-width="100px">
+        <el-form-item :label="$t('profiles.chat_timeout')" label-width="auto">
           <el-input-number
             v-model="channel.chat_timeout"
             :min="1"
@@ -12,7 +12,7 @@
         </el-form-item>
       </div>
       <div v-else-if="usage === 'EMBEDDING'" class="channel-editor-config-item">
-        <el-form-item :label="$t('profiles.embedding_timeout')" label-width="100px">
+        <el-form-item :label="$t('profiles.embedding_timeout')" label-width="auto">
           <el-input-number
             v-model="channel.embedding_timeout"
             :min="1"
@@ -23,7 +23,7 @@
       </div>
       <template v-else-if="usage === 'RERANK'">
         <div class="channel-editor-config-item">
-          <el-form-item :label="$t('profiles.rerank_timeout')" label-width="100px">
+          <el-form-item :label="$t('profiles.rerank_timeout')" label-width="auto">
             <el-input-number
               v-model="channel.rerank_timeout"
               :min="1"
@@ -33,7 +33,7 @@
           </el-form-item>
         </div>
         <div class="channel-editor-config-item">
-          <el-form-item :label="$t('profiles.rerank_candidate_k')" label-width="100px">
+          <el-form-item :label="$t('profiles.rerank_candidate_k')" label-width="auto">
             <el-input-number
               v-model="channel.rerank_candidate_k"
               :min="1"
@@ -43,7 +43,7 @@
           </el-form-item>
         </div>
         <div class="channel-editor-config-item">
-          <el-form-item :label="$t('profiles.kb_query_top_k')" label-width="100px">
+          <el-form-item :label="$t('profiles.kb_query_top_k')" label-width="auto">
             <el-input-number
               v-model="channel.kb_query_top_k"
               :min="1"
@@ -55,7 +55,7 @@
       </template>
     </div>
 
-    <el-form-item :label="label || $t('profiles.model_id')" label-width="100px">
+    <el-form-item :label="label || $t('profiles.model_id')" label-width="auto">
       <el-select
         v-model="selectedRuleKeys"
         multiple
@@ -119,17 +119,17 @@
           </div>
           <div class="channel-rule-fields">
             <div class="channel-rule-field">
-              <el-form-item :label="$t('profiles.model_id')" label-width="70px">
+              <el-form-item :label="$t('profiles.model_id')" label-width="auto">
                 <el-input :model-value="getRuleLabel(element)" disabled />
               </el-form-item>
             </div>
             <div class="channel-rule-field">
-              <el-form-item :label="$t('profiles.priority')" label-width="60px">
+              <el-form-item :label="$t('profiles.priority')" label-width="auto">
                 <el-input-number v-model="element.priority" :min="1" controls-position="right" @change="handlePriorityChange" />
               </el-form-item>
             </div>
             <div class="channel-rule-field">
-              <el-form-item :label="$t('profiles.weight')" label-width="60px">
+              <el-form-item :label="$t('profiles.weight')" label-width="auto">
                 <el-input-number v-model="element.weight" :min="0" controls-position="right" />
               </el-form-item>
             </div>

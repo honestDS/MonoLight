@@ -34,9 +34,10 @@ if TYPE_CHECKING:
 class ChannelGroupConfig(BaseModel):
     """渠道管理组配置（渠道管理架构）"""
 
-    chat_channel: ChannelConfig | None = PydanticField(None, description="对话渠道配置")
-    embedding_channel: ChannelConfig | None = PydanticField(None, description="嵌入渠道配置")
-    rerank_channel: ChannelConfig | None = PydanticField(None, description="重排渠道配置")
+    chat_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="对话渠道配置")
+    embedding_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="嵌入渠道配置")
+    rerank_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="重排渠道配置")
+    image_generation_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="图像生成渠道配置")
 
 
 class SecurityConfig(BaseModel):
@@ -51,10 +52,11 @@ class ToolConfig(BaseModel):
     """Agent 工具调用参数配置"""
 
     tool_timeout: float = PydanticField(30.0, gt=0, description="工具执行超时时间（秒）")
+    image_generation_timeout: float = PydanticField(60.0, gt=0, le=600, description="图像生成工具执行超时时间（秒）")
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
-    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
+    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "generate_image", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
     allowed_file_send_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 允许发送文件的安全目录白名单，目录必须使用绝对路径")
     file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
     file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
@@ -96,12 +98,12 @@ class ProfileConfig(BaseModel):
                 "chat_channel",
                 "embedding_channel",
                 "rerank_channel",
+                "image_generation_channel",
             ],
             "security": ["audit_channel_id", "audit_model_id", "audit_threshold"],
             "tool": [
                 "tool_timeout",
-                "tool_timeout",
-                "tool_timeout",
+                "image_generation_timeout",
                 "max_parallel_tools",
                 "max_turns",
                 "firecrawl_api_key",
@@ -144,6 +146,11 @@ PROFILE_EXAMPLE = {
                     {"channel_id": 1, "model_id": "bge-reranker-large", "priority": 1, "weight": 100},
                 ],
             },
+            "image_generation_channel": {
+                "rules": [
+                    {"channel_id": 1, "model_id": "gpt-image-1", "priority": 1, "weight": 100},
+                ],
+            },
         },
         "security": {
             "audit_channel_id": 1,
@@ -152,10 +159,11 @@ PROFILE_EXAMPLE = {
         },
         "tool": {
             "tool_timeout": 30,
+            "image_generation_timeout": 60,
             "max_parallel_tools": 5,
             "max_turns": 5,
             "firecrawl_api_key": "",
-            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "query_knowledge_base"],
+            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "generate_image", "query_knowledge_base"],
             "allowed_file_send_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,

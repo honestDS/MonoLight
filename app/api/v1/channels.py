@@ -62,6 +62,7 @@ CHANNEL_USAGE_MAP = {
     "chat_channel": ModelUsage.CHAT.value,
     "embedding_channel": ModelUsage.EMBEDDING.value,
     "rerank_channel": ModelUsage.RERANK.value,
+    "image_generation_channel": ModelUsage.IMAGE_GENERATION.value,
 }
 
 

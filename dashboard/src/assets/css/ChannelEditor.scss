@@ -2,14 +2,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0 16px;
-  padding: 12px 14px 2px;
-  margin-bottom: 12px;
-  background: var(--color-bg-page);
-  border-radius: 6px;
-}
-
-.channel-editor-config-item {
-  flex: 0 0 calc(25% - 12px);
 }
 
 .channel-rule-list {

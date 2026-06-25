@@ -3,13 +3,16 @@ from typing import Any
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.channel_router import select_channel
 from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, is_embedding_profile_available, list_available_knowledge_bases
 from app.core.log import get_logger
+from app.models.channel import ChannelConfig
 from app.models.profile import Profile
 
 from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
+from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
 from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
@@ -25,6 +28,10 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     SEND_FILE_TO_USER_TOOL_SCHEMA,
 ]
 
+CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS = [
+    IMAGE_GENERATION_TOOL_SCHEMA,
+]
+
 CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
 ]
@@ -38,6 +45,7 @@ TOOL_EXECUTOR_MAP = {
     FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"]: FirecrawlSearchExecutor,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"]: FirecrawlScrapeExecutor,
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
+    IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
 }
 
@@ -45,6 +53,8 @@ TOOL_EXECUTOR_MAP = {
 def get_registered_tool_names():
     registered_tool_names = []
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
+    for schema in CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     for schema in CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
@@ -62,6 +72,38 @@ def _get_enabled_tool_names(profile: Profile) -> set[str]:
     return {name for name in enabled_tools if isinstance(name, str)}
 
 
+async def _is_image_generation_profile_available(db: AsyncSession, profile: Profile) -> bool:
+    configs = profile.configs or {}
+    if not isinstance(configs, dict):
+        return False
+
+    channel_config = configs.get("channel", {})
+    if not isinstance(channel_config, dict):
+        return False
+
+    image_generation_channel_raw = channel_config.get("image_generation_channel")
+    if not image_generation_channel_raw:
+        return False
+
+    try:
+        image_generation_channel = ChannelConfig.model_validate(image_generation_channel_raw)
+    except Exception:
+        return False
+
+    if not image_generation_channel.rules:
+        return False
+
+    selected_channel = await select_channel(
+        db,
+        image_generation_channel,
+        "IMAGE_GENERATION",
+        excluded_priorities=set(),
+        cursor_key=None,
+        log_selection=False,
+    )
+    return selected_channel is not None
+
+
 async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
@@ -72,6 +114,8 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         if schema["function"]["name"] in enabled_tool_names:
             base_tools.append(copy.deepcopy(schema))
+    if IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
+        base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
     whitelist_ids = []
 
     try:
