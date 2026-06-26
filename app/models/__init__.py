@@ -1,3 +1,4 @@
+from app.models.background_task import BackgroundTask as BackgroundTask
 from app.models.channel import ModelChannel as ModelChannel
 from app.models.channel_cursor import ChannelCursor as ChannelCursor
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase

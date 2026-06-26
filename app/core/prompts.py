@@ -36,6 +36,19 @@ ERR_PARALLEL_LIMIT_EXCEEDED = "Too many parallel tool calls. Requested: {request
 # Tool execution interrupted
 PROMPT_TOOL_INTERRUPTED = "The execution of this tool was interrupted (possibly due to a new user message or system restart). The result is unknown. Please check if the action was completed and decide the next step."
 
+# Background task proactive reply prompts
+BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT = "A background tool task has completed. Use this result to proactively reply to the user. Do not call the original background tool again. Follow any user-facing delivery instruction included in the completed task result; otherwise reply with text only."
+
+BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT = "The previous tool call is not allowed in background proactive replies and has been ignored. Do not call the original background tool again. Follow any user-facing delivery instruction included in the completed task result; otherwise reply with text only."
+
+BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT = "Reply to the user with text only. Do not call any tools. Explain the completed background task result based on the provided background_tool_result message."
+
+BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT = "The background task has completed, but the proactive reply attempted unsupported tool calls and they were ignored."
+
+BACKGROUND_TASK_QUEUED_PROMPT = "Tool {tool_name} has been queued as a background task and will reply proactively after completion."
+
+BACKGROUND_TASK_UNSUPPORTED_PROMPT = "Do not use run_in_background with {tool_name}. Call the tool again without run_in_background, or choose a tool whose schema explicitly includes run_in_background."
+
 # Runtime context policy
 SYSTEM_RUNTIME_CONTEXT_POLICY = """<runtime_context_policy>
 Runtime environment metadata may be appended to user messages by the platform inside system_environment_context tags.

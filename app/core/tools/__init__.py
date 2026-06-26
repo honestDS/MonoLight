@@ -9,11 +9,13 @@ from app.core.log import get_logger
 from app.models.channel import ChannelConfig
 from app.models.profile import Profile
 
+from .cancel_background_task import CANCEL_BACKGROUND_TASK_TOOL_SCHEMA, CancelBackgroundTaskExecutor
 from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
+from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
 from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
 
@@ -26,6 +28,8 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     FIRECRAWL_SEARCH_TOOL_SCHEMA,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA,
     SEND_FILE_TO_USER_TOOL_SCHEMA,
+    LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
+    CANCEL_BACKGROUND_TASK_TOOL_SCHEMA,
 ]
 
 CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS = [
@@ -36,6 +40,12 @@ CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
 ]
 
+BACKGROUND_CAPABLE_TOOL_NAMES = {
+    FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"],
+    FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"],
+    IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"],
+}
+
 ALL_TOOLS_SCHEMAS = CONFIGURABLE_TOOL_SCHEMAS
 
 # Tool Executor Mapping
@@ -45,6 +55,8 @@ TOOL_EXECUTOR_MAP = {
     FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"]: FirecrawlSearchExecutor,
     FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"]: FirecrawlScrapeExecutor,
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
+    LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ListBackgroundTasksExecutor,
+    CANCEL_BACKGROUND_TASK_TOOL_SCHEMA["function"]["name"]: CancelBackgroundTaskExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
 }
@@ -59,6 +71,38 @@ def get_registered_tool_names():
     for schema in CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     return registered_tool_names
+
+
+def _inject_background_control(schema: dict[str, Any]) -> dict[str, Any]:
+    tool_name = schema["function"]["name"]
+    if tool_name not in BACKGROUND_CAPABLE_TOOL_NAMES:
+        return schema
+
+    parameters = schema["function"].setdefault("parameters", {})
+    properties = parameters.setdefault("properties", {})
+    properties.setdefault(
+        "run_in_background",
+        {
+            "type": "boolean",
+            "description": "Set true for long-running work that should continue in the background. The system will notify the user after completion.",
+            "default": False,
+        },
+    )
+    return schema
+
+
+def _iter_tool_schemas() -> list[dict[str, Any]]:
+    return [*CONFIGURABLE_TOOL_SCHEMAS, *CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS, *CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS]
+
+
+def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
+    for schema in _iter_tool_schemas():
+        if schema["function"]["name"] != tool_name:
+            continue
+        tool_schema = _inject_background_control(copy.deepcopy(schema))
+        properties = tool_schema.get("function", {}).get("parameters", {}).get("properties", {})
+        return isinstance(properties, dict) and parameter_name in properties
+    return False
 
 
 def _get_enabled_tool_names(profile: Profile) -> set[str]:
@@ -104,7 +148,7 @@ async def _is_image_generation_profile_available(db: AsyncSession, profile: Prof
     return selected_channel is not None
 
 
-async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None) -> tuple[list[dict[str, Any]], list[int]]:
+async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None, *, allow_background: bool = True) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
     query_knowledge_base 属于动态工具：只有被启用、嵌入模型可用且存在可用知识库时才暴露，并会注入运行时知识库白名单。
@@ -113,9 +157,11 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
     base_tools = []
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
         if schema["function"]["name"] in enabled_tool_names:
-            base_tools.append(copy.deepcopy(schema))
+            tool_schema = copy.deepcopy(schema)
+            base_tools.append(_inject_background_control(tool_schema) if allow_background else tool_schema)
     if IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
-        base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
+        image_tool_schema = copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA)
+        base_tools.append(_inject_background_control(image_tool_schema) if allow_background else image_tool_schema)
     whitelist_ids = []
 
     try:

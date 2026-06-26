@@ -10,6 +10,58 @@ import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+const normalizeMessageContent = (content) => {
+  if (typeof content === 'string') {
+    try {
+      return JSON.parse(content)
+    } catch {
+      return content
+    }
+  }
+  return content
+}
+
+const stableStringify = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+const normalizeHistoryMessage = (message) => {
+  const content = normalizeMessageContent(message?.content)
+  if (message?.type === 'background_result' && content?.type === 'background_tool_result') {
+    return {
+      ...message,
+      db_id: message.db_id || message.id,
+      role: 'background_system',
+      content: JSON.stringify(content)
+    }
+  }
+  return message
+}
+
+const getMessageDedupeKeys = (message) => {
+  const keys = new Set()
+  const dbId = message?.db_id || (typeof message?.id === 'number' ? message.id : null)
+  if (dbId) keys.add(`db:${dbId}`)
+
+  const content = normalizeMessageContent(message?.content)
+  const toolCalls = content?.tool_calls || message?.tool_calls || []
+  for (const toolCall of toolCalls) {
+    const toolCallId = toolCall?.id || toolCall?.function?.id
+    if (toolCallId) keys.add(`tool_call:${toolCallId}`)
+  }
+
+  const toolCallId = content?.tool_call_id || message?.tool_call_id
+  if (toolCallId) keys.add(`tool_result:${toolCallId}`)
+
+  keys.add(`content:${message?.role || ''}:${stableStringify(content ?? '')}`)
+  return keys
+}
 
 export function useChatSession() {
   // ==================== 组合各模块 ====================
@@ -39,11 +91,50 @@ export function useChatSession() {
     const historyData = await sessionManager.loadSessionHistory(pageCount)
     if (historyData && historyData.length > 0) {
       // 插入到消息列表开头
-      chatState.insertMessage(0, historyData, true)
+      chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
       await nextTick()
       chatState.scrollToBottom()
     }
   })
+
+  const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
+    if (!sessionId) return
+    const res = await chatApi.sessionsHistory(sessionId, 1, 20)
+    const historyData = res.data?.data || []
+    if (!historyData.length) return
+
+    const existingKeys = new Set(chatState.messages.value.flatMap(m => [...getMessageDedupeKeys(m)]))
+    const newMessages = []
+    for (const item of historyData) {
+      const message = normalizeHistoryMessage({ ...item, db_id: item.id })
+      const messageKeys = getMessageDedupeKeys(message)
+      if ([...messageKeys].some(key => existingKeys.has(key))) continue
+      newMessages.push(message)
+      messageKeys.forEach(key => existingKeys.add(key))
+    }
+    if (newMessages.length) {
+      chatState.messages.value.push(...newMessages)
+      await nextTick()
+      chatState.scrollToBottom()
+    }
+  }
+
+  const pollBackgroundTasksUntilSettled = async (sessionId, intervalSeconds = 2) => {
+    if (!sessionId) return
+    const maxAttempts = 60
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await sleep(Math.max(1, intervalSeconds) * 1000)
+      await mergeLatestSessionHistory(sessionId)
+
+      const res = await chatApi.backgroundTasks({ session_id: sessionId, page: 1, size: 20 })
+      const tasks = res.data?.data || []
+      const hasUnfinishedTasks = tasks.some(task => ['pending', 'running'].includes(task.status) || ['pending', 'running'].includes(task.reply_status))
+      if (!hasUnfinishedTasks) {
+        await mergeLatestSessionHistory(sessionId)
+        return
+      }
+    }
+  }
 
   // ==================== 核心发送方法 ====================
 
@@ -163,6 +254,12 @@ export function useChatSession() {
 
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
 
+      if (response.has_background_tasks) {
+        void pollBackgroundTasksUntilSettled(sessionManager.currentSessionId.value, response.background_task_poll_interval || 2).catch(err => {
+          console.error('Background task polling failed:', err)
+        })
+      }
+
       nextTick(() => chatState.scrollToBottom())
     } catch (err) {
       // 出错时也应清除排队标记，以便重新发送或其他操作
@@ -262,6 +359,21 @@ export function useChatSession() {
         })
         messageProcessor.cleanupThinkingMessage(chatState.messages)
         ElMessage.error(errorMessage || t('chat.stream_error'))
+      },
+      onProactiveReply: (data) => {
+        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
+          console.error('Proactive reply history merge failed:', err)
+        })
+      },
+      onProactiveReplyError: (data) => {
+        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+        const errorMessage = data.content || data.message || 'Background proactive reply failed'
+        messageProcessor.processStreamError(chatState.messages, errorMessage, null)
+        ElMessage.error(errorMessage)
+        void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
+          console.error('Proactive reply error history merge failed:', err)
+        })
       },
       onSessionId: (newSessionId) => {
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
@@ -414,7 +526,7 @@ export function useChatSession() {
     if (chatState.messageList.value.scrollTop < 50) {
       sessionManager.loadSessionHistory(2).then(historyData => {
         if (historyData && historyData.length > 0) {
-          chatState.insertMessage(0, historyData, true)
+          chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
         }
       })
     }

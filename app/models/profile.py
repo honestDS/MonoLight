@@ -55,8 +55,9 @@ class ToolConfig(BaseModel):
     image_generation_timeout: float = PydanticField(60.0, gt=0, le=600, description="图像生成工具执行超时时间（秒）")
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
+    background_task_max_concurrency: int = PydanticField(2, ge=1, le=20, description="允许的最大后台任务并发数量")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
-    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "generate_image", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
+    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
     allowed_file_send_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 允许发送文件的安全目录白名单，目录必须使用绝对路径")
     file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
     file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
@@ -68,6 +69,7 @@ class ToolConfig(BaseModel):
         le=100,
         description="工具执行器线程池最大线程数",
     )
+
 
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
@@ -106,6 +108,7 @@ class ProfileConfig(BaseModel):
                 "image_generation_timeout",
                 "max_parallel_tools",
                 "max_turns",
+                "background_task_max_concurrency",
                 "firecrawl_api_key",
                 "enabled_tools",
                 "allowed_file_send_dirs",
@@ -162,8 +165,9 @@ PROFILE_EXAMPLE = {
             "image_generation_timeout": 60,
             "max_parallel_tools": 5,
             "max_turns": 5,
+            "background_task_max_concurrency": 2,
             "firecrawl_api_key": "",
-            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "generate_image", "query_knowledge_base"],
+            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"],
             "allowed_file_send_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,

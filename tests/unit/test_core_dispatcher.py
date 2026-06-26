@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.dispatcher import ChatDispatcher, _resolve_chat_params
+from app.core import dispatcher as dispatcher_module
+from app.core.dispatcher import ChatDispatcher, _process_single_tool_with_isolated_db, _resolve_chat_params
 from app.core.exceptions import LLMException
 from app.core.prompts import SYSTEM_RUNTIME_CONTEXT_POLICY
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
@@ -88,6 +89,53 @@ def test_resolve_chat_params_uses_profile_chat_timeout():
     assert params["chat_timeout"] == 180
     assert params["context_window_k"] == 8
     assert params["max_tokens"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_with_isolated_db_uses_new_session(monkeypatch):
+    sessions = []
+
+    class FakeSessionContext:
+        def __init__(self):
+            self.db = object()
+
+        async def __aenter__(self):
+            sessions.append(self.db)
+            return self.db
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def fake_process_single_tool(tool_call, db, *args, **kwargs):
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=str(id(db)))
+
+    monkeypatch.setattr(dispatcher_module, "AsyncSessionLocal", FakeSessionContext)
+    monkeypatch.setattr(dispatcher_module, "process_single_tool", fake_process_single_tool)
+
+    first = await _process_single_tool_with_isolated_db(
+        MagicMock(id="call_1"),
+        MagicMock(),
+        MagicMock(),
+        [],
+        "tester",
+        "session_1",
+        1,
+        "user_1",
+    )
+    second = await _process_single_tool_with_isolated_db(
+        MagicMock(id="call_2"),
+        MagicMock(),
+        MagicMock(),
+        [],
+        "tester",
+        "session_1",
+        1,
+        "user_1",
+    )
+
+    assert len(sessions) == 2
+    assert sessions[0] is not sessions[1]
+    assert first.content != second.content
 
 
 @pytest.mark.asyncio

@@ -15,8 +15,10 @@ from app.core.log import (
     LogManager,
     get_logger,
 )
+from app.core.prompts import BACKGROUND_TASK_QUEUED_PROMPT, BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
+    tool_schema_has_parameter,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
@@ -48,6 +50,30 @@ def _build_tool_disabled_result(tool_name: str) -> str:
     )
 
 
+def _build_background_task_queued_result(tool_name: str, task_id: int) -> str:
+    return json.dumps(
+        {
+            "status": "queued",
+            "tool_name": tool_name,
+            "task_id": task_id,
+            "message": BACKGROUND_TASK_QUEUED_PROMPT.format(tool_name=tool_name),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_background_task_unsupported_result(tool_name: str) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "tool_name": tool_name,
+            "error": f"Tool {tool_name} does not support background execution.",
+            "instruction": BACKGROUND_TASK_UNSUPPORTED_PROMPT.format(tool_name=tool_name),
+        },
+        ensure_ascii=False,
+    )
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -63,11 +89,16 @@ async def process_single_tool(
     context_window_k: int = 4,
 ) -> InternalMessage:
     tool_name = tool_call.name
-    args = tool_call.arguments
+    args = dict(tool_call.arguments or {})
+    run_in_background = bool(args.pop("run_in_background", False))
 
     LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id, uid)
 
-    if _is_tool_enabled(tool_name, cfg):
+    if not _is_tool_enabled(tool_name, cfg):
+        cmd_result = _build_tool_disabled_result(tool_name)
+    elif run_in_background and not tool_schema_has_parameter(tool_name, "run_in_background"):
+        cmd_result = _build_background_task_unsupported_result(tool_name)
+    else:
         cmd_result = await audit_tool_call(
             db,
             profile,
@@ -78,8 +109,21 @@ async def process_single_tool(
             session_id=session_id,
             uid=uid,
         )
-    else:
-        cmd_result = _build_tool_disabled_result(tool_name)
+
+    if cmd_result is None and run_in_background:
+        from app.core.background_tasks.manager import background_task_manager
+
+        task = await background_task_manager.submit(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            tool_call_id=tool_call.id,
+            tool_name=tool_name,
+            arguments=args,
+            allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+        )
+        cmd_result = _build_background_task_queued_result(tool_name, task.id)
 
     if cmd_result is None:
         executor_cls = TOOL_EXECUTOR_MAP.get(tool_name)

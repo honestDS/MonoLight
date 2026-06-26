@@ -83,3 +83,82 @@ async def test_process_single_tool_applies_enabled_tools_before_knowledge_base_w
     assert payload == {
         "error": "Unauthorized knowledge_base_id: 123. It is not in the whitelist of allowed knowledge bases.",
     }
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_queues_background_task_and_strips_control_arg(monkeypatch):
+    _patch_process_single_tool_side_effects(monkeypatch)
+
+    async def allow_audit(*args, **kwargs):
+        return None
+
+    submitted = {}
+
+    class FakeBackgroundTaskManager:
+        async def submit(self, db, **kwargs):
+            submitted["db"] = db
+            submitted.update(kwargs)
+            return SimpleNamespace(id=42)
+
+    monkeypatch.setattr(process_single_tool_module, "audit_tool_call", allow_audit)
+    monkeypatch.setitem(process_single_tool_module.TOOL_EXECUTOR_MAP, "firecrawl_search", object)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "app.core.background_tasks.manager",
+        SimpleNamespace(background_task_manager=FakeBackgroundTaskManager()),
+    )
+
+    tool_call = SimpleNamespace(id="call_bg", name="firecrawl_search", arguments={"query": "mono", "run_in_background": True})
+    cfg = SimpleNamespace(tool=SimpleNamespace(enabled_tools=["firecrawl_search"]))
+
+    tool_msg = await process_single_tool(
+        tool_call=tool_call,
+        db="db",
+        profile=SimpleNamespace(id=1),
+        cfg=cfg,
+        messages=[],
+        username="tester",
+        session_id="session_1",
+        turn=1,
+        uid="user_1",
+        allowed_knowledge_base_ids=[1, 2],
+    )
+    payload = json.loads(tool_msg.content)
+
+    assert payload["status"] == "queued"
+    assert payload["tool_name"] == "firecrawl_search"
+    assert payload["task_id"] == 42
+    assert submitted["db"] == "db"
+    assert submitted["arguments"] == {"query": "mono"}
+    assert submitted["tool_call_id"] == "call_bg"
+    assert submitted["allowed_knowledge_base_ids"] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_process_single_tool_ignores_background_for_disabled_tool(monkeypatch):
+    _patch_process_single_tool_side_effects(monkeypatch)
+
+    async def fail_audit(*args, **kwargs):
+        raise AssertionError("audit should not run for disabled tools")
+
+    monkeypatch.setattr(process_single_tool_module, "audit_tool_call", fail_audit)
+
+    tool_call = SimpleNamespace(id="call_disabled_bg", name="firecrawl_search", arguments={"query": "mono", "run_in_background": True})
+    cfg = SimpleNamespace(tool=SimpleNamespace(enabled_tools=[]))
+
+    tool_msg = await process_single_tool(
+        tool_call=tool_call,
+        db=None,
+        profile=SimpleNamespace(id=1),
+        cfg=cfg,
+        messages=[],
+        username="tester",
+        session_id="session_1",
+        turn=1,
+        uid="user_1",
+    )
+    payload = json.loads(tool_msg.content)
+
+    assert payload["status"] == "failed"
+    assert payload["tool_name"] == "firecrawl_search"
+    assert "not enabled" in payload["error"]

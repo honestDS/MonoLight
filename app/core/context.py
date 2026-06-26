@@ -28,6 +28,16 @@ load_dotenv()
 logger = get_logger(__name__)
 
 
+def _is_background_tool_result_message(msg: InternalMessage) -> bool:
+    if not isinstance(msg.content, str):
+        return False
+    try:
+        payload = json.loads(msg.content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("type") == "background_tool_result"
+
+
 @dataclass(frozen=True)
 class ContextRequestBudget:
     context_window_tokens: int
@@ -444,6 +454,9 @@ class ContextManager:
                             audited_msgs.append(virtual_tool_msg)
                 i += 1
             elif msg.role == MessageRole.TOOL:
+                if _is_background_tool_result_message(msg):
+                    i += 1
+                    continue
                 logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
                 i += 1
             else:

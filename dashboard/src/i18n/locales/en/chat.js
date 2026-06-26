@@ -5,6 +5,7 @@ export default {
   empty_chat_tip: 'Select a session on the left or create a new one to start chatting',
   tool_call: 'Tool call: {name}',
   tool_result: 'Tool result: {name}',
+  background_task_result: 'Background task: {name}',
   new_session: 'New Session',
   default_title: 'New Session',
   upload: 'Upload Image/Attachment',

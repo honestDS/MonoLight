@@ -4,6 +4,15 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { isToolCall, isToolResult } from '../../utils'
 
+const parseBackgroundSystemMessage = (item) => {
+  if (item?.role !== 'system') return null
+  try {
+    const payload = typeof item.content === 'string' ? JSON.parse(item.content) : item.content
+    if (payload?.type === 'background_tool_result') return payload
+  } catch {}
+  return null
+}
+
 export function useMessageProcessor() {
   // ==================== 消息处理方法 ====================
 
@@ -224,6 +233,15 @@ export function useMessageProcessor() {
     if (history.length > 0) {
       const historyMessages = history
         .map((item, idx) => {
+          const backgroundPayload = parseBackgroundSystemMessage(item)
+          if (backgroundPayload) {
+            return {
+              id: `history_${Date.now()}_${idx}`,
+              role: 'background_system',
+              content: JSON.stringify(backgroundPayload),
+              created_at: item.created_at || null
+            }
+          }
           const isToolRelated = (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool'
           return {
             id: `history_${Date.now()}_${idx}`,

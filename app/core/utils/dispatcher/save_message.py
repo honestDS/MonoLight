@@ -18,7 +18,7 @@ from app.models.message import (
 
 
 def _to_storable_content(content: Any, msg_type: MessageType) -> str:
-    if msg_type == MessageType.TEXT and hasattr(content, "content"):
+    if msg_type in {MessageType.TEXT, MessageType.BACKGROUND_TASK_RESULT} and hasattr(content, "content"):
         payload = content.content
         if isinstance(payload, str) or payload is None:
             return payload or ""

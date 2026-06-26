@@ -23,6 +23,11 @@ logger = get_logger(__name__)
 
 
 class WebSocketChatAdapter(BaseChatAdapter):
+    async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
+        from app.core.session_notifier import session_notifier
+
+        await session_notifier.notify(uid, session_id, event)
+
     async def chat(
         self,
         db: AsyncSession,

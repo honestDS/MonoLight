@@ -31,6 +31,7 @@ class MessageType(StrEnum):
     TEXT = "text"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    BACKGROUND_TASK_RESULT = "background_result"
 
 
 class MessagePart(BaseModel):

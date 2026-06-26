@@ -260,6 +260,26 @@
         }
       }
 
+      &.background-system {
+        align-items: center;
+        max-width: 72%;
+        margin-left: auto;
+        margin-right: auto;
+
+        .message-header {
+          align-self: center;
+        }
+
+        .content {
+          width: 100%;
+          background: #f4f8ff;
+          color: #606266;
+          border: 1px solid #d9ecff;
+          border-radius: 10px;
+          box-shadow: 0 2px 8px rgba(64, 158, 255, 0.08);
+        }
+      }
+
       &.error {
         align-items: flex-start;
         margin-right: auto;
@@ -287,6 +307,24 @@
         word-break: break-word;
         white-space: pre-wrap;
         position: relative; /* 为内部 queued-indicator 定位做基准 */
+
+        &.background-system-card {
+          white-space: normal;
+        }
+
+        .background-system-title {
+          color: #409eff;
+          font-size: 13px;
+          font-weight: 600;
+          margin-bottom: 6px;
+        }
+
+        .background-system-text {
+          color: #606266;
+          font-size: 13px;
+          line-height: 1.5;
+          white-space: pre-wrap;
+        }
 
         .queued-indicator {
           position: absolute;

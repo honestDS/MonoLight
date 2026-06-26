@@ -1,6 +1,7 @@
 import base64
 import json
 import mimetypes
+import ssl
 import uuid
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ import aiohttp
 
 from app.core.channel_router import select_channel
 from app.core.exceptions import BaseBusinessException
+from app.core.i18n import t
 from app.core.paths import get_user_temp_dir
 from app.models.channel import ChannelConfig
 from app.providers.image_generation import ImageGenerationClient
@@ -41,6 +43,11 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
                     "description": "Image quality.",
                     "default": "auto",
                 },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Set true when image generation may take a long time. The task will run in the background and the model should proactively reply after completion, then call send_file_to_user using the generated file path from the result.",
+                    "default": False,
+                },
             },
             "required": ["prompt"],
         },
@@ -71,6 +78,7 @@ class ImageGenerationExecutor(BaseExecutor):
         return {
             "id": token,
             "name": file_name,
+            "path": str(image_path),
             "description": "Generated image",
             "mime_type": mime_type,
             "size": len(image_bytes),
@@ -85,11 +93,21 @@ class ImageGenerationExecutor(BaseExecutor):
     async def _download_remote_image(self, url: str) -> tuple[bytes, str]:
         client_timeout = aiohttp.ClientTimeout(total=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0))
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-                image_bytes = await response.read()
-                return image_bytes, content_type or "application/octet-stream"
+            try:
+                return await self._fetch_remote_image(session, url)
+            except aiohttp.ClientConnectorCertificateError:
+                return await self._fetch_remote_image(session, url, ssl=False)
+            except aiohttp.ClientConnectorSSLError as exc:
+                if not isinstance(exc.__cause__, ssl.SSLCertVerificationError):
+                    raise
+                return await self._fetch_remote_image(session, url, ssl=False)
+
+    async def _fetch_remote_image(self, session: aiohttp.ClientSession, url: str, ssl: bool | None = None) -> tuple[bytes, str]:
+        async with session.get(url, ssl=ssl) as response:
+            response.raise_for_status()
+            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            image_bytes = await response.read()
+            return image_bytes, content_type or "application/octet-stream"
 
     async def _save_downloaded_image(self, url: str) -> dict[str, Any]:
         image_bytes, content_type = await self._download_remote_image(url)
@@ -99,6 +117,28 @@ class ImageGenerationExecutor(BaseExecutor):
         if extension == ".jpe":
             extension = ".jpg"
         return await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}{extension}", content_type)
+
+    def _build_success_payload(
+        self,
+        file_item: dict[str, Any],
+    ) -> str:
+        return json.dumps(
+            {
+                "status": "success",
+                "instruction": "Call send_file_to_user with the file path below before replying to the user.",
+                "send_file_to_user": {
+                    "files": [
+                        {
+                            "path": file_item["path"],
+                            "display_name": file_item["name"],
+                            "description": file_item["description"],
+                            "mime_type": file_item["mime_type"],
+                        }
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        )
 
     async def execute(
         self,
@@ -177,41 +217,11 @@ class ImageGenerationExecutor(BaseExecutor):
 
                 if image.get("url"):
                     file_item = await self._save_downloaded_image(str(image["url"]))
-                    return json.dumps(
-                        {
-                            "status": "success",
-                            "type": "files_to_user",
-                            "files": [file_item],
-                            "errors": [],
-                            "model": model_name,
-                            "channel_id": channel.id,
-                            "channel_name": channel.name,
-                            "prompt": prompt_text,
-                            "size": resolved_size,
-                            "quality": resolved_quality,
-                            "message": "Image generated successfully. The generated image file will be automatically appended after the assistant reply in the chat UI.",
-                        },
-                        ensure_ascii=False,
-                    )
+                    return self._build_success_payload(file_item)
 
                 if image.get("b64_json"):
                     file_item = await self._save_base64_image(str(image["b64_json"]))
-                    return json.dumps(
-                        {
-                            "status": "success",
-                            "type": "files_to_user",
-                            "files": [file_item],
-                            "errors": [],
-                            "model": model_name,
-                            "channel_id": channel.id,
-                            "channel_name": channel.name,
-                            "prompt": prompt_text,
-                            "size": resolved_size,
-                            "quality": resolved_quality,
-                            "message": "Image generated successfully. The generated image file will be automatically appended after the assistant reply in the chat UI.",
-                        },
-                        ensure_ascii=False,
-                    )
+                    return self._build_success_payload(file_item)
 
                 return json.dumps(
                     {
@@ -222,11 +232,10 @@ class ImageGenerationExecutor(BaseExecutor):
                     ensure_ascii=False,
                 )
             except BaseBusinessException as exc:
-                last_error = exc.message
+                last_error = t(exc.message, default=exc.message, **exc.kwargs)
             except Exception as exc:
                 last_error = str(exc)
 
             excluded_priorities.add(rule.priority)
             if not image_channel.retry_on_failure:
                 return json.dumps({"status": "failed", "error": last_error}, ensure_ascii=False)
-

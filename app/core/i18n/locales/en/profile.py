@@ -24,6 +24,8 @@ MESSAGES = {
     "TOOL_FIRECRAWL_SEARCH_LABEL": "Firecrawl Search",
     "TOOL_FIRECRAWL_SCRAPE_LABEL": "Firecrawl Scrape",
     "TOOL_SEND_FILE_TO_USER_LABEL": "Send File to User",
+    "TOOL_LIST_BACKGROUND_TASKS_LABEL": "List Background Tasks",
+    "TOOL_CANCEL_BACKGROUND_TASK_LABEL": "Cancel Background Task",
     "TOOL_GENERATE_IMAGE_LABEL": "Generate Image",
     "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "Query Knowledge Base",
 }

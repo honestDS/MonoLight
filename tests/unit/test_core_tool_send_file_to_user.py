@@ -1,10 +1,13 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.core.tools import get_tools_for_profile
+from app.core.tools.cancel_background_task import CancelBackgroundTaskExecutor
 from app.core.tools.image_generation import ImageGenerationExecutor
+from app.core.tools.list_background_tasks import ListBackgroundTasksExecutor
 from app.core.tools.send_file_to_user import SendFileToUserExecutor, resolve_file_token, sanitize_files_to_user_result
 from app.models.channel import ChannelConfig, ChannelRule, ChannelType
 
@@ -265,11 +268,11 @@ def test_sanitize_files_to_user_result_returns_only_success_summary():
 
 @pytest.mark.asyncio
 async def test_get_tools_for_profile_respects_enabled_tools():
-    profile = SimpleNamespace(id=1, configs={"tool": {"enabled_tools": ["send_file_to_user"]}})
+    profile = SimpleNamespace(id=1, configs={"tool": {"enabled_tools": ["send_file_to_user", "list_background_tasks", "cancel_background_task"]}})
 
     tools, whitelist = await get_tools_for_profile(None, profile, embedding_profile_available=False)
 
-    assert [tool["function"]["name"] for tool in tools] == ["send_file_to_user"]
+    assert [tool["function"]["name"] for tool in tools] == ["send_file_to_user", "list_background_tasks", "cancel_background_task"]
     assert whitelist == []
 
 
@@ -281,6 +284,95 @@ async def test_get_tools_for_profile_allows_disabling_all_tools():
 
     assert tools == []
     assert whitelist == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_task_executor_cancels_user_task(monkeypatch):
+    cancelled_task = SimpleNamespace(
+        id=7,
+        uid="user_1",
+        session_id="session_1",
+        profile_id=1,
+        tool_call_id="call_1",
+        tool_name="firecrawl_search",
+        status="cancelled",
+        arguments={},
+        result=None,
+        error=None,
+        auto_reply=True,
+        reply_status="none",
+        locked_by=None,
+        lock_until=None,
+        attempt_count=1,
+        extra={},
+        created_at="2026-06-26T00:00:00",
+        started_at=None,
+        finished_at="2026-06-26T00:00:01",
+    )
+    calls = {}
+
+    async def fake_cancel_user_task(db, *, task_id, uid):
+        calls.update({"db": db, "task_id": task_id, "uid": uid})
+        return cancelled_task
+
+    monkeypatch.setattr("app.core.crud.background_task.background_task_crud.cancel_user_task", fake_cancel_user_task)
+
+    db = object()
+    executor = CancelBackgroundTaskExecutor(project_root=".", uid="user_1")
+    executor.set_runtime_context(db=db)
+
+    result = json.loads(await executor.execute(task_id=7))
+
+    assert calls == {"db": db, "task_id": 7, "uid": "user_1"}
+    assert result["status"] == "success"
+    assert result["task"]["id"] == 7
+    assert result["task"]["reply_status"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_list_background_tasks_executor_lists_user_tasks(monkeypatch):
+    task = SimpleNamespace(
+        id=7,
+        uid="user_1",
+        session_id="session_1",
+        profile_id=1,
+        tool_call_id="call_1",
+        tool_name="firecrawl_search",
+        status="running",
+        arguments={"query": "hello"},
+        result=None,
+        error=None,
+        auto_reply=True,
+        reply_status="pending",
+        locked_by=None,
+        lock_until=None,
+        attempt_count=1,
+        extra={},
+        created_at="2026-06-26T00:00:00",
+        started_at="2026-06-26T00:00:01",
+        finished_at=None,
+    )
+    calls = {}
+
+    async def fake_list_active_user_tasks(db, *, uid, session_id, skip, limit):
+        calls.update({"db": db, "uid": uid, "session_id": session_id, "skip": skip, "limit": limit})
+        return [task]
+
+    monkeypatch.setattr("app.core.crud.background_task.background_task_crud.list_active_user_tasks", fake_list_active_user_tasks)
+
+    db = object()
+    executor = ListBackgroundTasksExecutor(project_root=".", uid="user_1")
+    executor.set_runtime_context(db=db, session_id="session_1")
+
+    result = json.loads(await executor.execute(page=2, size=10))
+
+    assert calls == {"db": db, "uid": "user_1", "session_id": "session_1", "skip": 10, "limit": 10}
+    assert result["status"] == "success"
+    assert result["page"] == 2
+    assert result["size"] == 10
+    assert result["session_id"] == "session_1"
+    assert result["tasks"][0]["id"] == 7
+    assert result["tasks"][0]["reply_status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -411,20 +503,17 @@ async def test_image_generation_uses_model_entry_size_and_quality_by_default(tmp
     result = json.loads(result_json)
 
     assert result["status"] == "success"
-    assert result["type"] == "files_to_user"
+    assert "type" not in result
     assert captured_kwargs["size"] == "1024x1536"
     assert captured_kwargs["quality"] == "high"
-    assert result["size"] == "1024x1536"
-    assert result["quality"] == "high"
-    assert len(result["files"]) == 1
-    generated_file = result["files"][0]
-    assert "path" not in generated_file
-    generated_path = resolve_file_token(generated_file["id"])
+    assert result["instruction"] == "Call send_file_to_user with the file path below before replying to the user."
+    assert len(result["send_file_to_user"]["files"]) == 1
+    generated_file = result["send_file_to_user"]["files"][0]
+    generated_path = Path(generated_file["path"])
     assert generated_path.is_file()
     assert generated_path.read_bytes() == b"fake-png-bytes"
-    assert generated_file["name"].endswith(".png")
+    assert generated_file["display_name"].endswith(".png")
     assert generated_file["mime_type"] == "image/png"
-    assert generated_file["previewable"] is True
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from collections.abc import MutableSet
 from typing import Any
@@ -22,7 +23,24 @@ from app.schemas.response import (
 logger = get_logger(__name__)
 
 
+def _response_has_background_tasks(llm_response: dict[str, Any]) -> bool:
+    for item in llm_response.get("history") or []:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("status") == "queued" and payload.get("task_id"):
+            return True
+    return False
+
+
 class WebChatAdapter(BaseChatAdapter):
+    async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
+        logger.bind(uid=uid, session_id=session_id, event_type=event.get("type")).debug("Web adapter session event persisted for polling")
+
     async def chat(
         self,
         db: AsyncSession,
@@ -43,6 +61,9 @@ class WebChatAdapter(BaseChatAdapter):
                 attachments=attachments,
                 active_tasks=active_tasks,
             )
+            if isinstance(llm_response, dict) and _response_has_background_tasks(llm_response):
+                llm_response["has_background_tasks"] = True
+                llm_response["background_task_poll_interval"] = 2
             return llm_response
         except BaseBusinessException as e:
             return LLMResponse(

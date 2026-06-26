@@ -84,6 +84,15 @@
                 </el-collapse-item>
               </el-collapse>
             </template>
+            <template v-else-if="msg.role === 'background_system'">
+              <div class="message-header">
+                <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
+              </div>
+              <div class="content background-system-card">
+                <div class="background-system-title">{{ getBackgroundSystemTitle(msg) }}</div>
+                <div class="background-system-text">{{ getBackgroundSystemText(msg) }}</div>
+              </div>
+            </template>
             <template v-else>
               <div class="message-header">
                 <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -669,6 +678,27 @@ const getMessageFiles = (msg) => {
   return msg.files || parsed?.files || []
 }
 
+const parseBackgroundSystemContent = (content) => {
+  try {
+    const parsed = typeof content === 'string' ? JSON.parse(content) : content
+    if (parsed && parsed.type === 'background_tool_result') return parsed
+  } catch {}
+  return null
+}
+
+const getBackgroundSystemTitle = (msg) => {
+  const parsed = parseBackgroundSystemContent(msg.content)
+  const task = parsed?.task || {}
+  const toolName = task.tool_name || t('common.unknown_tool')
+  return t('chat.background_task_result', { name: toolName })
+}
+
+const getBackgroundSystemText = (msg) => {
+  const parsed = parseBackgroundSystemContent(msg.content)
+  const task = parsed?.task || {}
+  return task.summary || task.error || task.content || parsed?.instruction || ''
+}
+
 const isPreviewImage = (file) => {
   return file?.previewable && file?.mime_type?.startsWith('image/')
 }
@@ -685,6 +715,7 @@ const getMessageClass = (role) => {
   const roleMap = {
     user: 'user',
     thinking: 'thinking',
+    background_system: 'background-system',
     err: 'error'
   }
   return roleMap[role] || 'ai'

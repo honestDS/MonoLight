@@ -6,6 +6,7 @@ import weakref
 from fastapi import (
     APIRouter,
     Depends,
+    Query,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core import constants
+from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
@@ -29,8 +31,10 @@ from app.core.log import (
     set_profile_log_locale,
 )
 from app.core.security import get_current_user
+from app.core.session_notifier import session_notifier
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.session import generate_session_title
+from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig
 from app.models.message import (
     ChatCompletionRequest,
@@ -219,6 +223,34 @@ async def generate_title(
                 return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
 
+@router.get("/background-tasks")
+async def list_background_tasks(
+    session_id: str | None = None,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    offset = (page - 1) * size
+    tasks = await background_task_crud.list_user_tasks(db, uid=uid, session_id=session_id, skip=offset, limit=size)
+    data = [BackgroundTaskResponse.model_validate(task) for task in tasks]
+    return StandardResponse.success(data=data, message="background task list success")
+
+
+@router.get("/background-tasks/{task_id}")
+async def get_background_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    task = await background_task_crud.get_user_task(db, task_id=task_id, uid=uid)
+    if not task:
+        return StandardResponse.error(code=404, message="background task not found")
+    return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message="background task detail success")
+
+
 @router.get("/sessions/history")
 async def get_session_history(
     session_id: str,
@@ -261,6 +293,7 @@ async def chat_websocket(
     active_task: asyncio.Task | None = None
     active_tasks = weakref.WeakSet()  # 使用弱引用集合记录子任务，防止内存泄漏
     current_session_id = None
+    notifier_queue: asyncio.Queue[dict] = asyncio.Queue()
 
     async def cancel_all_tasks():
         """取消所有当前任务及子任务并等待其结束"""
@@ -313,8 +346,18 @@ async def chat_websocket(
 
     try:
         while True:
+            receive_task = asyncio.create_task(websocket.receive_json())
+            notify_task = asyncio.create_task(notifier_queue.get())
+            done, pending = await asyncio.wait({receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
+            for pending_task in pending:
+                pending_task.cancel()
+
+            if notify_task in done:
+                await websocket.send_json(notify_task.result())
+                continue
+
             # 接收 JSON 消息
-            data = await websocket.receive_json()
+            data = receive_task.result()
             message = data.get("message")
             session_id = data.get("session_id")
             attachments = data.get("attachments")
@@ -341,6 +384,11 @@ async def chat_websocket(
                 session_id = current_session_id
             else:
                 current_session_id = session_id
+
+            if old_session_id and old_session_id != current_session_id:
+                await session_notifier.unregister(uid, old_session_id, notifier_queue)
+            if current_session_id:
+                await session_notifier.register(uid, current_session_id, notifier_queue)
 
             # 判断是否发生了会话切换
             is_session_switched = old_session_id is not None and session_id != old_session_id
@@ -403,6 +451,7 @@ async def chat_websocket(
 
         # 显式清理当前会话锁
         if current_session_id:
+            await session_notifier.unregister(uid, current_session_id, notifier_queue)
             try:
                 await ws_chat_adapter.release_session_lock(current_session_id)
             except Exception:

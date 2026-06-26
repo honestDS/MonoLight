@@ -37,6 +37,8 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "[Dispatcher/Stream] Session {session_id} already has an active dispatcher, current request queued.",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] user message: {message}; attachments: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] turn {turn} | LLM response: {content}",
+    "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY": "Background proactive reply attempted unsupported tool calls; retrying with correction",
+    "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "Background proactive reply still attempted unsupported tool calls; falling back to text-only reply",
     "LOG_EMBEDDING_CHANNEL_FAILED": "Embedding channel call failed, retrying next priority group: {error}",
     "LOG_FIRECRAWL_SCRAPE_FAILED": "Firecrawl scrape failed",
     "LOG_FIRECRAWL_SCRAPING": "Firecrawl scraping: (formats={formats}, options={options})",

@@ -82,6 +82,8 @@ export const chatApi = {
   generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
   // 更新会话设置
   updateSessionSetting: (sessionId, enableMarkdown) => request.post('/chat/sessions/setting', { session_id: sessionId, enable_markdown: enableMarkdown }),
+  // 后台任务列表
+  backgroundTasks: (params) => request.get('/chat/background-tasks', { params }),
 }
 
 export const profileApi = {

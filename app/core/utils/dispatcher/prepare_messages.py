@@ -29,7 +29,7 @@ async def prepare_messages(
     uid: str,
     profile: Profile,
     cfg: ProfileConfig,
-    initial_msg: InternalMessage,
+    initial_msg: InternalMessage | None,
     message: Any,
     is_first_iter: bool,
     context_window_k: int = 4,

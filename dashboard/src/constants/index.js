@@ -40,7 +40,7 @@ export const defaultProfileConfigs = () => ({
     executor_max_workers: 10,
     max_turns: 5,
     firecrawl_api_key: '',
-    enabled_tools: ['execute_shell', 'write_file', 'firecrawl_search', 'firecrawl_scrape', 'send_file_to_user', 'generate_image', 'query_knowledge_base'],
+    enabled_tools: ['execute_shell', 'write_file', 'firecrawl_search', 'firecrawl_scrape', 'send_file_to_user', 'list_background_tasks', 'cancel_background_task', 'generate_image', 'query_knowledge_base'],
     allowed_file_send_dirs: [],
     file_send_max_count: 10,
     file_send_max_single_size_mb: 50,

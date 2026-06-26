@@ -9,16 +9,17 @@ const t = (key, ...args) => i18n.global.t(key, ...args)
 
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
-  
+
   // 通信模式: 'http' - 普通HTTP模式, 'ws' - WebSocket流式模式
   const transportMode = ref('ws')  // 默认使用流式模式
   const wsConnected = ref(false)     // WebSocket连接状态
-  
+
   // WebSocket 管理
   const wsManager = useWebSocket()
 
   // 并发请求回调映射管理: requestId -> callbacks
   const callbacksMap = new Map()
+  let sessionEventCallbacks = null
 
   // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
@@ -26,9 +27,9 @@ export function useChatTransport() {
     const callbacks = callbacksMap.get(requestId)
     if (callbacks) {
       handleWsMessage(data, callbacks)
-    } else if (data.type === 'session_id') {
-      // 会话 ID 同步等全局事件处理（若未带 requestId，尝试分发给所有活跃请求或第一个）
-      const firstCallbacks = callbacksMap.values().next().value
+    } else if (data.type === 'session_id' || data.type === 'proactive_reply' || data.type === 'proactive_reply_error') {
+      // 会话 ID 同步、主动回复等全局事件处理（若未带 requestId，尝试分发给第一个活跃请求或会话级回调）
+      const firstCallbacks = callbacksMap.values().next().value || sessionEventCallbacks
       if (firstCallbacks) {
         handleWsMessage(data, firstCallbacks)
       }
@@ -36,18 +37,20 @@ export function useChatTransport() {
   })
 
   // ==================== WebSocket 相关方法 ====================
-  
+
   // 处理 WebSocket 消息
   const handleWsMessage = (data, options = {}) => {
-    const { 
-      onContent, 
-      onToolStart, 
-      onToolEnd, 
-      onComplete, 
-      onError, 
-      onSessionId, 
-      scrollToBottom, 
-      setLoading, 
+    const {
+      onContent,
+      onToolStart,
+      onToolEnd,
+      onComplete,
+      onError,
+      onSessionId,
+      onProactiveReply,
+      onProactiveReplyError,
+      scrollToBottom,
+      setLoading,
       thinkingId,
       requestId: currentRequestId
     } = options
@@ -68,11 +71,11 @@ export function useChatTransport() {
       }
       return
     }
-    
+
     // 1.5 处理每一轮结束（覆盖最终清洗后的文本，清理占位符）
     if (type === 'turn_end') {
       if (onComplete) {
-        // 调用我们刚才设计的基于 response_id 的覆盖逻辑（我们将不再传递 type=done 时的整个 history 逻辑过去）
+        // 调用基于 response_id 的覆盖逻辑
         onComplete(data, thinkingId, requestId, 'turn_end')
       }
       if (scrollToBottom) {
@@ -136,6 +139,30 @@ export function useChatTransport() {
       return
     }
 
+    if (type === 'proactive_reply') {
+      if (onProactiveReply) {
+        onProactiveReply(data)
+      } else if (onComplete) {
+        onComplete(data, thinkingId, requestId, 'proactive_reply')
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
+    if (type === 'proactive_reply_error') {
+      if (onProactiveReplyError) {
+        onProactiveReplyError(data)
+      } else if (onError) {
+        onError(data.content || data.message || 'Background proactive reply failed', thinkingId, requestId)
+      }
+      if (scrollToBottom) {
+        scrollToBottom()
+      }
+      return
+    }
+
     // 处理任务开始确认
     if (type === 'task_start') {
       if (options.onTaskStart) {
@@ -163,7 +190,7 @@ export function useChatTransport() {
     if (data.choices && Array.isArray(data.choices)) {
       const choice = data.choices[0]
       if (!choice) return
-      
+
       const content = choice.message?.content || ''
       const finishReason = choice.finish_reason
 
@@ -188,10 +215,11 @@ export function useChatTransport() {
     wsManager.disconnect()
     wsConnected.value = false
     callbacksMap.clear()
+    sessionEventCallbacks = null
   }
 
   // ==================== 发送方法 ====================
-  
+
   const httpSend = async ({ message, sessionId, attachments }) => {
     const res = await chatApi.completions({
       message,
@@ -205,12 +233,13 @@ export function useChatTransport() {
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
-    
+
     const finalCallbacks = { ...callbacks, requestId }
+    sessionEventCallbacks = finalCallbacks
     if (requestId) {
       callbacksMap.set(requestId, finalCallbacks)
     }
-    
+
     if (!wsManager.isConnected.value) {
       try {
         await wsManager.connect(token)
@@ -223,7 +252,7 @@ export function useChatTransport() {
         return false
       }
     }
-    
+
     const wsData = {
       type: 'chat',
       message,
@@ -231,7 +260,7 @@ export function useChatTransport() {
       attachments: attachments || null,
       request_id: requestId
     }
-    
+
     if (!wsManager.sendMessage(wsData)) {
       ElMessage.error(t('chat.ws_message_send_failed'))
       if (requestId) callbacksMap.delete(requestId)

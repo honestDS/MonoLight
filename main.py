@@ -15,6 +15,7 @@ from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
+from app.core.background_tasks.recovery import recover_pending_background_tasks
 from app.core.log import LogManager, get_logger
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.utils.time import get_local_time
@@ -28,6 +29,7 @@ from app.tasks import background_log_cleaner, background_temp_cleaner
 async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await init_system_data(session)
+    await recover_pending_background_tasks()
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
     now_aware = get_local_time()
