@@ -16,7 +16,7 @@ const WS_BASE_URL = process.env.VUE_APP_WS_BASE_URL || API_ORIGIN.replace(/^http
 
 const getCurrentLocale = () => localStorage.getItem('locale') || 'zh'
 
-const appendLangParam = (url) => {
+const appendDownloadLangParam = (url) => {
   if (/[?&]lang=/.test(url)) return url
   const separator = url.includes('?') ? '&' : '?'
   return `${url}${separator}lang=${encodeURIComponent(getCurrentLocale())}`
@@ -153,8 +153,8 @@ export const fileApi = {
   },
   resolveDownloadUrl: (url) => {
     if (!url) return '#'
-    if (/^https?:\/\//i.test(url)) return appendLangParam(url)
-    return appendLangParam(`${API_ORIGIN}${url.startsWith('/') ? url : `/${url}`}`)
+    if (/^https?:\/\//i.test(url)) return appendDownloadLangParam(url)
+    return appendDownloadLangParam(`${API_ORIGIN}${url.startsWith('/') ? url : `/${url}`}`)
   }
 }
 
