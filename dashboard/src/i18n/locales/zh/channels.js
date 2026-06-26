@@ -67,7 +67,6 @@ export default {
   detect_failed: '检测失败，请检查渠道配置或模型是否支持',
   detect_model_list: '检测模型',
   select_detected_model: '选择已检测模型',
-  model_selected: '已选',
   model_list_success: '已检测到 {count} 个模型',
   model_list_empty: '未检测到可用模型',
   model_list_failed: '模型列表检测失败',

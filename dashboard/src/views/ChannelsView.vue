@@ -83,7 +83,6 @@
                         <div class="detected-model-option">
                           <span class="detected-model-name" :title="model.id">{{ model.id }}</span>
                           <span class="detected-model-meta">
-                            <span v-if="isDetectedModelSelected(model.id)" class="detected-model-selected">{{ $t('channels.model_selected') }}</span>
                             <span v-if="model.owned_by" class="detected-model-owner" :title="model.owned_by">{{ model.owned_by }}</span>
                           </span>
                         </div>
@@ -114,7 +113,7 @@
             <div class="model-entry-fields">
               <div class="model-entry-field model-entry-field-half">
                 <el-form-item :label="$t('channels.model_id_label')" :error="modelIdErrors[idx]">
-                  <el-input v-model="entry.model_id" :placeholder="$t('channels.model_id_placeholder')" @input="modelIdErrors[idx] = ''" />
+                  <el-input v-model="entry.model_id" :placeholder="$t('channels.model_id_placeholder')" @input="handleModelIdInput(idx)" />
                 </el-form-item>
               </div>
               <div class="model-entry-field model-entry-field-half">
@@ -271,6 +270,7 @@ const addModelEntry = () => {
 const removeModelEntry = (idx) => {
   form.model_ids.splice(idx, 1)
   modelIdErrors.value.splice(idx, 1)
+  syncDetectedSelection()
 }
 
 const resetDetectedModels = () => {
@@ -279,11 +279,12 @@ const resetDetectedModels = () => {
   _previousDetectedSelection = []
 }
 
-const isDetectedModelSelected = (modelId) => {
-  return form.model_ids.some(entry => (entry.model_id || '').trim() === modelId)
-}
-
 let _previousDetectedSelection = []
+
+const handleModelIdInput = (idx) => {
+  modelIdErrors.value[idx] = ''
+  syncDetectedSelection()
+}
 
 const handleDetectedModelChange = (values) => {
   const added = values.filter(v => !_previousDetectedSelection.includes(v))

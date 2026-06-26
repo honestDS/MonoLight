@@ -135,17 +135,6 @@
   min-width: 0;
 }
 
-.detected-model-selected {
-  flex-shrink: 0;
-  padding: 0 6px;
-  color: var(--el-color-success);
-  font-size: 12px;
-  line-height: 18px;
-  background: var(--el-color-success-light-9);
-  border: 1px solid var(--el-color-success-light-5);
-  border-radius: 999px;
-}
-
 .detected-model-owner {
   flex-shrink: 1;
   max-width: 160px;

@@ -67,7 +67,6 @@ export default {
   detect_failed: 'Detection failed, please check channel config or model support',
   detect_model_list: 'Detect Models',
   select_detected_model: 'Select detected model',
-  model_selected: 'Selected',
   model_list_success: 'Detected {count} model(s)',
   model_list_empty: 'No available models detected',
   model_list_failed: 'Failed to detect model list',
