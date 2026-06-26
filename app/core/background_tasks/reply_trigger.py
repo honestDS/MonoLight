@@ -44,14 +44,14 @@ async def _save_background_task_result_message(db, task) -> None:
         return
 
     result_message = InternalMessage(
-        role=MessageRole.SYSTEM,
+        role=MessageRole.ASSISTANT,
         content=_build_background_tool_result_message(task),
     )
     await save_message(
         db,
         task.session_id,
         task.uid,
-        MessageRole.SYSTEM,
+        MessageRole.ASSISTANT,
         MessageType.BACKGROUND_TASK_RESULT,
         result_message,
         task.profile_id,

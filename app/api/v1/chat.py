@@ -22,7 +22,7 @@ from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
-from app.core.i18n.context import set_current_locale
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
 from app.core.log import (
     get_logger,
@@ -282,7 +282,7 @@ async def chat_websocket(
     await websocket.accept()
     # 从 query 获取 lang 并设置上下文
     lang_param = websocket.query_params.get("lang")
-    set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
+    locale_token = set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
 
     uid = getattr(current_user, "uid", None)
     log_locale_token = None
@@ -338,7 +338,7 @@ async def chat_websocket(
         except Exception:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
             try:
-                await websocket.send_json({"type": "error", "message": constants.ERR_INTERNAL_SERVER_ERROR})
+                await websocket.send_json({"type": "error", "message": t(constants.ERR_INTERNAL_SERVER_ERROR), "request_id": request_id})
             except Exception:
                 pass
         finally:
@@ -371,7 +371,7 @@ async def chat_websocket(
                 continue
 
             if not message and not attachments:
-                await websocket.send_json({"error": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED)})
+                await websocket.send_json({"type": "error", "message": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED), "request_id": request_id})
                 continue
 
             # 会话 ID 解析与切换逻辑
@@ -434,7 +434,7 @@ async def chat_websocket(
         # 异常处理
         logger.bind(uid=uid).exception(t("LOG_CHAT_WS_EXCEPTION"))
         try:
-            await websocket.send_json({"error": t(constants.ERR_INTERNAL_SERVER_ERROR)})
+            await websocket.send_json({"type": "error", "message": t(constants.ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
         await cancel_all_tasks()
@@ -445,6 +445,7 @@ async def chat_websocket(
     finally:
         if log_locale_token is not None:
             reset_profile_log_locale(log_locale_token)
+        reset_current_locale(locale_token)
 
         # 确保任务被取消并释放锁
         await cancel_all_tasks()

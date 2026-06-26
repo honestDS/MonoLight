@@ -13,10 +13,10 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
-        return [InternalMessage(id=msg.id, role=MessageRole.SYSTEM, content=content, attachments=msg.attachments)]
+        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
 
     if not isinstance(payload, dict):
-        return [InternalMessage(id=msg.id, role=MessageRole.SYSTEM, content=content, attachments=msg.attachments)]
+        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
 
     tool_call_payload = payload.get("tool_call")
     tool_result_payload = payload.get("tool_result")
@@ -36,7 +36,7 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
     try:
         tool_call = InternalToolCall(**tool_call_payload)
     except Exception:
-        return [InternalMessage(id=msg.id, role=MessageRole.SYSTEM, content=content, attachments=msg.attachments)]
+        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
 
     tool_call_id = tool_result_payload.get("tool_call_id") or tool_call.id
     tool_result_content = tool_result_payload.get("content")
@@ -46,17 +46,17 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
     return [
         InternalMessage(
             id=msg.id,
-            role=MessageRole.TOOL,
-            content=tool_result_content,
-            attachments=msg.attachments,
-            tool_call_id=tool_call_id,
-        ),
-        InternalMessage(
-            id=msg.id,
             role=MessageRole.ASSISTANT,
             content=None,
             attachments=msg.attachments,
             tool_calls=[tool_call],
+        ),
+        InternalMessage(
+            id=msg.id,
+            role=MessageRole.TOOL,
+            content=tool_result_content,
+            attachments=msg.attachments,
+            tool_call_id=tool_call_id,
         ),
     ]
 
@@ -99,6 +99,9 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                         content = parsed_content
                 except json.JSONDecodeError:
                     pass
+
+            if role == MessageRole.ERR:
+                role = MessageRole.ASSISTANT
 
             parsed_history.append(
                 InternalMessage(

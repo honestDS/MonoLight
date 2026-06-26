@@ -12,7 +12,7 @@ from app.core import constants
 from app.core.crud.profile import profile_crud
 from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
-from app.core.i18n.context import set_current_locale
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
 from app.core.log import reset_profile_log_locale, set_profile_log_locale
 from app.core.paths import FAVICON_PATH
@@ -34,11 +34,12 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
 
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
     return JSONResponse(
         status_code=exc.status_code,
         content=StandardResponse.error(
             code=exc.status_code,
-            message=exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+            message=detail,
         ).model_dump(),
     )
 
@@ -102,7 +103,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def locale_middleware(request: Request, call_next):
     # HTTP 请求从 Accept-Language 读取语言；WebSocket 握手不经过 HTTP 中间件，
     # 其语言在对应的 WS handler 内通过 query 参数单独设置
-    set_current_locale(normalize_locale(request.headers.get("Accept-Language")))
+    locale_token = set_current_locale(normalize_locale(request.query_params.get("lang") or request.headers.get("Accept-Language")))
     log_locale_token = None
     try:
         async with AsyncSessionLocal() as db:
@@ -111,6 +112,7 @@ async def locale_middleware(request: Request, call_next):
     finally:
         if log_locale_token is not None:
             reset_profile_log_locale(log_locale_token)
+        reset_current_locale(locale_token)
 
 
 async def root():

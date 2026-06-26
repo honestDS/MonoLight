@@ -14,10 +14,18 @@ const request = axios.create({
 
 const WS_BASE_URL = process.env.VUE_APP_WS_BASE_URL || API_ORIGIN.replace(/^http/, 'ws')
 
+const getCurrentLocale = () => localStorage.getItem('locale') || 'zh'
+
+const appendLangParam = (url) => {
+  if (/[?&]lang=/.test(url)) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}lang=${encodeURIComponent(getCurrentLocale())}`
+}
+
 request.interceptors.request.use(config => {
   const token = localStorage.getItem('token')
   if (token) { config.headers['Authorization'] = `Bearer ${token}` }
-  config.headers['Accept-Language'] = localStorage.getItem('locale') || 'zh'
+  config.headers['Accept-Language'] = getCurrentLocale()
   return config
 })
 
@@ -64,7 +72,7 @@ export const authApi = {
 export const chatApi = {
     // 聊天 WS 接口
     createWebSocket(token) {
-        const lang = localStorage.getItem('locale') || 'zh'
+        const lang = getCurrentLocale()
         const wsUrl = `${WS_BASE_URL}/api/v1/chat/ws?token=${token}&lang=${lang}`
         console.log('WebSocket connecting to:', wsUrl)
         return new WebSocket(wsUrl)
@@ -122,7 +130,7 @@ export const systemApi = {
   logsHistory: (params) => request.get('/system/logs', { params }),
   // 系统日志实时 WS 接口
   createLogsWebSocket: (token) => {
-    const lang = localStorage.getItem('locale') || 'zh'
+    const lang = getCurrentLocale()
     const wsUrl = `${WS_BASE_URL}/api/v1/system/logs/ws?token=${token}&lang=${lang}`
     console.log('System Logs WebSocket connecting to:', wsUrl)
     return new WebSocket(wsUrl)
@@ -141,12 +149,12 @@ export const fileApi = {
     })
   },
   getDownloadUrl: (path) => {
-    return `${API_BASE_URL}/download?path=${encodeURIComponent(path)}`
+    return `${API_BASE_URL}/download?path=${encodeURIComponent(path)}&lang=${encodeURIComponent(getCurrentLocale())}`
   },
   resolveDownloadUrl: (url) => {
     if (!url) return '#'
-    if (/^https?:\/\//i.test(url)) return url
-    return `${API_ORIGIN}${url.startsWith('/') ? url : `/${url}`}`
+    if (/^https?:\/\//i.test(url)) return appendLangParam(url)
+    return appendLangParam(`${API_ORIGIN}${url.startsWith('/') ? url : `/${url}`}`)
   }
 }
 

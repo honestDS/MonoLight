@@ -7,6 +7,8 @@ import i18n from '../../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
+const resolveErrorMessage = (data, fallback) => data?.message || data?.content || data?.detail || data?.error || fallback
+
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
 
@@ -155,7 +157,7 @@ export function useChatTransport() {
       if (onProactiveReplyError) {
         onProactiveReplyError(data)
       } else if (onError) {
-        onError(data.content || data.message || 'Background proactive reply failed', thinkingId, requestId)
+        onError(resolveErrorMessage(data, 'Background proactive reply failed'), thinkingId, requestId)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -172,10 +174,11 @@ export function useChatTransport() {
     }
 
     // 6. 处理异常通知
-    if (type === 'error') {
-      console.error('WebSocket业务错误:', data.message)
+    if (type === 'error' || data.error || data.detail) {
+      const errorMessage = resolveErrorMessage(data, t('chat.stream_error'))
+      console.error('WebSocket业务错误:', errorMessage)
       if (onError) {
-        onError(data.message, thinkingId, requestId)
+        onError(errorMessage, thinkingId, requestId)
       }
       if (setLoading) {
         setLoading(false)
@@ -191,7 +194,7 @@ export function useChatTransport() {
       const choice = data.choices[0]
       if (!choice) return
 
-      const content = choice.message?.content || ''
+      const content = resolveErrorMessage(choice.message, '')
       const finishReason = choice.finish_reason
 
       if (choice.message?.role === 'err') {

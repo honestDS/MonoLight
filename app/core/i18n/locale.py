@@ -18,7 +18,7 @@ def normalize_locale(raw: str | None) -> str:
     if not raw:
         return DEFAULT_LOCALE
 
-    lang = raw.split("-")[0].lower()
+    lang = raw.split(",", 1)[0].split(";", 1)[0].replace("_", "-").split("-", 1)[0].strip().lower()
 
     if lang in SUPPORTED_LOCALES:
         return lang

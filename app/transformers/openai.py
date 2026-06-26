@@ -1,5 +1,6 @@
 import asyncio
 import json
+import socket
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
@@ -25,6 +26,14 @@ from .base import (
 )
 
 logger = get_logger(__name__)
+
+
+def _is_timeout_exception(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, aiohttp.ServerTimeoutError):
+        return True
+    return False
 
 
 class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer):
@@ -118,6 +127,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
+            if _is_timeout_exception(e):
+                raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_image(
@@ -273,6 +284,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
+            if _is_timeout_exception(e):
+                raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
             raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     @staticmethod

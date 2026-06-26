@@ -5,7 +5,7 @@ import { chatApi } from '../../api'
 import { isToolCall, isToolResult } from '../../utils'
 
 const parseBackgroundSystemMessage = (item) => {
-  if (item?.role !== 'system') return null
+  if (item?.type !== 'background_result' && item?.role !== 'system') return null
   try {
     const payload = typeof item.content === 'string' ? JSON.parse(item.content) : item.content
     if (payload?.type === 'background_tool_result') return payload

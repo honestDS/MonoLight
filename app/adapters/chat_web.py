@@ -69,7 +69,7 @@ class WebChatAdapter(BaseChatAdapter):
             return LLMResponse(
                 choices=[
                     LLMChoice(
-                        message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, **e.kwargs)),
+                        message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, default=e.message, **e.kwargs)),
                         finish_reason=FinishReason.ERROR,
                         created_at=time.time(),
                     )

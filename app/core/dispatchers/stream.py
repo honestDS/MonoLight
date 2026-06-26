@@ -381,7 +381,7 @@ class StreamDispatcherMixin:
             yield {"type": "done", "session_id": session_id, "history": _dump_output_history(turn_messages), "files": files_to_user or None, "response_id": final_response_id, "request_id": request_id}
 
         except BaseBusinessException as bbe:
-            yield {"type": "error", "message": t(bbe.message, **bbe.kwargs), "request_id": request_id}
+            yield {"type": "error", "message": t(bbe.message, default=bbe.message, **bbe.kwargs), "request_id": request_id}
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_STREAM_ERROR"), exc_info=True)
-            yield {"type": "error", "message": str(e), "request_id": request_id}
+            yield {"type": "error", "message": t(str(e), default=str(e)), "request_id": request_id}

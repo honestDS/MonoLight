@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.users import check_admin_privilege
 from app.core import constants
 from app.core.crud.log import system_log_crud
-from app.core.i18n.context import set_current_locale
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
@@ -67,7 +67,7 @@ async def system_logs_websocket(
     """
     # 语言上下文需在 accept 之前设置；WebSocket 的 accept 统一由 log_broadcaster.connect 内部完成，此处不再重复 accept
     lang_param = websocket.query_params.get("lang")
-    set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
+    locale_token = set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
     await log_broadcaster.connect(websocket)
     try:
         # 1. 回溯历史日志 (最近 100 条)
@@ -110,3 +110,5 @@ async def system_logs_websocket(
             await websocket.close()
         except Exception:
             pass
+    finally:
+        reset_current_locale(locale_token)
