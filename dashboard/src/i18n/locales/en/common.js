@@ -26,6 +26,7 @@ export default {
     profiles: 'Profiles',
     channels: 'Channels',
     prompts: 'Prompts',
+    scheduled_tasks: 'Scheduled Tasks',
     logs: 'System Logs',
     realtime_logs: 'Real-time Logs',
     history_logs: 'History Logs',

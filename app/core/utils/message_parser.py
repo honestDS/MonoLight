@@ -1,5 +1,6 @@
 import json
 
+from app.core.prompts import SCHEDULED_TASK_TRIGGER_PROMPT
 from app.models.message import (
     InternalMessage,
     InternalToolCall,
@@ -79,6 +80,9 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             if m_type == MessageType.BACKGROUND_TASK_RESULT:
                 parsed_history.extend(_parse_background_task_result_message(msg, content))
                 continue
+            elif m_type == MessageType.SCHEDULED_TASK_TRIGGER:
+                role = MessageRole.USER
+                content = SCHEDULED_TASK_TRIGGER_PROMPT.format(message=content)
             elif m_type == MessageType.TOOL_CALL or m_type == MessageType.TOOL_RESULT:
                 try:
                     parsed = json.loads(content)

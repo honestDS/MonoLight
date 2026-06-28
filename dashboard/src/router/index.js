@@ -5,6 +5,7 @@ const routes = [
   { path: '/', component: () => import('../views/ChatView.vue') },
   { path: '/profiles', component: () => import('../views/ProfilesView.vue') },
   { path: '/prompts', component: () => import('../views/PromptsView.vue') },
+  { path: '/scheduled-tasks', component: () => import('../views/ScheduledTasksView.vue') },
   { path: '/channels', component: () => import('../views/ChannelsView.vue') },
   { path: '/users', component: () => import('../views/UsersView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },

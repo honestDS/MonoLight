@@ -53,6 +53,7 @@ class BackgroundDispatcherMixin:
         call_context: str,
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
+        restrict_tools_to_background_allowlist: bool = True,
     ) -> tuple[InternalMessage, list[InternalMessage]]:
         user = await user_crud.get_by_uid(db, uid)
         username = user.username if user else "Unknown"
@@ -83,10 +84,15 @@ class BackgroundDispatcherMixin:
 
         tools = None
         allowed_knowledge_base_ids = None
+        allowed_tool_names = None
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available, allow_background=False)
-            background_tools = _filter_background_proactive_tools(profile_tools)
-            tools = background_tools or None
+            if restrict_tools_to_background_allowlist:
+                profile_tools = _filter_background_proactive_tools(profile_tools)
+                allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+            else:
+                allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
+            tools = profile_tools or None
 
         request_messages = ContextManager.trim_messages_for_model_request(
             messages=messages,
@@ -113,7 +119,7 @@ class BackgroundDispatcherMixin:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
         if allow_tools and ai_msg.tool_calls:
-            unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls)
+            unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
             if unsupported_tool_names:
                 logger.bind(uid=uid, session_id=session_id, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
                 correction_message = InternalMessage(
@@ -123,7 +129,7 @@ class BackgroundDispatcherMixin:
                             "type": "background_proactive_tool_correction",
                             "instruction": BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
                             "unsupported_tool_calls": unsupported_tool_names,
-                            "allowed_tool_calls": sorted(BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES),
+                            "allowed_tool_calls": sorted(allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES),
                         },
                         ensure_ascii=False,
                     ),
@@ -151,7 +157,7 @@ class BackgroundDispatcherMixin:
                 ai_msg = retry_response.message
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-                remaining_unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [])
+                remaining_unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
                     logger.bind(uid=uid, session_id=session_id, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
                     text_only_message = InternalMessage(
@@ -197,7 +203,7 @@ class BackgroundDispatcherMixin:
         if not allow_tools or not ai_msg.tool_calls:
             return ai_msg, turn_messages
 
-        _validate_background_proactive_tool_calls(ai_msg.tool_calls)
+        _validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
             raise LLMException(message=f"Background proactive reply attempted too many tool calls: {len(ai_msg.tool_calls)}")
 

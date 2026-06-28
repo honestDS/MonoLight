@@ -10,6 +10,7 @@ export const routeNameMap = {
   '/profiles': 'common.menu.system',
   '/channels': 'common.menu.system',
   '/prompts': 'common.menu.system',
+  '/scheduled-tasks': 'common.menu.scheduled_tasks',
   '/logs/realtime': 'common.menu.logs',
   '/logs/history': 'common.menu.logs'
 }

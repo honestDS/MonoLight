@@ -26,6 +26,7 @@ export default {
     profiles: '配置管理',
     channels: '渠道管理',
     prompts: '提示词管理',
+    scheduled_tasks: '定时任务',
     logs: '系统日志',
     realtime_logs: '实时日志',
     history_logs: '历史日志',

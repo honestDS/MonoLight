@@ -32,6 +32,7 @@ class MessageType(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     BACKGROUND_TASK_RESULT = "background_result"
+    SCHEDULED_TASK_TRIGGER = "scheduled_task_trigger"
 
 
 class MessagePart(BaseModel):
@@ -83,7 +84,7 @@ class MessageBase(SQLModel):
     session_id: str = Field(index=True, max_length=100)
     uid: str = Field(index=True, max_length=100)
     role: MessageRole = Field(max_length=20)
-    type: MessageType = Field(default=MessageType.TEXT, max_length=20)
+    type: MessageType = Field(default=MessageType.TEXT, max_length=40)
     content: str | None = Field(default=None)
     attachments: list[str] | None = Field(default=None, sa_column=Column(JSON))
     is_processed: bool = Field(default=False)

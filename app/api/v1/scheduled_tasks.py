@@ -1,0 +1,95 @@
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.users import check_admin_privilege
+from app.core.crud.scheduled_task import scheduled_task_crud
+from app.core.crud.session import session_crud
+from app.core.utils.time import get_local_time
+from app.models.scheduled_task import ScheduledTaskResponse, ScheduledTaskStatus
+from app.providers.database import get_db
+from app.schemas.response import PageData, StandardResponse
+from app.schemas.scheduled_task import ScheduledTaskCreateRequest, ScheduledTaskUpdateRequest
+
+router = APIRouter(prefix="/scheduled-tasks", tags=["ScheduledTasks"], dependencies=[Depends(check_admin_privilege)])
+
+
+async def _validate_user_session(db: AsyncSession, session_id: str, uid: str) -> None:
+    session = await session_crud.get_by_session_id(db, session_id)
+    if not session or session.uid != uid:
+        raise ValueError("session not found")
+
+
+@router.get("/list")
+async def list_scheduled_tasks(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    status: ScheduledTaskStatus | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    skip = (page - 1) * size
+    tasks = await scheduled_task_crud.list_tasks(db, skip=skip, limit=size, status=status)
+    total = await scheduled_task_crud.count_tasks(db, status=status)
+    data = PageData(
+        items=[ScheduledTaskResponse.model_validate(task) for task in tasks],
+        total=total,
+        page=page,
+        size=size,
+    )
+    return StandardResponse.success(data=data, message="scheduled task list success", raw_message=True)
+
+
+@router.post("/create")
+async def create_scheduled_task(
+    request: ScheduledTaskCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(check_admin_privilege),
+):
+    try:
+        await _validate_user_session(db, request.session_id, admin.uid)
+    except ValueError as exc:
+        return StandardResponse.error(code=400, message=str(exc), raw_message=True)
+
+    task = await scheduled_task_crud.create_scheduled_task(
+        db,
+        name=request.name,
+        uid=admin.uid,
+        session_id=request.session_id,
+        message=request.message,
+        interval_seconds=request.interval_seconds,
+    )
+    return StandardResponse.success(data=ScheduledTaskResponse.model_validate(task), message="scheduled task created", raw_message=True)
+
+
+@router.post("/update")
+async def update_scheduled_task(
+    task_id: int,
+    request: ScheduledTaskUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(check_admin_privilege),
+):
+    task = await scheduled_task_crud.get(db, task_id)
+    if not task or task.uid != admin.uid:
+        return StandardResponse.error(code=404, message="scheduled task not found", raw_message=True)
+
+    obj_in = request.model_dump(exclude_unset=True)
+    session_id = obj_in.get("session_id", task.session_id)
+    try:
+        await _validate_user_session(db, session_id, admin.uid)
+    except ValueError as exc:
+        return StandardResponse.error(code=400, message=str(exc), raw_message=True)
+
+    if "interval_seconds" in obj_in:
+        obj_in["next_run_at"] = get_local_time() + timedelta(seconds=obj_in["interval_seconds"])
+    updated_task = await scheduled_task_crud.update_scheduled_task(db, scheduled_task=task, obj_in=obj_in)
+    return StandardResponse.success(data=ScheduledTaskResponse.model_validate(updated_task), message="scheduled task updated", raw_message=True)
+
+
+@router.post("/delete")
+async def delete_scheduled_task(task_id: int, db: AsyncSession = Depends(get_db), admin=Depends(check_admin_privilege)):
+    task = await scheduled_task_crud.get(db, task_id)
+    if not task or task.uid != admin.uid:
+        return StandardResponse.error(code=404, message="scheduled task not found", raw_message=True)
+    await scheduled_task_crud.delete_task(db, scheduled_task=task)
+    return StandardResponse.success(message="scheduled task deleted", raw_message=True)

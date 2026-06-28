@@ -14,6 +14,7 @@ from app.core.crud.base import CRUDBase
 from app.models.message import (
     Message,
     MessageCreate,
+    MessageType,
 )
 from app.models.user import User
 
@@ -47,14 +48,29 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         获取未处理的新消息（通常用于动态追加用户新输入的指令）
         """
-        result = await db.execute(select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.is_processed == False).order_by(Message.created_at.asc()))  # noqa: E712
+        result = await db.execute(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.is_processed == False)  # noqa: E712
+            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .order_by(Message.created_at.asc())
+        )
         return result.scalars().all()
 
     async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> list[Message]:
         """
         用于前端分页加载会话历史记录
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).order_by(Message.created_at.desc()).limit(limit).offset(offset)
+        stmt = (
+            select(Message)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         result = await db.execute(stmt)
         return result.scalars().all()
 
@@ -69,6 +85,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
+                ChatSession.created_at,
             )
             .join(User, Message.uid == User.uid)
             .join(ChatSession, Message.session_id == ChatSession.session_id, isouter=True)
@@ -77,9 +94,21 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
 
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown).order_by(desc("last_active"))
+        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.created_at).order_by(desc("last_active"))
         result = await db.execute(stmt)
         return result.all()
+
+    async def get_latest_session_profile_id(self, db: AsyncSession, *, session_id: str, uid: str) -> int | None:
+        stmt = (
+            select(Message.profile_id)
+            .where(Message.session_id == session_id)
+            .where(Message.uid == uid)
+            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().first()
 
     async def remove_session(self, db: AsyncSession, session_id: str, uid: str = None, is_admin: bool = False) -> int:
         stmt = delete(Message).where(Message.session_id == session_id)

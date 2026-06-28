@@ -102,6 +102,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
+                "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             }
         )
     return StandardResponse.success(data=data, message=constants.MSG_SESSION_LIST_SUCCESS)

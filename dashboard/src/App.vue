@@ -23,6 +23,9 @@
           <el-menu-item index="/users">
             <span>{{ $t('common.menu.users') }}</span>
           </el-menu-item>
+          <el-menu-item index="/scheduled-tasks">
+            <span>{{ $t('common.menu.scheduled_tasks') }}</span>
+          </el-menu-item>
           <el-menu-item index="/knowledge-base">
             <span>{{ $t('common.menu.knowledge_base') }}</span>
           </el-menu-item>

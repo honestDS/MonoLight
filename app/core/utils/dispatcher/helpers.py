@@ -10,7 +10,7 @@ from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
 
-BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user"}
+BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user", "query_knowledge_base"}
 
 
 def _get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
@@ -124,19 +124,21 @@ def _get_tool_schema_name(schema: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _filter_background_proactive_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    missing_tool_names = sorted(tool_name for tool_name in BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES if tool_name not in TOOL_EXECUTOR_MAP)
+def _filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_names: set[str] | None = None) -> list[dict[str, Any]]:
+    allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+    missing_tool_names = sorted(tool_name for tool_name in allowed_names if tool_name not in TOOL_EXECUTOR_MAP)
     if missing_tool_names:
         raise ServerException(message=f"Background proactive tool is not registered: {', '.join(missing_tool_names)}")
-    return [tool for tool in tools if _get_tool_schema_name(tool) in BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES]
+    return [tool for tool in tools if _get_tool_schema_name(tool) in allowed_names]
 
 
-def _get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToolCall]) -> list[str]:
-    return sorted({tool_call.name for tool_call in tool_calls if tool_call.name not in BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES or tool_call.name not in TOOL_EXECUTOR_MAP})
+def _get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> list[str]:
+    allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
+    return sorted({tool_call.name for tool_call in tool_calls if tool_call.name not in allowed_names or tool_call.name not in TOOL_EXECUTOR_MAP})
 
 
-def _validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall]) -> None:
-    unsupported_tool_names = _get_unsupported_background_proactive_tool_names(tool_calls)
+def _validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> None:
+    unsupported_tool_names = _get_unsupported_background_proactive_tool_names(tool_calls, allowed_tool_names=allowed_tool_names)
     if unsupported_tool_names:
         raise LLMException(message=f"Background proactive reply attempted unsupported tool calls: {', '.join(unsupported_tool_names)}")
 
