@@ -1,5 +1,8 @@
+import importlib.util
 import logging
 import os
+from pathlib import Path
+from types import ModuleType
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +21,12 @@ from app.models.profile import (
 from .client import engine
 
 logger = logging.getLogger("uvicorn.error")
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+MIGRATION_SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+MIGRATION_RECORD_TABLE = "migration_record"
+MIGRATION_FILE_PREFIX = "migration_"
+MIGRATION_FILE_SUFFIX = ".py"
 
 
 def build_default_profile_configs() -> dict:
@@ -50,10 +59,90 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
     )
 
 
+async def ensure_migration_record_table(session: AsyncSession) -> None:
+    await session.execute(
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {MIGRATION_RECORD_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                migration_id VARCHAR(255) NOT NULL UNIQUE,
+                script_name VARCHAR(255) NOT NULL,
+                executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    await session.commit()
+
+
+async def has_migration_executed(session: AsyncSession, migration_id: str) -> bool:
+    result = await session.execute(
+        text(f"SELECT 1 FROM {MIGRATION_RECORD_TABLE} WHERE migration_id = :migration_id LIMIT 1"),
+        {"migration_id": migration_id},
+    )
+    return result.scalar() is not None
+
+
+async def mark_migration_executed(session: AsyncSession, migration_id: str, script_name: str) -> None:
+    await session.execute(
+        text(
+            f"""
+            INSERT INTO {MIGRATION_RECORD_TABLE} (migration_id, script_name)
+            VALUES (:migration_id, :script_name)
+            """
+        ),
+        {"migration_id": migration_id, "script_name": script_name},
+    )
+
+
+def load_migration_module(script_path: Path) -> ModuleType:
+    module_name = f"monoligh_migration_{script_path.stem}"
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Invalid migration script: {script_path.name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def iter_migration_scripts() -> list[Path]:
+    if not MIGRATION_SCRIPTS_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in MIGRATION_SCRIPTS_DIR.iterdir()
+        if path.is_file()
+        and path.name.startswith(MIGRATION_FILE_PREFIX)
+        and path.name.endswith(MIGRATION_FILE_SUFFIX)
+    )
+
+
+async def run_once_migration_scripts(session: AsyncSession) -> None:
+    await ensure_migration_record_table(session)
+    for script_path in iter_migration_scripts():
+        module = load_migration_module(script_path)
+        migration_id = getattr(module, "MIGRATION_ID", script_path.stem)
+        migrate_func = getattr(module, "migrate", None)
+        if not isinstance(migration_id, str) or not migration_id.strip():
+            raise RuntimeError(f"Invalid MIGRATION_ID in {script_path.name}")
+        if migrate_func is None:
+            raise RuntimeError(f"Missing migrate(session) in {script_path.name}")
+        if await has_migration_executed(session, migration_id):
+            continue
+
+        logger.info("MIGRATION: running %s", migration_id)
+        await migrate_func(session)
+        await mark_migration_executed(session, migration_id, script_path.name)
+        await session.commit()
+        logger.info("MIGRATION: completed %s", migration_id)
+
+
 async def init_system_data(session: AsyncSession):
     # 1. 基础表初始化 (若表不存在则创建)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    await run_once_migration_scripts(session)
 
     # 清空会话锁表 (active_session)
     await session.execute(text(f"DELETE FROM {ActiveSession.__tablename__}"))
