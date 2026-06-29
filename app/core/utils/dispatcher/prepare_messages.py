@@ -33,11 +33,10 @@ async def prepare_messages(
     message: Any,
     is_first_iter: bool,
     context_window_k: int = 4,
-    embedding_profile_available: bool | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
-    system_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
+    system_prompt = await build_system_prompt(db, profile)
     user_runtime_instructions = await build_user_runtime_instructions(db, session_id) if is_first_iter else ""
     reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
 

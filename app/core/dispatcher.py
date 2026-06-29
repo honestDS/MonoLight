@@ -1,7 +1,6 @@
 from app.core.channel_router import select_channel
 from app.core.context import ContextManager
 from app.core.dispatchers import ChatDispatcher
-from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.helpers import (
     _dump_background_proactive_history,
@@ -29,7 +28,6 @@ __all__ = [
     "validate_profile_and_cfg",
     "select_channel",
     "process_single_tool",
-    "is_embedding_profile_available",
     "get_tools_for_profile",
     "build_user_runtime_instructions",
     "build_system_prompt",

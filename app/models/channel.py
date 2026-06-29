@@ -241,7 +241,6 @@ class ChannelConfig(BaseModel):
 
     retry_on_failure: bool = PydanticField(True, description="渠道调用失败后是否降级重试")
     chat_timeout: float = PydanticField(60.0, gt=0, le=600, description="对话渠道调用超时（秒）")
-    embedding_timeout: float = PydanticField(30.0, gt=0, le=600, description="嵌入渠道调用超时（秒）")
     rerank_timeout: float = PydanticField(15.0, gt=0, le=120, description="重排渠道调用超时（秒）")
     rerank_candidate_k: int = PydanticField(20, gt=0, le=50, description="送入远程 reranker 的候选数量")
     kb_query_top_k: int = PydanticField(5, gt=0, le=50, description="知识库检索最终返回的片段数量")

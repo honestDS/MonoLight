@@ -17,9 +17,9 @@
     >
       <el-table-column :resizable="false" prop="name" :label="$t('knowledgeBase.kb_name')" min-width="150" sortable />
       <el-table-column :resizable="false" prop="description" :label="$t('knowledgeBase.description')" min-width="250" show-overflow-tooltip />
-      <el-table-column :resizable="false" :label="$t('knowledgeBase.profile')" min-width="160" show-overflow-tooltip>
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.embedding_model')" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">
-          {{ getProfileName(row.profile_id) }}
+          {{ getEmbeddingModelName(row) }}
         </template>
       </el-table-column>
       <el-table-column :resizable="false" prop="created_at" :label="$t('knowledgeBase.created_at')" width="180" sortable>
@@ -62,23 +62,21 @@
             :rows="3"
           />
         </el-form-item>
-        <el-form-item :label="$t('knowledgeBase.profile')" prop="profile_id">
+        <el-form-item v-if="!isEditing" :label="$t('knowledgeBase.embedding_model')" prop="embedding_model_key">
           <el-select
-            v-model="form.profile_id"
-            :placeholder="$t('knowledgeBase.select_profile')"
+            v-model="form.embedding_model_key"
+            :placeholder="$t('knowledgeBase.select_embedding_model')"
             class="full-width-input"
-            :disabled="isEditing"
+            filterable
           >
             <el-option
-              v-for="item in availableProfileOptions"
-              :key="item.id"
-              :label="item.name"
-              :value="item.id"
+              v-for="item in embeddingModelOptions"
+              :key="item.key"
+              :label="item.label"
+              :value="item.key"
             />
           </el-select>
-          <div class="help-text mt-5">
-            {{ isEditing ? $t('knowledgeBase.profile_edit_hint') : $t('knowledgeBase.profile_create_hint') }}
-          </div>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.embedding_model_hint') }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -281,8 +279,7 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const isEditing = ref(false)
 const editingId = ref(null)
-const allProfiles = ref([])
-const profileList = ref([])
+const embeddingModels = ref([])
 const formRef = ref(null)
 const importDialogVisible = ref(false)
 const importing = ref(false)
@@ -310,13 +307,19 @@ const rerankError = ref(null)
 const form = reactive({
   name: '',
   description: '',
-  profile_id: null
+  embedding_model_key: ''
 })
 
 const rules = computed(() => ({
   name: [{ required: true, message: t('knowledgeBase.input_kb_name'), trigger: 'blur' }],
-  profile_id: [{ required: true, message: t('knowledgeBase.select_profile_err'), trigger: 'change' }]
+  embedding_model_key: [{ required: !isEditing.value, message: t('knowledgeBase.select_embedding_model_err'), trigger: 'change' }]
 }))
+
+const embeddingModelOptions = computed(() => embeddingModels.value.map(item => ({
+  ...item,
+  key: `${item.channel_id}::${item.model_id}`,
+  label: `${item.channel_name} / ${item.model_id}${item.embedding_dimensions ? ` (${item.embedding_dimensions})` : ''}`
+})))
 
 const importForm = reactive({
   file: null,
@@ -349,11 +352,10 @@ const fetchData = async () => {
       page: currentPage.value,
       size: pageSize.value
     })
-    const { items, total: totalCount, profiles, available_profiles: availableProfiles } = res.data.data
+    const { items, total: totalCount, embedding_models: embeddingModelItems } = res.data.data
     tableData.value = items || []
     total.value = totalCount || 0
-    allProfiles.value = profiles || []
-    profileList.value = availableProfiles || []
+    embeddingModels.value = embeddingModelItems || []
   } catch (error) {
     ElMessage.error(t('knowledgeBase.fetch_list_failed') + error.message)
   } finally {
@@ -371,16 +373,10 @@ const handleSizeChange = () => {
   fetchData()
 }
 
-const getProfileName = (profileId) => {
-  return allProfiles.value.find(item => item.id === profileId)?.name || '-'
+const getEmbeddingModelName = (row) => {
+  const option = embeddingModelOptions.value.find(item => item.channel_id === row.embedding_channel_id && item.model_id === row.embedding_model_id)
+  return option?.label || row.embedding_model_id || '-'
 }
-
-const availableProfileOptions = computed(() => {
-  if (!isEditing.value) return profileList.value
-
-  const currentProfile = allProfiles.value.find(item => item.id === form.profile_id)
-  return currentProfile ? [currentProfile] : []
-})
 
 const showDialog = () => {
   resetFormFields()
@@ -395,7 +391,7 @@ const showEditDialog = (row) => {
   editingId.value = row.id
   form.name = row.name
   form.description = row.description || ''
-  form.profile_id = row.profile_id
+  form.embedding_model_key = `${row.embedding_channel_id}::${row.embedding_model_id}`
   dialogVisible.value = true
 }
 
@@ -403,7 +399,7 @@ const resetFormFields = () => {
   if (formRef.value) formRef.value.resetFields()
   form.name = ''
   form.description = ''
-  form.profile_id = null
+  form.embedding_model_key = ''
 }
 
 const resetImportForm = () => {
@@ -573,7 +569,13 @@ const submitForm = async () => {
           })
           ElMessage.success(t('knowledgeBase.update_success'))
         } else {
-          await knowledgeBaseApi.create(form)
+          const [embeddingChannelId, embeddingModelId] = form.embedding_model_key.split('::')
+          await knowledgeBaseApi.create({
+            name: form.name,
+            description: form.description,
+            embedding_channel_id: Number(embeddingChannelId),
+            embedding_model_id: embeddingModelId
+          })
           ElMessage.success(t('knowledgeBase.create_success'))
         }
         dialogVisible.value = false

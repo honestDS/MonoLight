@@ -21,7 +21,7 @@ class ScheduledTaskBase(SQLModel):
     status: ScheduledTaskStatus = Field(default=ScheduledTaskStatus.ENABLED, index=True, max_length=20)
     next_run_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
     last_run_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
-    last_message_id: int | None = Field(default=None, foreign_key="message.id", index=True)
+    last_message_id: int | None = Field(default=None, index=True)
     run_count: int = Field(default=0, ge=0)
 
 

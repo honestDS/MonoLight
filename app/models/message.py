@@ -93,7 +93,7 @@ class MessageBase(SQLModel):
 class Message(MessageBase, table=True):
     __tablename__ = "message"
     id: int | None = Field(default=None, primary_key=True, index=True)
-    profile_id: int = Field(foreign_key="profile.id")
+    profile_id: int = Field()
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

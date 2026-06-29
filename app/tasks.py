@@ -6,11 +6,10 @@ from pathlib import Path
 
 from app.core import constants
 from app.core.crud.log import system_log_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.system_setting import system_setting_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR
-from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -108,11 +107,8 @@ def _cleanup_temp_dir_by_size(max_size_bytes: int) -> tuple[int, int]:
 
 async def _get_active_temp_dir_max_size_mb() -> int | None:
     async with AsyncSessionLocal() as db:
-        profile = await profile_crud.get_active(db)
-        if not profile:
-            return None
-        config = ProfileConfig.model_validate(profile.configs or {})
-        return config.other.temp_dir_max_size_mb
+        settings = await system_setting_crud.get_runtime_settings(db)
+        return settings.temp_dir_max_size_mb
 
 
 async def background_temp_cleaner(interval_seconds: int = 10):

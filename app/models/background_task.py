@@ -27,7 +27,7 @@ class BackgroundTaskReplyStatus(StrEnum):
 class BackgroundTaskBase(SQLModel):
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
-    profile_id: int = Field(foreign_key="profile.id", index=True)
+    profile_id: int = Field(index=True)
     tool_call_id: str = Field(index=True, max_length=100)
     tool_name: str = Field(index=True, max_length=100)
     status: BackgroundTaskStatus = Field(default=BackgroundTaskStatus.PENDING, index=True, max_length=20)

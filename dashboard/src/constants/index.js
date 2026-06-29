@@ -18,7 +18,6 @@ export const routeNameMap = {
 // 默认渠道配置
 const defaultChannelConfig = () => ({
   chat_timeout: 60.0,
-  embedding_timeout: 30.0,
   rerank_timeout: 15.0,
   rerank_candidate_k: 20,
   kb_query_top_k: 5,
@@ -29,7 +28,6 @@ const defaultChannelConfig = () => ({
 export const defaultProfileConfigs = () => ({
   channel: {
     chat_channel: defaultChannelConfig(),
-    embedding_channel: defaultChannelConfig(),
     rerank_channel: defaultChannelConfig(),
     image_generation_channel: defaultChannelConfig(),
   },
@@ -48,10 +46,7 @@ export const defaultProfileConfigs = () => ({
     file_send_max_total_size_mb: 100,
     file_send_blocked_extensions: []
   },
-  other: {
-    log_locale: 'zh',
-    temp_dir_max_size_mb: 1024
-  },
+  other: {},
 })
 
 // 默认渠道规则

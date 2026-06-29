@@ -3,10 +3,12 @@ from app.models.channel import ModelChannel as ModelChannel
 from app.models.channel_cursor import ChannelCursor as ChannelCursor
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
+from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.message import Message as Message
 from app.models.profile import Profile as Profile
 from app.models.prompt import PromptLibrary as PromptLibrary
 from app.models.scheduled_task import ScheduledTask as ScheduledTask
 from app.models.session import ChatSession as ChatSession
 from app.models.system_log import SystemLog as SystemLog
+from app.models.system_setting import SystemSetting as SystemSetting
 from app.models.user import User as User

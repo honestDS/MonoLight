@@ -107,7 +107,7 @@ export const promptApi = {
   list: (params) => request.get('/prompts/list', { params }),
   create: (data) => request.post('/prompts/create', data),
   update: (id, data) => request.post(`/prompts/update?prompt_id=${id}`, data),
-  delete: (id) => request.post(`/prompts/delete?prompt_id=${id}`)
+  delete: (id, params = {}) => request.post('/prompts/delete', null, { params: { prompt_id: id, ...params } })
 }
 
 export const channelApi = {
@@ -124,6 +124,8 @@ export const channelApi = {
 }
 
 export const systemApi = {
+  settings: () => request.get('/system/settings'),
+  updateSettings: (data) => request.post('/system/settings', data),
   // 获取后端可用语言列表
   i18nLocales: () => request.get('/system/i18n/locales'),
   // 获取历史系统日志

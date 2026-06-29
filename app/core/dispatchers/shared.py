@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel_router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND
 from app.core.context import ContextManager
-from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.exceptions import LLMException
 from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.helpers import _get_multimodal_from_entry, _resolve_chat_params
@@ -33,7 +32,6 @@ class DispatcherValidationMixin:
         dispatcher_module = import_module("app.core.dispatcher")
         validate_profile = getattr(dispatcher_module, "validate_profile_and_cfg", validate_profile_and_cfg)
         select_chat_channel = getattr(dispatcher_module, "select_channel", select_channel)
-        check_embedding_profile = getattr(dispatcher_module, "is_embedding_profile_available", is_embedding_profile_available)
         build_prompt = getattr(dispatcher_module, "build_system_prompt", build_system_prompt)
         get_profile_tools = getattr(dispatcher_module, "get_tools_for_profile", get_tools_for_profile)
         build_runtime_instructions = getattr(dispatcher_module, "build_user_runtime_instructions", build_user_runtime_instructions)
@@ -48,9 +46,8 @@ class DispatcherValidationMixin:
         chat_channel_obj, model_entry, _channel_rule = selection
         img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
         chat_params = _resolve_chat_params(model_entry, chat_channel)
-        embedding_profile_available = await check_embedding_profile(db, profile)
-        system_prompt = await build_prompt(db, profile, embedding_profile_available=embedding_profile_available)
-        tools, _allowed_knowledge_base_ids = await get_profile_tools(db, profile, embedding_profile_available=embedding_profile_available)
+        system_prompt = await build_prompt(db, profile)
+        tools, _allowed_knowledge_base_ids = await get_profile_tools(db, profile)
 
         validation_msg = InternalMessage(role=MessageRole.USER, content=copy.deepcopy(message), attachments=copy.deepcopy(attachments))
         user_runtime_instructions = await build_runtime_instructions(db, session_id)

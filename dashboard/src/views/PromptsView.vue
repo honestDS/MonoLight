@@ -23,7 +23,7 @@
         <template #default="scope">
           <div class="action-buttons">
             <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">{{ $t('prompts.edit') }}</el-button>
-            <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">{{ $t('prompts.delete') }}</el-button>
+            <el-button type="danger" size="small" @click="deletePrompt(scope.row)">{{ $t('prompts.delete') }}</el-button>
           </div>
         </template>
       </el-table-column>
@@ -43,16 +43,30 @@
         <el-button type="primary" @click="submitForm" size="default" :loading="submitting">{{ $t('prompts.save') }}</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog :title="$t('prompts.reassign_prompt_title')" v-model="reassignDialogVisible" width="420px" class="standard-dialog" center align-center>
+      <div class="help-text mb-12">{{ $t('prompts.reassign_prompt_hint') }}</div>
+      <el-form label-width="120px" size="default">
+        <el-form-item :label="$t('prompts.replacement_prompt')">
+          <el-select v-model="replacementPromptId" class="full-width-input" filterable>
+            <el-option v-for="item in globalPromptOptions" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="reassignDialogVisible = false" size="default">{{ $t('prompts.cancel') }}</el-button>
+        <el-button type="danger" @click="confirmReassignAndDelete" size="default" :loading="deleteSubmitting">{{ $t('prompts.confirm_reassign_delete') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, ref, reactive, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { promptApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
-import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import { getShortContent } from '../utils'
 
 const prompts = ref([])
@@ -61,8 +75,13 @@ const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const submitting = ref(false)
+const deleteSubmitting = ref(false)
 const dialogVisible = ref(false)
+const reassignDialogVisible = ref(false)
 const dialogType = ref('create')
+const pendingDeletePrompt = ref(null)
+const replacementPromptId = ref(null)
+const replacementPromptOptions = ref([])
 
 const { t } = useI18n()
 
@@ -71,6 +90,8 @@ const form = reactive({
   name: '',
   content: ''
 })
+
+const globalPromptOptions = computed(() => replacementPromptOptions.value.filter(item => item.uid === null && item.id !== pendingDeletePrompt.value?.id))
 
 // 加载提示词列表
 const loadPrompts = async () => {
@@ -89,8 +110,10 @@ const loadPrompts = async () => {
   }
 }
 
-// 使用删除确认组合式函数
-const { handleDelete } = useDeleteConfirm(promptApi.delete, loadPrompts)
+const loadReplacementPromptOptions = async () => {
+  const res = await promptApi.list({ page: 1, size: 1000 })
+  replacementPromptOptions.value = res.data.data.items || []
+}
 
 const handleRefresh = () => {
   currentPage.value = 1
@@ -135,6 +158,47 @@ const submitForm = async () => {
     ElMessage.error(err.message || t('prompts.submit_failed'))
   } finally {
     submitting.value = false
+  }
+}
+
+const deletePrompt = async (row) => {
+  try {
+    await ElMessageBox.confirm(t('prompts.delete_confirm', { name: row.name }), t('prompts.delete'), { type: 'warning' })
+    await promptApi.delete(row.id)
+    ElMessage.success(t('prompts.delete_success'))
+    loadPrompts()
+  } catch (err) {
+    if (err === 'cancel' || err === 'close') return
+    if (err.response?.status === 409 || err.response?.data?.code === 409) {
+      pendingDeletePrompt.value = row
+      await loadReplacementPromptOptions()
+      replacementPromptId.value = globalPromptOptions.value[0]?.id || null
+      reassignDialogVisible.value = true
+      return
+    }
+    ElMessage.error(err.message || t('prompts.delete_failed'))
+  }
+}
+
+const confirmReassignAndDelete = async () => {
+  if (!pendingDeletePrompt.value || !replacementPromptId.value) {
+    return ElMessage.warning(t('prompts.select_replacement_prompt'))
+  }
+  deleteSubmitting.value = true
+  try {
+    await promptApi.delete(pendingDeletePrompt.value.id, {
+      replacement_prompt_id: replacementPromptId.value,
+      confirm_reassign: true
+    })
+    ElMessage.success(t('prompts.delete_success'))
+    reassignDialogVisible.value = false
+    pendingDeletePrompt.value = null
+    replacementPromptId.value = null
+    loadPrompts()
+  } catch (err) {
+    ElMessage.error(err.message || t('prompts.delete_failed'))
+  } finally {
+    deleteSubmitting.value = false
   }
 }
 

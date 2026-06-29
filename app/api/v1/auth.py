@@ -19,6 +19,7 @@ from app.core.security import (
     verify_password,
 )
 from app.providers.database import get_db
+from app.providers.database.bootstrap import ensure_default_profile_for_user
 from app.schemas.auth import (
     LoginRequest,
     ResetAdminRequest,
@@ -84,6 +85,8 @@ async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncS
                 "is_active": True,
             },
         )
+
+    await ensure_default_profile_for_user(db, user.uid)
 
     user_data = {
         "user_id": user.uid,

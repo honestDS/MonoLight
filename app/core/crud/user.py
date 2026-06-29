@@ -18,5 +18,11 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         result = await db.execute(select(User).where(User.uid == uid))
         return result.scalars().first()
 
+    async def get_multi_by_uids(self, db: AsyncSession, uids: list[str]) -> list[User]:
+        if not uids:
+            return []
+        result = await db.execute(select(User).where(User.uid.in_(uids)))
+        return list(result.scalars().all())
+
 
 user_crud = CRUDUser(User)

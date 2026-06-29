@@ -11,16 +11,6 @@
           />
         </el-form-item>
       </div>
-      <div v-else-if="usage === 'EMBEDDING'" class="channel-editor-config-item">
-        <el-form-item :label="$t('profiles.embedding_timeout')" label-width="auto">
-          <el-input-number
-            v-model="channel.embedding_timeout"
-            :min="1"
-            :max="600"
-            controls-position="right"
-          />
-        </el-form-item>
-      </div>
       <template v-else-if="usage === 'RERANK'">
         <div class="channel-editor-config-item">
           <el-form-item :label="$t('profiles.rerank_timeout')" label-width="auto">

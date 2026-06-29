@@ -9,12 +9,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core import constants
-from app.core.crud.profile import profile_crud
+from app.core.crud.system_setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
-from app.core.log import reset_profile_log_locale, set_profile_log_locale
+from app.core.log import reset_system_log_locale, set_system_log_locale
 from app.core.paths import FAVICON_PATH
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
@@ -107,11 +107,12 @@ async def locale_middleware(request: Request, call_next):
     log_locale_token = None
     try:
         async with AsyncSessionLocal() as db:
-            log_locale_token = set_profile_log_locale(await profile_crud.get_active(db))
+            settings = await system_setting_crud.get_runtime_settings(db)
+            log_locale_token = set_system_log_locale(settings.log_locale)
         return await call_next(request)
     finally:
         if log_locale_token is not None:
-            reset_profile_log_locale(log_locale_token)
+            reset_system_log_locale(log_locale_token)
         reset_current_locale(locale_token)
 
 

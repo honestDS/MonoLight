@@ -6,11 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.users import check_admin_privilege
 from app.core import constants
 from app.core.crud.log import system_log_crud
+from app.core.crud.system_setting import system_setting_crud
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger
 from app.core.log_broadcaster import log_broadcaster
 from app.models.system_log import SystemLogResponse
+from app.models.system_setting import SystemRuntimeSettings
 from app.providers.database import get_db
 from app.schemas.response import (
     PageData,
@@ -29,6 +31,18 @@ async def get_i18n_locales():
         "items": list(get_available_locales()),
     }
     return StandardResponse.success(data=data)
+
+
+@router.get("/settings", response_model=StandardResponse[SystemRuntimeSettings])
+async def get_system_settings(db: AsyncSession = Depends(get_db)):
+    settings = await system_setting_crud.get_runtime_settings(db)
+    return StandardResponse.success(data=settings)
+
+
+@router.post("/settings", response_model=StandardResponse[SystemRuntimeSettings])
+async def update_system_settings(settings_in: SystemRuntimeSettings, db: AsyncSession = Depends(get_db)):
+    settings = await system_setting_crud.update_runtime_settings(db, settings_in)
+    return StandardResponse.success(data=settings)
 
 
 @router.get("/logs", response_model=StandardResponse)

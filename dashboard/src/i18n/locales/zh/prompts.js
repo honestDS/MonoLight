@@ -16,5 +16,13 @@ export default {
   fill_required: '请填写名称和内容',
   save_success: '保存成功',
   submit_failed: '提交失败',
-  refresh: '刷新列表'
+  refresh: '刷新列表',
+  delete_confirm: '确定删除提示词“{name}”吗？',
+  delete_success: '删除成功',
+  delete_failed: '删除失败',
+  reassign_prompt_title: '重置引用后删除',
+  reassign_prompt_hint: '该提示词已被一个或多个配置文件引用，删除前需要先把这些引用重置到其他全局提示词。',
+  replacement_prompt: '替换提示词',
+  confirm_reassign_delete: '确认重置并删除',
+  select_replacement_prompt: '请选择替换提示词'
 }

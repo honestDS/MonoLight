@@ -2,9 +2,9 @@ import json
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.crud.prompt import prompt_crud
 from app.core.embedding.knowledge_base import (
     build_knowledge_base_prompt_items,
-    is_embedding_profile_available,
     list_available_knowledge_bases,
 )
 from app.core.log import (
@@ -29,7 +29,6 @@ logger = get_logger(__name__)
 async def build_system_prompt(
     db: AsyncSession,
     profile: Profile,
-    embedding_profile_available: bool | None = None,
 ) -> str:
     """
     构造系统提示词字符串（不注入消息列表）。
@@ -39,23 +38,16 @@ async def build_system_prompt(
     """
     full_parts = [SYSTEM_RUNTIME_CONTEXT_POLICY]
 
-    # 1. 如果 Profile 关联了 Prompt，则包裹后放入后续部分
-    if profile.prompt and profile.prompt.content:
-        instruction_part = SYSTEM_INSTRUCTIONS_WRAPPER.format(content=profile.prompt.content)
-        full_parts.append(instruction_part)
+    # 1. 如果 Profile 业务关联了 Prompt，则包裹后放入后续部分
+    if profile.prompt_id:
+        prompt = await prompt_crud.get_visible(db, profile.prompt_id, uid=profile.uid)
+        if prompt and prompt.content:
+            instruction_part = SYSTEM_INSTRUCTIONS_WRAPPER.format(content=prompt.content)
+            full_parts.append(instruction_part)
 
     # 2. 查询该 Profile 关联的可用知识库并注入
-    # 嵌入模型不可用（未配置或已禁用）时，知识库检索无法工作，
-    # 不注入知识库目录提示词，保持与工具暴露逻辑一致。
     try:
-        is_embedding_available = embedding_profile_available
-        if is_embedding_available is None:
-            is_embedding_available = await is_embedding_profile_available(db, profile)
-
-        if not is_embedding_available:
-            knowledge_bases = []
-        else:
-            knowledge_bases = await list_available_knowledge_bases(db, profile)
+        knowledge_bases = await list_available_knowledge_bases(db, profile)
         if knowledge_bases:
             knowledge_base_items = build_knowledge_base_prompt_items(knowledge_bases)
             # 序列化为美化后的 JSON
@@ -94,11 +86,10 @@ async def inject_system_prompt(
     db: AsyncSession,
     profile: Profile,
     messages: list[InternalMessage],
-    embedding_profile_available: bool | None = None,
 ) -> list[InternalMessage]:
     """
     注入系统提示词。
     若 Profile 有可用知识库，在尾部注入结构化知识库目录。
     """
-    full_prompt = await build_system_prompt(db, profile, embedding_profile_available=embedding_profile_available)
+    full_prompt = await build_system_prompt(db, profile)
     return inject_system_prompt_text(messages, full_prompt)

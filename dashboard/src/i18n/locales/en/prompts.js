@@ -16,5 +16,13 @@ export default {
   fill_required: 'Please fill in name and content',
   save_success: 'Saved successfully',
   submit_failed: 'Submit failed',
-  refresh: 'Refresh'
+  refresh: 'Refresh',
+  delete_confirm: 'Delete prompt "{name}"?',
+  delete_success: 'Deleted successfully',
+  delete_failed: 'Delete failed',
+  reassign_prompt_title: 'Reassign References and Delete',
+  reassign_prompt_hint: 'This prompt is referenced by one or more profiles. Before deletion, reassign those references to another global prompt.',
+  replacement_prompt: 'Replacement Prompt',
+  confirm_reassign_delete: 'Reassign and Delete',
+  select_replacement_prompt: 'Please select a replacement prompt'
 }

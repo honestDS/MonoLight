@@ -23,6 +23,7 @@ from app.models.user import (
     UserUpdate,
 )
 from app.providers.database import get_db
+from app.providers.database.bootstrap import ensure_default_profile_for_user
 from app.schemas.response import (
     PageData,
     StandardResponse,
@@ -59,6 +60,7 @@ async def add_new_user(
             "is_superuser": False,
         },
     )
+    await ensure_default_profile_for_user(db, new_user.uid)
 
     return StandardResponse.success(data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED)
 

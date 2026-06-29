@@ -10,7 +10,6 @@ from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
-from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -66,7 +65,6 @@ class BackgroundDispatcherMixin:
 
         chat_channel_obj, model_entry, _channel_rule = selection
         chat_params = _resolve_chat_params(model_entry, chat_channel)
-        embedding_profile_available = await is_embedding_profile_available(db, profile)
         messages = await prepare_messages(
             db,
             session_id,
@@ -77,7 +75,6 @@ class BackgroundDispatcherMixin:
             "",
             False,
             context_window_k=chat_params["context_window_k"],
-            embedding_profile_available=embedding_profile_available,
         )
         if extra_messages:
             messages.extend(extra_messages)
@@ -86,7 +83,7 @@ class BackgroundDispatcherMixin:
         allowed_knowledge_base_ids = None
         allowed_tool_names = None
         if allow_tools:
-            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available, allow_background=False)
+            profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
             if restrict_tools_to_background_allowlist:
                 profile_tools = _filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES

@@ -2,9 +2,7 @@
 
 import os
 from typing import (
-    TYPE_CHECKING,
     Any,
-    Optional,
 )
 
 from pydantic import (
@@ -19,23 +17,17 @@ from sqlmodel import (
     JSON,
     Column,
     Field,
-    Relationship,
     SQLModel,
 )
 
-from app.core.i18n.locale import DEFAULT_LOCALE, normalize_locale
 from app.core.utils.config import standardize_config
 from app.models.channel import ChannelConfig
-
-if TYPE_CHECKING:
-    from app.models.prompt import PromptLibrary
 
 
 class ChannelGroupConfig(BaseModel):
     """渠道管理组配置（渠道管理架构）"""
 
     chat_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="对话渠道配置")
-    embedding_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="嵌入渠道配置")
     rerank_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="重排渠道配置")
     image_generation_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="图像生成渠道配置")
 
@@ -74,13 +66,7 @@ class ToolConfig(BaseModel):
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
-    log_locale: str = PydanticField(DEFAULT_LOCALE, description="系统日志存储语言")
-    temp_dir_max_size_mb: int = PydanticField(1024, ge=1, le=1048576, description="单个临时目录大小上限（MB）")
-
-    @model_validator(mode="after")
-    def normalize_log_locale(self) -> "OtherConfig":
-        self.log_locale = normalize_locale(self.log_locale)
-        return self
+    pass
 
 
 class ProfileConfig(BaseModel):
@@ -98,7 +84,6 @@ class ProfileConfig(BaseModel):
         schema_map = {
             "channel": [
                 "chat_channel",
-                "embedding_channel",
                 "rerank_channel",
                 "image_generation_channel",
             ],
@@ -118,7 +103,7 @@ class ProfileConfig(BaseModel):
                 "file_send_blocked_extensions",
                 "executor_max_workers",
             ],
-            "other": ["log_locale", "temp_dir_max_size_mb"],
+            "other": [],
         }
         return standardize_config(data, schema_map)
 
@@ -133,12 +118,6 @@ PROFILE_EXAMPLE = {
                 "chat_timeout": 60.0,
                 "rules": [
                     {"channel_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 100},
-                ],
-            },
-            "embedding_channel": {
-                "embedding_timeout": 30.0,
-                "rules": [
-                    {"channel_id": 1, "model_id": "text-embedding-3-small", "priority": 1, "weight": 100},
                 ],
             },
             "rerank_channel": {
@@ -175,7 +154,7 @@ PROFILE_EXAMPLE = {
             "file_send_blocked_extensions": [],
             "executor_max_workers": 10,
         },
-        "other": {"log_locale": DEFAULT_LOCALE, "temp_dir_max_size_mb": 1024},
+        "other": {},
     },
 }
 
@@ -183,8 +162,9 @@ PROFILE_EXAMPLE = {
 class ProfileBase(SQLModel):
     """Profile 基础模型，包含 OpenAPI 示例文档"""
 
-    name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
-    prompt_id: int | None = Field(default=None, foreign_key="prompt.id", gt=0)
+    uid: str | None = Field(default=None, index=True, max_length=50)
+    name: str = Field(index=True, nullable=False, min_length=1, max_length=100)
+    prompt_id: int | None = Field(default=None, gt=0)
     configs: dict[str, Any] = Field(
         default={},
         sa_column=Column(JSON),
@@ -200,13 +180,12 @@ class Profile(ProfileBase, table=True):
     __tablename__ = "profile"
     id: int | None = Field(default=None, primary_key=True, index=True)
     is_active: bool = Field(default=False)
-    prompt: Optional["PromptLibrary"] = Relationship(back_populates="profiles")
 
 
 class ProfileCreate(ProfileBase):
     """Profile 创建模型"""
 
-    pass
+    knowledge_base_ids: list[int] | None = None
 
 
 class ProfileUpdate(SQLModel):
@@ -215,6 +194,7 @@ class ProfileUpdate(SQLModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     prompt_id: int | None = Field(None, gt=0)
     configs: dict[str, Any] | None = None
+    knowledge_base_ids: list[int] | None = None
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 
@@ -224,4 +204,6 @@ class ProfileResponse(ProfileBase):
 
     id: int
     is_active: bool
+    username: str | None = None
+    knowledge_base_ids: list[int] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)

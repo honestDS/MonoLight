@@ -1,19 +1,29 @@
 <template>
   <div class="view-container">
+    <div class="table-actions system-settings-actions">
+      <el-button type="primary" size="default" @click="showDialog('create')">{{ $t('profiles.create_profile') }}</el-button>
+      <el-button size="default" @click="handleRefresh">{{ $t('profiles.refresh') }}</el-button>
+      <el-button size="default" @click="showSystemSettingsDialog">{{ $t('profiles.global_settings') }}</el-button>
+    </div>
     <BaseDataTable
       :data="profiles"
       :loading="loading"
       :total="total"
       v-model:current-page="currentPage"
       v-model:page-size="pageSize"
-      :create-text="$t('profiles.create_profile')"
-      :refresh-text="$t('profiles.refresh')"
+      :create-text="''"
+      :refresh-text="''"
       @create="showDialog('create')"
       @refresh="handleRefresh"
       @page-change="loadProfiles"
       @size-change="handleSizeChange">
 
       <el-table-column :resizable="false" prop="name" :label="$t('profiles.profile_name')" min-width="120" sortable></el-table-column>
+      <el-table-column v-if="showOwnerColumn" :resizable="false" prop="username" :label="$t('profiles.owner_username')" min-width="120" sortable>
+        <template #default="scope">
+          <span>{{ scope.row.username || $t('profiles.owner_unknown') }}</span>
+        </template>
+      </el-table-column>
       <el-table-column :resizable="false" :label="$t('profiles.chat_channel_label')" min-width="200">
         <template #default="scope">
           <div class="models-list" v-if="scope.row.configs?.channel?.chat_channel?.rules?.length">
@@ -33,7 +43,7 @@
       <el-table-column :resizable="false" :label="$t('profiles.actions')" width="380" align="center" fixed="right">
         <template #default="scope">
           <div class="action-buttons">
-            <el-button :type="scope.row.is_active ? 'info' : 'success'" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">{{ $t('profiles.activate') }}</el-button>
+            <el-button v-if="canActivateProfile(scope.row)" :type="scope.row.is_active ? 'info' : 'success'" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">{{ $t('profiles.activate') }}</el-button>
             <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">{{ $t('profiles.edit') }}</el-button>
             <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">{{ $t('profiles.delete') }}</el-button>
           </div>
@@ -51,6 +61,11 @@
                 <div class="settings-section-title">{{ $t('profiles.base_settings') }}</div>
                 <el-form-item :label="$t('profiles.profile_name')">
                   <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
+                </el-form-item>
+                <el-form-item v-if="showOwnerColumn && dialogType === 'create'" :label="$t('profiles.owner_username')">
+                  <el-select v-model="form.uid" :placeholder="$t('profiles.select_owner')" filterable class="full-width-input">
+                    <el-option v-for="item in users" :key="item.uid" :label="item.username" :value="item.uid"></el-option>
+                  </el-select>
                 </el-form-item>
                 <el-form-item :label="$t('profiles.associated_prompt')">
                   <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
@@ -76,16 +91,6 @@
               </div>
 
               <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.embedding_channel') }}</div>
-                <ChannelEditor
-                  :channel="form.configs.channel.embedding_channel"
-                  :channels="channels"
-                  usage="EMBEDDING"
-                  :label="$t('profiles.embedding_model')"
-                />
-              </div>
-
-              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.rerank_channel') }}</div>
                 <ChannelEditor
                   :channel="form.configs.channel.rerank_channel"
@@ -106,6 +111,33 @@
               </div>
 
 
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane :label="$t('profiles.knowledge_base_settings')" name="knowledge_base">
+            <div class="tab-pane-content">
+              <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.knowledge_base_settings') }}</div>
+                <el-form-item :label="$t('profiles.bound_knowledge_bases')">
+                  <el-select
+                    v-model="form.knowledge_base_ids"
+                    :placeholder="$t('profiles.select_knowledge_bases')"
+                    class="full-width-input"
+                    multiple
+                    filterable
+                    collapse-tags
+                    collapse-tags-tooltip
+                  >
+                    <el-option v-for="item in knowledgeBaseOptions" :key="item.value" :label="item.label" :value="item.value">
+                      <div class="option-with-description">
+                        <span>{{ item.label }}</span>
+                        <span v-if="item.description" class="text-muted">{{ item.description }}</span>
+                      </div>
+                    </el-option>
+                  </el-select>
+                  <div class="help-text mt-5">{{ $t('profiles.knowledge_base_binding_hint') }}</div>
+                </el-form-item>
+              </div>
             </div>
           </el-tab-pane>
 
@@ -273,32 +305,6 @@
             </div>
           </el-tab-pane>
 
-          <!-- 其他设置 -->
-          <el-tab-pane :label="$t('profiles.other_settings')" name="other">
-            <div class="tab-pane-content">
-                <div class="settings-section">
-                  <div class="settings-section-title">{{ $t('profiles.log_storage_settings') }}</div>
-                  <el-form-item :label="$t('profiles.log_locale')">
-                    <el-select v-model="form.configs.other.log_locale" class="full-width-input">
-                      <el-option
-                        v-for="item in logLocaleOptions"
-                        :key="item.value"
-                        :label="item.label"
-                        :value="item.value"
-                      ></el-option>
-                    </el-select>
-                    <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
-                  </el-form-item>
-                </div>
-                <div class="settings-section">
-                  <div class="settings-section-title">{{ $t('profiles.temp_storage_settings') }}</div>
-                  <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
-                    <el-input-number v-model="form.configs.other.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
-                  </el-form-item>
-                </div>
-            </div>
-          </el-tab-pane>
         </el-tabs>
       </el-form>
       <template #footer>
@@ -306,14 +312,33 @@
         <el-button type="primary" @click="submitForm" size="default" :loading="submitting">{{ $t('profiles.save') }}</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
+      <el-form :model="systemSettings" label-width="150px" size="default">
+        <el-form-item :label="$t('profiles.log_locale')">
+          <el-select v-model="systemSettings.log_locale" class="full-width-input">
+            <el-option v-for="locale in localeOptions" :key="locale.value" :label="locale.label" :value="locale.value" />
+          </el-select>
+          <div class="help-text mt-5">{{ $t('profiles.log_locale_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
+          <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
+          <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="settingsDialogVisible = false" size="default">{{ $t('profiles.cancel') }}</el-button>
+        <el-button type="primary" @click="saveSystemSettings" size="default" :loading="settingsSubmitting">{{ $t('profiles.save') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { profileApi, channelApi, promptApi, systemApi } from '../api'
+import { profileApi, channelApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
@@ -324,30 +349,30 @@ import { SUPPORT_LOCALES } from '../i18n'
 const { t } = useI18n()
 
 const profiles = ref([])
+const users = ref([])
 const channels = ref([])
 const prompts = ref([])
-const backendLocales = ref([])
+const knowledgeBases = ref([])
 const toolOptions = ref([])
+const showOwnerColumn = ref(false)
+const currentUid = ref(null)
 const loading = ref(false)
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const dialogVisible = ref(false)
+const settingsDialogVisible = ref(false)
 const dialogType = ref('create')
 const submitting = ref(false)
+const settingsSubmitting = ref(false)
 const activeTab = ref('base')
 const allowedFileSendDirInput = ref('')
 const fileSendBlockedExtensionInput = ref('')
+const localeOptions = SUPPORT_LOCALES
 
-const logLocaleOptions = computed(() => {
-  const localeItems = backendLocales.value.length ? backendLocales.value : ['zh']
-  return localeItems.map(value => {
-    const matched = SUPPORT_LOCALES.find(item => item.value === value)
-    return {
-      value,
-      label: matched ? matched.label : value
-    }
-  })
+const systemSettings = reactive({
+  log_locale: 'zh',
+  temp_dir_max_size_mb: 1024
 })
 
 const auditModelOptions = computed(() => {
@@ -371,10 +396,26 @@ const auditModelOptions = computed(() => {
 
 const form = reactive({
   id: null,
+  uid: null,
   name: '',
   prompt_id: null,
+  knowledge_base_ids: [],
   configs: defaultProfileConfigs()
 })
+
+const knowledgeBaseOptions = computed(() => knowledgeBases.value
+  .filter(item => !form.uid || item.uid === form.uid)
+  .map(item => ({
+    value: item.id,
+    label: item.name,
+    description: item.description || ''
+  })))
+
+watch(() => form.uid, () => {
+  form.knowledge_base_ids = form.knowledge_base_ids.filter(id => knowledgeBaseOptions.value.some(item => item.value === id))
+})
+
+const canActivateProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
 
 const auditModelKey = computed({
   get() {
@@ -406,6 +447,9 @@ const loadProfiles = async () => {
     profiles.value = res.data.data.items || []
     total.value = res.data.data.total || 0
     toolOptions.value = res.data.data.meta?.tool_options || []
+    showOwnerColumn.value = Boolean(res.data.data.meta?.show_owner)
+    currentUid.value = res.data.data.meta?.current_uid || null
+    if (showOwnerColumn.value) fetchUsers()
   } catch (err) {
     ElMessage.error(err.message || t('profiles.load_failed'))
   } finally {
@@ -424,13 +468,32 @@ const fetchPrompts = async () => {
   }
 }
 
-const fetchBackendLocales = async () => {
+const loadSystemSettings = async () => {
   try {
-    const res = await systemApi.i18nLocales()
-    backendLocales.value = res.data.data.items || []
+    const settingsRes = await systemApi.settings()
+    Object.assign(systemSettings, settingsRes.data.data || {})
   } catch (err) {
-    backendLocales.value = ['zh']
+    ElMessage.error(err.message || t('profiles.load_settings_failed'))
   }
+}
+
+const saveSystemSettings = async () => {
+  settingsSubmitting.value = true
+  try {
+    const res = await systemApi.updateSettings({ ...systemSettings })
+    Object.assign(systemSettings, res.data.data || {})
+    settingsDialogVisible.value = false
+    ElMessage.success(t('profiles.system_settings_saved'))
+  } catch (err) {
+    ElMessage.error(err.message || t('profiles.save_settings_failed'))
+  } finally {
+    settingsSubmitting.value = false
+  }
+}
+
+const showSystemSettingsDialog = async () => {
+  await loadSystemSettings()
+  settingsDialogVisible.value = true
 }
 
 const fetchChannels = async () => {
@@ -442,12 +505,33 @@ const fetchChannels = async () => {
   }
 }
 
+const fetchKnowledgeBases = async () => {
+  try {
+    const res = await knowledgeBaseApi.list({ page: 1, size: 1000 })
+    knowledgeBases.value = res.data.data.items || []
+  } catch (err) {
+    knowledgeBases.value = []
+  }
+}
+
+const fetchUsers = async () => {
+  if (!showOwnerColumn.value) return
+  try {
+    const res = await adminApi.userList({ page: 1, size: 1000 })
+    users.value = res.data.data.items || []
+  } catch (err) {
+    users.value = []
+  }
+}
+
 const handleRefresh = () => {
   currentPage.value = 1
   loadProfiles()
   fetchChannels()
   fetchPrompts()
-  fetchBackendLocales()
+  loadSystemSettings()
+  fetchKnowledgeBases()
+  fetchUsers()
 }
 
 const handleSizeChange = () => {
@@ -514,8 +598,10 @@ const showDialog = (type, row = null) => {
   fileSendBlockedExtensionInput.value = ''
   if (type === 'edit' && row) {
     form.id = row.id
+    form.uid = row.uid || null
     form.name = row.name
     form.prompt_id = row.prompt_id
+    form.knowledge_base_ids = [...(row.knowledge_base_ids || [])]
     const base = defaultProfileConfigs()
     if (row.configs) {
       if (row.configs.tool) migrateToolConfig(row.configs.tool)
@@ -523,7 +609,6 @@ const showDialog = (type, row = null) => {
         const p = row.configs.channel
         // 深合并渠道配置
         if (p.chat_channel) Object.assign(base.channel.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
-        if (p.embedding_channel) Object.assign(base.channel.embedding_channel, JSON.parse(JSON.stringify(p.embedding_channel)))
         if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
         if (p.image_generation_channel) Object.assign(base.channel.image_generation_channel, JSON.parse(JSON.stringify(p.image_generation_channel)))
       }
@@ -534,8 +619,10 @@ const showDialog = (type, row = null) => {
     form.configs = base
   } else {
     form.id = null
+    form.uid = users.value[0]?.uid || null
     form.name = ''
     form.prompt_id = null
+    form.knowledge_base_ids = []
     form.configs = defaultProfileConfigs()
   }
   dialogVisible.value = true
@@ -544,6 +631,9 @@ const showDialog = (type, row = null) => {
 const submitForm = async () => {
   if (!form.name) {
     return ElMessage.warning(t('profiles.fill_required'))
+  }
+  if (dialogType.value === 'create' && showOwnerColumn.value && !form.uid) {
+    return ElMessage.warning(t('profiles.select_owner'))
   }
 
   // 清理无效规则与旧版规则级启用状态，并按后端规则排序：priority 数字越小越优先。
@@ -561,7 +651,6 @@ const submitForm = async () => {
     }
   }
   cleanChannel(form.configs.channel.chat_channel)
-  cleanChannel(form.configs.channel.embedding_channel)
   cleanChannel(form.configs.channel.rerank_channel)
   cleanChannel(form.configs.channel.image_generation_channel)
   addAllowedFileSendDir()
@@ -570,9 +659,20 @@ const submitForm = async () => {
   submitting.value = true
   try {
     if (dialogType.value === 'create') {
-      await profileApi.create(form)
+      await profileApi.create({
+        uid: form.uid,
+        name: form.name,
+        prompt_id: form.prompt_id,
+        knowledge_base_ids: form.knowledge_base_ids,
+        configs: form.configs
+      })
     } else {
-      await profileApi.update(form.id, form)
+      await profileApi.update(form.id, {
+        name: form.name,
+        prompt_id: form.prompt_id,
+        knowledge_base_ids: form.knowledge_base_ids,
+        configs: form.configs
+      })
     }
     ElMessage.success(t('profiles.save_success'))
     dialogVisible.value = false
@@ -588,7 +688,9 @@ onMounted(() => {
   loadProfiles()
   fetchChannels()
   fetchPrompts()
-  fetchBackendLocales()
+  loadSystemSettings()
+  fetchKnowledgeBases()
+  fetchUsers()
 })
 </script>
 

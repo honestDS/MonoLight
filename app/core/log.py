@@ -19,16 +19,15 @@ from app.core.utils.time import get_local_time
 
 
 def get_profile_log_locale(profile: object | None) -> str:
-    if not profile:
-        return DEFAULT_LOCALE
+    return DEFAULT_LOCALE
 
-    try:
-        from app.models.profile import ProfileConfig
 
-        cfg = ProfileConfig.model_validate(getattr(profile, "configs", {}) or {})
-        return cfg.other.log_locale
-    except Exception:
-        return DEFAULT_LOCALE
+def set_system_log_locale(locale: str | None) -> Token[str | None]:
+    return set_current_log_locale(locale or DEFAULT_LOCALE)
+
+
+def reset_system_log_locale(token: Token[str | None]) -> None:
+    reset_current_log_locale(token)
 
 
 def set_profile_log_locale(profile: object | None) -> Token[str | None]:

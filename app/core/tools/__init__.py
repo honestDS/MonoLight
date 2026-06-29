@@ -4,7 +4,7 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, is_embedding_profile_available, list_available_knowledge_bases
+from app.core.embedding.knowledge_base import build_knowledge_base_whitelist, list_available_knowledge_bases
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig
 from app.models.profile import Profile
@@ -148,10 +148,10 @@ async def _is_image_generation_profile_available(db: AsyncSession, profile: Prof
     return selected_channel is not None
 
 
-async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_profile_available: bool | None = None, *, allow_background: bool = True) -> tuple[list[dict[str, Any]], list[int]]:
+async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_background: bool = True) -> tuple[list[dict[str, Any]], list[int]]:
     """
     根据 Profile 中的 enabled_tools 生成当前会话向 LLM 暴露的工具列表。
-    query_knowledge_base 属于动态工具：只有被启用、嵌入模型可用且存在可用知识库时才暴露，并会注入运行时知识库白名单。
+    query_knowledge_base 属于动态工具：只有被启用且存在可用知识库时才暴露，并会注入运行时知识库白名单。
     """
     enabled_tool_names = _get_enabled_tool_names(profile)
     base_tools = []
@@ -165,13 +165,7 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, embedding_pr
     whitelist_ids = []
 
     try:
-        # 嵌入模型不可用（未配置或已禁用）时，知识库检索无法工作，
-        # 不向 LLM 暴露知识库查询工具，避免模型调用必然失败的工具。
-        is_embedding_available = embedding_profile_available
-        if is_embedding_available is None:
-            is_embedding_available = await is_embedding_profile_available(db, profile)
-
-        if not is_embedding_available or KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"] not in enabled_tool_names:
+        if KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"] not in enabled_tool_names:
             return base_tools, whitelist_ids
 
         knowledge_bases = await list_available_knowledge_bases(db, profile)

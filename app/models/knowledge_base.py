@@ -1,20 +1,26 @@
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any
 
 from pydantic import ConfigDict
 from sqlalchemy import Text
-from sqlmodel import JSON, Column, DateTime, Field, Relationship, SQLModel
+from sqlmodel import (
+    JSON,
+    Column,
+    DateTime,
+    Field,
+    SQLModel,
+)
 
 from app.core.utils.time import get_local_time
 
-if TYPE_CHECKING:
-    from app.models.profile import Profile
-
 
 class KnowledgeBaseCore(SQLModel):
+    uid: str = Field(index=True, nullable=False, max_length=50, description="知识库所属用户ID")
     name: str = Field(index=True, nullable=False, min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(default=None, max_length=500, description="知识库描述")
-    profile_id: int = Field(foreign_key="profile.id", nullable=False, description="绑定的配置文件ID，创建后不可修改")
+    embedding_channel_id: int = Field(nullable=False, index=True, description="向量化使用的渠道ID")
+    embedding_model_id: str = Field(nullable=False, max_length=255, description="向量化使用的模型ID")
+    embedding_dimensions: int | None = Field(default=None, gt=0, description="向量输出维度")
     collection_name: str = Field(unique=True, index=True, nullable=False, max_length=100, description="ChromaDB 中的 collection 名称")
 
 
@@ -31,7 +37,15 @@ class KnowledgeBase(KnowledgeBaseCore, table=True):
         sa_column=Column(DateTime(timezone=True), onupdate=get_local_time),
     )
 
-    profile: Optional["Profile"] = Relationship()
+
+class KnowledgeBaseProfileBinding(SQLModel, table=True):
+    """知识库与 Profile 的绑定关系。"""
+
+    __tablename__ = "knowledge_base_profile_binding"
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    knowledge_base_id: int = Field(nullable=False, index=True, description="知识库ID")
+    profile_id: int = Field(nullable=False, index=True, description="配置文件ID")
 
 
 class KnowledgeBaseDocument(SQLModel, table=True):
@@ -40,7 +54,7 @@ class KnowledgeBaseDocument(SQLModel, table=True):
     __tablename__ = "knowledge_base_document"
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    knowledge_base_id: int = Field(foreign_key="knowledge_base.id", nullable=False, index=True, description="所属知识库ID")
+    knowledge_base_id: int = Field(nullable=False, index=True, description="所属知识库ID")
     filename: str = Field(nullable=False, max_length=255, description="导入的文件名")
     content: str = Field(sa_column=Column(Text, nullable=False), description="文档原文")
     chunk_size: int = Field(nullable=False, description="分块大小")
@@ -56,20 +70,15 @@ class KnowledgeBaseDocument(SQLModel, table=True):
 class KnowledgeBaseCreate(SQLModel):
     name: str = Field(..., min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(None, max_length=500, description="知识库描述")
-    profile_id: int = Field(..., gt=0, description="配置文件的ID")
+    embedding_channel_id: int = Field(..., gt=0, description="向量化使用的渠道ID")
+    embedding_model_id: str = Field(..., min_length=1, max_length=255, description="向量化使用的模型ID")
 
 
 class KnowledgeBaseResponse(KnowledgeBaseCore):
     id: int
+    profile_ids: list[int] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class KnowledgeBaseProfileOption(SQLModel):
-    id: int
-    name: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,13 +86,16 @@ class KnowledgeBaseProfileOption(SQLModel):
 class KnowledgeBaseListResponse(SQLModel):
     items: list[KnowledgeBaseResponse]
     total: int
-    profiles: list[KnowledgeBaseProfileOption]
-    available_profiles: list[KnowledgeBaseProfileOption]
+    embedding_models: list[dict[str, Any]]
 
 
 class KnowledgeBaseUpdate(SQLModel):
     name: str = Field(..., min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(None, max_length=500, description="知识库描述")
+
+
+class KnowledgeBaseProfileBindingUpdate(SQLModel):
+    knowledge_base_ids: list[int] = Field(default_factory=list, description="绑定的知识库ID列表")
 
 
 class KnowledgeBaseQueryTestRequest(SQLModel):

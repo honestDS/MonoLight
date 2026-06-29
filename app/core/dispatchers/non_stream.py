@@ -12,7 +12,6 @@ from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
-from app.core.embedding.knowledge_base import is_embedding_profile_available
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
@@ -58,7 +57,7 @@ class NonStreamDispatcherMixin:
         try:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
-            profile = await profile_crud.get_active(db)
+            profile = await profile_crud.get_active(db, uid=uid)
 
             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
@@ -107,8 +106,6 @@ class NonStreamDispatcherMixin:
                     img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
                     chat_params = _resolve_chat_params(model_entry, chat_channel)
 
-                    embedding_profile_available = await is_embedding_profile_available(db, profile)
-
                     messages = await prepare_messages(
                         db,
                         session_id,
@@ -119,7 +116,6 @@ class NonStreamDispatcherMixin:
                         message,
                         is_first_iter,
                         context_window_k=chat_params["context_window_k"],
-                        embedding_profile_available=embedding_profile_available,
                     )
 
                     # 重新组装带附件的多模态消息（使用模型实际的多模态能力）
@@ -134,7 +130,7 @@ class NonStreamDispatcherMixin:
                                 is_history=is_history,
                             )
 
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, embedding_profile_available=embedding_profile_available)
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -214,7 +210,6 @@ class NonStreamDispatcherMixin:
                                     message,
                                     is_first_iter,
                                     context_window_k=chat_params["context_window_k"],
-                                    embedding_profile_available=embedding_profile_available,
                                 )
                                 _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 

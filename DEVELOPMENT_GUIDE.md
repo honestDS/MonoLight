@@ -34,6 +34,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
 2. CRUD 层应保持纯粹，仅负责数据的存取与基础过滤，不应包含 LLM 调用或复杂的跨领域业务逻辑。
 3. 所有针对特定 LLM 厂商的请求参数拼接与响应解析逻辑，必须封装在对应的 Transformer 实现类中，严禁在 `LLMClient` 或 `Dispatcher` 中出现特定厂商（如 OpenAI、Anthropic）的字段名称。
 4. 在涉及大模型流式输出或耗时工具调用的循环中，Agent 必须显式执行 `await db.execute(select(1))` 以保持数据库 Session 的活跃状态，防止连接因闲置被杀掉。
+5. 禁止使用数据库外键约束，所有关联关系必须通过业务逻辑或CRUD层实现。
 
 ## 六、 新增功能与测试要求
 - **目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。

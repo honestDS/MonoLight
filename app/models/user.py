@@ -1,7 +1,4 @@
 from datetime import datetime
-from typing import (
-    TYPE_CHECKING,
-)
 
 from pydantic import (
     ConfigDict,
@@ -13,14 +10,10 @@ from sqlmodel import (
     Column,
     DateTime,
     Field,
-    Relationship,
     SQLModel,
 )
 
 from app.core.utils.time import get_local_time
-
-if TYPE_CHECKING:
-    from app.models.prompt import PromptLibrary
 
 
 class UserBase(SQLModel):
@@ -44,8 +37,6 @@ class User(UserBase, table=True):
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True), onupdate=get_local_time),
     )
-
-    prompts: list["PromptLibrary"] = Relationship(back_populates="user")
 
 
 class UserCreate(SQLModel):

@@ -54,7 +54,7 @@ class ShellExecutor(BaseExecutor):
         """从已激活的 Profile 中获取超时配置"""
         try:
             async with AsyncSessionLocal() as session:
-                profile = await profile_crud.get_active(session)
+                profile = await profile_crud.get_active(session, uid=self.uid)
                 if profile and profile.configs:
                     cfg = ProfileConfig.model_validate(profile.configs)
                     return cfg.tool.tool_timeout
