@@ -37,6 +37,7 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "[Dispatcher/Stream] Session {session_id} already has an active dispatcher, current request queued.",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] user message: {message}; attachments: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] turn {turn} | LLM response: {content}",
+    "LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "Background task profile is not available for user; related scheduled tasks disabled: {disabled_count}",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY": "Background proactive reply attempted unsupported tool calls; retrying with correction",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "Background proactive reply still attempted unsupported tool calls; falling back to text-only reply",
     "LOG_SCHEDULED_TASK_DISPATCH_FAILED": "Scheduled task dispatch failed",

@@ -15,6 +15,7 @@ class ChatSession(SQLModel, table=True):
 
     session_id: str = Field(primary_key=True, max_length=100, index=True)
     uid: str = Field(index=True, max_length=100)
+    profile_id: int | None = Field(default=None, index=True)
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
     created_at: datetime = Field(

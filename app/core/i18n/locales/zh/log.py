@@ -37,6 +37,7 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] 用户消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] 第 {turn} 轮 | LLM 响应: {content}",
+    "LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "后台任务配置文件不可用于当前用户，已禁用相关定时任务：{disabled_count}",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY": "后台主动回复尝试调用不支持的工具，正在追加修正指令后重试",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "后台主动回复重试后仍尝试调用不支持的工具，降级为纯文本回复",
     "LOG_SCHEDULED_TASK_DISPATCH_FAILED": "定时任务调度失败",

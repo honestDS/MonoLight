@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
+from app.core.constants import ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND
 from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.session import session_crud
 from app.core.utils.time import get_local_time
@@ -19,6 +20,13 @@ async def _validate_user_session(db: AsyncSession, session_id: str, uid: str) ->
     session = await session_crud.get_by_session_id(db, session_id)
     if not session or session.uid != uid:
         raise ValueError("session not found")
+
+
+async def _get_session_profile_id(db: AsyncSession, session_id: str, uid: str) -> int | None:
+    session = await session_crud.get_by_session_id(db, session_id)
+    if not session or session.uid != uid:
+        return None
+    return session.profile_id
 
 
 @router.get("/list")
@@ -51,11 +59,16 @@ async def create_scheduled_task(
     except ValueError as exc:
         return StandardResponse.error(code=400, message=str(exc), raw_message=True)
 
+    profile_id = await _get_session_profile_id(db, request.session_id, admin.uid)
+    if profile_id is None:
+        return StandardResponse.error(code=400, message=ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND)
+
     task = await scheduled_task_crud.create_scheduled_task(
         db,
         name=request.name,
         uid=admin.uid,
         session_id=request.session_id,
+        profile_id=profile_id,
         message=request.message,
         interval_seconds=request.interval_seconds,
     )
@@ -82,6 +95,11 @@ async def update_scheduled_task(
 
     if "interval_seconds" in obj_in:
         obj_in["next_run_at"] = get_local_time() + timedelta(seconds=obj_in["interval_seconds"])
+    if obj_in.get("status") == ScheduledTaskStatus.ENABLED or "session_id" in obj_in:
+        profile_id = await _get_session_profile_id(db, session_id, admin.uid)
+        if profile_id is None:
+            return StandardResponse.error(code=400, message=ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND)
+        obj_in["profile_id"] = profile_id
     updated_task = await scheduled_task_crud.update_scheduled_task(db, scheduled_task=task, obj_in=obj_in)
     return StandardResponse.success(data=ScheduledTaskResponse.model_validate(updated_task), message="scheduled task updated", raw_message=True)
 

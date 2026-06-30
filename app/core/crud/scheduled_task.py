@@ -17,6 +17,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         name: str,
         uid: str,
         session_id: str,
+        profile_id: int | None,
         message: str,
         interval_seconds: int,
     ) -> ScheduledTask:
@@ -25,6 +26,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
             name=name,
             uid=uid,
             session_id=session_id,
+            profile_id=profile_id,
             message=message,
             interval_seconds=interval_seconds,
             next_run_at=now + timedelta(seconds=interval_seconds),
@@ -89,6 +91,27 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         await db.commit()
         await db.refresh(scheduled_task)
         return scheduled_task
+
+    async def disable_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> ScheduledTask:
+        scheduled_task.status = ScheduledTaskStatus.DISABLED
+        scheduled_task.updated_at = get_local_time()
+        db.add(scheduled_task)
+        await db.commit()
+        await db.refresh(scheduled_task)
+        return scheduled_task
+
+    async def disable_by_session(self, db: AsyncSession, *, uid: str, session_id: str) -> int:
+        stmt = select(ScheduledTask).where(ScheduledTask.uid == uid).where(ScheduledTask.session_id == session_id).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED)
+        result = await db.execute(stmt)
+        scheduled_tasks = list(result.scalars().all())
+        now = get_local_time()
+        for scheduled_task in scheduled_tasks:
+            scheduled_task.status = ScheduledTaskStatus.DISABLED
+            scheduled_task.updated_at = now
+            db.add(scheduled_task)
+        if scheduled_tasks:
+            await db.commit()
+        return len(scheduled_tasks)
 
     async def delete_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> None:
         await db.delete(scheduled_task)

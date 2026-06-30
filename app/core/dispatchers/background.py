@@ -5,10 +5,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
+from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import t
@@ -274,7 +275,7 @@ class BackgroundDispatcherMixin:
         async with AsyncSessionLocal() as db:
             task = await background_task_crud.get(db, task_id)
             if not task:
-                raise ServerException(message="Background task not found")
+                raise ServerException(message=ERR_BACKGROUND_TASK_NOT_FOUND)
             task_uid = task.uid
             task_session_id = task.session_id
             task_profile_id = task.profile_id
@@ -292,8 +293,16 @@ class BackgroundDispatcherMixin:
 
             try:
                 profile = await profile_crud.get_with_relations(db, task_profile_id)
-                if not profile:
-                    raise ServerException(message="Background task profile not found")
+                if not profile or profile.uid != task_uid:
+                    disabled_count = await scheduled_task_crud.disable_by_session(db, uid=task_uid, session_id=task_session_id)
+                    logger.bind(
+                        task_id=task_id,
+                        uid=task_uid,
+                        session_id=task_session_id,
+                        profile_id=task_profile_id,
+                        disabled_scheduled_tasks=disabled_count,
+                    ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE", disabled_count=disabled_count))
+                    raise ServerException(message=ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
                 ai_msg, turn_messages = await cls._generate_reply_from_history(
                     db,
                     uid=task_uid,

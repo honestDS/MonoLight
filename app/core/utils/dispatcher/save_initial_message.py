@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.crud.session import session_crud
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (
     InternalMessage,
@@ -26,6 +27,10 @@ async def save_initial_message(
     attachments: list[str] | None,
 ) -> InternalMessage:
     # 初始保存消息 (设置 is_processed=False，锁获取后才标记 True)
+    profile_id = profile.id if profile and profile.id else -1
+    if profile_id > 0:
+        await session_crud.upsert_profile(db, session_id=session_id, uid=uid, profile_id=profile_id)
+
     initial_msg_obj = InternalMessage(
         role=MessageRole.USER,
         content=message,
@@ -38,6 +43,6 @@ async def save_initial_message(
         MessageRole.USER,
         MessageType.TEXT,
         initial_msg_obj,
-        profile.id if profile and profile.id else -1,
+        profile_id,
         is_processed=False,
     )

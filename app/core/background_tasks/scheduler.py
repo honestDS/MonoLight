@@ -1,11 +1,12 @@
 import asyncio
 
+from app.core.constants import ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND
 from app.core.crud.active_session import active_session_crud
-from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
+from app.core.exceptions import BaseBusinessException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.dispatcher.save_message import save_message
@@ -96,11 +97,12 @@ class ScheduledTaskScheduler:
             await scheduled_task_crud.mark_skipped(db, scheduled_task=scheduled_task)
             return
 
-        profile_id = await message_crud.get_latest_session_profile_id(db, session_id=scheduled_task.session_id, uid=scheduled_task.uid)
+        # 定时任务按启用时绑定的配置文件执行。
+        profile_id = scheduled_task.profile_id
         profile = await profile_crud.get_with_relations(db, profile_id) if profile_id else None
-        if not profile or not profile.id:
-            log.warning(t("LOG_SCHEDULED_TASK_PROFILE_MISSING"))
-            await scheduled_task_crud.mark_skipped(db, scheduled_task=scheduled_task)
+        if not profile or not profile.id or profile.uid != scheduled_task.uid:
+            log.bind(profile_id=profile_id).warning(t("LOG_SCHEDULED_TASK_PROFILE_MISSING"))
+            await scheduled_task_crud.disable_task(db, scheduled_task=scheduled_task)
             return
 
         user = await user_crud.get_by_uid(db, scheduled_task.uid)
@@ -142,8 +144,10 @@ class ScheduledTaskScheduler:
             try:
                 log.info(t("LOG_SCHEDULED_TASK_REPLY_STARTED"))
                 profile = await profile_crud.get_with_relations(db, profile_id)
-                if not profile:
-                    raise RuntimeError("Scheduled task profile not found")
+                if not profile or profile.uid != uid:
+                    disabled_count = await scheduled_task_crud.disable_by_session(db, uid=uid, session_id=session_id)
+                    log.bind(disabled_scheduled_tasks=disabled_count).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE", disabled_count=disabled_count))
+                    raise ServerException(message=ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND)
                 ai_msg, turn_messages = await ChatDispatcher._generate_reply_from_history(
                     db,
                     uid=uid,
@@ -154,14 +158,15 @@ class ScheduledTaskScheduler:
                     restrict_tools_to_background_allowlist=False,
                 )
             except Exception as exc:
-                log.error(t("LOG_SCHEDULED_TASK_REPLY_FAILED", error=str(exc)), exc_info=True)
+                error_message = t(exc.message, default=exc.message, **exc.kwargs) if isinstance(exc, BaseBusinessException) else str(exc)
+                log.error(t("LOG_SCHEDULED_TASK_REPLY_FAILED", error=error_message), exc_info=True)
                 await ws_chat_adapter.send_session_event(
                     uid,
                     session_id,
                     {
                         "type": "proactive_reply_error",
                         "session_id": session_id,
-                        "content": f"定时任务回复失败：{exc}",
+                        "content": f"定时任务回复失败：{error_message}",
                         "task_id": scheduled_task_id,
                     },
                 )
