@@ -5,7 +5,6 @@ from app.core.crud.base import CRUDBase
 from app.core.i18n.locale import DEFAULT_LOCALE, normalize_locale
 from app.models.system_setting import SystemRuntimeSettings, SystemSetting
 
-
 DEFAULT_SYSTEM_SETTINGS = {
     "log_locale": DEFAULT_LOCALE,
     "temp_dir_max_size_mb": "1024",
