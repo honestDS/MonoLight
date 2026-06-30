@@ -18,6 +18,44 @@ const formatDateObject = (date, fallback = '') => {
   }
 }
 
+export const normalizeMessageContent = (content) => {
+  if (typeof content === 'string') {
+    try {
+      return JSON.parse(content)
+    } catch {
+      return content
+    }
+  }
+  return content
+}
+
+const stableStringify = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+export const getMessageDedupeKeys = (message) => {
+  const keys = new Set()
+  const dbId = message?.db_id || (typeof message?.id === 'number' ? message.id : null)
+  if (dbId) keys.add(`db:${dbId}`)
+
+  const content = normalizeMessageContent(message?.content)
+  const toolCalls = content?.tool_calls || message?.tool_calls || []
+  for (const toolCall of toolCalls) {
+    const toolCallId = toolCall?.id || toolCall?.function?.id
+    if (toolCallId) keys.add(`tool_call:${toolCallId}`)
+  }
+
+  const toolCallId = content?.tool_call_id || message?.tool_call_id
+  if (toolCallId) keys.add(`tool_result:${toolCallId}`)
+
+  keys.add(`content:${message?.role || ''}:${stableStringify(content ?? '')}`)
+  return keys
+}
+
 // 时间戳格式化
 export const formatTimestamp = (timestamp) => {
   if (!timestamp) return ''

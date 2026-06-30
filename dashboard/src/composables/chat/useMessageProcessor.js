@@ -2,7 +2,7 @@
 import { nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
-import { isToolCall, isToolResult } from '../../utils'
+import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
 
 const parseBackgroundSystemMessage = (item) => {
   if (item?.type !== 'background_result' && item?.role !== 'system') return null
@@ -11,6 +11,20 @@ const parseBackgroundSystemMessage = (item) => {
     if (payload?.type === 'background_tool_result') return payload
   } catch {}
   return null
+}
+
+const findToolCallIndex = (messages, toolCallId) => {
+  if (!toolCallId) return -1
+  return messages.findIndex(message => getMessageDedupeKeys(message).has(`tool_call:${toolCallId}`))
+}
+
+const findToolResultIndex = (messages, toolCallId) => {
+  if (!toolCallId) return -1
+  return messages.findIndex(message => getMessageDedupeKeys(message).has(`tool_result:${toolCallId}`))
+}
+
+const getToolMessageDedupeKeys = (message) => {
+  return [...getMessageDedupeKeys(message)].filter(key => key.startsWith('tool_call:') || key.startsWith('tool_result:'))
 }
 
 export function useMessageProcessor() {
@@ -114,6 +128,27 @@ export function useMessageProcessor() {
 
   // 处理流式下的工具调用开始，推送 tool_call 占位
   const processStreamToolStart = (messagesRef, toolCall, thinkingId, responseId, requestId) => {
+    const existingIdx = findToolCallIndex(messagesRef.value, toolCall.id)
+    if (existingIdx !== -1) {
+      const existingMsg = messagesRef.value[existingIdx]
+      const existingContent = normalizeMessageContent(existingMsg.content)
+      messagesRef.value[existingIdx] = {
+        ...existingMsg,
+        content: JSON.stringify({
+          role: 'assistant',
+          tool_calls: [{
+            ...existingContent?.tool_calls?.[0],
+            id: toolCall.id,
+            name: toolCall.name,
+            arguments: toolCall.arguments
+          }]
+        }),
+        response_id: existingMsg.response_id || responseId,
+        request_id: existingMsg.request_id || requestId
+      }
+      return
+    }
+
     const contentObj = {
       role: 'assistant',
       tool_calls: [{
@@ -176,6 +211,22 @@ export function useMessageProcessor() {
 
   // 处理流式下的工具调用结束，推送 tool 返回结果
   const processStreamToolEnd = (messagesRef, toolEnd, responseId, requestId) => {
+    const existingIdx = findToolResultIndex(messagesRef.value, toolEnd.tool_call_id)
+    if (existingIdx !== -1) {
+      const existingMsg = messagesRef.value[existingIdx]
+      messagesRef.value[existingIdx] = {
+        ...existingMsg,
+        content: JSON.stringify({
+          role: 'tool',
+          tool_call_id: toolEnd.tool_call_id,
+          content: toolEnd.result
+        }),
+        response_id: existingMsg.response_id || responseId,
+        request_id: existingMsg.request_id || requestId
+      }
+      return
+    }
+
     const contentObj = {
       role: 'tool',
       tool_call_id: toolEnd.tool_call_id,
@@ -344,6 +395,21 @@ export function useMessageProcessor() {
   // 按 thinking 位置插入 AI 消息
   const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId) => {
     if (!aiMessages || aiMessages.length === 0) return
+    const existingKeys = new Set(messagesRef.value.flatMap(getToolMessageDedupeKeys))
+    const dedupedMessages = []
+
+    for (const message of aiMessages) {
+      const messageKeys = getToolMessageDedupeKeys(message)
+      if ([...messageKeys].some(key => existingKeys.has(key))) continue
+      messageKeys.forEach(key => existingKeys.add(key))
+      dedupedMessages.push(message)
+    }
+
+    if (dedupedMessages.length === 0) {
+      removeThinkingMessage(messagesRef, thinkingId)
+      return
+    }
+
     let insertAt = -1
     if (thinkingId) {
       insertAt = messagesRef.value.findIndex(m => m.id === thinkingId)
@@ -353,9 +419,9 @@ export function useMessageProcessor() {
     }
 
     if (insertAt !== -1) {
-      messagesRef.value.splice(insertAt, 1, ...aiMessages)
+      messagesRef.value.splice(insertAt, 1, ...dedupedMessages)
     } else {
-      messagesRef.value.push(...aiMessages)
+      messagesRef.value.push(...dedupedMessages)
     }
   }
 

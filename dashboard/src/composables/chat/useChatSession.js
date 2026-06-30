@@ -5,31 +5,12 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
-import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolResultName, getToolResultContent, getMessageTimestamp } from '../../utils'
+import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-
-const normalizeMessageContent = (content) => {
-  if (typeof content === 'string') {
-    try {
-      return JSON.parse(content)
-    } catch {
-      return content
-    }
-  }
-  return content
-}
-
-const stableStringify = (value) => {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value)
-}
 
 const normalizeHistoryMessage = (message) => {
   const content = normalizeMessageContent(message?.content)
@@ -42,25 +23,6 @@ const normalizeHistoryMessage = (message) => {
     }
   }
   return message
-}
-
-const getMessageDedupeKeys = (message) => {
-  const keys = new Set()
-  const dbId = message?.db_id || (typeof message?.id === 'number' ? message.id : null)
-  if (dbId) keys.add(`db:${dbId}`)
-
-  const content = normalizeMessageContent(message?.content)
-  const toolCalls = content?.tool_calls || message?.tool_calls || []
-  for (const toolCall of toolCalls) {
-    const toolCallId = toolCall?.id || toolCall?.function?.id
-    if (toolCallId) keys.add(`tool_call:${toolCallId}`)
-  }
-
-  const toolCallId = content?.tool_call_id || message?.tool_call_id
-  if (toolCallId) keys.add(`tool_result:${toolCallId}`)
-
-  keys.add(`content:${message?.role || ''}:${stableStringify(content ?? '')}`)
-  return keys
 }
 
 export function useChatSession() {

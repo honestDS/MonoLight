@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
