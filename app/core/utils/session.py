@@ -1,5 +1,6 @@
+from app.core.constants import ERR_LLM_EMPTY_RESPONSE
 from app.core.crud.session import session_crud
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
@@ -46,7 +47,7 @@ async def generate_session_title(
             protocol=protocol,
         )
 
-        title = response.message.content.strip()
+        title = (response.message.content or "").strip()
         logger.bind(uid=uid, session_id=session_id).info(t("LOG_SESSION_TITLE_GENERATED", title=title))
         if title:
             # 移除可能存在的引号
@@ -61,7 +62,7 @@ async def generate_session_title(
                 await session_crud.create_or_update_title(db=db, session_id=session_id, uid=uid, title=title)
             return title
 
-        return None
+        raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
     except Exception as e:
         msg = t(e.message, default=e.message, **e.kwargs) if isinstance(e, BaseBusinessException) else str(e)

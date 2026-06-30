@@ -210,8 +210,6 @@ async def generate_title(
         except LLMException as e:
             # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
             excluded_priorities.add(_rule.priority)
-            if not chat_channel.retry_on_failure:
-                return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
             logger.bind(
                 uid=uid,
                 session_id=request.session_id,

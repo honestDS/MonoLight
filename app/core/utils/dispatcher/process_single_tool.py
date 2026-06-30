@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.dispatch_context import build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
     LogManager,
@@ -21,6 +22,7 @@ from app.core.tools import (
     tool_schema_has_parameter,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
+from app.core.utils.dispatcher.helpers import _format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
 from app.models.message import (
     InternalMessage,
@@ -74,6 +76,17 @@ def _build_background_task_unsupported_result(tool_name: str) -> str:
     )
 
 
+def _build_tool_error_result(tool_name: str, error_message: str) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "tool_name": tool_name,
+            "error": error_message,
+        },
+        ensure_ascii=False,
+    )
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -87,6 +100,7 @@ async def process_single_tool(
     allowed_knowledge_base_ids: list[int] | None = None,
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
+    allow_background_submission: bool = True,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -96,7 +110,7 @@ async def process_single_tool(
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
-    elif run_in_background and not tool_schema_has_parameter(tool_name, "run_in_background"):
+    elif run_in_background and (not allow_background_submission or not tool_schema_has_parameter(tool_name, "run_in_background")):
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
         cmd_result = await audit_tool_call(
@@ -122,6 +136,7 @@ async def process_single_tool(
             tool_name=tool_name,
             arguments=args,
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+            source="llm_tool_call",
         )
         cmd_result = _build_background_task_queued_result(tool_name, task.id)
 
@@ -138,11 +153,17 @@ async def process_single_tool(
 
             # 传递运行时上下文给 Executor
             if hasattr(instance, "set_runtime_context"):
-                instance.set_runtime_context(
-                    db=db,
-                    profile=profile,
+                dispatch_context = build_dispatch_context(
+                    mode="interactive",
+                    source="interactive_tool",
+                    uid=uid,
                     session_id=session_id,
+                    profile=profile,
+                    db=db,
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                )
+                instance.set_runtime_context(
+                    dispatch_context=dispatch_context,
                 )
 
             current_coro = instance.execute(**args)
@@ -166,6 +187,8 @@ async def process_single_tool(
                 if not task.done():
                     task.cancel()
                 raise
+            except Exception as exc:
+                cmd_result = _build_tool_error_result(tool_name, _format_exception_message(exc))
             finally:
                 if active_tasks is not None:
                     active_tasks.discard(task)

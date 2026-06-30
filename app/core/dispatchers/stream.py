@@ -229,8 +229,6 @@ class StreamDispatcherMixin:
                                     session_id=session_id,
                                     **channel_log_extra(chat_channel_obj, model_entry),
                                 ).warning(t("LOG_DISPATCHER_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
-                                if not chat_channel.retry_on_failure:
-                                    raise
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise

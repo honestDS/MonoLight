@@ -156,6 +156,7 @@ class ScheduledTaskScheduler:
                     call_context="scheduled_task_reply",
                     allow_tools=True,
                     restrict_tools_to_background_allowlist=False,
+                    reply_source="scheduled_task",
                 )
             except Exception as exc:
                 error_message = t(exc.message, default=exc.message, **exc.kwargs) if isinstance(exc, BaseBusinessException) else str(exc)
@@ -165,9 +166,11 @@ class ScheduledTaskScheduler:
                     session_id,
                     {
                         "type": "proactive_reply_error",
+                        "source": "scheduled_task",
                         "session_id": session_id,
                         "content": f"定时任务回复失败：{error_message}",
                         "task_id": scheduled_task_id,
+                        "scheduled_task_id": scheduled_task_id,
                     },
                 )
             else:
@@ -177,10 +180,12 @@ class ScheduledTaskScheduler:
                     session_id,
                     {
                         "type": "proactive_reply",
+                        "source": "scheduled_task",
                         "session_id": session_id,
                         "history": [message.model_dump(mode="json") for message in turn_messages],
                         "content": ai_msg.content,
                         "task_id": scheduled_task_id,
+                        "scheduled_task_id": scheduled_task_id,
                     },
                 )
             finally:

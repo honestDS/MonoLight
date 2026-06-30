@@ -44,22 +44,22 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
     if not isinstance(tool_result_content, str):
         tool_result_content = json.dumps(tool_result_content, ensure_ascii=False)
 
-    return [
-        InternalMessage(
-            id=msg.id,
-            role=MessageRole.ASSISTANT,
-            content=None,
-            attachments=msg.attachments,
-            tool_calls=[tool_call],
-        ),
-        InternalMessage(
-            id=msg.id,
-            role=MessageRole.TOOL,
-            content=tool_result_content,
-            attachments=msg.attachments,
-            tool_call_id=tool_call_id,
-        ),
-    ]
+    assistant_message = InternalMessage(
+        id=msg.id,
+        role=MessageRole.ASSISTANT,
+        content=None,
+        attachments=msg.attachments,
+        tool_calls=[tool_call],
+    )
+    tool_message = InternalMessage(
+        id=msg.id,
+        role=MessageRole.TOOL,
+        content=tool_result_content,
+        attachments=msg.attachments,
+        tool_call_id=tool_call_id,
+    )
+
+    return [tool_message, assistant_message]
 
 
 def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalMessage]:

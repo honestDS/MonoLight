@@ -4,12 +4,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
-from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import t
@@ -20,6 +18,7 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
 )
 from app.core.tools import get_tools_for_profile
+from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.helpers import (
     BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
     _dump_background_proactive_history,
@@ -27,7 +26,6 @@ from app.core.utils.dispatcher.helpers import (
     _filter_background_proactive_tools,
     _get_unsupported_background_proactive_tool_names,
     _process_single_tool_with_isolated_db,
-    _resolve_chat_params,
     _validate_background_proactive_tool_calls,
 )
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
@@ -36,7 +34,6 @@ from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
-from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
 
@@ -54,31 +51,14 @@ class BackgroundDispatcherMixin:
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
         restrict_tools_to_background_allowlist: bool = True,
+        reply_source: str = "background_task",
     ) -> tuple[InternalMessage, list[InternalMessage]]:
         user = await user_crud.get_by_uid(db, uid)
         username = user.username if user else "Unknown"
         cfg = await validate_profile_and_cfg(db, profile)
         chat_channel = cfg.channel.chat_channel
         chat_cursor_key = f"{profile.id}:CHAT"
-        selection = await select_channel(db, chat_channel, "CHAT", call_context=call_context, cursor_key=chat_cursor_key)
-        if not selection:
-            raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
-
-        chat_channel_obj, model_entry, _channel_rule = selection
-        chat_params = _resolve_chat_params(model_entry, chat_channel)
-        messages = await prepare_messages(
-            db,
-            session_id,
-            uid,
-            profile,
-            cfg,
-            None,
-            "",
-            False,
-            context_window_k=chat_params["context_window_k"],
-        )
-        if extra_messages:
-            messages.extend(extra_messages)
+        messages: list[InternalMessage] = []
 
         tools = None
         allowed_knowledge_base_ids = None
@@ -92,34 +72,47 @@ class BackgroundDispatcherMixin:
                 allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
             tools = profile_tools or None
 
-        request_messages = ContextManager.trim_messages_for_model_request(
-            messages=messages,
+        async def build_initial_request(chat_params):
+            nonlocal messages
+            messages = await prepare_messages(
+                db,
+                session_id,
+                uid,
+                profile,
+                cfg,
+                None,
+                "",
+                False,
+                context_window_k=chat_params["context_window_k"],
+            )
+            if extra_messages:
+                messages.extend(extra_messages)
+            return ContextManager.trim_messages_for_model_request(
+                messages=messages,
+                uid=uid,
+                session_id=session_id,
+                context_window_k=chat_params["context_window_k"],
+                max_tokens=chat_params["max_tokens"],
+                tools=tools,
+            )
+
+        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, allow_tools=allow_tools).info(t("LOG_PROACTIVE_REPLY_GENERATION_STARTED"))
+        response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+            db,
+            chat_channel=chat_channel,
+            request_builder=build_initial_request,
+            call_context=call_context,
+            cursor_key=chat_cursor_key,
             uid=uid,
             session_id=session_id,
-            context_window_k=chat_params["context_window_k"],
-            max_tokens=chat_params["max_tokens"],
             tools=tools,
-        )
-        response = await LLMClient.generate(
-            api_key=chat_channel_obj.get_decrypted_api_key(),
-            base_url=chat_channel_obj.base_url,
-            model_id=model_entry["model_id"],
-            messages=request_messages,
-            temperature=chat_params["temperature"],
-            top_p=chat_params["top_p"],
-            max_tokens=chat_params["max_tokens"],
-            tools=tools,
-            protocol=getattr(chat_channel_obj, "protocol", "openai"),
-            timeout=chat_params["chat_timeout"],
         )
         ai_msg = response.message
-        if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
-            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
         if allow_tools and ai_msg.tool_calls:
             unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
             if unsupported_tool_names:
-                logger.bind(uid=uid, session_id=session_id, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
+                logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
                 correction_message = InternalMessage(
                     role=MessageRole.SYSTEM,
                     content=json.dumps(
@@ -132,32 +125,33 @@ class BackgroundDispatcherMixin:
                         ensure_ascii=False,
                     ),
                 )
-                retry_messages = ContextManager.trim_messages_for_model_request(
-                    messages=[*messages, correction_message],
+
+                def build_correction_request(retry_chat_params):
+                    return ContextManager.trim_messages_for_model_request(
+                        messages=[*messages, correction_message],
+                        uid=uid,
+                        session_id=session_id,
+                        context_window_k=retry_chat_params["context_window_k"],
+                        max_tokens=retry_chat_params["max_tokens"],
+                        tools=tools,
+                    )
+
+                retry_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+                    db,
+                    chat_channel=chat_channel,
+                    request_builder=build_correction_request,
+                    call_context=f"{call_context}_tool_correction",
+                    cursor_key=chat_cursor_key,
                     uid=uid,
                     session_id=session_id,
-                    context_window_k=chat_params["context_window_k"],
-                    max_tokens=chat_params["max_tokens"],
                     tools=tools,
-                )
-                retry_response = await LLMClient.generate(
-                    api_key=chat_channel_obj.get_decrypted_api_key(),
-                    base_url=chat_channel_obj.base_url,
-                    model_id=model_entry["model_id"],
-                    messages=retry_messages,
-                    temperature=chat_params["temperature"],
-                    top_p=chat_params["top_p"],
-                    max_tokens=chat_params["max_tokens"],
-                    tools=tools,
-                    protocol=getattr(chat_channel_obj, "protocol", "openai"),
-                    timeout=chat_params["chat_timeout"],
                 )
                 ai_msg = retry_response.message
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                 remaining_unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
-                    logger.bind(uid=uid, session_id=session_id, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
+                    logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
                     text_only_message = InternalMessage(
                         role=MessageRole.SYSTEM,
                         content=json.dumps(
@@ -168,25 +162,27 @@ class BackgroundDispatcherMixin:
                             ensure_ascii=False,
                         ),
                     )
-                    text_only_messages = ContextManager.trim_messages_for_model_request(
-                        messages=[*messages, correction_message, text_only_message],
+
+                    def build_text_only_request(retry_chat_params):
+                        return ContextManager.trim_messages_for_model_request(
+                            messages=[*messages, correction_message, text_only_message],
+                            uid=uid,
+                            session_id=session_id,
+                            context_window_k=retry_chat_params["context_window_k"],
+                            max_tokens=retry_chat_params["max_tokens"],
+                            tools=None,
+                        )
+
+                    text_only_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+                        db,
+                        chat_channel=chat_channel,
+                        request_builder=build_text_only_request,
+                        call_context=f"{call_context}_text_only",
+                        cursor_key=chat_cursor_key,
                         uid=uid,
                         session_id=session_id,
-                        context_window_k=chat_params["context_window_k"],
-                        max_tokens=chat_params["max_tokens"],
                         tools=None,
-                    )
-                    text_only_response = await LLMClient.generate(
-                        api_key=chat_channel_obj.get_decrypted_api_key(),
-                        base_url=chat_channel_obj.base_url,
-                        model_id=model_entry["model_id"],
-                        messages=text_only_messages,
-                        temperature=chat_params["temperature"],
-                        top_p=chat_params["top_p"],
-                        max_tokens=chat_params["max_tokens"],
-                        tools=None,
-                        protocol=getattr(chat_channel_obj, "protocol", "openai"),
-                        timeout=chat_params["chat_timeout"],
+                        require_content=True,
                     )
                     ai_msg = text_only_response.message
                     if ai_msg.tool_calls:
@@ -194,7 +190,7 @@ class BackgroundDispatcherMixin:
                     if not (ai_msg.content or "").strip():
                         raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
-        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
+        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
         turn_messages = [ai_msg]
         await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
@@ -218,6 +214,7 @@ class BackgroundDispatcherMixin:
                     uid,
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                     context_window_k=chat_params["context_window_k"],
+                    allow_background_submission=False,
                 )
                 for tool_call in ai_msg.tool_calls
             ]
@@ -227,25 +224,26 @@ class BackgroundDispatcherMixin:
         for tool_response in tool_responses:
             await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
 
-        final_request_messages = ContextManager.trim_messages_for_model_request(
-            messages=messages,
+        def build_final_request(final_chat_params):
+            return ContextManager.trim_messages_for_model_request(
+                messages=messages,
+                uid=uid,
+                session_id=session_id,
+                context_window_k=final_chat_params["context_window_k"],
+                max_tokens=final_chat_params["max_tokens"],
+                tools=None,
+            )
+
+        final_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+            db,
+            chat_channel=chat_channel,
+            request_builder=build_final_request,
+            call_context=f"{call_context}_final",
+            cursor_key=chat_cursor_key,
             uid=uid,
             session_id=session_id,
-            context_window_k=chat_params["context_window_k"],
-            max_tokens=chat_params["max_tokens"],
             tools=None,
-        )
-        final_response = await LLMClient.generate(
-            api_key=chat_channel_obj.get_decrypted_api_key(),
-            base_url=chat_channel_obj.base_url,
-            model_id=model_entry["model_id"],
-            messages=final_request_messages,
-            temperature=chat_params["temperature"],
-            top_p=chat_params["top_p"],
-            max_tokens=chat_params["max_tokens"],
-            tools=None,
-            protocol=getattr(chat_channel_obj, "protocol", "openai"),
-            timeout=chat_params["chat_timeout"],
+            require_content_or_tools=True,
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
@@ -262,7 +260,7 @@ class BackgroundDispatcherMixin:
                 ensure_ascii=False,
             )
 
-        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=1, content=final_msg.content or ""))
+        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=1, content=final_msg.content or ""))
         messages.append(final_msg)
         turn_messages.append(final_msg)
         await save_assistant_message(db, session_id, uid, profile.id, final_msg)
@@ -294,14 +292,12 @@ class BackgroundDispatcherMixin:
             try:
                 profile = await profile_crud.get_with_relations(db, task_profile_id)
                 if not profile or profile.uid != task_uid:
-                    disabled_count = await scheduled_task_crud.disable_by_session(db, uid=task_uid, session_id=task_session_id)
                     logger.bind(
                         task_id=task_id,
                         uid=task_uid,
                         session_id=task_session_id,
                         profile_id=task_profile_id,
-                        disabled_scheduled_tasks=disabled_count,
-                    ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE", disabled_count=disabled_count))
+                    ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE"))
                     raise ServerException(message=ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
                 ai_msg, turn_messages = await cls._generate_reply_from_history(
                     db,
@@ -310,6 +306,7 @@ class BackgroundDispatcherMixin:
                     profile=profile,
                     call_context="background_task_proactive_reply",
                     allow_tools=True,
+                    reply_source="background_task",
                 )
                 return {
                     "uid": task_uid,

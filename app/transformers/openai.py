@@ -567,7 +567,14 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
 
     @classmethod
     def from_provider(cls, provider_response: Any) -> InternalMessage:
-        choice = provider_response["choices"][0]["message"]
+        choices = provider_response.get("choices") if isinstance(provider_response, dict) else None
+        if not choices:
+            raise LLMException(constants.ERR_LLM_EMPTY_RESPONSE)
+
+        choice = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(choice, dict):
+            raise LLMException(constants.ERR_LLM_EMPTY_RESPONSE)
+
         tool_calls = None
         if "tool_calls" in choice and choice["tool_calls"] is not None:
             tool_calls = []

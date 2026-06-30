@@ -91,6 +91,7 @@ async def _process_single_tool_with_isolated_db(
     *,
     allowed_knowledge_base_ids: list[int] | None = None,
     context_window_k: int = 4,
+    allow_background_submission: bool = True,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -108,6 +109,7 @@ async def _process_single_tool_with_isolated_db(
             uid,
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             context_window_k=context_window_k,
+            allow_background_submission=allow_background_submission,
         )
 
 

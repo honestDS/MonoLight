@@ -28,7 +28,6 @@ LIST_BACKGROUND_TASKS_TOOL_SCHEMA = {
                     "maximum": 100,
                 },
             },
-            "additionalProperties": False,
         },
     },
 }

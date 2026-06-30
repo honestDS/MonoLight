@@ -9,7 +9,7 @@ MESSAGES = {
     "ERR_CHAT_INPUT_TOO_LONG": "The input exceeds the available context budget of the current model. Please shorten the message or reduce the output length and try again.",
     "ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED": "The current model context budget is exhausted by system prompts, tool definitions, or output length. Please adjust the Profile configuration and try again.",
     "ERR_BACKGROUND_TASK_NOT_FOUND": "Background task not found",
-    "ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "Background task profile is not available for user. Related scheduled tasks have been disabled.",
+    "ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "Background task profile is not available for user.",
     "ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND": "Scheduled task profile not found",
     "ERR_CHANNEL_EMBEDDING_ONLY_FOR_TITLE": "The current model channel only supports embedding, cannot generate session title",
     "ERR_CHANNEL_DISABLED_FOR_TITLE": "Chat model channel has been disabled, cannot generate session title",
@@ -18,4 +18,5 @@ MESSAGES = {
     "MSG_TITLE_GENERATE_FAILED": "Unable to generate title, default title will be used",
     "MSG_MESSAGE_LIST_SUCCESS": "Session history retrieved successfully",
     "MSG_TOOL_RESULT_TRUNCATED": "\n\n[The tool response is too large, so the latter part has been omitted. Please answer based on the visible result above, or adjust the tool call parameters and query again.]",
+    "ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED": "Background task proactive reply failed: {error}",
 }

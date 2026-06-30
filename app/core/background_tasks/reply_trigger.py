@@ -1,10 +1,12 @@
-import asyncio
+﻿import asyncio
 import json
 
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.session import session_crud
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
+from app.core.utils.dispatcher.helpers import _format_exception_message
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -41,6 +43,7 @@ def _build_background_tool_result_message(task) -> str:
 async def _save_background_task_result_message(db, task) -> None:
     extra = task.extra if isinstance(task.extra, dict) else {}
     if extra.get(BACKGROUND_RESULT_MESSAGE_SAVED_EXTRA_KEY):
+        logger.bind(task_id=task.id, uid=task.uid, session_id=task.session_id).info(t("LOG_BACKGROUND_TASK_RESULT_MESSAGE_EXISTS"))
         return
 
     result_message = InternalMessage(
@@ -78,7 +81,7 @@ async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None
         uid = task.uid
         session_id = task.session_id
         profile_id = task.profile_id
-        error_content = f"后台任务主动回复失败：{error_message}"
+        error_content = t("ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message)
         err_message = InternalMessage(role=MessageRole.ERR, content=error_content)
         await save_message(db, session_id, uid, MessageRole.ERR, MessageType.TEXT, err_message, profile_id, is_processed=True)
         await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error=error_message)
@@ -88,9 +91,11 @@ async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None
         session_id,
         {
             "type": "proactive_reply_error",
+            "source": "background_task",
             "session_id": session_id,
             "content": error_content,
             "task_id": task_id,
+            "background_task_id": task_id,
         },
     )
 
@@ -99,15 +104,19 @@ async def trigger_background_task_reply(task_id: int) -> None:
     async with AsyncSessionLocal() as db:
         task = await background_task_crud.get(db, task_id)
         if not task or not task.auto_reply:
+            logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
             return
         if task.status not in {BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED}:
+            logger.bind(task_id=task_id, status=getattr(task, "status", None)).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
             return
         if task.reply_status not in {BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.FAILED}:
+            logger.bind(task_id=task_id, reply_status=task.reply_status).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
             return
 
         session = await session_crud.get_by_session_id(db, task.session_id)
         if not session:
             await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error="Session not found")
+            logger.bind(task_id=task_id, session_id=task.session_id).warning(t("LOG_BACKGROUND_TASK_REPLY_SESSION_MISSING"))
             return
 
         await _save_background_task_result_message(db, task)
@@ -123,6 +132,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
             if task:
                 if response.get("deferred"):
                     await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.PENDING)
+                    logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info(t("LOG_BACKGROUND_TASK_REPLY_DEFERRED"))
                     asyncio.create_task(_retry_later(task_id))
                     return
                 await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.SUCCEEDED)
@@ -132,18 +142,22 @@ async def trigger_background_task_reply(task_id: int) -> None:
             response["session_id"],
             {
                 "type": "proactive_reply",
+                "source": "background_task",
                 "session_id": response["session_id"],
                 "history": response.get("history", []),
                 "content": response.get("content", ""),
                 "task_id": task_id,
+                "background_task_id": task_id,
             },
         )
     except Exception as exc:
-        error_message = str(exc)
-        logger.bind(task_id=task_id).error(f"Background task proactive reply failed: {error_message}", exc_info=True)
+        error_message = _format_exception_message(exc)
+        logger.bind(task_id=task_id).error(t("LOG_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message), exc_info=True)
         await _save_and_notify_reply_error(task_id, error_message)
 
 
 async def _retry_later(task_id: int) -> None:
+    logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_RETRY_SCHEDULED"))
     await asyncio.sleep(2)
     await trigger_background_task_reply(task_id)
+

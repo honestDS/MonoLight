@@ -12,12 +12,15 @@ import aiohttp
 from app.core.channel_router import select_channel
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.models.channel import ChannelConfig
 from app.providers.image_generation import ImageGenerationClient
 
 from .base import BaseExecutor
 from .send_file_to_user import _encode_token
+
+logger = get_logger(__name__)
 
 IMAGE_GENERATION_TOOL_SCHEMA = {
     "type": "function",
@@ -87,8 +90,29 @@ class ImageGenerationExecutor(BaseExecutor):
         }
 
     async def _save_base64_image(self, b64_json: str) -> dict[str, Any]:
+        self._log_image_save_started(source="base64")
         image_bytes = base64.b64decode(b64_json)
-        return await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}.png", "image/png")
+        file_item = await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}.png", "image/png")
+        self._log_image_saved(file_item, source="base64")
+        return file_item
+
+    def _log_image_save_started(self, *, source: str, source_url: str | None = None) -> None:
+        logger.bind(
+            uid=self.uid,
+            source=source,
+            source_url=source_url,
+        ).info(t("LOG_IMAGE_GENERATION_SAVE_STARTED"))
+
+    def _log_image_saved(self, file_item: dict[str, Any], *, source: str, source_url: str | None = None) -> None:
+        logger.bind(
+            uid=self.uid,
+            source=source,
+            source_url=source_url,
+            file_name=file_item["name"],
+            path=file_item["path"],
+            mime_type=file_item["mime_type"],
+            size=file_item["size"],
+        ).info(t("LOG_IMAGE_GENERATION_SAVE_SUCCEEDED"))
 
     async def _download_remote_image(self, url: str) -> tuple[bytes, str]:
         client_timeout = aiohttp.ClientTimeout(total=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0))
@@ -110,13 +134,16 @@ class ImageGenerationExecutor(BaseExecutor):
             return image_bytes, content_type or "application/octet-stream"
 
     async def _save_downloaded_image(self, url: str) -> dict[str, Any]:
+        self._log_image_save_started(source="remote_url", source_url=url)
         image_bytes, content_type = await self._download_remote_image(url)
         if not content_type.startswith("image/"):
             raise ValueError(f"Downloaded image has unsupported content type: {content_type}")
         extension = mimetypes.guess_extension(content_type) or ".img"
         if extension == ".jpe":
             extension = ".jpg"
-        return await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}{extension}", content_type)
+        file_item = await self._write_image_file(image_bytes, f"generated_image_{uuid.uuid4().hex}{extension}", content_type)
+        self._log_image_saved(file_item, source="remote_url", source_url=url)
+        return file_item
 
     def _build_success_payload(
         self,
@@ -237,5 +264,3 @@ class ImageGenerationExecutor(BaseExecutor):
                 last_error = str(exc)
 
             excluded_priorities.add(rule.priority)
-            if not image_channel.retry_on_failure:
-                return json.dumps({"status": "failed", "error": last_error}, ensure_ascii=False)

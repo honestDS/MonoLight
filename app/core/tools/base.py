@@ -5,6 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from app.core.dispatch_context import DispatchContext
 from app.core.log import get_logger
 
 
@@ -18,6 +19,7 @@ class BaseExecutor(abc.ABC):
         self.profile = None
         self.session_id = None
         self.allowed_knowledge_base_ids = []
+        self.dispatch_context: DispatchContext | None = None
 
     async def run_sync(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
         """使用 asyncio.to_thread 执行同步函数，由系统原生管理线程池并随调度器信号量动态控制并发"""
@@ -33,11 +35,13 @@ class BaseExecutor(abc.ABC):
         profile=None,
         session_id: str | None = None,
         allowed_knowledge_base_ids: list[int] | None = None,
+        dispatch_context: DispatchContext | None = None,
     ):
-        self.db = db
-        self.profile = profile
-        self.session_id = session_id
-        self.allowed_knowledge_base_ids = allowed_knowledge_base_ids or []
+        self.dispatch_context = dispatch_context
+        self.db = dispatch_context.db if dispatch_context else db
+        self.profile = dispatch_context.profile if dispatch_context else profile
+        self.session_id = dispatch_context.session_id if dispatch_context else session_id
+        self.allowed_knowledge_base_ids = dispatch_context.allowed_knowledge_base_ids if dispatch_context else (allowed_knowledge_base_ids or [])
 
     @abc.abstractmethod
     async def execute(self, **kwargs) -> str:
