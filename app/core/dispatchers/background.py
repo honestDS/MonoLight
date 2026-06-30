@@ -39,6 +39,30 @@ logger = get_logger(__name__)
 
 
 class BackgroundDispatcherMixin:
+    @staticmethod
+    def _build_virtual_tool_feedback_messages(ai_msg: InternalMessage, payload: dict[str, Any]) -> list[InternalMessage]:
+        if not ai_msg.tool_calls:
+            return []
+
+        feedback_messages = [ai_msg]
+        for tool_call in ai_msg.tool_calls:
+            feedback_payload = {
+                **payload,
+                "tool_call": {
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                },
+            }
+            feedback_messages.append(
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id=tool_call.id,
+                    content=json.dumps(feedback_payload, ensure_ascii=False),
+                )
+            )
+        return feedback_messages
+
     @classmethod
     async def _generate_reply_from_history(
         cls,
@@ -113,22 +137,21 @@ class BackgroundDispatcherMixin:
             unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
             if unsupported_tool_names:
                 logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
-                correction_message = InternalMessage(
-                    role=MessageRole.SYSTEM,
-                    content=json.dumps(
-                        {
-                            "type": "background_proactive_tool_correction",
-                            "instruction": BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
-                            "unsupported_tool_calls": unsupported_tool_names,
-                            "allowed_tool_calls": sorted(allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES),
-                        },
-                        ensure_ascii=False,
-                    ),
+                correction_messages = cls._build_virtual_tool_feedback_messages(
+                    ai_msg,
+                    {
+                        "type": "background_proactive_tool_correction",
+                        "error": "Unsupported tool call in background proactive reply.",
+                        "instruction": BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
+                        "unsupported_tool_calls": unsupported_tool_names,
+                        "allowed_tool_calls": sorted(allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES),
+                    },
                 )
+                correction_context_messages = [*messages, *correction_messages]
 
                 def build_correction_request(retry_chat_params):
                     return ContextManager.trim_messages_for_model_request(
-                        messages=[*messages, correction_message],
+                        messages=correction_context_messages,
                         uid=uid,
                         session_id=session_id,
                         context_window_k=retry_chat_params["context_window_k"],
@@ -152,20 +175,20 @@ class BackgroundDispatcherMixin:
                 remaining_unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
                     logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
-                    text_only_message = InternalMessage(
-                        role=MessageRole.SYSTEM,
-                        content=json.dumps(
-                            {
-                                "type": "background_proactive_text_only_fallback",
-                                "instruction": BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
-                            },
-                            ensure_ascii=False,
-                        ),
+                    text_only_messages = cls._build_virtual_tool_feedback_messages(
+                        ai_msg,
+                        {
+                            "type": "background_proactive_text_only_fallback",
+                            "error": "Unsupported tool call in background proactive retry.",
+                            "instruction": BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
+                            "unsupported_tool_calls": remaining_unsupported_tool_names,
+                        },
                     )
+                    text_only_context_messages = [*correction_context_messages, *text_only_messages]
 
                     def build_text_only_request(retry_chat_params):
                         return ContextManager.trim_messages_for_model_request(
-                            messages=[*messages, correction_message, text_only_message],
+                            messages=text_only_context_messages,
                             uid=uid,
                             session_id=session_id,
                             context_window_k=retry_chat_params["context_window_k"],
