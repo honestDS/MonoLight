@@ -182,7 +182,7 @@ async def generate_title(
         return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
 
     from app.core.channel_router import select_channel
-    from app.core.dispatcher import _format_exception_message
+    from app.core.dispatcher import format_exception_message
     from app.core.exceptions import LLMException
     from app.core.log import channel_log_extra
 
@@ -214,7 +214,7 @@ async def generate_title(
                 uid=uid,
                 session_id=request.session_id,
                 **channel_log_extra(channel, model_entry),
-            ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=_format_exception_message(e)))
+            ).warning(t("LOG_TITLE_CHANNEL_FAILED", error=format_exception_message(e)))
 
         selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
         if not selection:

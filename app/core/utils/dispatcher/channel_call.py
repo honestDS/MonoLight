@@ -8,7 +8,7 @@ from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONS
 from app.core.exceptions import ApiKeyException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
-from app.core.utils.dispatcher.helpers import _resolve_chat_params
+from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 from app.models.message import InternalMessage, InternalResponse
 from app.providers.llm.client import LLMClient
@@ -46,7 +46,7 @@ async def generate_chat_with_fallback(
 
     while True:
         chat_channel_obj, model_entry, channel_rule = selection
-        chat_params = _resolve_chat_params(model_entry, chat_channel)
+        chat_params = resolve_chat_params(model_entry, chat_channel)
         try:
             request_messages = await _resolve_request_messages(request_builder, chat_params)
             response = await LLMClient.generate(

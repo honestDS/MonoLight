@@ -13,7 +13,7 @@ from app.providers.database import AsyncSessionLocal
 BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user", "query_knowledge_base"}
 
 
-def _get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
+def get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
     """从模型条目中提取多模态能力"""
     return (
         model_entry.get("image_understanding", False),
@@ -22,7 +22,7 @@ def _get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
     )
 
 
-def _resolve_chat_params(model_entry: dict, chat_channel) -> dict:
+def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
     """从模型条目与对话渠道中解析对话参数。"""
     return {
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
@@ -33,13 +33,13 @@ def _resolve_chat_params(model_entry: dict, chat_channel) -> dict:
     }
 
 
-def _format_exception_message(exc: Exception) -> str:
+def format_exception_message(exc: Exception) -> str:
     if isinstance(exc, BaseBusinessException):
         return t(exc.message, default=exc.message, **exc.kwargs)
     return str(exc)
 
 
-def _extract_files_to_user(tool_responses: list[InternalMessage]) -> list[dict[str, Any]]:
+def extract_files_to_user(tool_responses: list[InternalMessage]) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
@@ -79,7 +79,7 @@ def _filter_tool_output_messages(messages: list[InternalMessage]) -> list[Intern
     return filtered_messages
 
 
-async def _process_single_tool_with_isolated_db(
+async def process_single_tool_with_isolated_db(
     tool_call: InternalToolCall,
     profile,
     cfg,
@@ -113,11 +113,11 @@ async def _process_single_tool_with_isolated_db(
         )
 
 
-def _dump_output_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
+def dump_output_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
     return [message.model_dump(exclude_none=True) for message in messages]
 
 
-def _dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
+def dump_background_proactive_history(messages: list[InternalMessage]) -> list[dict[str, Any]]:
     return [message.model_dump(exclude_none=True) for message in _filter_tool_output_messages(messages)]
 
 
@@ -126,7 +126,7 @@ def _get_tool_schema_name(schema: dict[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_names: set[str] | None = None) -> list[dict[str, Any]]:
+def filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_names: set[str] | None = None) -> list[dict[str, Any]]:
     allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
     missing_tool_names = sorted(tool_name for tool_name in allowed_names if tool_name not in TOOL_EXECUTOR_MAP)
     if missing_tool_names:
@@ -134,18 +134,18 @@ def _filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool
     return [tool for tool in tools if _get_tool_schema_name(tool) in allowed_names]
 
 
-def _get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> list[str]:
+def get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> list[str]:
     allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
     return sorted({tool_call.name for tool_call in tool_calls if tool_call.name not in allowed_names or tool_call.name not in TOOL_EXECUTOR_MAP})
 
 
-def _validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> None:
-    unsupported_tool_names = _get_unsupported_background_proactive_tool_names(tool_calls, allowed_tool_names=allowed_tool_names)
+def validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> None:
+    unsupported_tool_names = get_unsupported_background_proactive_tool_names(tool_calls, allowed_tool_names=allowed_tool_names)
     if unsupported_tool_names:
         raise LLMException(message=f"Background proactive reply attempted unsupported tool calls: {', '.join(unsupported_tool_names)}")
 
 
-def _reassemble_multimodal_messages(
+def reassemble_multimodal_messages(
     messages: list[InternalMessage],
     image_understanding: bool,
     audio_understanding: bool,

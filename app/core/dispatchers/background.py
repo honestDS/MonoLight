@@ -21,12 +21,12 @@ from app.core.tools import get_tools_for_profile
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.helpers import (
     BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
-    _dump_background_proactive_history,
-    _extract_files_to_user,
-    _filter_background_proactive_tools,
-    _get_unsupported_background_proactive_tool_names,
-    _process_single_tool_with_isolated_db,
-    _validate_background_proactive_tool_calls,
+    dump_background_proactive_history,
+    extract_files_to_user,
+    filter_background_proactive_tools,
+    get_unsupported_background_proactive_tool_names,
+    process_single_tool_with_isolated_db,
+    validate_background_proactive_tool_calls,
 )
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
@@ -66,7 +66,7 @@ class BackgroundDispatcherMixin:
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
             if restrict_tools_to_background_allowlist:
-                profile_tools = _filter_background_proactive_tools(profile_tools)
+                profile_tools = filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
             else:
                 allowed_tool_names = {tool["function"]["name"] for tool in profile_tools if isinstance(tool.get("function", {}).get("name"), str)}
@@ -110,7 +110,7 @@ class BackgroundDispatcherMixin:
         ai_msg = response.message
 
         if allow_tools and ai_msg.tool_calls:
-            unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
+            unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
             if unsupported_tool_names:
                 logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY"))
                 correction_message = InternalMessage(
@@ -149,7 +149,7 @@ class BackgroundDispatcherMixin:
                 ai_msg = retry_response.message
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-                remaining_unsupported_tool_names = _get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
+                remaining_unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls or [], allowed_tool_names=allowed_tool_names)
                 if remaining_unsupported_tool_names:
                     logger.bind(uid=uid, session_id=session_id, reply_source=reply_source, unsupported_tools=remaining_unsupported_tool_names).warning(t("LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY"))
                     text_only_message = InternalMessage(
@@ -197,13 +197,13 @@ class BackgroundDispatcherMixin:
         if not allow_tools or not ai_msg.tool_calls:
             return ai_msg, turn_messages
 
-        _validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
+        validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
             raise LLMException(message=f"Background proactive reply attempted too many tool calls: {len(ai_msg.tool_calls)}")
 
         tool_responses = await asyncio.gather(
             *[
-                _process_single_tool_with_isolated_db(
+                process_single_tool_with_isolated_db(
                     tool_call,
                     profile,
                     cfg,
@@ -220,7 +220,7 @@ class BackgroundDispatcherMixin:
             ]
         )
 
-        files_to_user = _extract_files_to_user(tool_responses)
+        files_to_user = extract_files_to_user(tool_responses)
         for tool_response in tool_responses:
             await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
 
@@ -312,7 +312,7 @@ class BackgroundDispatcherMixin:
                     "uid": task_uid,
                     "session_id": task_session_id,
                     "content": ai_msg.content,
-                    "history": _dump_background_proactive_history(turn_messages),
+                    "history": dump_background_proactive_history(turn_messages),
                 }
             finally:
                 await active_session_crud.release_lock(db, task_session_id)

@@ -9,7 +9,7 @@ from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND
 from app.core.context import ContextManager
 from app.core.exceptions import LLMException
 from app.core.tools import get_tools_for_profile
-from app.core.utils.dispatcher.helpers import _get_multimodal_from_entry, _resolve_chat_params
+from app.core.utils.dispatcher.helpers import get_multimodal_from_entry, resolve_chat_params
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt
 from app.core.utils.dispatcher.markdown_instruction import build_user_runtime_instructions
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
@@ -44,8 +44,8 @@ class DispatcherValidationMixin:
             raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 
         chat_channel_obj, model_entry, _channel_rule = selection
-        img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
-        chat_params = _resolve_chat_params(model_entry, chat_channel)
+        img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
+        chat_params = resolve_chat_params(model_entry, chat_channel)
         system_prompt = await build_prompt(db, profile)
         tools, _allowed_knowledge_base_ids = await get_profile_tools(db, profile)
 

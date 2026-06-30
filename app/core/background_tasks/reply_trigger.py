@@ -6,7 +6,7 @@ from app.core.crud.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
-from app.core.utils.dispatcher.helpers import _format_exception_message
+from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
@@ -151,7 +151,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
             },
         )
     except Exception as exc:
-        error_message = _format_exception_message(exc)
+        error_message = format_exception_message(exc)
         logger.bind(task_id=task_id).error(t("LOG_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message), exc_info=True)
         await _save_and_notify_reply_error(task_id, error_message)
 

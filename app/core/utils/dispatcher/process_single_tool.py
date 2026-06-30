@@ -22,7 +22,7 @@ from app.core.tools import (
     tool_schema_has_parameter,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
-from app.core.utils.dispatcher.helpers import _format_exception_message
+from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
 from app.models.message import (
     InternalMessage,
@@ -188,7 +188,7 @@ async def process_single_tool(
                     task.cancel()
                 raise
             except Exception as exc:
-                cmd_result = _build_tool_error_result(tool_name, _format_exception_message(exc))
+                cmd_result = _build_tool_error_result(tool_name, format_exception_message(exc))
             finally:
                 if active_tasks is not None:
                     active_tasks.discard(task)

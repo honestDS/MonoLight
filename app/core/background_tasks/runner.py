@@ -12,7 +12,7 @@ from app.core.dispatch_context import build_background_dispatch_context
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
-from app.core.utils.dispatcher.helpers import _format_exception_message
+from app.core.utils.dispatcher.helpers import format_exception_message
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
@@ -124,7 +124,7 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
                 return
-            error_message = _format_exception_message(exc)
+            error_message = format_exception_message(exc)
             log.error(t("LOG_BACKGROUND_TASK_FAILED", error=error_message), exc_info=True)
             task = await background_task_crud.mark_failed(db, task=task, error=error_message)
             task.result = _build_failure_result(task, error_message)

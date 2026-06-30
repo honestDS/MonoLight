@@ -21,13 +21,13 @@ from app.core.utils.dispatcher.append_new_user_messages import append_new_user_m
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
-    _dump_output_history,
-    _extract_files_to_user,
-    _format_exception_message,
-    _get_multimodal_from_entry,
-    _process_single_tool_with_isolated_db,
-    _reassemble_multimodal_messages,
-    _resolve_chat_params,
+    dump_output_history,
+    extract_files_to_user,
+    format_exception_message,
+    get_multimodal_from_entry,
+    process_single_tool_with_isolated_db,
+    reassemble_multimodal_messages,
+    resolve_chat_params,
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
@@ -103,8 +103,8 @@ class NonStreamDispatcherMixin:
                         raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
 
                     chat_channel_obj, model_entry, _channel_rule = selection
-                    img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
-                    chat_params = _resolve_chat_params(model_entry, chat_channel)
+                    img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
+                    chat_params = resolve_chat_params(model_entry, chat_channel)
 
                     messages = await prepare_messages(
                         db,
@@ -190,13 +190,13 @@ class NonStreamDispatcherMixin:
                                     uid=uid,
                                     session_id=session_id,
                                     **channel_log_extra(chat_channel_obj, model_entry),
-                                ).warning(t("LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED", error=_format_exception_message(exc)))
+                                ).warning(t("LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED", error=format_exception_message(exc)))
                                 selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_non_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
                                 if not selection:
                                     raise
                                 chat_channel_obj, model_entry, _channel_rule = selection
-                                img_understanding, audio_understanding, video_understanding = _get_multimodal_from_entry(model_entry)
-                                chat_params = _resolve_chat_params(model_entry, chat_channel)
+                                img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
+                                chat_params = resolve_chat_params(model_entry, chat_channel)
                                 # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
                                 messages = await prepare_messages(
                                     db,
@@ -209,7 +209,7 @@ class NonStreamDispatcherMixin:
                                     is_first_iter,
                                     context_window_k=chat_params["context_window_k"],
                                 )
-                                _reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
+                                reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
                         if not ai_msg.tool_calls and files_to_user:
                             ai_msg.content = json.dumps(
@@ -249,7 +249,7 @@ class NonStreamDispatcherMixin:
                         async def wrapped_tool_call(tc):
                             async with sem:
                                 task = asyncio.create_task(
-                                    _process_single_tool_with_isolated_db(
+                                    process_single_tool_with_isolated_db(
                                         tc,
                                         profile,
                                         cfg,
@@ -275,7 +275,7 @@ class NonStreamDispatcherMixin:
                         tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
                         tool_responses = await asyncio.gather(*tasks)
 
-                        files_to_user.extend(_extract_files_to_user(tool_responses))
+                        files_to_user.extend(extract_files_to_user(tool_responses))
                         for tool_res in tool_responses:
                             await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
 
@@ -289,7 +289,7 @@ class NonStreamDispatcherMixin:
 
             return LLMResponse(
                 choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
-                history=_dump_output_history(turn_messages),
+                history=dump_output_history(turn_messages),
                 files=files_to_user or None,
             ).model_dump()
 
