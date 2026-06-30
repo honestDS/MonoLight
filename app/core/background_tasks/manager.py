@@ -10,6 +10,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.background_task import BackgroundTask
 from app.models.profile import Profile, ProfileConfig
+from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
@@ -71,8 +72,6 @@ class BackgroundTaskManager:
             if free_slots <= 0:
                 log.info(t("LOG_BACKGROUND_TASK_SCHEDULE_NO_SLOT"))
                 return
-
-        from app.providers.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             pending_tasks = await background_task_crud.list_pending(db, profile_id=profile.id, limit=free_slots)

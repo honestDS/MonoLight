@@ -1,7 +1,9 @@
 import json
 
 from app.core import constants
+from app.core.crud.background_task import background_task_crud
 from app.core.i18n import t
+from app.models.background_task import BackgroundTaskResponse, BackgroundTaskStatus
 
 from .base import BaseExecutor
 
@@ -35,9 +37,6 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
                 },
                 ensure_ascii=False,
             )
-
-        from app.core.crud.background_task import background_task_crud
-        from app.models.background_task import BackgroundTaskResponse, BackgroundTaskStatus
 
         task = await background_task_crud.cancel_user_task(self.db, task_id=task_id, uid=self.uid)
         if not task:

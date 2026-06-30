@@ -16,6 +16,7 @@ from app.models.message import (
     MessageCreate,
     MessageType,
 )
+from app.models.session import ChatSession
 from app.models.user import User
 
 
@@ -75,8 +76,6 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.scalars().all()
 
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
-        from app.models.session import ChatSession
-
         stmt = (
             select(
                 Message.session_id,

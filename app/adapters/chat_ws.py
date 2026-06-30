@@ -11,6 +11,7 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.session_notifier import session_notifier
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -24,8 +25,6 @@ logger = get_logger(__name__)
 
 class WebSocketChatAdapter(BaseChatAdapter):
     async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
-        from app.core.session_notifier import session_notifier
-
         await session_notifier.notify(uid, session_id, event)
 
     async def chat(

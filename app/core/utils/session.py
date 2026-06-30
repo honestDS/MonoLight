@@ -5,6 +5,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.models.message import InternalMessage, MessageRole
+from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
@@ -56,8 +57,6 @@ async def generate_session_title(
             title = title[:50]
 
             # 这里的 db 需要重新获取，因为是异步任务
-            from app.providers.database import AsyncSessionLocal
-
             async with AsyncSessionLocal() as db:
                 await session_crud.create_or_update_title(db=db, session_id=session_id, uid=uid, title=title)
             return title

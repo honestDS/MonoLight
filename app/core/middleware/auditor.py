@@ -5,6 +5,7 @@ from typing import (
 )
 
 from app.core import constants
+from app.core.crud.channel import channel_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import (
@@ -13,6 +14,7 @@ from app.core.prompts import (
     CONFIRMATION_PREFIX,
     FILE_WRITE_CONFIRMATION_PROMPT,
 )
+from app.core.tools import get_registered_tool_names
 from app.core.tools.shell import ShellExecutor
 from app.models.message import (
     InternalMessage,
@@ -91,9 +93,6 @@ class AuditMiddleware:
 
     @staticmethod
     async def audit(db, profile, cfg, tool_name: str, args: dict, session_id: str = None, uid: str = None) -> str | None:
-        from app.core.crud.channel import channel_crud
-        from app.core.tools import get_registered_tool_names
-
         if tool_name not in get_registered_tool_names():
             return None
 

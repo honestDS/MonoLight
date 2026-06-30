@@ -13,9 +13,12 @@ from app.core.exceptions import EmbeddingException, LLMException, RerankExceptio
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import (
+    FilePart,
+    ImagePart,
     InternalMessage,
     InternalToolCall,
     MessageRole,
+    TextPart,
 )
 
 from .base import (
@@ -524,8 +527,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
-        from app.models.message import FilePart, ImagePart, TextPart
-
         provider_msgs = []
         for msg in internal_messages:
             if isinstance(msg.content, list):

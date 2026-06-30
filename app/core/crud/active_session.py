@@ -1,7 +1,11 @@
+import asyncio
+from datetime import timedelta
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import delete
 
 from app.core.crud.base import CRUDBase
+from app.core.utils.time import get_local_time
 from app.models.active_session import ActiveSession
 
 
@@ -26,8 +30,6 @@ class CRUDActiveSession(CRUDBase[ActiveSession, ActiveSession, ActiveSession]):
         释放会话锁
         如果发生 CancelledError，依然保证尝试执行释放逻辑。
         """
-        import asyncio
-
         async def _do_release():
             try:
                 stmt = delete(ActiveSession).where(ActiveSession.session_id == session_id)
@@ -47,10 +49,6 @@ class CRUDActiveSession(CRUDBase[ActiveSession, ActiveSession, ActiveSession]):
         """
         清理过期的锁（防止死锁）
         """
-        from datetime import timedelta
-
-        from app.core.utils.time import get_local_time
-
         deadline = get_local_time() - timedelta(seconds=timeout_seconds)
         stmt = delete(ActiveSession).where(ActiveSession.created_at < deadline)
         await db.execute(stmt)

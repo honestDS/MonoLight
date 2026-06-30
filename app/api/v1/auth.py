@@ -18,6 +18,7 @@ from app.core.security import (
     get_password_hash,
     verify_password,
 )
+from app.models.user import UserCreate
 from app.providers.database import get_db
 from app.providers.database.bootstrap import ensure_default_profile_for_user
 from app.schemas.auth import (
@@ -72,8 +73,6 @@ async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncS
             },
         )
     else:
-        from app.models.user import UserCreate
-
         user_in = UserCreate(username=admin_username, password=default_password)
         user = await user_crud.create(
             db,

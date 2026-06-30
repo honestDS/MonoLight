@@ -13,6 +13,7 @@ from app.core.constants import (
 )
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
+from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import LLMException, ServerException
@@ -297,8 +298,6 @@ class BackgroundDispatcherMixin:
 
     @classmethod
     async def dispatch_proactive_reply(cls, task_id: int) -> dict[str, Any]:
-        from app.core.crud.background_task import background_task_crud
-
         async with AsyncSessionLocal() as db:
             task = await background_task_crud.get(db, task_id)
             if not task:

@@ -2,6 +2,8 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.crud.session import session_crud
+from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (
     InternalMessage,
@@ -17,9 +19,6 @@ async def save_assistant_message(
     profile_id: int,
     ai_msg: InternalMessage,
 ):
-    from app.core.crud.session import session_crud
-    from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
-
     session = await session_crud.get_by_session_id(db, session_id)
     enable_markdown = session.enable_markdown if session else False
 

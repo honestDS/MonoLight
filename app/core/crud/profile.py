@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.base import CRUDBase
@@ -36,14 +36,10 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         return list(result.scalars().all())
 
     async def count(self, db: AsyncSession, uid: str | None = None) -> int:
-        from sqlalchemy import func
-
         result = await db.execute(select(func.count()).select_from(Profile).where(Profile.uid == uid))
         return result.scalar()
 
     async def count_all(self, db: AsyncSession) -> int:
-        from sqlalchemy import func
-
         result = await db.execute(select(func.count()).select_from(Profile))
         return result.scalar()
 

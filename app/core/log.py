@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import Token
@@ -11,11 +12,15 @@ from pathlib import Path
 from loguru import logger
 
 from app.core import constants
+from app.core.crud.log import system_log_crud
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
+from app.core.log_broadcaster import log_broadcaster
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
+from app.models.system_log import SystemLogCreate
+from app.providers.database import AsyncSessionLocal
 
 
 def get_profile_log_locale(profile: object | None) -> str:
@@ -71,8 +76,6 @@ class LogManager:
         # 异步 WebSocket 推送器
         async def ws_sink(message):
             try:
-                from app.core.log_broadcaster import log_broadcaster
-
                 record = message.record
                 uid = record["extra"].get("uid")
                 session_id = record["extra"].get("session_id")
@@ -109,10 +112,6 @@ class LogManager:
         # 异步数据库写入器
         async def db_sink(message):
             try:
-                from app.core.crud.log import system_log_crud
-                from app.models.system_log import SystemLogCreate
-                from app.providers.database import AsyncSessionLocal
-
                 record = message.record
                 # 提取 extra 中的关键字段
                 uid = record["extra"].get("uid")
@@ -148,8 +147,6 @@ class LogManager:
                     await system_log_crud.create(db, obj_in=log_entry)
             except Exception as e:
                 # 避免循环日志并打印完整堆栈异常
-                import traceback
-
                 sys.stderr.write(f"Error in DB log sink: {str(e)}\n")
                 traceback.print_exc(file=sys.stderr)
 

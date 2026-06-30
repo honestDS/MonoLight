@@ -1,7 +1,9 @@
 import json
 
 from app.core import constants
+from app.core.crud.background_task import background_task_crud
 from app.core.i18n import t
+from app.models.background_task import BackgroundTaskResponse
 
 from .base import BaseExecutor
 
@@ -46,9 +48,6 @@ class ListBackgroundTasksExecutor(BaseExecutor):
                 },
                 ensure_ascii=False,
             )
-
-        from app.core.crud.background_task import background_task_crud
-        from app.models.background_task import BackgroundTaskResponse
 
         page = max(1, int(page or 1))
         size = min(100, max(1, int(size or 20)))

@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime
 from enum import StrEnum
@@ -116,8 +117,6 @@ class MessageResponse(MessageBase):
     def parse_content(cls, v):
         if isinstance(v, str):
             try:
-                import json
-
                 parsed = json.loads(v)
                 if isinstance(parsed, (list, dict)):
                     return parsed

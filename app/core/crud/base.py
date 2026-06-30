@@ -3,6 +3,7 @@ from typing import (
     TypeVar,
 )
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
     SQLModel,
@@ -27,8 +28,6 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
         return result.scalars().all()
 
     async def count(self, db: AsyncSession) -> int:
-        from sqlalchemy import func
-
         result = await db.execute(select(func.count()).select_from(self.model))
         return result.scalar()
 

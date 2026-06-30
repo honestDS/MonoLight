@@ -16,16 +16,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.core import constants
+from app.core.channel_router import select_channel
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
+from app.core.crud.session import session_crud
 from app.core.crud.system_setting import system_setting_crud
-from app.core.dispatcher import ChatDispatcher
-from app.core.exceptions import BaseBusinessException
+from app.core.dispatcher import ChatDispatcher, format_exception_message
+from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
 from app.core.log import (
+    channel_log_extra,
     get_logger,
     reset_system_log_locale,
     set_system_log_locale,
@@ -135,8 +138,6 @@ async def update_session_setting(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    from app.core.crud.session import session_crud
-
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
 
@@ -180,11 +181,6 @@ async def generate_title(
         chat_channel = ChannelConfig.model_validate(chat_channel_raw)
     except Exception:
         return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
-
-    from app.core.channel_router import select_channel
-    from app.core.dispatcher import format_exception_message
-    from app.core.exceptions import LLMException
-    from app.core.log import channel_log_extra
 
     selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
     if not selection:
