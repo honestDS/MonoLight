@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
-from app.core.constants import ERR_LLM_UNEXPECTED_ERROR
+from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_VALIDATION_FAILED
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -51,7 +51,7 @@ class WebChatAdapter(BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ):
         if not session_id:
-            raise BaseBusinessException(message="ERR_VALIDATION_FAILED", detail="session_id is required")
+            raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
         try:
             llm_response = await ChatDispatcher.dispatch(
                 db=db,

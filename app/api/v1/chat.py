@@ -233,7 +233,7 @@ async def list_background_tasks(
     offset = (page - 1) * size
     tasks = await background_task_crud.list_user_tasks(db, uid=uid, session_id=session_id, skip=offset, limit=size)
     data = [BackgroundTaskResponse.model_validate(task) for task in tasks]
-    return StandardResponse.success(data=data, message="background task list success")
+    return StandardResponse.success(data=data, message=constants.MSG_BACKGROUND_TASK_LIST_SUCCESS)
 
 
 @router.get("/background-tasks/{task_id}")
@@ -245,8 +245,8 @@ async def get_background_task(
     uid = getattr(current_user, "uid", None)
     task = await background_task_crud.get_user_task(db, task_id=task_id, uid=uid)
     if not task:
-        return StandardResponse.error(code=404, message="background task not found")
-    return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message="background task detail success")
+        return StandardResponse.error(code=404, message=constants.ERR_BACKGROUND_TASK_NOT_FOUND)
+    return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message=constants.MSG_BACKGROUND_TASK_DETAIL_SUCCESS)
 
 
 @router.get("/sessions/history")

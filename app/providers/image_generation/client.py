@@ -16,7 +16,7 @@ class ImageGenerationClient:
     def get_transformer(cls, channel_type: ChannelType | str) -> BaseImageGenerationTransformer:
         transformer = cls._transformers.get(str(channel_type).lower())
         if not transformer:
-            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported image generation channel {channel_type}")
+            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL, channel_type=channel_type)
         return transformer
 
     @classmethod

@@ -1,5 +1,8 @@
 import json
 
+from app.core import constants
+from app.core.i18n import t
+
 from .base import BaseExecutor
 
 CANCEL_BACKGROUND_TASK_TOOL_SCHEMA = {
@@ -28,7 +31,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": "Database context is not available.",
+                    "error": t(constants.ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
                 },
                 ensure_ascii=False,
             )
@@ -41,7 +44,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": "Background task not found.",
+                    "error": t(constants.ERR_BACKGROUND_TASK_NOT_FOUND),
                     "task_id": task_id,
                 },
                 ensure_ascii=False,
@@ -50,7 +53,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
-                "message": "Background task cancelled." if task.status == BackgroundTaskStatus.CANCELLED else "Background task is already finished.",
+                "message": t(constants.MSG_BACKGROUND_TASK_CANCELLED) if task.status == BackgroundTaskStatus.CANCELLED else t(constants.MSG_BACKGROUND_TASK_ALREADY_FINISHED),
                 "task": BackgroundTaskResponse.model_validate(task).model_dump(mode="json"),
             },
             ensure_ascii=False,

@@ -4,7 +4,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import (
+    ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN,
+    ERR_BACKGROUND_TASK_NOT_FOUND,
+    ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
+    ERR_BACKGROUND_TOO_MANY_TOOL_CALLS,
+    ERR_LLM_EMPTY_RESPONSE,
+)
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
@@ -222,7 +228,7 @@ class BackgroundDispatcherMixin:
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-            raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL", detail=f"too many tool calls: {len(ai_msg.tool_calls)}")
+            raise LLMException(message=ERR_BACKGROUND_TOO_MANY_TOOL_CALLS, count=len(ai_msg.tool_calls))
 
         tool_responses = await asyncio.gather(
             *[
@@ -270,7 +276,7 @@ class BackgroundDispatcherMixin:
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
-            raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL", detail="background proactive final reply must not call tools")
+            raise LLMException(message=ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN)
         if not (final_msg.content or "").strip() and not files_to_user:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
         if files_to_user:

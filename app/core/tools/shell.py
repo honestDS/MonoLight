@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 
+from app.core import constants
 from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -73,7 +74,7 @@ class ShellExecutor(BaseExecutor):
         if blacklisted:
             return json.dumps(
                 {
-                    "stdout": f"不允许使用shell工具执行该命令: {blacklisted},禁止命令列表: {self.COMMAND_BLACKLIST}",
+                    "stdout": t(constants.ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
                     "stderr": "",
                     "exit_code": 1,
                     "system_info": system_info,
@@ -118,14 +119,14 @@ class ShellExecutor(BaseExecutor):
                 if process:
                     process.kill()
                 return json.dumps(
-                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
+                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
                     ensure_ascii=False,
                 )
             except subprocess.TimeoutExpired:
                 if process:
                     process.kill()
                 return json.dumps(
-                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
+                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
                     ensure_ascii=False,
                 )
             except asyncio.CancelledError:
@@ -167,7 +168,7 @@ class ShellExecutor(BaseExecutor):
                     except ProcessLookupError:
                         pass
                 return json.dumps(
-                    {"error": f"Command timed out after {profile_timeout}s system_info: {system_info}"},
+                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
                     ensure_ascii=False,
                 )
             except asyncio.CancelledError:

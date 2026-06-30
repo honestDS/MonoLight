@@ -16,6 +16,7 @@ MESSAGES = {
     "ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED": "The embedding model channel has been disabled, please enable it in model management and try again",
     "ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL": "The embedding model channel has no Base URL configured",
     "ERR_PROFILE_EMBEDDING_CALL_FAILED": "Embedding model call failed: {message}",
+    "ERR_PROFILE_RERANK_CALL_FAILED": "Rerank model call failed: {message}",
     "ERR_PROFILE_AUDIT_MODEL_NOT_CHAT": "Security audit model must be a chat model",
     "ERR_KB_NOT_FOUND_FOR_QUERY": "Knowledge base not found",
     "ERR_KB_NOT_IN_PROFILE": "No permission to query knowledge bases that do not belong to the current profile",

@@ -23,7 +23,7 @@ from app.schemas.response import StandardResponse
 async def favicon():
     if os.path.exists(FAVICON_PATH):
         return FileResponse(FAVICON_PATH)
-    return JSONResponse(status_code=404, content={"message": "Favicon not found"})
+    return JSONResponse(status_code=404, content=StandardResponse.error(code=404, message=constants.ERR_FAVICON_NOT_FOUND).model_dump())
 
 
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):

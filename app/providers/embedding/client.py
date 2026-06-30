@@ -16,7 +16,7 @@ class EmbeddingClient:
     def get_transformer(cls, channel_type: ChannelType | str) -> BaseEmbeddingTransformer:
         transformer = cls._transformers.get(str(channel_type).lower())
         if not transformer:
-            raise LLMException(constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=f"Unsupported embedding channel {channel_type}")
+            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_EMBEDDING_CHANNEL, channel_type=channel_type)
         return transformer
 
     @classmethod

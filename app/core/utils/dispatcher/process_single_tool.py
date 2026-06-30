@@ -10,13 +10,14 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core import constants
 from app.core.dispatch_context import build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
     LogManager,
     get_logger,
 )
-from app.core.prompts import BACKGROUND_TASK_QUEUED_PROMPT, BACKGROUND_TASK_UNSUPPORTED_PROMPT
+from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
     tool_schema_has_parameter,
@@ -44,7 +45,7 @@ def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
 def _build_tool_disabled_result(tool_name: str) -> str:
     return json.dumps(
         {
-            "error": f"Tool {tool_name} is not enabled in the active profile",
+            "error": t(constants.ERR_TOOL_NOT_ENABLED, tool_name=tool_name),
             "tool_name": tool_name,
             "status": "failed",
         },
@@ -58,7 +59,7 @@ def _build_background_task_queued_result(tool_name: str, task_id: int) -> str:
             "status": "queued",
             "tool_name": tool_name,
             "task_id": task_id,
-            "message": BACKGROUND_TASK_QUEUED_PROMPT.format(tool_name=tool_name),
+            "message": t(constants.MSG_BACKGROUND_TASK_QUEUED, tool_name=tool_name),
         },
         ensure_ascii=False,
     )
@@ -69,7 +70,7 @@ def _build_background_task_unsupported_result(tool_name: str) -> str:
         {
             "status": "failed",
             "tool_name": tool_name,
-            "error": f"Tool {tool_name} does not support background execution.",
+            "error": t(constants.ERR_BACKGROUND_TASK_UNSUPPORTED, tool_name=tool_name),
             "instruction": BACKGROUND_TASK_UNSUPPORTED_PROMPT.format(tool_name=tool_name),
         },
         ensure_ascii=False,
@@ -194,7 +195,7 @@ async def process_single_tool(
                     active_tasks.discard(task)
         else:
             cmd_result = json.dumps(
-                {"error": f"Tool {tool_name} not registered"},
+                {"error": t(constants.ERR_TOOL_NOT_REGISTERED, tool_name=tool_name)},
                 ensure_ascii=False,
             )
 

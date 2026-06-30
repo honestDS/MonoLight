@@ -1,6 +1,7 @@
-﻿import asyncio
+import asyncio
 import json
 
+from app.core import constants
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.session import session_crud
 from app.core.i18n import t
@@ -115,7 +116,7 @@ async def trigger_background_task_reply(task_id: int) -> None:
 
         session = await session_crud.get_by_session_id(db, task.session_id)
         if not session:
-            await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error="Session not found")
+            await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error=t(constants.ERR_SESSION_NOT_FOUND))
             logger.bind(task_id=task_id, session_id=task.session_id).warning(t("LOG_BACKGROUND_TASK_REPLY_SESSION_MISSING"))
             return
 

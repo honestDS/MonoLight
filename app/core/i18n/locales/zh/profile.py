@@ -16,6 +16,7 @@ MESSAGES = {
     "ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED": "嵌入模型渠道已被禁用，请在模型管理中启用后重试",
     "ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL": "嵌入模型渠道未配置 Base URL",
     "ERR_PROFILE_EMBEDDING_CALL_FAILED": "嵌入模型调用失败: {message}",
+    "ERR_PROFILE_RERANK_CALL_FAILED": "重排模型调用失败: {message}",
     "ERR_PROFILE_AUDIT_MODEL_NOT_CHAT": "安全审计模型必须选择对话类模型",
     "ERR_KB_NOT_FOUND_FOR_QUERY": "知识库不存在",
     "ERR_KB_NOT_IN_PROFILE": "无权查询不属于当前配置的知识库",

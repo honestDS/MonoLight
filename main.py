@@ -21,7 +21,7 @@ from app.core.background_tasks.scheduler import scheduled_task_scheduler
 from app.core.log import LogManager, get_logger
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.utils.time import get_local_time
-from app.handler import register_handlers
+from app.handler import register_handlers, register_middlewares
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.bootstrap import init_system_data
 from app.tasks import background_log_cleaner, background_temp_cleaner
@@ -75,6 +75,7 @@ def register_routers(app: FastAPI) -> None:
 
 def create_app() -> FastAPI:
     fastapi_app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
+    register_middlewares(fastapi_app)
     register_handlers(fastapi_app)
     register_routers(fastapi_app)
     return fastapi_app

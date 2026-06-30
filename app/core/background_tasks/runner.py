@@ -3,6 +3,7 @@ import os
 import uuid
 from typing import Any
 
+from app.core import constants
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.schemas import BackgroundTaskResult
 from app.core.constants import ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE
@@ -46,7 +47,7 @@ def _build_success_result(task: BackgroundTask, raw_result: Any) -> dict[str, An
     result = BackgroundTaskResult(
         status="succeeded",
         tool_name=task.tool_name,
-        summary=f"Background task {task.id} completed successfully.",
+        summary=t(constants.MSG_BACKGROUND_TASK_EXECUTION_SUCCEEDED),
         content=content,
     )
     return result.model_dump()
@@ -56,7 +57,7 @@ def _build_failure_result(task: BackgroundTask, error: str) -> dict[str, Any]:
     result = BackgroundTaskResult(
         status="failed",
         tool_name=task.tool_name,
-        summary=f"Background task {task.id} failed.",
+        summary=t(constants.ERR_BACKGROUND_TASK_EXECUTION_FAILED),
         error=error,
     )
     return result.model_dump()
@@ -102,7 +103,7 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
 
             executor_cls = TOOL_EXECUTOR_MAP.get(task.tool_name)
             if not executor_cls:
-                raise RuntimeError(f"Tool {task.tool_name} not registered")
+                raise RuntimeError(t(constants.ERR_TOOL_NOT_REGISTERED, tool_name=task.tool_name))
 
             instance = executor_cls(project_root=os.getcwd(), uid=task.uid)
             if hasattr(instance, "set_config"):

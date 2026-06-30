@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from app.core import constants
 from app.core.crypto import _get_encryption_key
+from app.core.i18n import t
 
 from .base import BaseExecutor
 
@@ -43,23 +45,23 @@ def _encode_token(data: dict[str, Any]) -> str:
 def resolve_file_token(token: str) -> Path:
     parts = token.split(".", 2)
     if len(parts) != 3 or parts[0] != TOKEN_VERSION:
-        raise ValueError("Invalid file token")
+        raise ValueError(t(constants.ERR_FILE_TOKEN_INVALID))
 
     _version, payload, signature = parts
     expected_signature = _sign_payload(payload)
     if not hmac.compare_digest(signature, expected_signature):
-        raise ValueError("Invalid file token signature")
+        raise ValueError(t(constants.ERR_FILE_TOKEN_SIGNATURE_INVALID))
 
     try:
         data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
     except Exception as exc:
-        raise ValueError("Invalid file token payload") from exc
+        raise ValueError(t(constants.ERR_FILE_TOKEN_PAYLOAD_INVALID)) from exc
 
     path = Path(data.get("path", "")).resolve()
     if _is_sensitive_path(path):
-        raise ValueError("Sensitive file is not allowed")
+        raise ValueError(t(constants.ERR_FILE_SENSITIVE_NOT_ALLOWED))
     if not path.exists() or not path.is_file():
-        raise FileNotFoundError("File not found")
+        raise FileNotFoundError(t(constants.ERR_FILE_NOT_FOUND))
     return path
 
 
@@ -133,9 +135,9 @@ def summarize_files_to_user_result(content: str | None) -> str | None:
     files = payload.get("files") or []
     success = bool(files)
     if success:
-        message = "File sending succeeded. The sent files will be automatically appended after your assistant reply in the chat UI. Do not repeat file download links or file metadata in your text response."
+        message = t(constants.MSG_TOOL_FILE_SEND_SUCCESS)
     else:
-        message = "File sending failed. Ask the user to check the file paths and profile file sending whitelist before retrying."
+        message = t(constants.ERR_GENERIC_ERROR)
 
     return json.dumps(
         {
@@ -184,7 +186,7 @@ class SendFileToUserExecutor(BaseExecutor):
                     "type": "files_to_user",
                     "files": [],
                     "status": "failed",
-                    "errors": [{"path": "", "error": "Invalid files argument. Expected an object or an array of objects."}],
+                    "errors": [{"path": "", "error": t(constants.ERR_FILE_ARGUMENT_INVALID)}],
                     "allowed_file_send_dirs": allowed_dirs,
                 },
                 ensure_ascii=False,
@@ -201,7 +203,7 @@ class SendFileToUserExecutor(BaseExecutor):
                     "type": "files_to_user",
                     "files": [],
                     "status": "failed",
-                    "errors": [{"path": "", "error": "No allowed file sending directories are configured. Ask the user to configure tool.allowed_file_send_dirs in the active profile before calling send_file_to_user."}],
+                    "errors": [{"path": "", "error": t(constants.ERR_FILE_SEND_DIRS_UNCONFIGURED)}],
                     "allowed_file_send_dirs": allowed_dirs,
                 },
                 ensure_ascii=False,
@@ -209,33 +211,33 @@ class SendFileToUserExecutor(BaseExecutor):
 
         if len(normalized_files) > max_file_count:
             normalized_files = normalized_files[:max_file_count]
-            errors.append({"path": "", "error": f"Only the first {max_file_count} files are processed"})
+            errors.append({"path": "", "error": t(constants.MSG_FILE_COUNT_TRUNCATED, max_file_count=max_file_count)})
 
         for item in normalized_files:
             raw_path = item.get("path") if isinstance(item, dict) else None
             try:
                 if not raw_path:
-                    raise ValueError("Missing file path")
+                    raise ValueError(t(constants.ERR_FILE_PATH_MISSING))
 
                 path = Path(raw_path)
                 if not path.is_absolute():
-                    raise ValueError("File path must be absolute")
+                    raise ValueError(t(constants.ERR_FILE_PATH_NOT_ABSOLUTE))
 
                 resolved_path = path.resolve()
                 if not _is_allowed_path(resolved_path, allowed_dirs):
-                    raise ValueError("File path is outside allowed directories")
+                    raise ValueError(t(constants.ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
                 if _is_sensitive_path(resolved_path):
-                    raise ValueError("Sensitive file is not allowed")
+                    raise ValueError(t(constants.ERR_FILE_SENSITIVE_NOT_ALLOWED))
                 if resolved_path.suffix.lower() in blocked_extensions:
-                    raise ValueError("File extension is blocked")
+                    raise ValueError(t(constants.ERR_FILE_EXTENSION_BLOCKED))
                 if not resolved_path.exists() or not resolved_path.is_file():
-                    raise FileNotFoundError("File not found")
+                    raise FileNotFoundError(t(constants.ERR_FILE_NOT_FOUND))
 
                 size = resolved_path.stat().st_size
                 if size > max_single_file_size:
-                    raise ValueError("File exceeds the single file size limit")
+                    raise ValueError(t(constants.ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED))
                 if total_size + size > max_total_file_size:
-                    raise ValueError("Files exceed the total size limit")
+                    raise ValueError(t(constants.ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED))
 
                 mime_type = item.get("mime_type") or mimetypes.guess_type(resolved_path.name)[0] or "application/octet-stream"
                 display_name = item.get("display_name") or resolved_path.name

@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from app.core import constants
 from app.core.channel_router import select_channel
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -152,7 +153,7 @@ class ImageGenerationExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
-                "instruction": "Call send_file_to_user with the file path below before replying to the user.",
+                "instruction": t(constants.MSG_TOOL_IMAGE_SEND_INSTRUCTION),
                 "send_file_to_user": {
                     "files": [
                         {
@@ -175,21 +176,21 @@ class ImageGenerationExecutor(BaseExecutor):
         **kwargs: Any,
     ) -> str:
         if not self.db or not self.profile or not self.cfg:
-            return json.dumps({"status": "failed", "error": "Runtime context is missing."}, ensure_ascii=False)
+            return json.dumps({"status": "failed", "error": t(constants.ERR_TOOL_RUNTIME_CONTEXT_MISSING)}, ensure_ascii=False)
 
         image_channel = self._get_channel_config()
         if not image_channel or not image_channel.rules:
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": "No image generation channel is configured in the active profile.",
+                    "error": t(constants.ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED),
                 },
                 ensure_ascii=False,
             )
 
         prompt_text = (prompt or "").strip()
         if not prompt_text:
-            return json.dumps({"status": "failed", "error": "prompt is required."}, ensure_ascii=False)
+            return json.dumps({"status": "failed", "error": t(constants.ERR_TOOL_IMAGE_PROMPT_REQUIRED)}, ensure_ascii=False)
 
         excluded_priorities: set[int] = set()
         last_error = ""
@@ -208,7 +209,7 @@ class ImageGenerationExecutor(BaseExecutor):
                 return json.dumps(
                     {
                         "status": "failed",
-                        "error": last_error or "No available image generation channel.",
+                        "error": last_error or t(constants.ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE),
                     },
                     ensure_ascii=False,
                 )
@@ -233,7 +234,7 @@ class ImageGenerationExecutor(BaseExecutor):
                     return json.dumps(
                         {
                             "status": "failed",
-                            "error": "The image generation model did not return an image.",
+                            "error": t(constants.ERR_TOOL_IMAGE_EMPTY_RESPONSE),
                             "model": model_entry["model_id"],
                         },
                         ensure_ascii=False,
@@ -253,7 +254,7 @@ class ImageGenerationExecutor(BaseExecutor):
                 return json.dumps(
                     {
                         "status": "failed",
-                        "error": "The image generation model returned an image item without url or b64_json.",
+                        "error": t(constants.ERR_TOOL_IMAGE_INVALID_ITEM),
                         "model": model_name,
                     },
                     ensure_ascii=False,

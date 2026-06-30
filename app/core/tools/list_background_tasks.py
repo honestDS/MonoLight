@@ -1,5 +1,8 @@
 import json
 
+from app.core import constants
+from app.core.i18n import t
+
 from .base import BaseExecutor
 
 LIST_BACKGROUND_TASKS_TOOL_SCHEMA = {
@@ -39,7 +42,7 @@ class ListBackgroundTasksExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": "Database context is not available.",
+                    "error": t(constants.ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
                 },
                 ensure_ascii=False,
             )
@@ -62,6 +65,7 @@ class ListBackgroundTasksExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
+                "message": t(constants.MSG_BACKGROUND_TASK_LIST_SUCCESS),
                 "page": page,
                 "size": size,
                 "session_id": task_session_id,

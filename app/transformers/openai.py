@@ -400,7 +400,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_RERANK_FAILED", error=str(e)))
-            raise RerankException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
+            raise RerankException(constants.ERR_PROFILE_RERANK_CALL_FAILED, params={"message": str(e)})
 
     async def rerank_texts(
         self,
