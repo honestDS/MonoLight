@@ -1,11 +1,9 @@
 from enum import StrEnum
-from typing import (
-    Any,
-    TypeVar,
-)
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 
 T = TypeVar("T")
@@ -25,16 +23,22 @@ class StandardResponse[T](BaseModel):
     data: T | None = None
 
     @classmethod
-    def success(cls, data: Any = None, message: str = "MSG_GENERIC_SUCCESS", raw_message: bool = False, **kwargs):
-        if not raw_message:
-            message = t(message, default=message, **kwargs)
-        return cls(code=200, message=message, data=data)
+    def success(cls, data: Any = None, message: str = "MSG_GENERIC_SUCCESS", params: dict[str, Any] | None = None, **kwargs):
+        merged_params = dict(params or {})
+        if kwargs:
+            merged_params.update(kwargs)
+        return cls(code=200, message=t(message, default=message, **merged_params), data=data)
 
     @classmethod
-    def error(cls, code: int = 500, message: str = "ERR_GENERIC_ERROR", raw_message: bool = False, **kwargs):
-        if not raw_message:
-            message = t(message, default=message, **kwargs)
-        return cls(code=code, message=message, data=None)
+    def error(cls, code: int = 500, message: str = "ERR_GENERIC_ERROR", data: Any = None, params: dict[str, Any] | None = None, **kwargs):
+        merged_params = dict(params or {})
+        if kwargs:
+            merged_params.update(kwargs)
+        return cls(code=code, message=t(message, default=message, **merged_params), data=data)
+
+    @classmethod
+    def from_exception(cls, exc: BaseBusinessException):
+        return cls(code=exc.code, message=exc.render_message(), data=exc.data)
 
 
 class PageData[T](BaseModel):

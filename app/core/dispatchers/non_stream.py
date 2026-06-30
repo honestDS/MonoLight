@@ -297,4 +297,4 @@ class NonStreamDispatcherMixin:
             raise
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_ERROR"), exc_info=True)
-            raise ServerException(message=str(e))
+            raise ServerException(message=ERR_INTERNAL_SERVER_ERROR, cause=str(e))

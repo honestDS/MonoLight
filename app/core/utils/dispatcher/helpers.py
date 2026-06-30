@@ -1,4 +1,4 @@
-﻿import json
+import json
 from importlib import import_module
 from typing import Any
 
@@ -13,7 +13,6 @@ BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user", "query_knowledge
 
 
 def get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
-    """从模型条目中提取多模态能力"""
     return (
         model_entry.get("image_understanding", False),
         model_entry.get("audio_understanding", False),
@@ -22,7 +21,6 @@ def get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
 
 
 def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
-    """从模型条目与对话渠道中解析对话参数。"""
     return {
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
         "top_p": model_entry.get("top_p"),
@@ -34,7 +32,7 @@ def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
 
 def format_exception_message(exc: Exception) -> str:
     if isinstance(exc, BaseBusinessException):
-        return t(exc.message, default=exc.message, **exc.kwargs)
+        return exc.render_message()
     return str(exc)
 
 
@@ -129,7 +127,7 @@ def filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_
     allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
     missing_tool_names = sorted(tool_name for tool_name in allowed_names if tool_name not in TOOL_EXECUTOR_MAP)
     if missing_tool_names:
-        raise ServerException(message=f"Background proactive tool is not registered: {', '.join(missing_tool_names)}")
+        raise ServerException(message="ERR_INTERNAL_SERVER_ERROR", missing_tools=", ".join(missing_tool_names))
     return [tool for tool in tools if _get_tool_schema_name(tool) in allowed_names]
 
 
@@ -141,7 +139,7 @@ def get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToo
 def validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> None:
     unsupported_tool_names = get_unsupported_background_proactive_tool_names(tool_calls, allowed_tool_names=allowed_tool_names)
     if unsupported_tool_names:
-        raise LLMException(message=f"Background proactive reply attempted unsupported tool calls: {', '.join(unsupported_tool_names)}")
+        raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL", detail=", ".join(unsupported_tool_names))
 
 
 def reassemble_multimodal_messages(
@@ -150,11 +148,6 @@ def reassemble_multimodal_messages(
     audio_understanding: bool,
     video_understanding: bool,
 ) -> None:
-    """按给定多模态能力就地重组消息列表中带附件的用户消息。
-
-    依赖 MessageAssembler.assemble 的幂等性：可对已组装过的消息安全重复调用，
-    用于降级换渠道后按新渠道能力重新组装附件内容。
-    """
     for idx, m in enumerate(messages):
         if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
             is_history = idx != len(messages) - 1
@@ -165,5 +158,3 @@ def reassemble_multimodal_messages(
                 video_understanding=video_understanding,
                 is_history=is_history,
             )
-
-

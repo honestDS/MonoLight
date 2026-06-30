@@ -39,7 +39,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         if not session_id:
-            raise BaseBusinessException(message="session_id is required")
+            raise BaseBusinessException(message="ERR_VALIDATION_FAILED", detail="session_id is required")
         try:
             async for chunk in ChatDispatcher.dispatch_stream(
                 db=db,

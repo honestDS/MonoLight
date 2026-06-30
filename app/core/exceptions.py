@@ -1,69 +1,95 @@
+from dataclasses import dataclass
 from typing import Any
+
+from app.core import constants
+from app.core.i18n import t
+
+
+@dataclass(slots=True)
+class MessageSpec:
+    key: str
+    params: dict[str, Any] | None = None
+    default: str | None = None
+
+    def render(self) -> str:
+        return t(self.key, default=self.default or self.key, **(self.params or {}))
 
 
 class BaseBusinessException(Exception):
-    def __init__(self, code: int = 500, message: str = "业务异常", data: Any = None, **kwargs):
+    def __init__(
+        self,
+        message: str = constants.ERR_GENERIC_ERROR,
+        code: int = 500,
+        data: Any = None,
+        params: dict[str, Any] | None = None,
+        default_message: str | None = None,
+        cause: str | None = None,
+        **kwargs,
+    ):
+        merged_params = dict(params or {})
+        if kwargs:
+            merged_params.update(kwargs)
+
         self.code = code
-        self.message = message
         self.data = data
-        self.kwargs = kwargs
-        super().__init__(self.message)
+        self.message_spec = MessageSpec(key=message, params=merged_params or None, default=default_message)
+        self.message = self.message_spec.key
+        self.kwargs = self.message_spec.params or {}
+        self.default_message = default_message
+        self.cause = cause
+        super().__init__(self.render_message())
+
+    def render_message(self) -> str:
+        return self.message_spec.render()
+
+    def to_response(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.render_message(),
+            "data": self.data,
+        }
 
 
 class AuthException(BaseBusinessException):
-    def __init__(self, message: str = "认证失败", code: int = 401, **kwargs):
+    def __init__(self, message: str = constants.ERR_UNAUTHORIZED, code: int = 401, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class ForbiddenException(BaseBusinessException):
-    def __init__(self, message: str = "权限不足", code: int = 403, **kwargs):
+    def __init__(self, message: str = constants.ERR_SESSION_NO_PERMISSION, code: int = 403, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class ResourceNotFoundException(BaseBusinessException):
-    def __init__(self, message: str = "资源不存在", code: int = 404, **kwargs):
+    def __init__(self, message: str = constants.ERR_KB_NOT_FOUND, code: int = 404, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class ParameterException(BaseBusinessException):
-    def __init__(self, message: str = "参数错误", code: int = 400, **kwargs):
+    def __init__(self, message: str = constants.ERR_VALIDATION_FAILED, code: int = 400, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class ServerException(BaseBusinessException):
-    def __init__(self, message: str = "系统内部错误", code: int = 500, **kwargs):
+    def __init__(self, message: str = constants.ERR_INTERNAL_SERVER_ERROR, code: int = 500, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class ApiKeyException(BaseBusinessException):
-    def __init__(self, message: str = "API Key 加解密异常", code: int = 500, **kwargs):
+    def __init__(self, message: str = constants.ERR_API_KEY_CRYPTO_FAILED, code: int = 500, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class LLMException(BaseBusinessException):
-    def __init__(self, message: str = "大模型调用异常", code: int = 502, **kwargs):
+    def __init__(self, message: str = constants.ERR_LLM_UNEXPECTED_ERROR, code: int = 502, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
 
 
 class EmbeddingException(LLMException):
-    """嵌入模型调用异常。
-
-    属于非主线（对话）流程的异常类型，便于在调用方按类型区分处理：
-    通常仅记录日志并降级，不应中断对话主线调用。
-    继承自 LLMException 以兼容既有 `except LLMException` 捕获逻辑。
-    """
-
-    def __init__(self, message: str = "嵌入模型调用异常", code: int = 502, **kwargs):
+    def __init__(self, message: str = constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, code: int = 502, **kwargs):
         super().__init__(message=message, code=code, **kwargs)
 
 
 class RerankException(LLMException):
-    """重排（Rerank）模型调用异常。
-
-    属于非主线（对话）流程的异常类型，便于在调用方按类型区分处理：
-    通常仅记录日志并降级，不应中断对话主线调用。
-    继承自 LLMException 以兼容既有 `except LLMException` 捕获逻辑。
-    """
-
-    def __init__(self, message: str = "重排模型调用异常", code: int = 502, **kwargs):
+    def __init__(self, message: str = constants.ERR_PROFILE_RERANK_CALL_FAILED, code: int = 502, **kwargs):
         super().__init__(message=message, code=code, **kwargs)

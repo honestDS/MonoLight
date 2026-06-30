@@ -222,7 +222,7 @@ class BackgroundDispatcherMixin:
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-            raise LLMException(message=f"Background proactive reply attempted too many tool calls: {len(ai_msg.tool_calls)}")
+            raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL", detail=f"too many tool calls: {len(ai_msg.tool_calls)}")
 
         tool_responses = await asyncio.gather(
             *[
@@ -270,7 +270,7 @@ class BackgroundDispatcherMixin:
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
-            raise LLMException(message="Background proactive final reply must not call tools")
+            raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL", detail="background proactive final reply must not call tools")
         if not (final_msg.content or "").strip() and not files_to_user:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
         if files_to_user:

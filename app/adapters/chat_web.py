@@ -51,7 +51,7 @@ class WebChatAdapter(BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ):
         if not session_id:
-            raise BaseBusinessException(message="session_id is required")
+            raise BaseBusinessException(message="ERR_VALIDATION_FAILED", detail="session_id is required")
         try:
             llm_response = await ChatDispatcher.dispatch(
                 db=db,
