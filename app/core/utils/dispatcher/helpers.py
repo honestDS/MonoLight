@@ -1,11 +1,10 @@
-import json
+﻿import json
 from importlib import import_module
 from typing import Any
 
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.tools import TOOL_EXECUTOR_MAP
-from app.core.utils.dispatcher.process_single_tool import process_single_tool
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -95,7 +94,7 @@ async def process_single_tool_with_isolated_db(
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
-    process_tool = getattr(dispatcher_module, "process_single_tool", process_single_tool)
+    process_tool = getattr(dispatcher_module, "process_single_tool")
     async with async_session_local() as tool_db:
         return await process_tool(
             tool_call,
@@ -166,3 +165,5 @@ def reassemble_multimodal_messages(
                 video_understanding=video_understanding,
                 is_history=is_history,
             )
+
+
