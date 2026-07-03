@@ -52,13 +52,14 @@ app/api/v1/
 ├── profile.py              # Profile 配置管理
 ├── prompts.py              # Prompt 资产管理
 ├── channels.py             # 模型渠道与模型条目管理
+├── message_platforms.py    # 消息平台管理器(当前仅用于微信openclaw)与登录接口
 ├── files.py                # 文件上传与下载
 ├── knowledge_base.py       # 知识库、文档、检索测试接口
 ├── scheduled_tasks.py      # 定时任务管理
 └── system.py               # 系统设置、日志、语言列表接口
 ```
 
-API 层负责接收外部请求、执行鉴权依赖、组装请求参数、调用下层服务或 CRUD，并通过统一响应结构返回结果。聊天和日志相关接口同时包含 WebSocket 入口。
+API 层负责接收外部请求、执行鉴权依赖、组装请求参数、调用下层服务或 CRUD，并通过统一响应结构返回结果。聊天和日志相关接口同时包含 WebSocket 入口；消息平台接口还负责平台配置、启停、微信 OpenClaw 扫码登录与登录状态轮询。
 
 ## 对话适配层：`app/adapters/`
 
@@ -66,10 +67,11 @@ API 层负责接收外部请求、执行鉴权依赖、组装请求参数、调�
 app/adapters/
 ├── base.py                 # 对话适配器抽象基类
 ├── chat_web.py             # HTTP Chat Completions 适配
-└── chat_ws.py              # WebSocket 流式聊天适配
+├── chat_ws.py              # WebSocket 流式聊天适配
+└── weixin_openclaw.py      # 微信 OpenClaw 消息平台适配
 ```
 
-适配层负责把不同传输协议的输入转换为统一的内部对话请求，并把调度结果转换回 HTTP 或 WebSocket 响应。
+适配层负责把不同传输协议或消息平台的输入转换为统一的内部对话请求，并把调度结果转换回对应通道响应。`weixin_openclaw.py` 封装 OpenClaw 登录、长轮询收信、回调字段兼容、上下文 token、同步游标与消息发送，并复用内部聊天调度链路生成回复；业务异常和未知异常会被转换为本地化错误回复发送给用户。
 
 ## 核心层：`app/core/`
 
@@ -80,6 +82,7 @@ app/core/
 ├── dispatchers/            # 对话分发器实现
 ├── embedding/              # 知识库向量化编排
 ├── i18n/                   # 后端国际化
+├── message_platforms/      # 消息平台管理器(当前仅用于微信openclaw)后台轮询管理
 ├── middleware/             # 工具安全审计中间件
 ├── rerank/                 # 知识库重排编排
 ├── retrieval/              # 混合检索、稀疏检索、融合策略
@@ -116,6 +119,18 @@ app/core/background_tasks/
 
 该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消、状态更新和主动回复。
 
+### 消息平台（当前仅用于微信openclaw）：`app/core/message_platforms/`
+
+```text
+app/core/message_platforms/
+├── __init__.py
+└── manager.py              # 消息平台轮询任务管理器
+```
+
+消息平台管理器在应用生命周期中启动和停止，负责加载已启用、已绑定 `uid` 且已连接的平台，并为每个平台维护独立轮询任务。平台配置变更、启停、删除或扫码登录成功后，API 层会触发管理器重载或重启对应平台任务。
+
+微信 OpenClaw 平台轮询任务会复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后并发调用内部聊天调度流程，回复结果经适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库。
+
 ### 数据访问：`app/core/crud/`
 
 ```text
@@ -127,6 +142,7 @@ app/core/crud/
 ├── channel_cursor.py       # 渠道路由游标访问
 ├── log.py                  # 系统日志访问
 ├── message.py              # 消息访问
+├── message_platform.py     # 消息平台访问
 ├── profile.py              # Profile 访问
 ├── prompt.py               # Prompt 访问
 ├── scheduled_task.py       # 定时任务访问
@@ -255,6 +271,7 @@ app/models/
 ├── channel_cursor.py       # 渠道路由游标模型
 ├── knowledge_base.py       # 知识库、文档、分块模型
 ├── message.py              # 内部消息、消息记录模型
+├── message_platform.py     # 消息平台模型、状态与响应结构
 ├── profile.py              # Profile 配置模型
 ├── prompt.py               # Prompt 模型
 ├── scheduled_task.py       # 定时任务模型
@@ -264,7 +281,7 @@ app/models/
 └── user.py                 # 用户模型
 ```
 
-模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。
+模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。
 
 ## Provider 层：`app/providers/`
 
@@ -336,6 +353,7 @@ dashboard/src/
 dashboard/src/views/
 ├── LoginView.vue           # 登录页
 ├── ChatView.vue            # 聊天页
+├── MessagePlatformsView.vue # 消息平台管理页
 ├── ProfilesView.vue        # Profile 管理页
 ├── PromptsView.vue         # Prompt 管理页
 ├── ScheduledTasksView.vue  # 定时任务管理页
@@ -353,8 +371,10 @@ dashboard/src/components/
 ├── BaseDataTable.vue       # 通用数据表格
 ├── ChannelEditor.vue       # 渠道编辑器
 ├── LanguageSwitcher.vue    # 语言切换器
+├── MessagePlatformFormDialog.vue # 消息平台创建与编辑弹窗
 ├── StatusTag.vue           # 状态标签
-└── VirtualizedCode.vue     # 虚拟化代码展示
+├── VirtualizedCode.vue     # 虚拟化代码展示
+└── weixin_oc/              # 微信 OpenClaw 专用组件
 
 dashboard/src/composables/
 ├── chat/                   # 聊天页状态、传输、消息处理、会话管理
@@ -364,7 +384,7 @@ dashboard/src/composables/
 └── useWebSocket.js         # WebSocket 通用封装
 ```
 
-前端采用 Vue 3、Vue Router、Element Plus、Axios 和 vue-i18n。`api/index.js` 集中封装后端 REST API 与 WebSocket 地址，`router/index.js` 定义页面路由和登录态守卫。
+前端采用 Vue 3、Vue Router、Element Plus、Axios 和 vue-i18n。`api/index.js` 集中封装后端 REST API 与 WebSocket 地址，`router/index.js` 定义页面路由和登录态守卫。消息平台页面提供平台列表、状态展示、启停、删除、配置编辑、创建后扫码登录，以及微信 OpenClaw 二维码状态刷新。
 
 ## 测试与脚本
 
@@ -375,7 +395,8 @@ tests/
 └── test_shell_tool.py                       # Shell 工具测试
 
 scripts/
-└── migration_20260629_add_scheduled_task_profile_id.py # 定时任务字段迁移脚本
+├── migration_20260629_add_scheduled_task_profile_id.py # 定时任务字段迁移脚本
+└── migration_20260703_add_message_platform.py          # 消息平台表迁移脚本
 ```
 
 测试目录覆盖当前关键约定与工具行为；脚本目录保存项目维护和数据迁移相关脚本。
