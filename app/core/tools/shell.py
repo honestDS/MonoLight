@@ -1,8 +1,13 @@
 import asyncio
 import json
+import ntpath
 import os
+import posixpath
+import re
+import shlex
 import subprocess
 import sys
+import sysconfig
 
 from app.core import constants
 from app.core.crud.profile import profile_crud
@@ -51,6 +56,113 @@ class ShellExecutor(BaseExecutor):
                 continue
         return data.decode("utf-8", errors="replace")
 
+    def _build_result(self, stdout: bytes, stderr: bytes, exit_code: int, system_info: str) -> str:
+        return json.dumps(
+            {
+                "stdout": self._safe_decode(stdout),
+                "stderr": self._safe_decode(stderr),
+                "exit_code": exit_code,
+                "system_info": system_info,
+            },
+            ensure_ascii=False,
+        )
+
+    def _build_timeout_result(self, profile_timeout: float, system_info: str) -> str:
+        return json.dumps(
+            {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
+            ensure_ascii=False,
+        )
+
+    def _build_subprocess_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        scripts_dir = sysconfig.get_path("scripts")
+        if scripts_dir:
+            env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
+        if sys.prefix != sys.base_prefix:
+            env["VIRTUAL_ENV"] = sys.prefix
+        return env
+
+    async def _execute_argv(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.user_temp_dir),
+            env=self._build_subprocess_env(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
+            return self._build_result(stdout, stderr, process.returncode, system_info)
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            return self._build_timeout_result(profile_timeout, system_info)
+        except asyncio.CancelledError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            raise
+
+    def _execute_argv_sync(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
+        process = None
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self.user_temp_dir),
+                env=self._build_subprocess_env(),
+            )
+            stdout, stderr = process.communicate(timeout=profile_timeout)
+            return self._build_result(stdout, stderr, process.returncode, system_info)
+        except subprocess.TimeoutExpired:
+            if process:
+                process.kill()
+            return self._build_timeout_result(profile_timeout, system_info)
+
+    def _normalize_python_inline_code(self, code: str) -> str:
+        compound_keywords = r"async\s+def|class|def|if|elif|else|for|while|try|except|finally|with|match"
+        return re.sub(rf";[ \t]*(?=(?:{compound_keywords})\b)", "\n", code)
+
+    def _resolve_python_inline_executable(self, executable: str) -> str:
+        if ntpath.dirname(executable) or posixpath.dirname(executable):
+            return executable
+        return sys.executable
+
+    def _has_shell_composition(self, args: list[str]) -> bool:
+        return any(re.search(r"[&|;<>]", arg) for arg in args)
+
+    def _extract_python_inline_command(self, command: str) -> list[str] | None:
+        try:
+            parts = shlex.split(command, posix=True)
+        except ValueError:
+            return None
+
+        if len(parts) < 3:
+            return None
+
+        executable = ntpath.basename(posixpath.basename(parts[0])).lower()
+        if executable not in {"python", "python3", "python.exe", "py", "py.exe"}:
+            return None
+
+        try:
+            code_flag_index = parts.index("-c")
+        except ValueError:
+            return None
+
+        if code_flag_index + 1 >= len(parts):
+            return None
+
+        if self._has_shell_composition(parts[code_flag_index + 2 :]):
+            return None
+
+        parts[0] = self._resolve_python_inline_executable(parts[0])
+        parts[code_flag_index + 1] = self._normalize_python_inline_code(parts[code_flag_index + 1])
+        return parts
+
     async def _get_profile_timeout(self) -> float:
         """从已激活的 Profile 中获取超时配置"""
         try:
@@ -64,7 +176,6 @@ class ShellExecutor(BaseExecutor):
         return 30.0
 
     async def execute(self, command: str) -> str:
-        # 删除可能存在的确认前缀
         if command.startswith(CONFIRMATION_PREFIX):
             command = command.split(" ", 1)[-1]
 
@@ -83,52 +194,39 @@ class ShellExecutor(BaseExecutor):
             )
 
         t_logger = self.logger.bind(tool_call=True)
-        # 获取当前循环类型进行诊断
         loop = asyncio.get_running_loop()
         loop_type = type(loop).__name__
-
-        # 强制使用数据库配置的超时
         profile_timeout = await self._get_profile_timeout()
+        managed_argv = self._extract_python_inline_command(command)
 
-        # Windows 下的兼容性处理：如果不是 ProactorEventLoop，则使用同步运行+线程池降级
         if sys.platform == "win32" and "Proactor" not in loop_type:
             t_logger.warning(t("LOG_SHELL_WINDOWS_SYNC_FALLBACK", uid=self.uid, loop_type=loop_type))
 
-            # 使用 subprocess.Popen 并配合 asyncio，以便可以主动终止进程
             process = None
             try:
 
                 def run_sync():
                     nonlocal process
-                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=os.environ.copy())
+                    if managed_argv is not None:
+                        return self._execute_argv_sync(managed_argv, profile_timeout, system_info)
+                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=self._build_subprocess_env())
                     return process.communicate(timeout=profile_timeout)
 
-                # 为了能够在外部取消并终止，我们将 run_in_executor 包装在 wait_for 中，但是要注意 cancellation 的处理
-                stdout, stderr = await asyncio.wait_for(loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0)
+                result = await asyncio.wait_for(loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0)
 
-                return json.dumps(
-                    {
-                        "stdout": self._safe_decode(stdout),
-                        "stderr": self._safe_decode(stderr),
-                        "exit_code": process.returncode if process else -1,
-                        "system_info": system_info,
-                    },
-                    ensure_ascii=False,
-                )
+                if isinstance(result, str):
+                    return result
+
+                stdout, stderr = result
+                return self._build_result(stdout, stderr, process.returncode if process else -1, system_info)
             except TimeoutError:
                 if process:
                     process.kill()
-                return json.dumps(
-                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
-                    ensure_ascii=False,
-                )
+                return self._build_timeout_result(profile_timeout, system_info)
             except subprocess.TimeoutExpired:
                 if process:
                     process.kill()
-                return json.dumps(
-                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
-                    ensure_ascii=False,
-                )
+                return self._build_timeout_result(profile_timeout, system_info)
             except asyncio.CancelledError:
                 if process:
                     process.kill()
@@ -138,45 +236,31 @@ class ShellExecutor(BaseExecutor):
                     process.kill()
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-        # 正常的异步处理（Linux 或已正确配置的 Windows）
         try:
+            if managed_argv is not None:
+                return await self._execute_argv(managed_argv, profile_timeout, system_info)
+
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.user_temp_dir),
-                env=os.environ.copy(),
+                env=self._build_subprocess_env(),
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=profile_timeout)
-                out = self._safe_decode(stdout)
-                err = self._safe_decode(stderr)
-
-                return json.dumps(
-                    {
-                        "stdout": out,
-                        "stderr": err,
-                        "exit_code": process.returncode,
-                        "system_info": system_info,
-                    },
-                    ensure_ascii=False,
-                )
+                return self._build_result(stdout, stderr, process.returncode, system_info)
             except TimeoutError:
-                if process:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                return json.dumps(
-                    {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
-                    ensure_ascii=False,
-                )
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return self._build_timeout_result(profile_timeout, system_info)
             except asyncio.CancelledError:
-                if process:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
                 raise
         except asyncio.CancelledError:
             raise
@@ -188,13 +272,13 @@ SHELL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "execute_shell",
-        "description": "Execute shell commands. Now protected by LLM Security Auditor at Orchestrator level.",
+        "description": "Execute shell commands. Python inline commands that start with python/python3/py and use -c are automatically executed without a shell to avoid cross-platform escaping issues.",
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute.",
+                    "description": "Shell command to execute. For Python code, use a normal command starting with python -c; the tool automatically bypasses shell escaping for supported inline Python commands.",
                 },
             },
             "required": ["command"],

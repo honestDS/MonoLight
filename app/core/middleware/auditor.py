@@ -105,9 +105,9 @@ class AuditMiddleware:
 
         # 提取 execute_shell 的内容并检查验证状态
         if tool_name == "execute_shell":
-            cmd_arg = args.get("command", "")
+            command = args.get("command", "")
 
-            blacklisted = ShellExecutor.check_blacklist(cmd_arg)
+            blacklisted = ShellExecutor.check_blacklist(command)
             if blacklisted:
                 return json.dumps(
                     {
@@ -117,7 +117,7 @@ class AuditMiddleware:
                     ensure_ascii=False,
                 )
 
-            is_any_verified, command = AuditMiddleware.verify_token(cmd_arg, session_id=session_id, uid=uid)
+            is_any_verified, command = AuditMiddleware.verify_token(command, session_id=session_id, uid=uid)
 
         # 提取 write_file 的内容并检查验证状态
         if tool_name == "write_file":
