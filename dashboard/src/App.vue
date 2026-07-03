@@ -39,6 +39,9 @@
             <el-menu-item index="/channels">
               <span>{{ $t('common.menu.channels') }}</span>
             </el-menu-item>
+            <el-menu-item index="/message-platforms">
+              <span>{{ $t('common.menu.message_platforms') }}</span>
+            </el-menu-item>
             <el-menu-item index="/prompts">
               <span>{{ $t('common.menu.prompts') }}</span>
             </el-menu-item>

@@ -7,6 +7,7 @@ const routes = [
   { path: '/prompts', component: () => import('../views/PromptsView.vue') },
   { path: '/scheduled-tasks', component: () => import('../views/ScheduledTasksView.vue') },
   { path: '/channels', component: () => import('../views/ChannelsView.vue') },
+  { path: '/message-platforms', component: () => import('../views/MessagePlatformsView.vue') },
   { path: '/users', component: () => import('../views/UsersView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },

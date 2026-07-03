@@ -3,7 +3,7 @@ MESSAGES = {
     "MSG_PROFILE_UPDATED": "配置修改成功",
     "MSG_PROFILE_DELETED": "配置已删除",
     "MSG_PROFILE_ACTIVATED": "配置已激活",
-    "ERR_PROFILE_NOT_FOUND": "未找到该配置",
+    "ERR_PROFILE_NOT_FOUND": "配置信息未找到",
     "ERR_PROFILE_NAME_EXISTS": "配置名称已存在",
     "ERR_ACTIVATE_NO_CHANNEL": "无法激活未绑定渠道的配置",
     "ERR_DELETE_LAST_PROFILE": "不能删除最后一个配置",

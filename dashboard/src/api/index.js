@@ -123,6 +123,18 @@ export const channelApi = {
   testEmbeddingDimension: (channelId, modelId) => request.post(`/channels/test-embedding-dimension?channel_id=${channelId}&model_id=${encodeURIComponent(modelId)}`)
 }
 
+
+export const messagePlatformApi = {
+  list: (params) => request.get('/message-platforms/list', { params }),
+  types: () => request.get('/message-platforms/types'),
+  create: (data) => request.post('/message-platforms/create', data),
+  get: (id) => request.get(`/message-platforms/get?platform_id=${id}`),
+  update: (id, data) => request.post(`/message-platforms/update?platform_id=${id}`, data),
+  delete: (id) => request.post(`/message-platforms/delete?platform_id=${id}`),
+  startWeixinLogin: (id) => request.post(`/message-platforms/${id}/weixin-openclaw/login/start`),
+  getWeixinLoginStatus: (id) => request.get(`/message-platforms/${id}/weixin-openclaw/login/status`)
+}
+
 export const systemApi = {
   settings: () => request.get('/system/settings'),
   updateSettings: (data) => request.post('/system/settings', data),

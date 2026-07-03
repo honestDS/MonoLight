@@ -5,6 +5,7 @@ from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.message import Message as Message
+from app.models.message_platform import MessagePlatform as MessagePlatform
 from app.models.profile import Profile as Profile
 from app.models.prompt import PromptLibrary as PromptLibrary
 from app.models.scheduled_task import ScheduledTask as ScheduledTask

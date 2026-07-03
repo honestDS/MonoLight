@@ -11,6 +11,7 @@ from app.api.v1.channels import router as channel_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.files import router as files_router
 from app.api.v1.knowledge_base import router as knowledge_base_router
+from app.api.v1.message_platforms import router as message_platform_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
 from app.api.v1.scheduled_tasks import router as scheduled_task_router
@@ -19,6 +20,7 @@ from app.api.v1.users import router as user_router
 from app.core.background_tasks.recovery import recover_pending_background_tasks
 from app.core.background_tasks.scheduler import scheduled_task_scheduler
 from app.core.log import LogManager, get_logger
+from app.core.message_platforms.manager import message_platform_polling_manager
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
@@ -46,12 +48,14 @@ async def lifespan(app: FastAPI):
     cleaner_task = asyncio.create_task(background_log_cleaner(7))
     temp_cleaner_task = asyncio.create_task(background_temp_cleaner())
     scheduled_task_scheduler.start()
+    message_platform_polling_manager.start()
 
     yield
 
     cleaner_task.cancel()
     temp_cleaner_task.cancel()
     await scheduled_task_scheduler.stop()
+    await message_platform_polling_manager.stop()
     for task in (cleaner_task, temp_cleaner_task):
         try:
             await task
@@ -70,6 +74,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(profile_router, prefix="/api/v1")
     app.include_router(prompt_router, prefix="/api/v1")
     app.include_router(knowledge_base_router, prefix="/api/v1")
+    app.include_router(message_platform_router, prefix="/api/v1")
     app.include_router(scheduled_task_router, prefix="/api/v1")
 
 
