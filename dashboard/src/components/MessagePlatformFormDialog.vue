@@ -17,7 +17,7 @@
       <el-form-item :label="$t('messagePlatforms.enabled')">
         <el-switch v-model="localForm.is_enabled" />
       </el-form-item>
-      <el-form-item :label="$t('messagePlatforms.uid')">
+      <el-form-item :label="$t('messagePlatforms.uid')" :required="localForm.is_enabled">
         <el-select v-model="localForm.uid" class="full-width-input" clearable filterable :loading="usersLoading">
           <el-option v-for="user in users" :key="user.uid" :label="user.username" :value="user.uid" />
         </el-select>

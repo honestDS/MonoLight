@@ -21,6 +21,7 @@ export default {
   qrcode_tip: '请使用微信扫码并确认登录。登录成功后 token 将自动保存到平台配置。',
   qrcode_content: '二维码内容',
   fill_required: '请填写必填项',
+  uid_required: '启用消息平台前必须绑定用户',
   create_success: '创建成功',
   update_success: '更新成功',
   submit_failed: '提交失败',
@@ -42,6 +43,6 @@ export default {
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: '二维码已过期',
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID: '二维码响应缺少必要字段',
-    ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED: 'OpenClaw token 不能为空'
+    ERR_MESSAGE_PLATFORM_UID_REQUIRED: '启用消息平台前必须绑定用户'
   }
 }

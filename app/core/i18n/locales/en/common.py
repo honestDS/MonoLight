@@ -89,8 +89,9 @@ MESSAGES = {
     "ERR_MESSAGE_PLATFORM_NAME_EXISTS": "Message platform name already exists",
     "ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE": "Unsupported message platform type",
     "ERR_MESSAGE_PLATFORM_QRCODE_SESSION_NOT_FOUND": "Qrcode session not found",
-    "ERR_MESSAGE_PLATFORM_LOGIN_TOKEN_MISSING": "Login token missing",
+    "ERR_MESSAGE_PLATFORM_LOGIN_TOKEN_MISSING": "Login token is missing. Please scan the QR code again to bind the platform",
     "ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED": "QR code expired",
     "ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID": "QR code response is missing required fields",
-    "ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED": "OpenClaw token is required",
+    "ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED": "token is missing. Please scan the QR code again to bind the platform",
+    "ERR_MESSAGE_PLATFORM_UID_REQUIRED": "A bound user is required before enabling a message platform",
 }

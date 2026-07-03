@@ -46,6 +46,16 @@ def _normalize_update_payload(platform_type: MessagePlatformType, payload: Messa
     return data
 
 
+def _normalize_uid(uid: str | None) -> str | None:
+    normalized = str(uid or "").strip()
+    return normalized or None
+
+
+def _ensure_uid_for_enabled(is_enabled: bool, uid: str | None) -> None:
+    if is_enabled and not _normalize_uid(uid):
+        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_UID_REQUIRED)
+
+
 @router.get("/types", response_model=StandardResponse)
 async def get_message_platform_types():
     return StandardResponse.success(
@@ -84,7 +94,8 @@ async def create_message_platform(platform_in: MessagePlatformCreate, db: AsyncS
     if await message_platform_crud.get_by_name(db, platform_in.name):
         raise ParameterException(constants.ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     payload = _normalize_create_payload(platform_in)
-    payload["uid"] = payload.get("uid") or getattr(admin, "uid", None)
+    payload["uid"] = _normalize_uid(payload.get("uid") or getattr(admin, "uid", None))
+    _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
     platform = await message_platform_crud.create(db, obj_in=payload)
     await message_platform_polling_manager.reload()
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_CREATED)
@@ -100,11 +111,16 @@ async def update_message_platform(platform_id: int, platform_in: MessagePlatform
         if same_name:
             raise ParameterException(constants.ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     data = _normalize_update_payload(platform.platform_type, platform_in)
+    if "uid" in data:
+        data["uid"] = _normalize_uid(data.get("uid"))
     if "config" in data:
         data["config"] = {**dict(platform.config or {}), **data["config"]}
     if data.get("config", {}).get("token"):
         data["status"] = MessagePlatformStatus.CONNECTED
         data["last_error"] = ""
+    next_is_enabled = bool(data["is_enabled"]) if "is_enabled" in data else platform.is_enabled
+    next_uid = data["uid"] if "uid" in data else platform.uid
+    _ensure_uid_for_enabled(next_is_enabled, next_uid)
     platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data)
     await message_platform_polling_manager.restart_platform(platform.id)
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_UPDATED)
@@ -146,7 +162,7 @@ async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depen
         db,
         platform=platform,
         status=MessagePlatformStatus.WAITING_LOGIN,
-        state=login_state,
+        state={**login_state, "qr_error": ""},
         last_error="",
     )
     return StandardResponse.success(
@@ -184,7 +200,7 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
     finally:
         await adapter.close()
     qrcode_status = status_data["qrcode_status"]
-    state = {"qrcode_status": qrcode_status, "login_status_raw": status_data.get("raw")}
+    state = {"qrcode_status": qrcode_status}
     update_kwargs = {"state": state}
     if qrcode_status == "confirmed":
         token = status_data.get("token") or ""
@@ -197,12 +213,19 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
             {
                 "status": MessagePlatformStatus.CONNECTED,
                 "config": config_update,
+                "state": {**state, "qrcode": "", "qrcode_img_content": "", "qr_error": ""},
                 "account_id": status_data.get("account_id") or None,
                 "last_error": "",
             }
         )
     elif qrcode_status == "expired":
-        update_kwargs.update({"status": MessagePlatformStatus.ERROR, "last_error": constants.ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED})
+        update_kwargs.update(
+            {
+                "status": MessagePlatformStatus.ERROR,
+                "state": {**state, "qrcode": "", "qrcode_img_content": "", "qr_error": constants.ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED},
+                "last_error": constants.ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
+            }
+        )
     else:
         update_kwargs.update({"status": MessagePlatformStatus.WAITING_LOGIN})
     platform = await message_platform_crud.update_runtime_state(db, platform=platform, **update_kwargs)

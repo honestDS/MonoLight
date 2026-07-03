@@ -170,14 +170,15 @@ class WeixinOpenClawAdapter(BaseChatAdapter):
         )
         status = str(data.get("status", "wait")).strip()
         token = str(data.get("bot_token") or data.get("token") or "").strip()
-        account_id = str(data.get("account_id") or data.get("user_id") or "").strip()
-        base_url = str(data.get("base_url") or "").strip()
+        account_id = str(data.get("ilink_bot_id") or data.get("account_id") or data.get("user_id") or "").strip()
+        base_url = str(data.get("baseurl") or data.get("base_url") or "").strip()
+        user_id = str(data.get("ilink_user_id") or "").strip()
         return {
             "qrcode_status": status,
             "token": token,
             "account_id": account_id,
             "base_url": base_url,
-            "raw": data,
+            "user_id": user_id,
         }
 
     async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
@@ -261,19 +262,33 @@ class WeixinOpenClawAdapter(BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ) -> bool:
         resolved_uid = uid or message.user_id
-        should_generate_title = await self.should_generate_title(db, message.session_id)
-        reply = await self.chat(
-            db=db,
-            message=message.text,
-            uid=resolved_uid,
-            session_id=message.session_id,
-            active_tasks=active_tasks,
-        )
-        if should_generate_title:
-            await self.generate_title_for_message(resolved_uid, message.session_id, message.text)
-        if not reply:
+        try:
+            should_generate_title = await self.should_generate_title(db, message.session_id)
+            reply = await self.chat(
+                db=db,
+                message=message.text,
+                uid=resolved_uid,
+                session_id=message.session_id,
+                active_tasks=active_tasks,
+            )
+            if should_generate_title:
+                await self.generate_title_for_message(resolved_uid, message.session_id, message.text)
+            if not reply:
+                return False
+            return await self.reply_text(message.user_id, reply, context_token=message.context_token)
+        except BaseBusinessException as exc:
+            return await self._reply_error(message, exc.message, **exc.kwargs)
+        except Exception as exc:
+            logger.bind(uid=resolved_uid, session_id=message.session_id).exception("Weixin OpenClaw message handling failed: {error}", error=str(exc))
+            return await self._reply_error(message, ERR_LLM_UNEXPECTED_ERROR)
+
+    async def _reply_error(self, message: WeixinOpenClawMessage, error_key: str, **kwargs) -> bool:
+        error_text = t(error_key, default=error_key, **kwargs)
+        try:
+            return await self.reply_text(message.user_id, error_text, context_token=message.context_token)
+        except Exception as exc:
+            logger.bind(user_id=message.user_id, session_id=message.session_id, error_key=error_key).exception("Weixin OpenClaw error reply failed: {error}", error=str(exc))
             return False
-        return await self.reply_text(message.user_id, reply, context_token=message.context_token)
 
     @staticmethod
     async def should_generate_title(db: AsyncSession, session_id: str) -> bool:

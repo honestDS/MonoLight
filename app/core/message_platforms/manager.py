@@ -203,6 +203,8 @@ class MessagePlatformPollingManager:
             return False
         if platform.status != MessagePlatformStatus.CONNECTED:
             return False
+        if not platform.uid:
+            return False
         return bool(platform.get_config_secret("token"))
 
     def _build_weixin_adapter(self, platform: MessagePlatform) -> WeixinOpenClawAdapter:

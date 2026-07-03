@@ -208,6 +208,9 @@ const submitForm = async () => {
   if (!form.name || !form.platform_type) {
     return ElMessage.warning(t('messagePlatforms.fill_required'))
   }
+  if (form.is_enabled && !form.uid) {
+    return ElMessage.warning(t('messagePlatforms.uid_required'))
+  }
   submitting.value = true
   try {
     const payload = buildPayload()

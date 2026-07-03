@@ -21,6 +21,7 @@ export default {
   qrcode_tip: 'Scan and confirm with Weixin. The token will be saved to the platform config after login succeeds.',
   qrcode_content: 'QR Content',
   fill_required: 'Please fill required fields',
+  uid_required: 'Please bind a user before enabling the platform',
   create_success: 'Created successfully',
   update_success: 'Updated successfully',
   submit_failed: 'Submit failed',
@@ -42,6 +43,6 @@ export default {
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: 'QR code expired',
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID: 'QR code response is missing required fields',
-    ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED: 'OpenClaw token is required'
+    ERR_MESSAGE_PLATFORM_UID_REQUIRED: 'A bound user is required before enabling a message platform'
   }
 }
