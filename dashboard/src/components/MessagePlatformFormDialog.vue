@@ -22,12 +22,6 @@
           <el-option v-for="user in users" :key="user.uid" :label="user.username" :value="user.uid" />
         </el-select>
       </el-form-item>
-      <el-alert
-        v-if="!isEdit"
-        class="login-tip"
-        type="info"
-        :closable="false"
-        :title="$t('messagePlatforms.create_login_tip')" />
       <el-form-item :label="$t('messagePlatforms.api_timeout_ms')">
         <el-input-number v-model="localForm.config.api_timeout_ms" :min="1000" :max="120000" />
       </el-form-item>
@@ -66,9 +60,3 @@ const emit = defineEmits(['update:visible', 'submit'])
 
 const localForm = computed(() => props.form)
 </script>
-
-<style lang="scss" scoped>
-.login-tip {
-  margin-bottom: 18px;
-}
-</style>

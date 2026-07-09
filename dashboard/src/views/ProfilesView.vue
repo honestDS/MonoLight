@@ -1,10 +1,5 @@
 <template>
   <div class="view-container">
-    <div class="table-actions system-settings-actions">
-      <el-button type="primary" size="default" @click="showDialog('create')">{{ $t('profiles.create_profile') }}</el-button>
-      <el-button size="default" @click="handleRefresh">{{ $t('profiles.refresh') }}</el-button>
-      <el-button size="default" @click="showSystemSettingsDialog">{{ $t('profiles.global_settings') }}</el-button>
-    </div>
     <BaseDataTable
       :data="profiles"
       :loading="loading"
@@ -17,6 +12,11 @@
       @refresh="handleRefresh"
       @page-change="loadProfiles"
       @size-change="handleSizeChange">
+      <template #actions>
+        <el-button type="primary" size="default" @click="showDialog('create')">{{ $t('profiles.create_profile') }}</el-button>
+        <el-button size="default" @click="handleRefresh">{{ $t('profiles.refresh') }}</el-button>
+        <el-button size="default" @click="showSystemSettingsDialog">{{ $t('profiles.global_settings') }}</el-button>
+      </template>
 
       <el-table-column :resizable="false" prop="name" :label="$t('profiles.profile_name')" min-width="120" sortable></el-table-column>
       <el-table-column v-if="showOwnerColumn" :resizable="false" prop="username" :label="$t('profiles.owner_username')" min-width="120" sortable>

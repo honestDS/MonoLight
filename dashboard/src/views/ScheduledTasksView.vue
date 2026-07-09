@@ -51,8 +51,8 @@
           <el-input v-model="form.name" :placeholder="$t('scheduledTasks.input_name')" />
         </el-form-item>
         <el-form-item :label="$t('scheduledTasks.session_id')">
-          <el-select v-model="form.session_id" :placeholder="$t('scheduledTasks.select_session')" filterable class="full-width-input" :loading="sessionsLoading">
-            <el-option v-for="session in sessions" :key="session.session_id" :label="formatSessionLabel(session)" :value="session.session_id">
+          <el-select v-model="form.session_id" :placeholder="$t('scheduledTasks.select_session')" filterable class="full-width-input" popper-class="session-select-dropdown" :loading="sessionsLoading">
+            <el-option v-for="session in sessions" :key="session.session_id" class="session-select-option" :label="formatSessionLabel(session)" :value="session.session_id">
               <div class="session-option">
                 <div class="session-option-title">{{ session.title || $t('chat.default_title') }}</div>
                 <div class="session-option-meta">{{ session.session_id }} · {{ formatTime(session.created_at) }}</div>
@@ -253,18 +253,38 @@ onMounted(() => {
 <style lang="scss">
 @import "@/assets/css/common.scss";
 
-.session-option {
+.session-select-dropdown .el-select-dropdown__item.session-select-option {
+  height: auto;
+  min-height: 52px;
+  padding: 8px 12px;
   line-height: 1.35;
-  padding: 4px 0;
+}
+
+.session-select-dropdown .el-select-dropdown__item.session-select-option.selected .session-option-title {
+  color: var(--el-color-primary);
+}
+
+.session-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 
 .session-option-title {
   color: var(--el-text-color-primary);
   font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-option-meta {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

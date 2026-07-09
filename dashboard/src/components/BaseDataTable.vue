@@ -2,9 +2,11 @@
   <div class="base-data-table">
 
     <!-- 表格操作按钮 -->
-    <div class="table-actions">
-      <el-button v-if="resolvedCreateText" type="primary" size="default" @click="$emit('create')">{{ resolvedCreateText }}</el-button>
-      <el-button v-if="resolvedRefreshText" size="default" @click="$emit('refresh')">{{ resolvedRefreshText }}</el-button>
+    <div v-if="hasActions || resolvedCreateText || resolvedRefreshText" class="table-actions">
+      <slot name="actions">
+        <el-button v-if="resolvedCreateText" type="primary" size="default" @click="$emit('create')">{{ resolvedCreateText }}</el-button>
+        <el-button v-if="resolvedRefreshText" size="default" @click="$emit('refresh')">{{ resolvedRefreshText }}</el-button>
+      </slot>
     </div>
 
     <!-- 数据表格 -->
@@ -43,10 +45,11 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, useSlots } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
+const slots = useSlots()
 
 const props = defineProps({
   data: {
@@ -96,6 +99,7 @@ const emit = defineEmits(['create', 'refresh', 'page-change', 'size-change', 'up
 const resolvedCreateText = computed(() => props.createText === undefined ? t('common.create') : props.createText)
 const resolvedRefreshText = computed(() => props.refreshText === undefined ? t('common.refresh') : props.refreshText)
 const resolvedEmptyText = computed(() => props.emptyText === undefined ? t('common.no_data') : props.emptyText)
+const hasActions = computed(() => Boolean(slots.actions))
 
 const handleSizeChange = (val) => {
   emit('update:pageSize', val)

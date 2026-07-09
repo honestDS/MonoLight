@@ -61,10 +61,7 @@
       v-model:visible="loginDialogVisible"
       :login-data="loginData"
       :qrcode-image-url="qrcodeImageUrl"
-      :checking-login="checkingLogin"
-      @closed="clearLoginTimer"
-      @copy="copyQrCode"
-      @refresh-status="checkLoginStatus" />
+      @closed="clearLoginTimer" />
   </div>
 </template>
 
@@ -246,17 +243,6 @@ const clearLoginTimer = () => {
     loginTimer = null
   }
   qrcodeImageUrl.value = ''
-}
-
-const copyQrCode = async () => {
-  const value = loginData.value?.qrcode || ''
-  if (!value) return
-  try {
-    await navigator.clipboard.writeText(value)
-    ElMessage.success(t('messagePlatforms.copied'))
-  } catch (err) {
-    ElMessage.error(err.message || t('common.action_failed'))
-  }
 }
 
 const startLogin = async (row) => {
