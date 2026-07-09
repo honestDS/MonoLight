@@ -17,10 +17,43 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
     padding: 16px;
     border-bottom: 1px solid #ebeef5;
     font-weight: 500;
     flex-shrink: 0;
+
+    > span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sidebar-actions {
+      display: flex;
+      justify-content: flex-end;
+      flex-shrink: 0;
+      margin-left: auto;
+
+      .refresh-icon {
+        color: #409eff;
+        cursor: pointer;
+        font-size: 16px;
+        padding: 4px;
+        border-radius: 4px;
+
+        &:hover {
+          background: #ecf5ff;
+          color: #409eff;
+        }
+
+        &.loading {
+          animation: refresh-icon-rotate 1s linear infinite;
+          pointer-events: none;
+        }
+      }
+    }
   }
 
   .sessions-list {
@@ -665,6 +698,16 @@
 @keyframes skeleton-loading {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+@keyframes refresh-icon-rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes title-char-appear {

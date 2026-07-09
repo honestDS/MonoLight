@@ -4,6 +4,7 @@ export default {
   session_created_at: 'Created',
   session_last_active: 'Active',
   session_source: 'Source',
+  refresh_sessions: 'Refresh session list',
   no_sessions: 'No sessions',
   empty_chat_tip: 'Select a session on the left or create a new one to start chatting',
   tool_call: 'Tool call: {name}',

@@ -4,10 +4,9 @@
     <div class="sessions-sidebar">
       <div class="sidebar-header">
         <span>{{ $t('chat.sessions_title') }}</span>
-        <el-button type="text" size="small" @click="loadSessions">
-
-          <i class="el-icon-refresh"></i>
-        </el-button>
+        <div class="sidebar-actions">
+          <el-icon class="refresh-icon" :class="{ loading: sessionsLoading }" :title="$t('chat.refresh_sessions')" @click.stop="loadSessions"><Refresh /></el-icon>
+        </div>
       </div>
       <div class="sessions-list">
         <div 
@@ -319,6 +318,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { ElCollapse, ElCollapseItem } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import VirtualizedCode from '../components/VirtualizedCode.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
 import { ElMessage } from 'element-plus'
