@@ -1,6 +1,9 @@
 export default {
   sessions_title: 'Sessions',
   session_prefix: 'Session: {id}',
+  session_created_at: 'Created',
+  session_last_active: 'Active',
+  session_source: 'Source',
   no_sessions: 'No sessions',
   empty_chat_tip: 'Select a session on the left or create a new one to start chatting',
   tool_call: 'Tool call: {name}',

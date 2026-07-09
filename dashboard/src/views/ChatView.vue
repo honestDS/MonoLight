@@ -18,7 +18,7 @@
           @click="selectSession(session)"
         >
           <div class="session-content">
-            <div class="session-id" :title="session.session_id">
+            <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
               <template v-if="typingSessionId === session.session_id">
                 <span 
                   v-for="(char, index) in session.title" 
@@ -31,7 +31,20 @@
               </template>
 
             </div>
-            <div class="session-time">{{ session.last_active }}</div>
+            <div class="session-meta" :title="`${$t('chat.session_created_at')}: ${session.created_at || '-'}\n${$t('chat.session_last_active')}: ${session.last_active || '-'}\n${$t('chat.session_source')}: ${session.source || '-'}`">
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_created_at') }}</span>
+                <span class="session-meta-value">{{ session.created_at || '-' }}</span>
+              </div>
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_last_active') }}</span>
+                <span class="session-meta-value">{{ session.last_active || '-' }}</span>
+              </div>
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_source') }}</span>
+                <span class="session-meta-value">{{ session.source || '-' }}</span>
+              </div>
+            </div>
           </div>
           <div class="session-actions">
             <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>

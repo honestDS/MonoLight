@@ -1,6 +1,9 @@
 export default {
   sessions_title: '会话列表',
   session_prefix: '会话: {id}',
+  session_created_at: '创建',
+  session_last_active: '活跃',
+  session_source: '来源',
   no_sessions: '暂无会话',
   empty_chat_tip: '请选择左侧会话或新建会话开始聊天',
   tool_call: '工具调用: {name}',

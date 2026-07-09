@@ -31,9 +31,9 @@
 
   .session-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    padding: 12px;
+    padding: 10px 12px;
     margin-bottom: 4px;
     border-radius: 4px;
     cursor: pointer;
@@ -52,18 +52,45 @@
       flex: 1;
       min-width: 0;
 
-      .session-id {
+      .session-title {
         font-size: 12px;
+        line-height: 18px;
         color: #303133;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        margin-bottom: 4px;
+        margin-bottom: 6px;
+        font-weight: 500;
       }
 
-      .session-time {
+      .session-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .session-meta-line {
+        display: flex;
+        align-items: center;
+        min-width: 0;
         font-size: 11px;
+        line-height: 16px;
         color: #909399;
+      }
+
+      .session-meta-label {
+        flex-shrink: 0;
+        margin-right: 4px;
+        color: #a8abb2;
+      }
+
+      .session-meta-value {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .typing-char {
