@@ -120,13 +120,14 @@
         padding: 20px;
         
         .message-attachments {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+          display: flex;
+          flex-wrap: wrap;
           gap: 8px;
           width: min(100%, 720px);
           margin-bottom: 8px;
 
           .message-attachment-item {
+            flex: 0 1 148px;
             min-width: 0;
 
             .msg-attachment-image {
@@ -223,6 +224,12 @@
       &.user {
         align-items: flex-end;
         margin-left: auto;
+
+        .message-attachments {
+          align-self: flex-end;
+          justify-content: flex-end;
+        }
+
         .content {
           background: #409eff;
           color: #fff;
@@ -244,6 +251,12 @@
       &.ai {
         align-items: flex-start;
         margin-right: auto;
+
+        .message-attachments {
+          align-self: flex-start;
+          justify-content: flex-start;
+        }
+
         .content {
           background: #f4f4f5;
           color: #303133;
@@ -253,6 +266,12 @@
       &.thinking {
         align-items: flex-start;
         margin-right: auto;
+
+        .message-attachments {
+          align-self: flex-start;
+          justify-content: flex-start;
+        }
+
         .content {
           background: #f0f0f0;
           color: #909399;
@@ -265,6 +284,11 @@
         max-width: 72%;
         margin-left: auto;
         margin-right: auto;
+
+        .message-attachments {
+          align-self: flex-start;
+          justify-content: flex-start;
+        }
 
         .message-header {
           align-self: center;
@@ -283,6 +307,12 @@
       &.error {
         align-items: flex-start;
         margin-right: auto;
+
+        .message-attachments {
+          align-self: flex-start;
+          justify-content: flex-start;
+        }
+
         .content {
           background: #fef0f0;
           color: #f56c6c;
