@@ -25,11 +25,12 @@ async def save_initial_message(
     profile: Profile,
     message: Any,
     attachments: list[str] | None,
+    source: str = "http",
 ) -> InternalMessage:
     # 初始保存消息 (设置 is_processed=False，锁获取后才标记 True)
     profile_id = profile.id if profile and profile.id else -1
     if profile_id > 0:
-        await session_crud.upsert_profile(db, session_id=session_id, uid=uid, profile_id=profile_id)
+        await session_crud.upsert_profile(db, session_id=session_id, uid=uid, profile_id=profile_id, source=source, reply_target_source=source)
 
     initial_msg_obj = InternalMessage(
         role=MessageRole.USER,

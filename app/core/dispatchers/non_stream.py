@@ -53,6 +53,7 @@ class NonStreamDispatcherMixin:
         session_id: str = "default",
         attachments: list[str] | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
+        session_source: str = "http",
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -64,7 +65,7 @@ class NonStreamDispatcherMixin:
             await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
             # 1. 初始保存消息
-            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
+            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []

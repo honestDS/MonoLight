@@ -131,6 +131,7 @@ export const messagePlatformApi = {
   get: (id) => request.get(`/message-platforms/get?platform_id=${id}`),
   update: (id, data) => request.post(`/message-platforms/update?platform_id=${id}`, data),
   delete: (id) => request.post(`/message-platforms/delete?platform_id=${id}`),
+  recover: (id) => request.post(`/message-platforms/recover?platform_id=${id}`),
   startWeixinLogin: (id) => request.post(`/message-platforms/${id}/weixin-openclaw/login/start`),
   getWeixinLoginStatus: (id) => request.get(`/message-platforms/${id}/weixin-openclaw/login/status`)
 }

@@ -68,9 +68,9 @@ async def _save_background_task_result_message(db, task) -> None:
 
 
 async def _send_session_event(uid: str, session_id: str, event: dict) -> None:
-    from app.adapters.chat_ws import ws_chat_adapter
+    from app.core.message_platforms.notifier import send_session_event
 
-    await ws_chat_adapter.send_session_event(uid, session_id, event)
+    await send_session_event(uid, session_id, event)
 
 
 async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None:
@@ -161,4 +161,3 @@ async def _retry_later(task_id: int) -> None:
     logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_RETRY_SCHEDULED"))
     await asyncio.sleep(2)
     await trigger_background_task_reply(task_id)
-

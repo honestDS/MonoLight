@@ -12,6 +12,15 @@ from app.models.message_platform import (
     MessagePlatformType,
     MessagePlatformUpdate,
 )
+from app.models.session import ChatSession
+
+WEIXIN_OPENCLAW_SESSION_PREFIX = "weixin-openclaw:"
+
+
+def _parse_weixin_openclaw_session_user_id(session_id: str) -> str:
+    if not session_id.startswith(WEIXIN_OPENCLAW_SESSION_PREFIX):
+        return ""
+    return session_id[len(WEIXIN_OPENCLAW_SESSION_PREFIX) :].strip()
 
 
 class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, MessagePlatformUpdate]):
@@ -46,6 +55,35 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
             .order_by(MessagePlatform.id.asc())
         )
         return result.scalars().all()
+
+    async def get_platform_for_session(self, db: AsyncSession, *, uid: str, session_id: str, source: str) -> MessagePlatform | None:
+        if source != "weixin-openclaw":
+            return None
+
+        user_id = _parse_weixin_openclaw_session_user_id(session_id)
+        session_result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id, ChatSession.uid == uid))
+        session = session_result.scalars().first()
+        if session is not None and session.reply_target_source != source:
+            return None
+
+        result = await db.execute(
+            select(MessagePlatform)
+            .where(
+                MessagePlatform.is_enabled.is_(True),
+                MessagePlatform.platform_type == MessagePlatformType.WEIXIN_OPENCLAW,
+                MessagePlatform.status == MessagePlatformStatus.CONNECTED,
+                MessagePlatform.uid == uid,
+            )
+            .order_by(MessagePlatform.id.asc())
+        )
+        platforms = result.scalars().all()
+        if not user_id:
+            return platforms[0] if len(platforms) == 1 else None
+        for platform in platforms:
+            context_tokens = (platform.state or {}).get("context_tokens")
+            if isinstance(context_tokens, dict) and str(context_tokens.get(user_id) or "").strip():
+                return platform
+        return platforms[0] if len(platforms) == 1 else None
 
     async def update_runtime_state(
         self,

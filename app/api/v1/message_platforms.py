@@ -136,6 +136,22 @@ async def delete_message_platform(platform_id: int, db: AsyncSession = Depends(g
     return StandardResponse.success(message=constants.MSG_MESSAGE_PLATFORM_DELETED)
 
 
+@router.post("/recover", response_model=StandardResponse)
+async def recover_message_platform(platform_id: int, db: AsyncSession = Depends(get_db)):
+    platform = await message_platform_crud.get(db, platform_id)
+    if not platform:
+        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+    if platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW:
+        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE)
+    if not platform.get_config_secret("token"):
+        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING)
+    next_status = MessagePlatformStatus.CONNECTED if platform.is_enabled else MessagePlatformStatus.DISCONNECTED
+    platform = await message_platform_crud.update_runtime_state(db, platform=platform, status=next_status, state={"poll_lease": {}}, last_error="")
+    if platform.is_enabled:
+        await message_platform_polling_manager.restart_platform(platform.id)
+    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_RECOVERED)
+
+
 @router.post("/{platform_id}/weixin-openclaw/login/start", response_model=StandardResponse)
 async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
@@ -147,11 +163,14 @@ async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depen
     adapter = WeixinOpenClawAdapter(
         WeixinOpenClawConfig(
             base_url=str(config.get("base_url") or DEFAULT_BASE_URL),
+            cdn_base_url=str(config["cdn_base_url"]),
             bot_type=DEFAULT_BOT_TYPE,
             channel_version=DEFAULT_CHANNEL_VERSION,
             api_timeout_ms=config["api_timeout_ms"],
             long_poll_timeout_ms=config["long_poll_timeout_ms"],
             poll_interval_ms=config["poll_interval_ms"],
+            max_inbound_media_size_mb=config["max_inbound_media_size_mb"],
+            merge_single_poll_messages=config["merge_single_poll_messages"],
         )
     )
     try:
@@ -188,11 +207,14 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
     adapter = WeixinOpenClawAdapter(
         WeixinOpenClawConfig(
             base_url=str(config.get("base_url") or DEFAULT_BASE_URL),
+            cdn_base_url=str(config["cdn_base_url"]),
             bot_type=DEFAULT_BOT_TYPE,
             channel_version=DEFAULT_CHANNEL_VERSION,
             api_timeout_ms=config["api_timeout_ms"],
             long_poll_timeout_ms=config["long_poll_timeout_ms"],
             poll_interval_ms=config["poll_interval_ms"],
+            max_inbound_media_size_mb=config["max_inbound_media_size_mb"],
+            merge_single_poll_messages=config["merge_single_poll_messages"],
         )
     )
     try:

@@ -37,6 +37,9 @@
       <el-form-item :label="$t('messagePlatforms.poll_interval_ms')">
         <el-input-number v-model="localForm.config.poll_interval_ms" :min="0" :max="60000" />
       </el-form-item>
+      <el-form-item :label="$t('messagePlatforms.merge_single_poll_messages')">
+        <el-switch v-model="localForm.config.merge_single_poll_messages" />
+      </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="emit('update:visible', false)">{{ $t('common.cancel') }}</el-button>

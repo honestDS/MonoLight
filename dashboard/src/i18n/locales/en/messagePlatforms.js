@@ -13,9 +13,11 @@ export default {
   api_timeout_ms: 'API Timeout(ms)',
   long_poll_timeout_ms: 'Long Poll Timeout(ms)',
   poll_interval_ms: 'Long Poll Interval(ms)',
+  merge_single_poll_messages: 'Merge messages in one poll',
   last_error: 'Last Error',
   actions: 'Actions',
   login: 'QR Login',
+  recover: 'Recover',
   refresh_status: 'Refresh Status',
   qrcode_title: 'Weixin OpenClaw QR Login',
   qrcode_tip: 'Scan and confirm with Weixin. The token will be saved to the platform config after login succeeds.',
@@ -27,6 +29,7 @@ export default {
   submit_failed: 'Submit failed',
   load_failed: 'Load failed',
   login_started: 'QR code generated',
+  recover_success: 'Recovered successfully',
   login_confirmed: 'Login succeeded',
   login_waiting: 'Waiting for confirmation',
   login_expired: 'QR code expired',
@@ -43,6 +46,7 @@ export default {
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: 'QR code expired',
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID: 'QR code response is missing required fields',
-    ERR_MESSAGE_PLATFORM_UID_REQUIRED: 'A bound user is required before enabling a message platform'
+    ERR_MESSAGE_PLATFORM_UID_REQUIRED: 'A bound user is required before enabling a message platform',
+    ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING: 'Platform token is missing and cannot be recovered. Please scan the QR code again to bind the platform'
   }
 }

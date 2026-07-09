@@ -34,11 +34,12 @@
       <el-table-column :label="$t('messagePlatforms.last_error')" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ errorLabel(row.last_error) }}</template>
       </el-table-column>
-      <el-table-column :label="$t('messagePlatforms.actions')" width="300" fixed="right">
+      <el-table-column :label="$t('messagePlatforms.actions')" width="420" fixed="right">
         <template #default="{ row }">
           <div class="action-buttons">
             <el-button size="small" type="primary" @click="handleEdit(row)">{{ $t('common.edit') }}</el-button>
             <el-button size="small" type="success" @click="startLogin(row)">{{ $t('messagePlatforms.login') }}</el-button>
+            <el-button v-if="row.status === 'ERROR'" size="small" type="warning" :loading="recoveringId === row.id" @click="handleRecover(row)">{{ $t('messagePlatforms.recover') }}</el-button>
             <el-button size="small" type="danger" @click="handleDelete(row.id, row.name)">{{ $t('common.delete') }}</el-button>
           </div>
         </template>
@@ -85,6 +86,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const checkingLogin = ref(false)
 const usersLoading = ref(false)
+const recoveringId = ref(null)
 const dialogVisible = ref(false)
 const loginDialogVisible = ref(false)
 const isEdit = ref(false)
@@ -108,7 +110,8 @@ const defaultForm = () => ({
   config: {
     api_timeout_ms: 15000,
     long_poll_timeout_ms: 30000,
-    poll_interval_ms: 1000
+    poll_interval_ms: 1000,
+    merge_single_poll_messages: true
   },
   state: {}
 })
@@ -200,7 +203,8 @@ const buildPayload = () => ({
   config: {
     api_timeout_ms: form.config.api_timeout_ms || 15000,
     long_poll_timeout_ms: form.config.long_poll_timeout_ms || 30000,
-    poll_interval_ms: form.config.poll_interval_ms ?? 1000
+    poll_interval_ms: form.config.poll_interval_ms ?? 1000,
+    merge_single_poll_messages: form.config.merge_single_poll_messages ?? true
   }
 })
 
@@ -270,6 +274,20 @@ const startLogin = async (row) => {
     loginTimer = setInterval(checkLoginStatus, 3000)
   } catch (err) {
     ElMessage.error(err.message || t('common.action_failed'))
+  }
+}
+
+const handleRecover = async (row) => {
+  if (!row?.id || recoveringId.value) return
+  recoveringId.value = row.id
+  try {
+    await messagePlatformApi.recover(row.id)
+    ElMessage.success(t('messagePlatforms.recover_success'))
+    await fetchPlatforms()
+  } catch (err) {
+    ElMessage.error(err.message || t('common.action_failed'))
+  } finally {
+    recoveringId.value = null
   }
 }
 

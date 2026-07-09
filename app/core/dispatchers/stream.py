@@ -54,6 +54,7 @@ class StreamDispatcherMixin:
         attachments: list[str] | None = None,
         request_id: str | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
+        session_source: str = "ws",
     ) -> AsyncGenerator[dict[str, Any]]:
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -65,7 +66,7 @@ class StreamDispatcherMixin:
             await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
             # 1. 初始保存消息
-            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments)
+            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
             turn_messages: list[InternalMessage] = []
             files_to_user: list[dict[str, Any]] = []

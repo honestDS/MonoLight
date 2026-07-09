@@ -85,6 +85,7 @@ MESSAGES = {
     "MSG_MESSAGE_PLATFORM_DELETED": "Message platform deleted",
     "MSG_MESSAGE_PLATFORM_LOGIN_STARTED": "QR login started",
     "MSG_MESSAGE_PLATFORM_LOGIN_STATUS": "QR login status loaded",
+    "MSG_MESSAGE_PLATFORM_RECOVERED": "Message platform recovered",
     "ERR_MESSAGE_PLATFORM_NOT_FOUND": "Message platform not found",
     "ERR_MESSAGE_PLATFORM_NAME_EXISTS": "Message platform name already exists",
     "ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE": "Unsupported message platform type",
@@ -94,4 +95,5 @@ MESSAGES = {
     "ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID": "QR code response is missing required fields",
     "ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED": "token is missing. Please scan the QR code again to bind the platform",
     "ERR_MESSAGE_PLATFORM_UID_REQUIRED": "A bound user is required before enabling a message platform",
+    "ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING": "Platform token is missing and cannot be recovered. Please scan the QR code again to bind the platform",
 }

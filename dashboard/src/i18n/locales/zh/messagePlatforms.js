@@ -13,9 +13,11 @@ export default {
   api_timeout_ms: 'API超时(ms)',
   long_poll_timeout_ms: '长轮询超时(ms)',
   poll_interval_ms: '长轮询间隔(ms)',
+  merge_single_poll_messages: '合并单次轮询消息',
   last_error: '最后错误',
   actions: '操作',
   login: '扫码登录',
+  recover: '恢复',
   refresh_status: '刷新状态',
   qrcode_title: '微信 OpenClaw 扫码登录',
   qrcode_tip: '请使用微信扫码并确认登录。登录成功后 token 将自动保存到平台配置。',
@@ -27,6 +29,7 @@ export default {
   submit_failed: '提交失败',
   load_failed: '加载失败',
   login_started: '二维码已生成',
+  recover_success: '恢复成功',
   login_confirmed: '登录成功',
   login_waiting: '等待扫码确认',
   login_expired: '二维码已过期',
@@ -43,6 +46,7 @@ export default {
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: '二维码已过期',
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID: '二维码响应缺少必要字段',
-    ERR_MESSAGE_PLATFORM_UID_REQUIRED: '启用消息平台前必须绑定用户'
+    ERR_MESSAGE_PLATFORM_UID_REQUIRED: '启用消息平台前必须绑定用户',
+    ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING: '平台缺少 token，无法恢复，请重新扫码绑定'
   }
 }

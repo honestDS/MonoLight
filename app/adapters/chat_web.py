@@ -60,6 +60,7 @@ class WebChatAdapter(BaseChatAdapter):
                 session_id=session_id,
                 attachments=attachments,
                 active_tasks=active_tasks,
+                session_source="http",
             )
             if isinstance(llm_response, dict) and _response_has_background_tasks(llm_response):
                 llm_response["has_background_tasks"] = True

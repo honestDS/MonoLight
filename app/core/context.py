@@ -247,6 +247,19 @@ class ContextManager:
             return msg.content
         if msg.content is None:
             return ""
+        if isinstance(msg.content, list):
+            text_parts: list[str] = []
+            for part in msg.content:
+                part_type = getattr(part, "type", "")
+                if part_type == "text":
+                    text_parts.append(str(getattr(part, "text", "") or ""))
+                elif part_type == "image_url":
+                    text_parts.append("[图片]")
+                elif part_type == "file":
+                    text_parts.append(f"[文件:{getattr(part, 'path', '') or ''}]")
+                else:
+                    text_parts.append(json.dumps(ContextManager._to_jsonable(part), ensure_ascii=False))
+            return "\n".join(item for item in text_parts if item)
         return json.dumps(ContextManager._to_jsonable(msg.content), ensure_ascii=False)
 
     @staticmethod

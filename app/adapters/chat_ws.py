@@ -48,6 +48,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 attachments=attachments,
                 request_id=request_id,
                 active_tasks=active_tasks,
+                session_source="ws",
             ):
                 yield chunk
         except BaseBusinessException as e:

@@ -84,6 +84,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
+                ChatSession.source,
+                ChatSession.reply_target_source,
                 ChatSession.created_at,
             )
             .join(User, Message.uid == User.uid)
@@ -93,7 +95,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
 
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.created_at).order_by(desc("last_active"))
+        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.source, ChatSession.reply_target_source, ChatSession.created_at).order_by(desc("last_active"))
         result = await db.execute(stmt)
         return result.all()
 
@@ -114,8 +116,16 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
         result = await db.execute(stmt)
+        deleted_count = result.rowcount or 0
+
+        if deleted_count > 0:
+            session_stmt = delete(ChatSession).where(ChatSession.session_id == session_id)
+            if not is_admin:
+                session_stmt = session_stmt.where(ChatSession.uid == uid)
+            await db.execute(session_stmt)
+
         await db.commit()
-        return result.rowcount
+        return deleted_count
 
 
 message_crud = CRUDMessage(Message)

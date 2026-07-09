@@ -105,6 +105,8 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
+                "source": row.source or "http",
+                "reply_target_source": row.reply_target_source or row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             }
         )
@@ -415,6 +417,7 @@ async def chat_websocket(
                             profile,
                             message,
                             attachments,
+                            source="ws",
                         )
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
             else:

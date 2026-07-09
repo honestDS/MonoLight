@@ -126,13 +126,13 @@ class ScheduledTaskScheduler:
         reply_task.add_done_callback(self._active_reply_tasks.discard)
 
     async def _generate_reply(self, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int) -> None:
-        from app.adapters.chat_ws import ws_chat_adapter
         from app.core.dispatcher import ChatDispatcher
+        from app.core.message_platforms.notifier import send_session_event
 
         async with self._reply_semaphore:
-            await self._generate_reply_locked(ws_chat_adapter, ChatDispatcher, scheduled_task_id, uid, session_id, profile_id)
+            await self._generate_reply_locked(send_session_event, ChatDispatcher, scheduled_task_id, uid, session_id, profile_id)
 
-    async def _generate_reply_locked(self, ws_chat_adapter, ChatDispatcher, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int) -> None:
+    async def _generate_reply_locked(self, send_session_event, ChatDispatcher, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int) -> None:
         async with AsyncSessionLocal() as db:
             log = logger.bind(uid=uid, session_id=session_id, scheduled_task_id=scheduled_task_id, profile_id=profile_id)
             await active_session_crud.cleanup_expired_locks(db)
@@ -161,7 +161,7 @@ class ScheduledTaskScheduler:
             except Exception as exc:
                 error_message = t(exc.message, default=exc.message, **exc.kwargs) if isinstance(exc, BaseBusinessException) else str(exc)
                 log.error(t("LOG_SCHEDULED_TASK_REPLY_FAILED", error=error_message), exc_info=True)
-                await ws_chat_adapter.send_session_event(
+                await send_session_event(
                     uid,
                     session_id,
                     {
@@ -175,7 +175,7 @@ class ScheduledTaskScheduler:
                 )
             else:
                 log.bind(content=ai_msg.content or "[工具调用]").info(t("LOG_SCHEDULED_TASK_REPLY_COMPLETED", content=ai_msg.content or "[工具调用]"))
-                await ws_chat_adapter.send_session_event(
+                await send_session_event(
                     uid,
                     session_id,
                     {
