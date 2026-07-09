@@ -1,4 +1,4 @@
-﻿import json
+import json
 
 from app.core.context import ContextManager
 from app.core.dispatchers.background import BackgroundDispatcherMixin
@@ -42,8 +42,87 @@ def test_virtual_tool_feedback_builds_matched_tool_chain():
         "arguments": {"prompt": "cat"},
     }
 
-    audited = ContextManager.audit_tool_chain(messages, uid="u1", session_id="s1")
-    assert audited == messages
+    audited = ContextManager.audit_tool_chain([InternalMessage(role=MessageRole.USER, content="start"), *messages], uid="u1", session_id="s1")
+    assert audited == [audited[0], *messages]
+
+
+def test_audit_tool_chain_drops_tool_call_without_user_or_tool_predecessor():
+    orphan_ai_msg = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=None,
+        tool_calls=[
+            InternalToolCall(
+                id="call_orphan",
+                name="query_knowledge_base",
+                arguments={"query": "context"},
+            )
+        ],
+    )
+    tool_msg = InternalMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps({"result": "ok"}, ensure_ascii=False),
+        tool_call_id="call_orphan",
+    )
+
+    audited = ContextManager.audit_tool_chain([orphan_ai_msg, tool_msg], uid="u1", session_id="s1")
+
+    assert audited == []
+
+
+def test_audit_tool_chain_keeps_tool_call_after_function_response_turn():
+    first_ai_msg = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=None,
+        tool_calls=[
+            InternalToolCall(
+                id="call_first",
+                name="query_knowledge_base",
+                arguments={"query": "context"},
+            )
+        ],
+    )
+    first_tool_msg = InternalMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps({"result": "first"}, ensure_ascii=False),
+        tool_call_id="call_first",
+    )
+    second_ai_msg = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=None,
+        tool_calls=[
+            InternalToolCall(
+                id="call_second",
+                name="query_knowledge_base",
+                arguments={"query": "follow up"},
+            )
+        ],
+    )
+    second_tool_msg = InternalMessage(
+        role=MessageRole.TOOL,
+        content=json.dumps({"result": "second"}, ensure_ascii=False),
+        tool_call_id="call_second",
+    )
+
+    user_msg = InternalMessage(role=MessageRole.USER, content="start")
+    audited = ContextManager.audit_tool_chain(
+        [
+            user_msg,
+            first_ai_msg,
+            first_tool_msg,
+            second_ai_msg,
+            second_tool_msg,
+        ],
+        uid="u1",
+        session_id="s1",
+    )
+
+    assert audited == [
+        user_msg,
+        first_ai_msg,
+        first_tool_msg,
+        second_ai_msg,
+        second_tool_msg,
+    ]
 
 
 def test_virtual_tool_feedback_returns_empty_without_tool_calls():

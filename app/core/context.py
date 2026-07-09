@@ -444,6 +444,13 @@ class ContextManager:
                         matched_tools.append(target)
                         found_tool_call_ids.add(target.tool_call_id)
 
+                previous_non_system = next((item for item in reversed(audited_msgs) if item.role != MessageRole.SYSTEM), None)
+                if previous_non_system is None or previous_non_system.role not in {MessageRole.USER, MessageRole.TOOL}:
+                    for matched_tool in matched_tools:
+                        consumed_msg_ids.add(id(matched_tool))
+                    i += 1
+                    continue
+
                 audited_msgs.append(msg)
                 for matched_tool in matched_tools:
                     audited_msgs.append(matched_tool)
