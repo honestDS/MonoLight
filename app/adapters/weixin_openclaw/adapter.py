@@ -13,7 +13,6 @@ from app.adapters.weixin_openclaw.client import WeixinOpenClawClient
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.media import WeixinOpenClawMediaMixin
 from app.adapters.weixin_openclaw.message import (
-    build_attachment_fallback_text,
     build_session_id,
     extract_context_token,
     extract_message_timestamp,
@@ -241,7 +240,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 logger.bind(uid=resolved_uid, session_id=message.session_id).warning(t("LOG_WEIXIN_OPENCLAW_RUNTIME_INVALID_BEFORE_DISPATCH"))
                 return False
 
-            dispatch_text = message.text or build_attachment_fallback_text(message.attachments)
+            dispatch_text = message.text
             result = await self.chat(
                 db=db,
                 message=dispatch_text,

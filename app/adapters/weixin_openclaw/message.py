@@ -148,7 +148,6 @@ async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, A
         if item_type == IMAGE_ITEM_TYPE:
             media_path = await adapter.resolve_inbound_image(item)
             if media_path:
-                texts.append("[图片]")
                 attachments.append(str(media_path))
             continue
 
