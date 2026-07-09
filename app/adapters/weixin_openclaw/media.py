@@ -148,18 +148,10 @@ class WeixinOpenClawMediaMixin:
     @staticmethod
     def resolve_outbound_file_path(file_item: dict[str, Any]) -> Path | None:
         token = str(file_item.get("id") or "").strip()
-        if token:
-            return resolve_file_token(token)
-
-        raw_path = str(file_item.get("path") or "").strip()
-        if not raw_path:
+        if not token:
             logger.bind(file_id=file_item.get("id"), file_name=file_item.get("name")).warning(t("LOG_WEIXIN_OPENCLAW_OUTBOUND_FILE_PATH_MISSING"))
             return None
-        path = Path(raw_path).resolve()
-        if not path.exists() or not path.is_file():
-            logger.bind(file_path=str(path), file_name=file_item.get("name")).warning(t("LOG_WEIXIN_OPENCLAW_OUTBOUND_FILE_PATH_INVALID"))
-            return None
-        return path
+        return resolve_file_token(token)
 
     @staticmethod
     def resolve_outbound_file_name(file_item: dict[str, Any], media_path: Path) -> str:
