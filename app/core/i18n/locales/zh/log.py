@@ -67,6 +67,8 @@ MESSAGES = {
     "LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE": "后台任务配置文件不可用于当前用户",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_RETRY": "后台主动回复尝试调用不支持的工具，正在追加修正指令后重试",
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "后台主动回复重试后仍尝试调用不支持的工具，降级为纯文本回复",
+    "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY": "后台主动回复最终阶段仍返回工具调用，已忽略调用并引导模型重新生成纯文本",
+    "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_IGNORED": "后台主动回复最终阶段纠正后仍返回工具调用，已忽略调用并使用安全兜底内容",
     "LOG_SCHEDULED_TASK_DISPATCH_FAILED": "定时任务调度失败",
     "LOG_SCHEDULED_TASK_SESSION_MISSING": "定时任务跳过：会话不存在或无权访问",
     "LOG_SCHEDULED_TASK_PROFILE_MISSING": "定时任务跳过：会话 Profile 缺失",

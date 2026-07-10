@@ -10,6 +10,8 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_BACKGROUND_TOO_MANY_TOOL_CALLS,
     ERR_LLM_EMPTY_RESPONSE,
+    MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES,
+    MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
 )
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
@@ -20,6 +22,7 @@ from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import (
+    BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
@@ -280,7 +283,56 @@ class BackgroundDispatcherMixin:
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
-            raise LLMException(message=ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN)
+            repeated_tool_names = sorted({tool_call.name for tool_call in final_msg.tool_calls})
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                reply_source=reply_source,
+                repeated_tools=repeated_tool_names,
+            ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY"))
+            final_correction_messages = cls._build_virtual_tool_feedback_messages(
+                final_msg,
+                {
+                    "type": "background_proactive_final_tool_correction",
+                    "error": t(ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN),
+                    "instruction": BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
+                    "ignored_tool_calls": repeated_tool_names,
+                },
+            )
+            final_correction_context_messages = [*messages, *final_correction_messages]
+
+            def build_final_correction_request(retry_chat_params):
+                return ContextManager.trim_messages_for_model_request(
+                    messages=final_correction_context_messages,
+                    uid=uid,
+                    session_id=session_id,
+                    context_window_k=retry_chat_params["context_window_k"],
+                    max_tokens=retry_chat_params["max_tokens"],
+                    tools=None,
+                )
+
+            corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+                db,
+                chat_channel=chat_channel,
+                request_builder=build_final_correction_request,
+                call_context=f"{call_context}_final_tool_correction",
+                cursor_key=chat_cursor_key,
+                uid=uid,
+                session_id=session_id,
+                tools=None,
+                require_content_or_tools=True,
+            )
+            final_msg = corrected_response.message
+            if final_msg.tool_calls:
+                logger.bind(
+                    uid=uid,
+                    session_id=session_id,
+                    reply_source=reply_source,
+                    repeated_tools=sorted({tool_call.name for tool_call in final_msg.tool_calls}),
+                ).warning(t("LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_IGNORED"))
+                final_msg.tool_calls = []
+                fallback_message = MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES if files_to_user else MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES
+                final_msg.content = t(fallback_message)
         final_text, _untrusted_files = parse_assistant_files_content(final_msg.content)
         final_msg.content = final_text
         if not final_text.strip() and not files_to_user:

@@ -59,7 +59,7 @@ MESSAGES = {
     "ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL": "Unsupported image generation channel: {channel_type}",
     "ERR_LLM_UNSUPPORTED_RERANK_CHANNEL": "Unsupported rerank channel: {channel_type}",
     "ERR_BACKGROUND_TOO_MANY_TOOL_CALLS": "Too many tool calls in background proactive reply: {count}",
-    "ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN": "Background proactive final reply must not call tools",
+    "ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN": "The final background proactive reply must not contain additional tool calls.",
     "ERR_FAVICON_NOT_FOUND": "Favicon not found",
     "ERR_TOOL_MISSING_REQUIRED_ARGUMENTS": "Missing required arguments: {fields}",
     "ERR_TOOL_INVALID_INTEGER_ARGUMENT": "Invalid argument {field}: {value}. It must be an integer",

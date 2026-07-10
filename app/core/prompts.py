@@ -43,6 +43,8 @@ BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT = "The previous tool call is not all
 
 BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT = "Reply to the user in natural language text only. Do not call any tools. Explain the completed background task result based on the provided background_tool_result message. Do not copy or emit raw JSON, Python/JavaScript arrays, tool arguments, file path lists, download metadata, or internal tool response text. If the result contains files that cannot be delivered by a tool, say the task completed and briefly describe the file/result in user-friendly wording."
 
+BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT = "The delivery tool call has already been processed and the repeated tool call was ignored. Do not call or simulate any tools. Reply now with concise user-facing natural language that summarizes the completed result. Do not output raw JSON, tool arguments, file paths, download metadata, or internal tool response text."
+
 BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT = "The background task has completed, but the proactive reply attempted unsupported tool calls and they were ignored."
 
 BACKGROUND_TASK_QUEUED_PROMPT = "Tool {tool_name} has been queued as a background task and will reply proactively after completion."

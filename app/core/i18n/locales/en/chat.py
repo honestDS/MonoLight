@@ -19,4 +19,6 @@ MESSAGES = {
     "MSG_MESSAGE_LIST_SUCCESS": "Session history retrieved successfully",
     "MSG_TOOL_RESULT_TRUNCATED": "\n\n[The tool response is too large, so the latter part has been omitted. Please answer based on the visible result above, or adjust the tool call parameters and query again.]",
     "ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED": "Background task proactive reply failed: {error}",
+    "MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES": "The background task completed, but no final description could be generated. Please review the task result attached to this reply.",
+    "MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES": "The background task completed, but no final description could be generated.",
 }
