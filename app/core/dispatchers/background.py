@@ -1,5 +1,6 @@
 import asyncio
 import json
+from functools import partial
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +74,23 @@ class BackgroundDispatcherMixin:
                 )
             )
         return feedback_messages
+
+    @staticmethod
+    def _build_final_correction_request(
+        retry_chat_params,
+        *,
+        messages: list[InternalMessage],
+        uid: str,
+        session_id: str,
+    ) -> list[InternalMessage]:
+        return ContextManager.trim_messages_for_model_request(
+            messages=messages,
+            uid=uid,
+            session_id=session_id,
+            context_window_k=retry_chat_params["context_window_k"],
+            max_tokens=retry_chat_params["max_tokens"],
+            tools=None,
+        )
 
     @classmethod
     async def _generate_reply_from_history(
@@ -300,16 +318,12 @@ class BackgroundDispatcherMixin:
                 },
             )
             final_correction_context_messages = [*messages, *final_correction_messages]
-
-            def build_final_correction_request(retry_chat_params):
-                return ContextManager.trim_messages_for_model_request(
-                    messages=final_correction_context_messages,
-                    uid=uid,
-                    session_id=session_id,
-                    context_window_k=retry_chat_params["context_window_k"],
-                    max_tokens=retry_chat_params["max_tokens"],
-                    tools=None,
-                )
+            build_final_correction_request = partial(
+                cls._build_final_correction_request,
+                messages=final_correction_context_messages,
+                uid=uid,
+                session_id=session_id,
+            )
 
             corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
                 db,
