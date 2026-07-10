@@ -41,6 +41,7 @@ async def save_message(
     content: Any,
     profile_id: int,
     is_processed: bool = True,
+    dedupe_key: str | None = None,
 ) -> InternalMessage:
     # Determine attachments and final content payload
     attachments_to_save = None
@@ -58,10 +59,17 @@ async def save_message(
         "is_processed": is_processed,
     }
 
-    db_obj = await message_crud.create(
-        db,
-        obj_in=obj_in_data,
-    )
+    if dedupe_key is None:
+        db_obj = await message_crud.create(
+            db,
+            obj_in=obj_in_data,
+        )
+    else:
+        db_obj = await message_crud.create_idempotent(
+            db,
+            obj_in=obj_in_data,
+            dedupe_key=dedupe_key,
+        )
     return InternalMessage(
         id=db_obj.id,
         role=role,

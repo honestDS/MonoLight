@@ -10,6 +10,7 @@ class SessionEvent(SQLModel, table=True):
     __tablename__ = "session_event"
 
     id: int | None = Field(default=None, primary_key=True, index=True)
+    dedupe_key: str = Field(unique=True, max_length=64)
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
     event: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))

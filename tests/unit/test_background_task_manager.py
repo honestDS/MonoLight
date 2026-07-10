@@ -79,6 +79,78 @@ async def test_schedule_respects_profile_concurrency_limit(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_loop_periodically_recovers_expired_running_tasks(monkeypatch):
+    manager = BackgroundTaskManager()
+    recover_calls = 0
+    recover_reply_calls = 0
+    dispatch_calls = 0
+    monotonic_values = iter([0, 30, 30])
+
+    async def recover_tasks():
+        nonlocal recover_calls
+        recover_calls += 1
+
+    async def recover_replies():
+        nonlocal recover_reply_calls
+        recover_reply_calls += 1
+
+    async def dispatch_tasks():
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+
+    async def dispatch_replies():
+        manager._stop_event.set()
+
+    monkeypatch.setattr(manager_module, "BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS", 30)
+    monkeypatch.setattr(manager_module, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(manager_module, "recover_pending_background_tasks", recover_tasks)
+    monkeypatch.setattr(manager_module, "recover_pending_background_task_replies", recover_replies)
+    monkeypatch.setattr(manager, "dispatch_pending_tasks", dispatch_tasks)
+    monkeypatch.setattr(manager, "dispatch_pending_replies", dispatch_replies)
+
+    await manager._run_loop()
+
+    assert recover_calls == 1
+    assert recover_reply_calls == 1
+    assert dispatch_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pending_replies_does_not_wait_for_reply_completion(monkeypatch):
+    manager = BackgroundTaskManager()
+    reply_started = asyncio.Event()
+    release_reply = asyncio.Event()
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return None
+
+    async def list_pending_replies(db, *, limit):
+        assert limit == manager_module.BACKGROUND_TASK_REPLY_MAX_CONCURRENCY
+        return [SimpleNamespace(id=11)]
+
+    async def run_reply(task_id):
+        assert task_id == 11
+        reply_started.set()
+        await release_reply.wait()
+
+    monkeypatch.setattr(manager_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(manager_module.background_task_crud, "list_pending_replies", list_pending_replies)
+    monkeypatch.setattr(manager, "_run_reply", run_reply)
+
+    await manager.dispatch_pending_replies()
+    await reply_started.wait()
+
+    assert len(manager._running_replies) == 1
+
+    release_reply.set()
+    await asyncio.gather(*manager._running_replies)
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_running_background_tasks():
     manager = BackgroundTaskManager()
     started = asyncio.Event()
@@ -88,10 +160,15 @@ async def test_stop_cancels_running_background_tasks():
         await asyncio.Event().wait()
 
     task = asyncio.create_task(running_task())
+    reply_task = asyncio.create_task(running_task())
     manager._running_by_profile[1].add(task)
+    manager._running_replies.add(reply_task)
     await started.wait()
+    await asyncio.sleep(0)
 
     await manager.stop()
 
     assert task.cancelled()
+    assert reply_task.cancelled()
     assert manager._running_by_profile == {}
+    assert manager._running_replies == set()

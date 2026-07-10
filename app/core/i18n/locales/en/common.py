@@ -31,6 +31,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_DETAIL_SUCCESS": "Background task detail retrieved successfully",
     "MSG_BACKGROUND_TASK_EXECUTION_SUCCEEDED": "Background task completed successfully",
     "ERR_BACKGROUND_TASK_EXECUTION_FAILED": "Background task failed",
+    "ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED": "Background task lease expired and the maximum retry count was reached",
     "MSG_BACKGROUND_TASK_CANCELLED": "Background task cancelled",
     "MSG_BACKGROUND_TASK_ALREADY_FINISHED": "Background task is already finished",
     "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task and will reply proactively after completion.",

@@ -3,7 +3,7 @@ import os
 
 import app.warning_filters  # noqa: F401
 from app.core.background_tasks.manager import background_task_manager
-from app.core.background_tasks.recovery import recover_pending_background_tasks
+from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.log import LogManager, get_logger
 from app.core.paths import DEFAULT_LOG_FILE_PATH
 from app.providers.database.bootstrap import create_database_tables
@@ -24,6 +24,7 @@ async def run_background_task_worker() -> None:
 
     async def run_owned_worker(owned_stop_event: asyncio.Event) -> None:
         await recover_pending_background_tasks()
+        await recover_pending_background_task_replies()
 
         background_task_manager.start()
         cleaner_tasks = [

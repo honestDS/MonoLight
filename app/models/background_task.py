@@ -37,7 +37,9 @@ class BackgroundTaskBase(SQLModel):
     auto_reply: bool = Field(default=True)
     reply_status: BackgroundTaskReplyStatus = Field(default=BackgroundTaskReplyStatus.NONE, index=True, max_length=20)
     locked_by: str | None = Field(default=None, index=True, max_length=100)
-    lock_until: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
+    lock_until: int | None = Field(default=None, index=True)
+    reply_locked_by: str | None = Field(default=None, index=True, max_length=100)
+    reply_lock_until: int | None = Field(default=None, index=True)
     attempt_count: int = Field(default=0, ge=0)
     extra: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 

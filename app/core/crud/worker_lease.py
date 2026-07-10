@@ -1,13 +1,11 @@
-from datetime import timedelta
-
 from sqlalchemy import delete, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
-from app.core.utils.time import get_local_time
 from app.models.worker_lease import WorkerLease
+from app.providers.database.time import get_database_timestamp
 
 
 class CRUDWorkerLease(CRUDBase[WorkerLease, WorkerLease, WorkerLease]):
@@ -27,8 +25,8 @@ class CRUDWorkerLease(CRUDBase[WorkerLease, WorkerLease, WorkerLease]):
         owner_id: str,
         lease_seconds: int,
     ) -> bool:
-        now = get_local_time()
-        lease_until = now + timedelta(seconds=lease_seconds)
+        now = await get_database_timestamp(db)
+        lease_until = now + lease_seconds
         result = await db.execute(
             update(WorkerLease)
             .where(
@@ -87,7 +85,7 @@ class CRUDWorkerLease(CRUDBase[WorkerLease, WorkerLease, WorkerLease]):
         owner_id: str,
         lease_seconds: int,
     ) -> bool:
-        now = get_local_time()
+        now = await get_database_timestamp(db)
         result = await db.execute(
             update(WorkerLease)
             .where(
@@ -96,7 +94,7 @@ class CRUDWorkerLease(CRUDBase[WorkerLease, WorkerLease, WorkerLease]):
                 WorkerLease.lease_until >= now,
             )
             .values(
-                lease_until=now + timedelta(seconds=lease_seconds),
+                lease_until=now + lease_seconds,
                 updated_at=now,
             )
             .execution_options(synchronize_session=False)

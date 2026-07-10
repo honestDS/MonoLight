@@ -2,6 +2,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, select
 
@@ -13,12 +14,31 @@ SESSION_EVENT_RETENTION_HOURS = 24
 
 
 class CRUDSessionEvent(CRUDBase[SessionEvent, SessionEvent, SessionEvent]):
-    async def publish(self, db: AsyncSession, *, uid: str, session_id: str, event: dict[str, Any]) -> SessionEvent:
-        item = SessionEvent(uid=uid, session_id=session_id, event=event)
+    async def publish(
+        self,
+        db: AsyncSession,
+        *,
+        dedupe_key: str,
+        uid: str,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> tuple[SessionEvent, bool]:
+        item = SessionEvent(dedupe_key=dedupe_key, uid=uid, session_id=session_id, event=event)
         db.add(item)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            existing = await self.get_by_dedupe_key(db, dedupe_key)
+            if existing is None:
+                raise
+            return existing, False
         await db.refresh(item)
-        return item
+        return item, True
+
+    async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> SessionEvent | None:
+        result = await db.execute(select(SessionEvent).where(SessionEvent.dedupe_key == dedupe_key))
+        return result.scalars().first()
 
     async def get_latest_id(self, db: AsyncSession) -> int:
         result = await db.execute(select(func.max(SessionEvent.id)))

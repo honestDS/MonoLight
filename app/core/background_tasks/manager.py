@@ -1,9 +1,12 @@
 import asyncio
 from collections import defaultdict
+from time import monotonic
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
+from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
@@ -16,12 +19,15 @@ from app.providers.database import AsyncSessionLocal
 logger = get_logger(__name__)
 
 BACKGROUND_TASK_POLL_INTERVAL_SECONDS = 0.5
+BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS = 30
 BACKGROUND_TASK_PROFILE_FETCH_LIMIT = 100
+BACKGROUND_TASK_REPLY_MAX_CONCURRENCY = 4
 
 
 class BackgroundTaskManager:
     def __init__(self) -> None:
         self._running_by_profile: dict[int, set[asyncio.Task]] = defaultdict(set)
+        self._running_replies: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -79,7 +85,9 @@ class BackgroundTaskManager:
 
         async with self._lock:
             active_tasks = [task for tasks in self._running_by_profile.values() for task in tasks if not task.done()]
+            active_tasks.extend(task for task in self._running_replies if not task.done())
             self._running_by_profile.clear()
+            self._running_replies.clear()
 
         for task in active_tasks:
             task.cancel()
@@ -131,10 +139,32 @@ class BackgroundTaskManager:
                 task = asyncio.create_task(self._run_task(pending_task.id, profile.id))
                 running.add(task)
 
+    async def dispatch_pending_replies(self) -> None:
+        async with self._lock:
+            self._running_replies.difference_update({task for task in self._running_replies if task.done()})
+            free_slots = max(0, BACKGROUND_TASK_REPLY_MAX_CONCURRENCY - len(self._running_replies))
+            if free_slots <= 0:
+                return
+
+            async with AsyncSessionLocal() as db:
+                pending_replies = await background_task_crud.list_pending_replies(db, limit=free_slots)
+
+            for pending_reply in pending_replies:
+                if pending_reply.id is None:
+                    continue
+                task = asyncio.create_task(self._run_reply(pending_reply.id))
+                self._running_replies.add(task)
+
     async def _run_loop(self) -> None:
+        next_recovery_at = monotonic() + BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS
         while not self._stop_event.is_set():
             try:
+                if monotonic() >= next_recovery_at:
+                    await recover_pending_background_tasks()
+                    await recover_pending_background_task_replies()
+                    next_recovery_at = monotonic() + BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS
                 await self.dispatch_pending_tasks()
+                await self.dispatch_pending_replies()
             except Exception:
                 logger.bind(component="background_task_manager").exception(t("LOG_BACKGROUND_TASK_SCHEDULE_FAILED"))
             try:
@@ -144,6 +174,15 @@ class BackgroundTaskManager:
                 )
             except TimeoutError:
                 continue
+
+    async def _run_reply(self, task_id: int) -> None:
+        try:
+            await trigger_background_task_reply(task_id)
+        finally:
+            current_task = asyncio.current_task()
+            async with self._lock:
+                if current_task is not None:
+                    self._running_replies.discard(current_task)
 
     async def _run_task(self, task_id: int, profile_id: int) -> None:
         try:

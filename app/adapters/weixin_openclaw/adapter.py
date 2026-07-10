@@ -124,17 +124,17 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             logger.bind(uid=uid, session_id=session_id, event_type=event_type).warning(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_EMPTY"))
             return False
 
-        sent = False
+        any_sent = False
         if text:
-            sent = await self.reply_text(user_id, text)
+            any_sent = await self.reply_text(user_id, text)
         for file_item in files:
-            sent = await self.reply_file_item(user_id, file_item) or sent
+            any_sent = await self.reply_file_item(user_id, file_item) or any_sent
 
-        if sent:
+        if any_sent:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type, file_count=len(files)).info(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_SENT"))
         else:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type, file_count=len(files)).warning(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_SEND_FAILED"))
-        return sent
+        return any_sent
 
     async def chat(
         self,

@@ -1,5 +1,7 @@
 import asyncio
 import json
+import uuid
+from time import monotonic
 
 from app.core import constants
 from app.core.crud.background_task import background_task_crud
@@ -9,13 +11,22 @@ from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.save_message import save_message
-from app.models.background_task import BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.background_task import BackgroundTaskReplyStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
 BACKGROUND_RESULT_MESSAGE_SAVED_EXTRA_KEY = "background_result_message_saved"
+BACKGROUND_TASK_REPLY_LEASE_SECONDS = 300
+BACKGROUND_TASK_REPLY_LEASE_RENEW_INTERVAL_SECONDS = 100
+BACKGROUND_TASK_REPLY_LEASE_RETRY_MAX_SECONDS = 10
+BACKGROUND_TASK_REPLY_LEASE_SAFETY_MARGIN_SECONDS = 10
+BACKGROUND_TASK_REPLY_STATE_RETRY_MAX_SECONDS = 10
+
+
+def _build_background_message_dedupe_key(task_id: int, purpose: str) -> str:
+    return f"background-task:{task_id}:{purpose}"
 
 
 def _build_background_tool_result_message(task) -> str:
@@ -60,6 +71,7 @@ async def _save_background_task_result_message(db, task) -> None:
         result_message,
         task.profile_id,
         is_processed=True,
+        dedupe_key=_build_background_message_dedupe_key(task.id, "result"),
     )
     task.extra = {**extra, BACKGROUND_RESULT_MESSAGE_SAVED_EXTRA_KEY: True}
     db.add(task)
@@ -73,7 +85,82 @@ async def _send_session_event(uid: str, session_id: str, event: dict) -> None:
     await send_session_event(uid, session_id, event)
 
 
-async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None:
+async def _renew_reply_lease(task_id: int, worker_id: str) -> bool:
+    lease_deadline = monotonic() + BACKGROUND_TASK_REPLY_LEASE_SECONDS
+    retry_delay = 1.0
+    await asyncio.sleep(BACKGROUND_TASK_REPLY_LEASE_RENEW_INTERVAL_SECONDS)
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                renewed = await background_task_crud.renew_reply_lease(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    lease_seconds=BACKGROUND_TASK_REPLY_LEASE_SECONDS,
+                )
+            if not renewed:
+                logger.bind(task_id=task_id, worker_id=worker_id).warning(t("LOG_BACKGROUND_TASK_REPLY_LEASE_LOST"))
+                return False
+            lease_deadline = monotonic() + BACKGROUND_TASK_REPLY_LEASE_SECONDS
+            retry_delay = 1.0
+            await asyncio.sleep(BACKGROUND_TASK_REPLY_LEASE_RENEW_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            remaining = lease_deadline - monotonic() - BACKGROUND_TASK_REPLY_LEASE_SAFETY_MARGIN_SECONDS
+            logger.bind(task_id=task_id, worker_id=worker_id).error(
+                t(
+                    "LOG_BACKGROUND_TASK_REPLY_LEASE_RENEW_FAILED",
+                    error=format_exception_message(exc),
+                    retry_seconds=max(0, remaining),
+                ),
+                exc_info=True,
+            )
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(retry_delay, remaining))
+            retry_delay = min(retry_delay * 2, BACKGROUND_TASK_REPLY_LEASE_RETRY_MAX_SECONDS)
+
+
+async def _release_reply_claim(task_id: int, worker_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        await background_task_crud.release_reply_claim(
+            db,
+            task_id=task_id,
+            worker_id=worker_id,
+        )
+
+
+async def _converge_persisted_reply_success(task_id: int, worker_id: str) -> None:
+    retry_delay = 1.0
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                completed = await background_task_crud.complete_reply_claim(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    status=BackgroundTaskReplyStatus.SUCCEEDED,
+                )
+            if not completed:
+                logger.bind(task_id=task_id, worker_id=worker_id).warning(t("LOG_BACKGROUND_TASK_REPLY_STATE_CONVERGENCE_LOST"))
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.bind(task_id=task_id, worker_id=worker_id).error(
+                t(
+                    "LOG_BACKGROUND_TASK_REPLY_STATE_COMMIT_FAILED",
+                    error=format_exception_message(exc),
+                    retry_seconds=retry_delay,
+                ),
+                exc_info=True,
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, BACKGROUND_TASK_REPLY_STATE_RETRY_MAX_SECONDS)
+
+
+async def _save_and_notify_reply_error(task_id: int, worker_id: str, error_message: str) -> None:
     async with AsyncSessionLocal() as db:
         task = await background_task_crud.get(db, task_id)
         if not task:
@@ -84,8 +171,17 @@ async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None
         profile_id = task.profile_id
         error_content = t(constants.ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED, error=error_message)
         err_message = InternalMessage(role=MessageRole.ERR, content=error_content)
-        await save_message(db, session_id, uid, MessageRole.ERR, MessageType.TEXT, err_message, profile_id, is_processed=True)
-        await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error=error_message)
+        await save_message(
+            db,
+            session_id,
+            uid,
+            MessageRole.ERR,
+            MessageType.TEXT,
+            err_message,
+            profile_id,
+            is_processed=True,
+            dedupe_key=_build_background_message_dedupe_key(task_id, "reply-error"),
+        )
 
     await _send_session_event(
         uid,
@@ -100,28 +196,36 @@ async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None
         },
     )
 
+    async with AsyncSessionLocal() as db:
+        await background_task_crud.complete_reply_claim(
+            db,
+            task_id=task_id,
+            worker_id=worker_id,
+            status=BackgroundTaskReplyStatus.FAILED,
+            error=error_message,
+        )
 
-async def trigger_background_task_reply(task_id: int) -> None:
+
+async def _execute_claimed_reply(task_id: int, worker_id: str) -> None:
     async with AsyncSessionLocal() as db:
         task = await background_task_crud.get(db, task_id)
-        if not task or not task.auto_reply:
-            logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
-            return
-        if task.status not in {BackgroundTaskStatus.SUCCEEDED, BackgroundTaskStatus.FAILED}:
-            logger.bind(task_id=task_id, status=getattr(task, "status", None)).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
-            return
-        if task.reply_status not in {BackgroundTaskReplyStatus.PENDING, BackgroundTaskReplyStatus.FAILED}:
-            logger.bind(task_id=task_id, reply_status=task.reply_status).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
+        if not task:
             return
 
         session = await session_crud.get_by_session_id(db, task.session_id)
         if not session:
-            await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error=t(constants.ERR_SESSION_NOT_FOUND))
+            error_message = t(constants.ERR_SESSION_NOT_FOUND)
+            await background_task_crud.complete_reply_claim(
+                db,
+                task_id=task_id,
+                worker_id=worker_id,
+                status=BackgroundTaskReplyStatus.FAILED,
+                error=error_message,
+            )
             logger.bind(task_id=task_id, session_id=task.session_id).warning(t("LOG_BACKGROUND_TASK_REPLY_SESSION_MISSING"))
             return
 
         await _save_background_task_result_message(db, task)
-        await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.RUNNING)
 
     try:
         from app.core.dispatcher import ChatDispatcher
@@ -129,14 +233,16 @@ async def trigger_background_task_reply(task_id: int) -> None:
         response = await ChatDispatcher.dispatch_proactive_reply(task_id)
 
         async with AsyncSessionLocal() as db:
-            task = await background_task_crud.get(db, task_id)
-            if task:
-                if response.get("deferred"):
-                    await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.PENDING)
-                    logger.bind(task_id=task_id, uid=task.uid, session_id=task.session_id).info(t("LOG_BACKGROUND_TASK_REPLY_DEFERRED"))
-                    asyncio.create_task(_retry_later(task_id))
-                    return
-                await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.SUCCEEDED)
+            if response.get("deferred"):
+                completed = await background_task_crud.complete_reply_claim(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    status=BackgroundTaskReplyStatus.PENDING,
+                )
+                if completed:
+                    logger.bind(task_id=task_id, uid=response["uid"], session_id=response["session_id"]).info(t("LOG_BACKGROUND_TASK_REPLY_DEFERRED"))
+                return
 
         await _send_session_event(
             response["uid"],
@@ -147,17 +253,55 @@ async def trigger_background_task_reply(task_id: int) -> None:
                 "session_id": response["session_id"],
                 "history": response.get("history", []),
                 "content": response.get("content", ""),
+                "files": response.get("files", []),
                 "task_id": task_id,
                 "background_task_id": task_id,
             },
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         error_message = format_exception_message(exc)
-        logger.bind(task_id=task_id).error(t("LOG_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message), exc_info=True)
-        await _save_and_notify_reply_error(task_id, error_message)
+        logger.bind(task_id=task_id, worker_id=worker_id).error(t("LOG_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message), exc_info=True)
+        await _save_and_notify_reply_error(task_id, worker_id, error_message)
+        return
+
+    await _converge_persisted_reply_success(task_id, worker_id)
 
 
-async def _retry_later(task_id: int) -> None:
-    logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_RETRY_SCHEDULED"))
-    await asyncio.sleep(2)
-    await trigger_background_task_reply(task_id)
+async def trigger_background_task_reply(task_id: int) -> None:
+    worker_id = uuid.uuid4().hex
+    async with AsyncSessionLocal() as db:
+        task = await background_task_crud.try_claim_reply(
+            db,
+            task_id=task_id,
+            worker_id=worker_id,
+            lease_seconds=BACKGROUND_TASK_REPLY_LEASE_SECONDS,
+        )
+    if not task:
+        logger.bind(task_id=task_id).info(t("LOG_BACKGROUND_TASK_REPLY_TRIGGER_SKIPPED"))
+        return
+
+    execution_task = asyncio.create_task(_execute_claimed_reply(task_id, worker_id))
+    lease_task = asyncio.create_task(_renew_reply_lease(task_id, worker_id))
+    try:
+        done, _pending = await asyncio.wait(
+            {execution_task, lease_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if execution_task in done:
+            await execution_task
+        else:
+            lease_renewed = await lease_task
+            if not lease_renewed:
+                execution_task.cancel()
+                await asyncio.gather(execution_task, return_exceptions=True)
+                await asyncio.shield(_release_reply_claim(task_id, worker_id))
+    except asyncio.CancelledError:
+        execution_task.cancel()
+        await asyncio.gather(execution_task, return_exceptions=True)
+        await asyncio.shield(_release_reply_claim(task_id, worker_id))
+        raise
+    finally:
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)

@@ -2,6 +2,7 @@ from typing import (
     Any,
 )
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
     delete,
@@ -21,6 +22,31 @@ from app.models.user import User
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
+    async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> Message | None:
+        result = await db.execute(select(Message).where(Message.dedupe_key == dedupe_key))
+        return result.scalars().first()
+
+    async def create_idempotent(
+        self,
+        db: AsyncSession,
+        *,
+        obj_in: MessageCreate | dict[str, Any],
+        dedupe_key: str,
+    ) -> Message:
+        obj_in_data = obj_in if isinstance(obj_in, dict) else obj_in.model_dump()
+        db_obj = Message.model_validate({**obj_in_data, "dedupe_key": dedupe_key})
+        db.add(db_obj)
+        try:
+            await db.commit()
+            await db.refresh(db_obj)
+            return db_obj
+        except IntegrityError:
+            await db.rollback()
+            existing = await self.get_by_dedupe_key(db, dedupe_key)
+            if existing is None:
+                raise
+            return existing
+
     async def get_by_session(self, db: AsyncSession, session_id: str, limit: int = 100) -> list[Message]:
         result = await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.created_at.asc()).limit(limit))
         return result.scalars().all()

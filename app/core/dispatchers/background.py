@@ -25,6 +25,7 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
 )
 from app.core.tools import get_tools_for_profile
+from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.helpers import (
     BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
@@ -83,7 +84,7 @@ class BackgroundDispatcherMixin:
         extra_messages: list[InternalMessage] | None = None,
         restrict_tools_to_background_allowlist: bool = True,
         reply_source: str = "background_task",
-    ) -> tuple[InternalMessage, list[InternalMessage]]:
+    ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]]]:
         user = await user_crud.get_by_uid(db, uid)
         username = user.username if user else "Unknown"
         cfg = await validate_profile_and_cfg(db, profile)
@@ -220,12 +221,14 @@ class BackgroundDispatcherMixin:
                     if not (ai_msg.content or "").strip():
                         raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
+        safe_content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+        ai_msg.content = safe_content
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
         turn_messages = [ai_msg]
         await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
         if not allow_tools or not ai_msg.tool_calls:
-            return ai_msg, turn_messages
+            return ai_msg, turn_messages, []
 
         validate_background_proactive_tool_calls(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
@@ -278,23 +281,18 @@ class BackgroundDispatcherMixin:
         final_msg = final_response.message
         if final_msg.tool_calls:
             raise LLMException(message=ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN)
-        if not (final_msg.content or "").strip() and not files_to_user:
+        final_text, _untrusted_files = parse_assistant_files_content(final_msg.content)
+        final_msg.content = final_text
+        if not final_text.strip() and not files_to_user:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-        if files_to_user:
-            final_msg.content = json.dumps(
-                {
-                    "type": "assistant_files",
-                    "text": final_msg.content or "",
-                    "files": files_to_user,
-                },
-                ensure_ascii=False,
-            )
 
-        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=1, content=final_msg.content or ""))
+        logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=1, content=final_text))
+        if files_to_user:
+            final_msg.content = build_assistant_files_content(final_text, files_to_user)
         messages.append(final_msg)
         turn_messages.append(final_msg)
         await save_assistant_message(db, session_id, uid, profile.id, final_msg)
-        return final_msg, turn_messages
+        return final_msg, turn_messages, files_to_user
 
     @classmethod
     async def dispatch_proactive_reply(cls, task_id: int) -> dict[str, Any]:
@@ -327,7 +325,7 @@ class BackgroundDispatcherMixin:
                         profile_id=task_profile_id,
                     ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE"))
                     raise ServerException(message=ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
-                ai_msg, turn_messages = await cls._generate_reply_from_history(
+                ai_msg, turn_messages, files = await cls._generate_reply_from_history(
                     db,
                     uid=task_uid,
                     session_id=task_session_id,
@@ -336,10 +334,12 @@ class BackgroundDispatcherMixin:
                     allow_tools=True,
                     reply_source="background_task",
                 )
+                content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
                 return {
                     "uid": task_uid,
                     "session_id": task_session_id,
-                    "content": ai_msg.content,
+                    "content": content,
+                    "files": files,
                     "history": dump_background_proactive_history(turn_messages),
                 }
             finally:

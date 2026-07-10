@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from collections import defaultdict
 from typing import Any
@@ -12,6 +13,33 @@ logger = get_logger(__name__)
 SESSION_EVENT_POLL_INTERVAL_SECONDS = 0.25
 SESSION_EVENT_FETCH_LIMIT = 100
 SESSION_EVENT_CLEANUP_INTERVAL_SECONDS = 60 * 60
+
+
+def _resolve_session_event_identity(event: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    event_source = str(event.get("source") or "")
+    if event.get("event_id") is not None:
+        return {"event_id": event["event_id"], "type": event_type}
+    if event_source == "background_task" and event.get("background_task_id") is not None:
+        return {"background_task_id": event["background_task_id"], "type": event_type}
+    if event_source == "scheduled_task" and event.get("trigger_message_id") is not None:
+        return {"trigger_message_id": event["trigger_message_id"], "type": event_type}
+    return {"event": event}
+
+
+def build_session_event_dedupe_key(uid: str, session_id: str, source: str, event: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "uid": uid,
+            "session_id": session_id,
+            "source": source,
+            "identity": _resolve_session_event_identity(event),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class SessionNotifier:
@@ -52,10 +80,25 @@ class SessionNotifier:
             if not queues:
                 self._queues.pop((uid, session_id), None)
 
-    async def notify(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
+    async def notify(
+        self,
+        uid: str,
+        session_id: str,
+        event: dict[str, Any],
+        *,
+        dedupe_key: str | None = None,
+    ) -> bool:
         normalized_event = json.loads(json.dumps(event, ensure_ascii=False, default=str))
+        resolved_dedupe_key = dedupe_key or build_session_event_dedupe_key(uid, session_id, "session", normalized_event)
         async with AsyncSessionLocal() as db:
-            await session_event_crud.publish(db, uid=uid, session_id=session_id, event=normalized_event)
+            _item, created = await session_event_crud.publish(
+                db,
+                dedupe_key=resolved_dedupe_key,
+                uid=uid,
+                session_id=session_id,
+                event=normalized_event,
+            )
+        return created
 
     async def _poll_events(self) -> None:
         while not self._stop_event.is_set():

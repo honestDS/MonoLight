@@ -54,15 +54,27 @@ async def send_session_event(uid: str, session_id: str, event: dict[str, Any]) -
         session = await session_crud.get_by_session_id(db, session_id)
         source = session.reply_target_source if session and session.reply_target_source else session.source if session else "http"
 
+        normalized_event = normalize_outbox_event(event)
+        dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
         if source in {"http", "ws"}:
-            await session_notifier.notify(uid, session_id, event)
-            logger.bind(uid=uid, session_id=session_id, event_type=event.get("type"), session_source=source).debug("WebSocket session event notified")
+            created = await session_notifier.notify(
+                uid,
+                session_id,
+                normalized_event,
+                dedupe_key=dedupe_key,
+            )
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                event_type=event.get("type"),
+                session_source=source,
+                session_event_created=created,
+            ).debug("WebSocket session event notified")
             return
 
-        normalized_event = normalize_outbox_event(event)
         outbox_item, created = await message_platform_outbox_crud.enqueue(
             db,
-            dedupe_key=build_outbox_dedupe_key(uid, session_id, source, normalized_event),
+            dedupe_key=dedupe_key,
             uid=uid,
             session_id=session_id,
             source=source,

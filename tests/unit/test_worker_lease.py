@@ -1,25 +1,20 @@
 import asyncio
-from datetime import timedelta
 
 import pytest
 from sqlalchemy import delete, update
 
 from app.core.crud.worker_lease import worker_lease_crud
-from app.core.utils.time import get_local_time
 from app.models.worker_lease import WorkerLease
 from app.providers.database import AsyncSessionLocal, engine
+from app.providers.database.time import get_database_timestamp
 from app.workers import lease as lease_runner
 
 
 @pytest.fixture(autouse=True)
 async def clean_worker_lease_table():
     async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: WorkerLease.__table__.create(
-                sync_connection,
-                checkfirst=True,
-            )
-        )
+        await connection.run_sync(lambda sync_connection: WorkerLease.__table__.drop(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: WorkerLease.__table__.create(sync_connection))
     async with AsyncSessionLocal() as db:
         await db.execute(delete(WorkerLease))
         await db.commit()
@@ -97,7 +92,8 @@ async def test_expired_worker_lease_can_be_taken_over():
             owner_id="worker-a",
             lease_seconds=30,
         )
-        await db.execute(update(WorkerLease).where(WorkerLease.worker_name == "message_platform").values(lease_until=get_local_time() - timedelta(seconds=1)))
+        database_now = await get_database_timestamp(db)
+        await db.execute(update(WorkerLease).where(WorkerLease.worker_name == "message_platform").values(lease_until=database_now - 1))
         await db.commit()
 
     async with AsyncSessionLocal() as db:
@@ -119,6 +115,8 @@ async def test_expired_worker_lease_can_be_taken_over():
     assert stale_owner_renewed is False
     assert lease is not None
     assert lease.owner_id == "worker-b"
+    assert isinstance(lease.lease_until, int)
+    assert isinstance(lease.updated_at, int)
 
 
 @pytest.mark.asyncio
@@ -242,3 +240,48 @@ async def test_worker_lease_runner_stops_and_releases_after_lease_loss(monkeypat
         "release",
     ]
     assert events[0][2] == events[2][2] == events[4][2]
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_loss_cancels_worker_after_shutdown_timeout(monkeypatch):
+    events = []
+    worker_started = asyncio.Event()
+    worker_cancelled = asyncio.Event()
+    acquire_attempts = 0
+
+    async def acquire(worker_name, owner_id):
+        nonlocal acquire_attempts
+        acquire_attempts += 1
+        return True
+
+    async def renew(worker_name, owner_id):
+        await worker_started.wait()
+        return False
+
+    async def release(worker_name, owner_id):
+        events.append(("release", worker_name, owner_id))
+
+    async def run_worker(owned_stop_event):
+        worker_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append(("worker-stop", owned_stop_event.is_set()))
+            worker_cancelled.set()
+
+    monkeypatch.setattr(lease_runner, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(lease_runner, "WORKER_SHUTDOWN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(lease_runner, "_acquire_worker_lease", acquire)
+    monkeypatch.setattr(lease_runner, "_renew_worker_lease", renew)
+    monkeypatch.setattr(lease_runner, "_release_worker_lease", release)
+
+    await lease_runner.run_with_worker_lease(
+        "background_task",
+        asyncio.Event(),
+        run_worker,
+    )
+
+    assert worker_cancelled.is_set()
+    assert acquire_attempts == 1
+    assert [event[0] for event in events] == ["worker-stop", "release"]
+    assert events[0][1] is True

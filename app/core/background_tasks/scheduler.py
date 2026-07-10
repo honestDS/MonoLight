@@ -9,6 +9,7 @@ from app.core.crud.user import user_crud
 from app.core.exceptions import BaseBusinessException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.scheduled_task import ScheduledTask
@@ -157,7 +158,7 @@ class ScheduledTaskScheduler:
                     disabled_count = await scheduled_task_crud.disable_by_session(db, uid=uid, session_id=session_id)
                     log.bind(disabled_scheduled_tasks=disabled_count).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE", disabled_count=disabled_count))
                     raise ServerException(message=ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND)
-                ai_msg, turn_messages = await ChatDispatcher._generate_reply_from_history(
+                ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
                     db,
                     uid=uid,
                     session_id=session_id,
@@ -184,7 +185,8 @@ class ScheduledTaskScheduler:
                     },
                 )
             else:
-                log.bind(content=ai_msg.content or "[工具调用]").info(t("LOG_SCHEDULED_TASK_REPLY_COMPLETED", content=ai_msg.content or "[工具调用]"))
+                content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+                log.bind(content=content or "[工具调用]").info(t("LOG_SCHEDULED_TASK_REPLY_COMPLETED", content=content or "[工具调用]"))
                 await send_session_event(
                     uid,
                     session_id,
@@ -193,7 +195,8 @@ class ScheduledTaskScheduler:
                         "source": "scheduled_task",
                         "session_id": session_id,
                         "history": [message.model_dump(mode="json") for message in turn_messages],
-                        "content": ai_msg.content,
+                        "content": content,
+                        "files": files,
                         "task_id": scheduled_task_id,
                         "scheduled_task_id": scheduled_task_id,
                         "trigger_message_id": trigger_message_id,

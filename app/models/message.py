@@ -95,6 +95,7 @@ class Message(MessageBase, table=True):
     __tablename__ = "message"
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field()
+    dedupe_key: str | None = Field(default=None, unique=True, max_length=64)
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

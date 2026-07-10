@@ -7,8 +7,9 @@ import start
 
 
 class ExitedProcess:
-    def __init__(self, return_code: int | None) -> None:
+    def __init__(self, return_code: int | None, pid: int = 1234) -> None:
         self.return_code = return_code
+        self.pid = pid
 
     def poll(self) -> int | None:
         return self.return_code
@@ -78,6 +79,14 @@ def test_build_background_task_command_starts_exactly_one_worker_process():
         "-m",
         "app.workers.background_task",
     ]
+
+
+def test_report_process_started_includes_name_and_pid(capsys):
+    process = ExitedProcess(return_code=None, pid=4321)
+
+    start.report_process_started("Background task worker", process)
+
+    assert capsys.readouterr().out == "Background task worker process started [PID 4321]\n"
 
 
 def test_run_initializes_system_before_starting_processes(monkeypatch):
@@ -202,3 +211,49 @@ def test_stop_processes_swallows_repeated_shutdown_interrupts(monkeypatch):
     start.stop_processes([process])
 
     assert killed == [[process], [process]]
+
+
+def test_install_shutdown_signal_handlers_registers_sigint_and_sigterm(monkeypatch):
+    previous_handlers = {
+        start.signal.SIGINT: object(),
+        start.signal.SIGTERM: object(),
+    }
+    registered = []
+
+    def install_signal(shutdown_signal, handler):
+        registered.append((shutdown_signal, handler))
+        return previous_handlers[shutdown_signal]
+
+    monkeypatch.setattr(start.signal, "signal", install_signal)
+
+    installed = start._install_shutdown_signal_handlers()
+
+    assert registered == [
+        (start.signal.SIGINT, start._raise_shutdown_interrupt),
+        (start.signal.SIGTERM, start._raise_shutdown_interrupt),
+    ]
+    assert installed == previous_handlers
+
+
+def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    stopped_processes = []
+    restored_handlers = []
+    previous_handlers = {start.signal.SIGTERM: object()}
+
+    def run_coroutine(coroutine):
+        coroutine.close()
+
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
+    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(start, "_install_shutdown_signal_handlers", lambda: previous_handlers)
+    monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)
+    monkeypatch.setattr(start, "stop_processes", lambda processes: stopped_processes.append(list(processes)))
+    monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    return_code = start.run()
+
+    assert return_code == 0
+    assert stopped_processes == [[process]]
+    assert restored_handlers == [previous_handlers]

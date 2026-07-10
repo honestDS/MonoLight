@@ -15,6 +15,9 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     async def recover_tasks():
         events.append("recover")
 
+    async def recover_replies():
+        events.append("recover-replies")
+
     def start_manager():
         events.append("manager-start")
 
@@ -36,6 +39,7 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     monkeypatch.setattr(worker, "create_database_tables", create_tables)
     monkeypatch.setattr(worker, "run_with_worker_lease", run_with_lease)
     monkeypatch.setattr(worker, "recover_pending_background_tasks", recover_tasks)
+    monkeypatch.setattr(worker, "recover_pending_background_task_replies", recover_replies)
     monkeypatch.setattr(worker.background_task_manager, "start", start_manager)
     monkeypatch.setattr(worker.background_task_manager, "stop", stop_manager)
     monkeypatch.setattr(worker, "background_log_cleaner", lambda days: cleaner("log-cleaner"))
@@ -52,6 +56,7 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
         "tables",
         "lease:background_task",
         "recover",
+        "recover-replies",
         "manager-start",
         "log-cleaner-start",
         "temp-cleaner-start",

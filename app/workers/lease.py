@@ -11,6 +11,7 @@ logger = get_logger(__name__)
 WORKER_LEASE_SECONDS = 30
 WORKER_LEASE_RENEW_INTERVAL_SECONDS = 10
 WORKER_LEASE_ACQUIRE_INTERVAL_SECONDS = 5
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
 async def _acquire_worker_lease(worker_name: str, owner_id: str) -> bool:
@@ -83,6 +84,23 @@ async def _maintain_worker_lease(
             return
 
 
+async def _stop_owned_worker(worker_name: str, worker_task: asyncio.Task) -> None:
+    done, _pending = await asyncio.wait(
+        {worker_task},
+        timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+    )
+    if worker_task in done:
+        await worker_task
+        return
+
+    logger.error(
+        "Worker graceful shutdown timed out",
+        extra={"worker_name": worker_name},
+    )
+    worker_task.cancel()
+    await asyncio.gather(worker_task, return_exceptions=True)
+
+
 async def _run_owned_worker(
     worker_name: str,
     owner_id: str,
@@ -107,9 +125,10 @@ async def _run_owned_worker(
             return_when=asyncio.FIRST_COMPLETED,
         )
         worker_finished_independently = worker_task in done and renewal_task not in done and shutdown_task not in done
+        lease_management_stopped = renewal_task in done
         owned_stop_event.set()
-        await worker_task
-        return worker_finished_independently
+        await _stop_owned_worker(worker_name, worker_task)
+        return worker_finished_independently or lease_management_stopped
     finally:
         owned_stop_event.set()
         renewal_task.cancel()
@@ -129,6 +148,8 @@ async def run_with_worker_lease(
     shutdown_event: asyncio.Event,
     run_worker: Callable[[asyncio.Event], Awaitable[None]],
 ) -> None:
+    waiting_for_lease = False
+    logger.bind(worker_name=worker_name).info("Worker process entered lease management")
     while not shutdown_event.is_set():
         owner_id = uuid.uuid4().hex
         try:
@@ -141,15 +162,20 @@ async def run_with_worker_lease(
             acquired = False
 
         if not acquired:
+            if not waiting_for_lease:
+                logger.bind(worker_name=worker_name).info("Worker process is waiting to acquire lease")
+                waiting_for_lease = True
             await _wait_for_stop(
                 shutdown_event,
                 WORKER_LEASE_ACQUIRE_INTERVAL_SECONDS,
             )
             continue
 
-        worker_finished_independently = False
+        waiting_for_lease = False
+        logger.bind(worker_name=worker_name, owner_id=owner_id).info("Worker lease acquired")
+        should_stop_process = False
         try:
-            worker_finished_independently = await _run_owned_worker(
+            should_stop_process = await _run_owned_worker(
                 worker_name,
                 owner_id,
                 shutdown_event,
@@ -164,5 +190,5 @@ async def run_with_worker_lease(
                     extra={"worker_name": worker_name},
                 )
 
-        if worker_finished_independently:
+        if should_stop_process:
             return

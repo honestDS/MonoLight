@@ -75,6 +75,10 @@ def build_background_task_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.background_task"]
 
 
+def report_process_started(process_name: str, process: subprocess.Popen) -> None:
+    print(f"{process_name} process started [PID {process.pid}]", flush=True)
+
+
 async def initialize_system() -> None:
     from app.providers.database import AsyncSessionLocal
     from app.providers.database.bootstrap import init_system_data
@@ -160,22 +164,42 @@ def stop_processes(processes: list[subprocess.Popen]) -> None:
         _kill_running_processes(processes)
 
 
+def _raise_shutdown_interrupt(_signum, _frame) -> None:
+    raise KeyboardInterrupt
+
+
+def _install_shutdown_signal_handlers() -> dict[int, signal.Handlers]:
+    previous_handlers = {}
+    for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[shutdown_signal] = signal.signal(shutdown_signal, _raise_shutdown_interrupt)
+    return previous_handlers
+
+
+def _restore_signal_handlers(previous_handlers: dict[int, signal.Handlers]) -> None:
+    for shutdown_signal, previous_handler in previous_handlers.items():
+        signal.signal(shutdown_signal, previous_handler)
+
+
 def run() -> int:
     config = load_start_config()
     asyncio.run(initialize_system())
     process_options = _subprocess_options()
     child_environment = os.environ.copy()
     processes: list[subprocess.Popen] = []
-
-    web_process = subprocess.Popen(build_web_command(config), env=child_environment, **process_options)
-    processes.append(web_process)
+    previous_handlers = _install_shutdown_signal_handlers()
 
     try:
+        web_process = subprocess.Popen(build_web_command(config), env=child_environment, **process_options)
+        processes.append(web_process)
+        report_process_started("Web", web_process)
+
         wait_for_web_service(web_process, config)
         message_platform_process = subprocess.Popen(build_message_platform_command(), env=child_environment, **process_options)
         processes.append(message_platform_process)
+        report_process_started("Message platform worker", message_platform_process)
         background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
         processes.append(background_task_process)
+        report_process_started("Background task worker", background_task_process)
 
         while True:
             for process in processes:
@@ -187,6 +211,7 @@ def run() -> int:
         return 0
     finally:
         stop_processes(processes)
+        _restore_signal_handlers(previous_handlers)
 
 
 def main() -> None:
