@@ -1,4 +1,3 @@
-import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -17,18 +16,15 @@ from app.api.v1.prompts import router as prompt_router
 from app.api.v1.scheduled_tasks import router as scheduled_task_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
-from app.core.background_tasks.recovery import recover_pending_background_tasks
 from app.core.log import LogManager, get_logger
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.session_notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
-from app.tasks import background_log_cleaner, background_temp_cleaner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await recover_pending_background_tasks()
     await session_notifier.start()
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
@@ -41,19 +37,9 @@ async def lifespan(app: FastAPI):
 
     get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
 
-    cleaner_task = asyncio.create_task(background_log_cleaner(7))
-    temp_cleaner_task = asyncio.create_task(background_temp_cleaner())
-
     yield
 
-    cleaner_task.cancel()
-    temp_cleaner_task.cancel()
     await session_notifier.stop()
-    for task in (cleaner_task, temp_cleaner_task):
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
 
 
 def register_routers(app: FastAPI) -> None:

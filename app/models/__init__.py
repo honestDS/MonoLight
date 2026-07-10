@@ -15,3 +15,4 @@ from app.models.session_event import SessionEvent as SessionEvent
 from app.models.system_log import SystemLog as SystemLog
 from app.models.system_setting import SystemSetting as SystemSetting
 from app.models.user import User as User
+from app.models.worker_lease import WorkerLease as WorkerLease

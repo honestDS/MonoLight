@@ -40,6 +40,7 @@ MESSAGES = {
     "LOG_PROACTIVE_REPLY_GENERATION_STARTED": "Proactive reply generation started",
     "LOG_BACKGROUND_TASK_QUEUED": "Background task queued",
     "LOG_BACKGROUND_TASK_SCHEDULE_NO_SLOT": "Background task scheduling skipped: no free concurrency slot",
+    "LOG_BACKGROUND_TASK_SCHEDULE_FAILED": "Background task scheduling failed",
     "LOG_BACKGROUND_TASK_CLAIM_SKIPPED": "Background task claim skipped: task is missing or already handled by another worker",
     "LOG_BACKGROUND_TASK_MISSING": "Background task is missing",
     "LOG_BACKGROUND_TASK_STARTED": "Background task started",

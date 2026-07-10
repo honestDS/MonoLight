@@ -11,55 +11,14 @@ from app.models.message import (
 
 
 def _parse_background_task_result_message(msg: Message, content: str) -> list[InternalMessage]:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
-
-    if not isinstance(payload, dict):
-        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
-
-    tool_call_payload = payload.get("tool_call")
-    tool_result_payload = payload.get("tool_result")
-    if not isinstance(tool_call_payload, dict) or not isinstance(tool_result_payload, dict):
-        task_payload = payload.get("task") if isinstance(payload.get("task"), dict) else {}
-        tool_call_id = f"background_task_result_{msg.id or 'unknown'}"
-        tool_call_payload = {
-            "id": tool_call_id,
-            "name": task_payload.get("tool_name") or "background_task",
-            "arguments": {},
-        }
-        tool_result_payload = {
-            "tool_call_id": tool_call_id,
-            "content": json.dumps(task_payload or payload, ensure_ascii=False),
-        }
-
-    try:
-        tool_call = InternalToolCall(**tool_call_payload)
-    except Exception:
-        return [InternalMessage(id=msg.id, role=MessageRole.ASSISTANT, content=content, attachments=msg.attachments)]
-
-    tool_call_id = tool_result_payload.get("tool_call_id") or tool_call.id
-    tool_result_content = tool_result_payload.get("content")
-    if not isinstance(tool_result_content, str):
-        tool_result_content = json.dumps(tool_result_content, ensure_ascii=False)
-
-    assistant_message = InternalMessage(
-        id=msg.id,
-        role=MessageRole.ASSISTANT,
-        content=None,
-        attachments=msg.attachments,
-        tool_calls=[tool_call],
-    )
-    tool_message = InternalMessage(
-        id=msg.id,
-        role=MessageRole.TOOL,
-        content=tool_result_content,
-        attachments=msg.attachments,
-        tool_call_id=tool_call_id,
-    )
-
-    return [tool_message, assistant_message]
+    return [
+        InternalMessage(
+            id=msg.id,
+            role=MessageRole.USER,
+            content=content,
+            attachments=msg.attachments,
+        )
+    ]
 
 
 def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalMessage]:

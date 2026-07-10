@@ -71,6 +71,10 @@ def build_message_platform_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.message_platform"]
 
 
+def build_background_task_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.background_task"]
+
+
 async def initialize_system() -> None:
     from app.providers.database import AsyncSessionLocal
     from app.providers.database.bootstrap import init_system_data
@@ -114,7 +118,14 @@ def _request_process_stop(process: subprocess.Popen) -> None:
 
 def _kill_running_processes(processes: list[subprocess.Popen]) -> None:
     for process in processes:
-        if process.poll() is None:
+        if process.poll() is not None:
+            continue
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
             try:
                 process.kill()
             except OSError:
@@ -163,6 +174,8 @@ def run() -> int:
         wait_for_web_service(web_process, config)
         message_platform_process = subprocess.Popen(build_message_platform_command(), env=child_environment, **process_options)
         processes.append(message_platform_process)
+        background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
+        processes.append(background_task_process)
 
         while True:
             for process in processes:

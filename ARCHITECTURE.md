@@ -49,9 +49,12 @@ app/
 
 ### 应用入口层
 
-- `start.py`：跨平台统一启动器；读取 `.env` 中的 `APP_PORT`、`APP_HOST` 和 `APP_WORKERS`，在父进程中完成一次数据库与系统数据初始化，再按操作系统创建并托管 Uvicorn Web 进程与唯一后台 Worker。
-- `main.py`：创建 FastAPI 应用，注册中间件、异常处理器和 API 路由；每个 Web Worker 在生命周期中恢复可原子认领的后台任务、启动周期清理任务和数据库会话事件订阅，不运行定时任务调度器或消息平台长轮询。
-- `app/workers/message_platform.py`：独立后台进程入口；复用统一告警过滤配置，并使用进程文件锁确保单机只运行一个实例，统一承担定时任务调度、消息平台长轮询和 Outbox 投递。
+- `start.py`：跨平台统一启动器；读取 `.env` 中的 `APP_PORT`、`APP_HOST` 和 `APP_WORKERS`，在父进程中完成一次数据库与系统数据初始化，再按操作系统创建并托管 Uvicorn Web 进程、唯一消息平台 Worker 与唯一后台任务 Worker。
+- `main.py`：创建 FastAPI 应用，注册中间件、异常处理器和 API 路由；每个 Web Worker 只启动数据库会话事件订阅，不执行后台任务、定时任务、周期清理或消息平台长轮询。
+- `app/workers/message_platform.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担定时任务调度、消息平台长轮询和 Outbox 投递。
+- `app/workers/background_task.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担后台工具任务恢复、认领、按 Profile 并发调度以及日志和临时目录清理。
+- `app/workers/lease.py`：管理独立 Worker 的数据库租约获取、续租、失效停止和释放。
+- `app/workers/signals.py`：为独立 Worker 统一注册 POSIX 信号和 Windows `SIGBREAK` 关闭处理。
 - `app/handler.py`：注册 CORS、语言环境中间件、根路径、favicon 路由，以及数据库、校验、业务异常、LLM 异常和兜底异常处理器。
 - `app/tasks.py`：提供系统日志清理、临时目录清理等周期任务。
 - `app/warning_filters.py`：集中处理第三方库或运行环境的告警过滤。
@@ -142,7 +145,7 @@ app/core/background_tasks/
 └── schemas.py              # 后台任务内部结构
 ```
 
-该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消、状态更新和主动回复。定时任务调度器只在唯一后台 Worker 中启动，避免多个 Uvicorn Web Worker 重复触发同一计划任务。
+该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消、状态更新和主动回复。Web Worker 只写入后台任务记录，唯一后台任务 Worker 负责恢复、认领和按 Profile 并发调度，确保并发上限不会随 Web Worker 数量扩大。定时任务调度器只在唯一消息平台 Worker 中启动，避免多个 Uvicorn Web Worker 重复触发同一计划任务。
 
 ### 消息平台：`app/core/message_platforms/`
 
@@ -152,11 +155,10 @@ app/core/message_platforms/
 ├── base.py                 # 消息平台处理器抽象接口
 ├── manager.py              # 平台轮询任务与 Outbox 消费管理
 ├── notifier.py             # Web 通知或外部平台 Outbox 入队
-├── process_lock.py         # 独立 Worker 单实例文件锁
 └── weixin_openclaw.py      # 微信 OpenClaw 轮询、消息合并与会话事件处理
 ```
 
-消息平台管理器只由 `app/workers/message_platform.py` 独立进程启动，通过平台处理器注册表加载可轮询平台，并为每个平台维护独立任务。Web Worker 只负责修改数据库中的平台配置；独立进程定期刷新配置并启动或停止对应任务。单机进程文件锁阻止重复启动消息平台 Worker，因此无需让所有 Web Worker 竞争平台租约。新增消息平台时实现 `MessagePlatformHandler` 并注册到管理器，无需把平台专属逻辑写入通用管理器。
+消息平台管理器只由持有 `message_platform` 数据库租约的独立进程启动，通过平台处理器注册表加载可轮询平台，并为每个平台维护独立任务。Web Worker 只负责修改数据库中的平台配置；独立进程定期刷新配置并启动或停止对应任务。租约会定期续期，进程崩溃或失去数据库连接后可由其他实例在租约过期后接管，因此互斥范围可跨主机生效。新增消息平台时实现 `MessagePlatformHandler` 并注册到管理器，无需把平台专属逻辑写入通用管理器。
 
 外部平台主动事件采用持久化 Outbox：后台任务或计划任务生成事件后，`notifier.py` 将事件写入 `message_platform_outbox`；唯一后台进程原子认领事件并投递，失败时指数退避重试，进程异常退出后可通过认领租约恢复未完成事件。单次投递由管理器限制在 300 秒内，认领租约为 330 秒，保证正常投递不会因租约提前到期而被重复认领。相同事件使用确定性摘要键去重，投递语义为至少一次；如果外部平台不支持幂等，进程在“远端已接收但本地尚未标记成功”的极小窗口崩溃时仍可能重复发送。
 
@@ -183,7 +185,8 @@ app/core/crud/
 ├── session.py              # 会话访问
 ├── session_event.py        # WebSocket 跨进程广播事件访问
 ├── system_setting.py       # 系统设置访问
-└── user.py                 # 用户访问
+├── user.py                 # 用户访问
+└── worker_lease.py         # 独立 Worker 数据库租约访问
 ```
 
 CRUD 层封装数据库读写细节，供 API 层、调度层、后台任务和系统初始化流程调用。
@@ -320,10 +323,11 @@ app/models/
 ├── session_event.py        # WebSocket 跨进程广播事件模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型
-└── user.py                 # 用户模型
+├── user.py                 # 用户模型
+└── worker_lease.py         # 独立 Worker 数据库租约模型
 ```
 
-模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。`message_platform_outbox` 保存待投递事件、处理状态、认领所有者、租约、重试次数和错误信息；`session_event` 保存供所有 Web Worker 读取的短期主动会话事件。
+模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。`message_platform_outbox` 保存待投递事件、处理状态、认领所有者、租约、重试次数和错误信息；`session_event` 保存供所有 Web Worker 读取的短期主动会话事件；`worker_lease` 保存两个独立 Worker 的当前所有者和租约有效期。
 
 ## Provider 层：`app/providers/`
 
@@ -447,11 +451,11 @@ tests/
     ├── test_background_virtual_tool_feedback.py # 后台虚拟工具反馈测试
     ├── test_message_platform_manager.py     # 消息平台处理器注册与事件路由测试
     ├── test_message_platform_outbox.py      # Outbox 去重、认领、恢复与重试测试
-    ├── test_message_platform_process_lock.py # 消息平台进程单实例锁测试
     ├── test_models_no_foreign_keys.py       # 模型外键约束约定测试
     ├── test_session_notifier.py             # 数据库会话事件广播与清理测试
     ├── test_start.py                        # 跨平台启动器配置与命令测试
-    └── test_shell_tool.py                   # Shell 工具测试
+    ├── test_shell_tool.py                   # Shell 工具测试
+    └── test_worker_lease.py                 # 独立 Worker 数据库租约测试
 
 scripts/
 ├── migration_20260629_add_scheduled_task_profile_id.py # 定时任务字段迁移脚本
@@ -459,7 +463,8 @@ scripts/
 ├── migration_20260709_add_chat_session_reply_target_source.py # 会话回复目标来源迁移脚本
 ├── migration_20260709_add_chat_session_source.py       # 会话来源字段迁移脚本
 ├── migration_20260710_add_message_platform_outbox.py   # 消息平台 Outbox 表迁移
-└── migration_20260710_add_session_event.py             # WebSocket 会话事件广播表迁移
+├── migration_20260710_add_session_event.py             # WebSocket 会话事件广播表迁移
+└── migration_20260711_add_worker_lease.py              # 独立 Worker 数据库租约表迁移
 ```
 
 测试目录覆盖当前关键约定、工具行为和消息平台管理器；新增单元测试按规范放置在 `tests/unit/`。脚本目录保存项目维护和数据迁移相关脚本。
@@ -471,4 +476,4 @@ data/                       # SQLite、Chroma、日志等持久化运行数据
 temp/                       # 用户临时目录、上传文件、工具执行临时文件
 ```
 
-这两个目录属于运行期数据区域，不承载源码模块。路径定义集中在 `app/core/paths.py`。`data/message-platform-worker.lock` 是消息平台独立进程的单机实例锁文件。
+这两个目录属于运行期数据区域，不承载源码模块。路径定义集中在 `app/core/paths.py`。独立 Worker 的互斥状态存储在业务数据库的 `worker_lease` 表中，不依赖运行主机上的锁文件。

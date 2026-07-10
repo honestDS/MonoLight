@@ -2,7 +2,69 @@ import json
 
 from app.core.context import ContextManager
 from app.core.dispatchers.background import BackgroundDispatcherMixin
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.core.utils.message_parser import parse_db_messages_to_internal
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
+
+
+def test_background_task_result_is_preserved_as_new_user_trigger():
+    result_content = json.dumps(
+        {
+            "type": "background_tool_result",
+            "instruction": "Proactively reply to the user.",
+            "task": {
+                "status": "succeeded",
+                "tool_name": "generate_image",
+                "files": ["generated.png"],
+            },
+        },
+        ensure_ascii=False,
+    )
+    raw_messages = [
+        Message(
+            id=3,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.BACKGROUND_TASK_RESULT,
+            content=result_content,
+            is_processed=True,
+        ),
+        Message(
+            id=2,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="任务已提交。",
+            is_processed=True,
+        ),
+        Message(
+            id=1,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="用后台模式画一张图。",
+            is_processed=True,
+        ),
+    ]
+
+    parsed = parse_db_messages_to_internal(raw_messages)
+    audited = ContextManager.audit_tool_chain(
+        list(reversed(parsed)),
+        uid="u1",
+        session_id="s1",
+    )
+
+    assert [message.role for message in audited] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.USER,
+    ]
+    assert audited[-1].content == result_content
 
 
 def test_virtual_tool_feedback_builds_matched_tool_chain():

@@ -72,6 +72,14 @@ def test_build_message_platform_command_starts_exactly_one_worker_process():
     ]
 
 
+def test_build_background_task_command_starts_exactly_one_worker_process():
+    assert start.build_background_task_command() == [
+        sys.executable,
+        "-m",
+        "app.workers.background_task",
+    ]
+
+
 def test_run_initializes_system_before_starting_processes(monkeypatch):
     events = []
     process = ExitedProcess(return_code=1)
@@ -93,7 +101,7 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["initialize", "process", "process"]
+    assert events == ["initialize", "process", "process", "process"]
 
 
 @pytest.mark.parametrize(
@@ -124,6 +132,21 @@ def test_subprocess_options_match_current_platform():
         assert options == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     else:
         assert options == {"start_new_session": True}
+
+
+def test_kill_running_processes_sends_sigkill_to_posix_process_group(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    process.pid = 1234
+    kill_calls = []
+
+    sigkill = object()
+    monkeypatch.setattr(start.os, "name", "posix")
+    monkeypatch.setattr(start.os, "killpg", lambda pid, shutdown_signal: kill_calls.append((pid, shutdown_signal)), raising=False)
+    monkeypatch.setattr(start.signal, "SIGKILL", sigkill, raising=False)
+
+    start._kill_running_processes([process])
+
+    assert kill_calls == [(1234, sigkill)]
 
 
 def test_stop_processes_force_kills_after_graceful_timeout(monkeypatch):

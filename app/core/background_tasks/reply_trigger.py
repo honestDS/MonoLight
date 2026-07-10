@@ -82,7 +82,7 @@ async def _save_and_notify_reply_error(task_id: int, error_message: str) -> None
         uid = task.uid
         session_id = task.session_id
         profile_id = task.profile_id
-        error_content = t("ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED", error=error_message)
+        error_content = t(constants.ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED, error=error_message)
         err_message = InternalMessage(role=MessageRole.ERR, content=error_content)
         await save_message(db, session_id, uid, MessageRole.ERR, MessageType.TEXT, err_message, profile_id, is_processed=True)
         await background_task_crud.set_reply_status(db, task=task, status=BackgroundTaskReplyStatus.FAILED, error=error_message)

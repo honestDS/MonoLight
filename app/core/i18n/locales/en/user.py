@@ -15,4 +15,5 @@ MESSAGES = {
     "ERR_USER_SUPER_PROTECTED": "Super administrator accounts are core protected, disabling or renaming is strictly forbidden.",
     "ERR_USER_SUPER_DELETE_FORBIDDEN": "Deleting super administrator accounts is forbidden.",
     "MSG_ADMIN_RESET_SUCCESS": "Super administrator account information has been successfully reset, please log in and change the default password in time.",
+    "ERR_AUTH_RESET_TOKEN_INVALID": "The administrator reset token is invalid",
 }

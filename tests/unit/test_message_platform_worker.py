@@ -24,7 +24,13 @@ async def test_worker_starts_and_stops_scheduler_and_message_platform_manager(mo
     async def stop_scheduler():
         events.append("scheduler-stop")
 
+    async def run_with_lease(worker_name, stop_event, run_owned_worker):
+        events.append(f"lease:{worker_name}")
+        await run_owned_worker(stop_event)
+
+    monkeypatch.setattr(worker, "install_shutdown_signal_handlers", lambda stop_event: None)
     monkeypatch.setattr(worker, "create_database_tables", create_tables)
+    monkeypatch.setattr(worker, "run_with_worker_lease", run_with_lease)
     monkeypatch.setattr(worker.message_platform_polling_manager, "start", start_manager)
     monkeypatch.setattr(worker.message_platform_polling_manager, "stop", stop_manager)
     monkeypatch.setattr(worker.scheduled_task_scheduler, "start", start_scheduler)
@@ -38,6 +44,7 @@ async def test_worker_starts_and_stops_scheduler_and_message_platform_manager(mo
 
     assert events == [
         "tables",
+        "lease:message_platform",
         "manager-start",
         "scheduler-start",
         "scheduler-stop",
