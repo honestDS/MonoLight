@@ -121,18 +121,27 @@ class ScheduledTaskScheduler:
         )
         await scheduled_task_crud.mark_dispatched(db, scheduled_task=scheduled_task, message_id=saved_message.id)
         log.bind(message_id=saved_message.id, profile_id=profile.id).info(t("LOG_SCHEDULED_TASK_MESSAGE_QUEUED"))
-        reply_task = asyncio.create_task(self._generate_reply(scheduled_task.id, scheduled_task.uid, scheduled_task.session_id, profile.id))
+        reply_task = asyncio.create_task(self._generate_reply(scheduled_task.id, scheduled_task.uid, scheduled_task.session_id, profile.id, saved_message.id))
         self._active_reply_tasks.add(reply_task)
         reply_task.add_done_callback(self._active_reply_tasks.discard)
 
-    async def _generate_reply(self, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int) -> None:
+    async def _generate_reply(self, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int, trigger_message_id: int | None) -> None:
         from app.core.dispatcher import ChatDispatcher
         from app.core.message_platforms.notifier import send_session_event
 
         async with self._reply_semaphore:
-            await self._generate_reply_locked(send_session_event, ChatDispatcher, scheduled_task_id, uid, session_id, profile_id)
+            await self._generate_reply_locked(send_session_event, ChatDispatcher, scheduled_task_id, uid, session_id, profile_id, trigger_message_id)
 
-    async def _generate_reply_locked(self, send_session_event, ChatDispatcher, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int) -> None:
+    async def _generate_reply_locked(
+        self,
+        send_session_event,
+        ChatDispatcher,
+        scheduled_task_id: int | None,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        trigger_message_id: int | None,
+    ) -> None:
         async with AsyncSessionLocal() as db:
             log = logger.bind(uid=uid, session_id=session_id, scheduled_task_id=scheduled_task_id, profile_id=profile_id)
             await active_session_crud.cleanup_expired_locks(db)
@@ -171,6 +180,7 @@ class ScheduledTaskScheduler:
                         "content": f"定时任务回复失败：{error_message}",
                         "task_id": scheduled_task_id,
                         "scheduled_task_id": scheduled_task_id,
+                        "trigger_message_id": trigger_message_id,
                     },
                 )
             else:
@@ -186,6 +196,7 @@ class ScheduledTaskScheduler:
                         "content": ai_msg.content,
                         "task_id": scheduled_task_id,
                         "scheduled_task_id": scheduled_task_id,
+                        "trigger_message_id": trigger_message_id,
                     },
                 )
             finally:

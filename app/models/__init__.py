@@ -6,10 +6,12 @@ from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocu
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.message import Message as Message
 from app.models.message_platform import MessagePlatform as MessagePlatform
+from app.models.message_platform_outbox import MessagePlatformOutbox as MessagePlatformOutbox
 from app.models.profile import Profile as Profile
 from app.models.prompt import PromptLibrary as PromptLibrary
 from app.models.scheduled_task import ScheduledTask as ScheduledTask
 from app.models.session import ChatSession as ChatSession
+from app.models.session_event import SessionEvent as SessionEvent
 from app.models.system_log import SystemLog as SystemLog
 from app.models.system_setting import SystemSetting as SystemSetting
 from app.models.user import User as User

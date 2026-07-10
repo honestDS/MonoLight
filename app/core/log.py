@@ -12,15 +12,12 @@ from pathlib import Path
 from loguru import logger
 
 from app.core import constants
-from app.core.crud.log import system_log_crud
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
 from app.core.log_broadcaster import log_broadcaster
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
-from app.models.system_log import SystemLogCreate
-from app.providers.database import AsyncSessionLocal
 
 
 def get_profile_log_locale(profile: object | None) -> str:
@@ -112,6 +109,10 @@ class LogManager:
         # 异步数据库写入器
         async def db_sink(message):
             try:
+                from app.core.crud.log import system_log_crud
+                from app.models.system_log import SystemLogCreate
+                from app.providers.database import AsyncSessionLocal
+
                 record = message.record
                 # 提取 extra 中的关键字段
                 uid = record["extra"].get("uid")

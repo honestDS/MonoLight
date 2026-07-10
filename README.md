@@ -71,6 +71,56 @@ MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（Gene
 ## 5. 开源协议
 本项目采用 AGPL-3.0 协议开源。
 
+## 运行服务
+
+Web 服务与消息平台运行器是两个独立进程。Web 服务可以启动多个 Worker，但消息平台运行器只能启动一个实例。
+
+在 `.env` 中配置 Web Worker 数量：
+
+```dotenv
+APP_PORT=8001
+APP_WORKERS=1
+```
+
+`APP_WORKERS` 只控制 Web Worker 数量，必须为大于或等于 `1` 的整数。消息平台 Worker 始终固定为一个。
+
+推荐在 Windows、Linux 和 macOS 上使用统一启动器：
+
+```bash
+python start.py
+```
+
+启动器会识别当前操作系统，先在父进程中完成一次数据库建表、迁移和系统数据初始化，再使用 `.env` 中的端口和 Worker 数量启动 Uvicorn；Web 端口就绪后，再启动唯一的后台 Worker。任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
+
+需要分别调试两个进程时，先执行一次全局初始化：
+
+```bash
+python -c "import asyncio; from start import initialize_system; asyncio.run(initialize_system())"
+```
+
+然后手动启动 Web 服务：
+
+```bash
+python main.py
+```
+
+以及唯一后台 Worker：
+
+```bash
+python -m app.workers.message_platform
+```
+
+后台 Worker 统一负责：
+
+- 定时任务的扫描与触发；
+- 各外部消息平台的长轮询收信；
+- 消息平台任务的配置刷新与生命周期管理；
+- 持久化 Outbox 的主动消息投递、失败重试和崩溃恢复。
+
+Web Worker 不会启动定时任务调度器或消息平台长轮询。后台任务和计划任务需要向外部平台主动发送事件时，只会将事件写入数据库 Outbox，由后台 Worker 异步投递。面向 WebSocket 的主动事件写入 `session_event`，由每个 Web Worker 独立轮询并投递到本进程连接，避免多 Worker 场景下事件静默丢失。
+
+`data/message-platform-worker.lock` 用于阻止同一主机重复启动后台 Worker。容器或多主机部署时还必须在部署配置中将后台 Worker 副本数固定为 `1`；该文件锁不提供跨主机互斥。
+
 ## 自动化测试
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
 

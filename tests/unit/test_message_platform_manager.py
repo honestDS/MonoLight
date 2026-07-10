@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -40,3 +41,30 @@ def test_manager_accepts_empty_handler_registry():
     manager = MessagePlatformPollingManager(())
 
     assert manager.get_handler(MessagePlatformType.WEIXIN_OPENCLAW) is None
+
+
+@pytest.mark.asyncio
+async def test_manager_start_is_idempotent_and_stop_clears_runtime_tasks(monkeypatch):
+    manager = MessagePlatformPollingManager(())
+    stop_gate = asyncio.Event()
+
+    async def wait_until_stopped():
+        await stop_gate.wait()
+
+    monkeypatch.setattr(manager, "_supervisor_loop", wait_until_stopped)
+    monkeypatch.setattr(manager, "_outbox_loop", wait_until_stopped)
+
+    manager.start()
+    first_supervisor = manager._supervisor_task
+    first_outbox = manager._outbox_task
+    manager.start()
+
+    assert manager.is_running is True
+    assert manager._supervisor_task is first_supervisor
+    assert manager._outbox_task is first_outbox
+
+    await manager.stop()
+
+    assert manager.is_running is False
+    assert manager._supervisor_task is None
+    assert manager._outbox_task is None

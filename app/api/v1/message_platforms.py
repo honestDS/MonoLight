@@ -6,7 +6,6 @@ from app.api.v1.users import check_admin_privilege
 from app.core import constants
 from app.core.crud.message_platform import message_platform_crud
 from app.core.exceptions import ParameterException, ResourceNotFoundException
-from app.core.message_platforms.manager import message_platform_polling_manager
 from app.models.message_platform import (
     MessagePlatformCreate,
     MessagePlatformResponse,
@@ -97,7 +96,6 @@ async def create_message_platform(platform_in: MessagePlatformCreate, db: AsyncS
     payload["uid"] = _normalize_uid(payload.get("uid") or getattr(admin, "uid", None))
     _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
     platform = await message_platform_crud.create(db, obj_in=payload)
-    await message_platform_polling_manager.reload()
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_CREATED)
 
 
@@ -122,7 +120,6 @@ async def update_message_platform(platform_id: int, platform_in: MessagePlatform
     next_uid = data["uid"] if "uid" in data else platform.uid
     _ensure_uid_for_enabled(next_is_enabled, next_uid)
     platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data)
-    await message_platform_polling_manager.restart_platform(platform.id)
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_UPDATED)
 
 
@@ -132,7 +129,6 @@ async def delete_message_platform(platform_id: int, db: AsyncSession = Depends(g
     if not platform:
         raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
     await message_platform_crud.remove(db, id=platform_id)
-    await message_platform_polling_manager.restart_platform(platform_id)
     return StandardResponse.success(message=constants.MSG_MESSAGE_PLATFORM_DELETED)
 
 
@@ -146,9 +142,7 @@ async def recover_message_platform(platform_id: int, db: AsyncSession = Depends(
     if not platform.get_config_secret("token"):
         raise ParameterException(constants.ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING)
     next_status = MessagePlatformStatus.CONNECTED if platform.is_enabled else MessagePlatformStatus.DISCONNECTED
-    platform = await message_platform_crud.update_runtime_state(db, platform=platform, status=next_status, state={"poll_lease": {}}, last_error="")
-    if platform.is_enabled:
-        await message_platform_polling_manager.restart_platform(platform.id)
+    platform = await message_platform_crud.update_runtime_state(db, platform=platform, status=next_status, last_error="")
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_RECOVERED)
 
 
@@ -251,8 +245,6 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
     else:
         update_kwargs.update({"status": MessagePlatformStatus.WAITING_LOGIN})
     platform = await message_platform_crud.update_runtime_state(db, platform=platform, **update_kwargs)
-    if platform.status == MessagePlatformStatus.CONNECTED:
-        await message_platform_polling_manager.restart_platform(platform.id)
     return StandardResponse.success(
         message=constants.MSG_MESSAGE_PLATFORM_LOGIN_STATUS,
         data=WeixinOpenClawLoginStatusResponse(

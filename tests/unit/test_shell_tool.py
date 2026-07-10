@@ -1,4 +1,4 @@
-﻿import json
+import json
 import sys
 import sysconfig
 
@@ -16,13 +16,7 @@ async def test_execute_python_inline_command_bypasses_shell(monkeypatch, tmp_pat
 
     monkeypatch.setattr(executor, "_get_profile_timeout", fake_get_profile_timeout)
     python_executable = sys.executable.replace("\\", "/")
-    command = (
-        f'"{python_executable}" -c '
-        '"import json, sys; '
-        "payload = {'quote': '\\\"', 'items': [1, 2, 3], 'arg': sys.argv[1]}; "
-        'print(json.dumps(payload, ensure_ascii=False))" '
-        '"arg with spaces"'
-    )
+    command = f"\"{python_executable}\" -c \"import json, sys; payload = {{'quote': '\\\"', 'items': [1, 2, 3], 'arg': sys.argv[1]}}; print(json.dumps(payload, ensure_ascii=False))\" \"arg with spaces\""
 
     result = json.loads(await executor.execute(command=command))
 
@@ -46,16 +40,16 @@ async def test_execute_python_inline_command_normalizes_compound_statement(monke
     command = (
         f'"{python_executable}" -c '
         '"import json; class TestClass:\n'
-        '    def __init__(self, name):\n'
-        '        self.name = name\n'
-        '        self.data = []\n'
-        '\n'
-        '    def add_data(self, item):\n'
-        '        self.data.append(item)\n'
-        '\n'
-        'obj = TestClass(\'测试对象\')\n'
-        'obj.add_data(10)\n'
-        'print(json.dumps({\'name\': obj.name, \'data\': obj.data}, ensure_ascii=False))"'
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+        "        self.data = []\n"
+        "\n"
+        "    def add_data(self, item):\n"
+        "        self.data.append(item)\n"
+        "\n"
+        "obj = TestClass('测试对象')\n"
+        "obj.add_data(10)\n"
+        "print(json.dumps({'name': obj.name, 'data': obj.data}, ensure_ascii=False))\""
     )
 
     result = json.loads(await executor.execute(command=command))
@@ -73,8 +67,8 @@ def test_python_inline_command_detection_skips_shell_composition(tmp_path):
     assert executor._extract_python_inline_command('python -c "import json; class TestClass:\n    pass"')[2].startswith("import json\nclass TestClass:")
     assert executor._extract_python_inline_command('python -c "print(1)" | more') is None
     assert executor._extract_python_inline_command('python -c "print(1)" > out.txt') is None
-    assert executor._extract_python_inline_command('python -c "import sys; sys.stderr.write(\'x\')" 2> err.txt') is None
-    assert executor._extract_python_inline_command('python -c "import sys; sys.stderr.write(\'x\')" 2>&1') is None
+    assert executor._extract_python_inline_command("python -c \"import sys; sys.stderr.write('x')\" 2> err.txt") is None
+    assert executor._extract_python_inline_command("python -c \"import sys; sys.stderr.write('x')\" 2>&1") is None
 
 
 def test_python_inline_command_keeps_explicit_interpreter_path(tmp_path):

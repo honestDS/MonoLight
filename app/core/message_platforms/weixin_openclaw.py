@@ -1,12 +1,9 @@
 import asyncio
-import time
-import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.message import merge_message_pair
-from app.core.crud.active_session import active_session_crud
 from app.core.crud.message_platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -15,9 +12,6 @@ from app.models.message_platform import MessagePlatform, MessagePlatformStatus, 
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
-
-POLL_LEASE_GRACE_SECONDS = 30
-POLL_LEASE_MIN_SECONDS = 60
 
 
 class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
@@ -31,20 +25,18 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         pending_messages: dict[tuple[str, str], WeixinOpenClawMessage] = {}
         pending_uids: dict[tuple[str, str], str] = {}
         pending_flush_tasks: dict[tuple[str, str], asyncio.Task] = {}
-        poll_lock_key = f"message-platform:{platform_id}"
-        poll_owner = uuid.uuid4().hex
         try:
             while True:
                 platform_uid = ""
                 previous_sync_buf = ""
                 try:
-                    should_continue, platform, previous_sync_buf = await self._claim_poll(platform_id, poll_lock_key, poll_owner)
-                    if not should_continue:
+                    async with AsyncSessionLocal() as db:
+                        platform = await message_platform_crud.get(db, platform_id)
+                    if not self.is_pollable(platform):
                         return
-                    if platform is None:
-                        await asyncio.sleep(1)
-                        continue
+                    assert platform is not None
                     platform_uid = platform.uid or ""
+                    previous_sync_buf = str((platform.state or {}).get("sync_buf") or "")
                     next_signature = self._adapter_signature(platform)
                     if adapter is None or adapter_signature != next_signature:
                         if adapter is not None and active_message_tasks:
@@ -62,11 +54,8 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         if not self.is_pollable(platform):
                             return
                         assert platform is not None
-                        if not self._poll_owner_matches(platform, poll_owner):
-                            continue
                         if adapter.sync_buf != previous_sync_buf:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
-                        await self._release_poll_lease(db, platform)
                         for message in messages:
                             self._enqueue_message(
                                 adapter,
@@ -89,8 +78,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     logger.bind(platform_id=platform_id).exception("message platform polling failed")
                     await self._mark_error(platform_id, str(exc))
                     await asyncio.sleep(5)
-                finally:
-                    await self._release_poll_lease_if_owned(platform_id, poll_owner)
         finally:
             for task in active_message_tasks:
                 task.cancel()
@@ -101,53 +88,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
             if adapter is not None:
                 await adapter.close()
-
-    async def _claim_poll(self, platform_id: int, poll_lock_key: str, poll_owner: str) -> tuple[bool, MessagePlatform | None, str]:
-        async with AsyncSessionLocal() as db:
-            await active_session_crud.cleanup_expired_locks(db)
-            lock_acquired = await active_session_crud.acquire_lock(db, poll_lock_key)
-            if not lock_acquired:
-                return True, None, ""
-            try:
-                platform = await message_platform_crud.get(db, platform_id)
-                if not self.is_pollable(platform):
-                    return False, None, ""
-                assert platform is not None
-                state = dict(platform.state or {})
-                lease = state.get("poll_lease") if isinstance(state.get("poll_lease"), dict) else {}
-                lease_until = float(lease.get("until") or 0)
-                if lease_until > time.time() and lease.get("owner") != poll_owner:
-                    return True, None, ""
-                previous_sync_buf = str(state.get("sync_buf") or "")
-                lease_seconds = self._poll_lease_seconds(platform)
-                await message_platform_crud.update_runtime_state(
-                    db,
-                    platform=platform,
-                    state={"poll_lease": {"owner": poll_owner, "until": time.time() + lease_seconds}},
-                )
-                return True, platform, previous_sync_buf
-            finally:
-                await active_session_crud.release_lock(db, poll_lock_key)
-
-    @staticmethod
-    def _poll_lease_seconds(platform: MessagePlatform) -> float:
-        config = normalize_weixin_openclaw_config(platform.config)
-        return max(POLL_LEASE_MIN_SECONDS, config["long_poll_timeout_ms"] / 1000 + POLL_LEASE_GRACE_SECONDS)
-
-    @staticmethod
-    def _poll_owner_matches(platform: MessagePlatform, poll_owner: str) -> bool:
-        lease = (platform.state or {}).get("poll_lease")
-        return isinstance(lease, dict) and lease.get("owner") == poll_owner
-
-    async def _release_poll_lease_if_owned(self, platform_id: int, poll_owner: str) -> None:
-        async with AsyncSessionLocal() as db:
-            platform = await message_platform_crud.get(db, platform_id)
-            if platform is not None and self._poll_owner_matches(platform, poll_owner):
-                await self._release_poll_lease(db, platform)
-
-    @staticmethod
-    async def _release_poll_lease(db, platform: MessagePlatform) -> None:
-        await message_platform_crud.update_runtime_state(db, platform=platform, state={"poll_lease": {}})
 
     def _enqueue_message(
         self,

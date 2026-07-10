@@ -108,13 +108,7 @@ def load_migration_module(script_path: Path) -> ModuleType:
 def iter_migration_scripts() -> list[Path]:
     if not MIGRATION_SCRIPTS_DIR.exists():
         return []
-    return sorted(
-        path
-        for path in MIGRATION_SCRIPTS_DIR.iterdir()
-        if path.is_file()
-        and path.name.startswith(MIGRATION_FILE_PREFIX)
-        and path.name.endswith(MIGRATION_FILE_SUFFIX)
-    )
+    return sorted(path for path in MIGRATION_SCRIPTS_DIR.iterdir() if path.is_file() and path.name.startswith(MIGRATION_FILE_PREFIX) and path.name.endswith(MIGRATION_FILE_SUFFIX))
 
 
 async def run_once_migration_scripts(session: AsyncSession) -> None:
@@ -137,12 +131,19 @@ async def run_once_migration_scripts(session: AsyncSession) -> None:
         logger.info("MIGRATION: completed %s", migration_id)
 
 
-async def init_system_data(session: AsyncSession):
-    # 1. 基础表初始化 (若表不存在则创建)
+async def create_database_tables() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
+
+async def init_database_schema(session: AsyncSession) -> None:
+    await create_database_tables()
     await run_once_migration_scripts(session)
+
+
+async def init_system_data(session: AsyncSession):
+    # 1. 基础表初始化与迁移
+    await init_database_schema(session)
 
     # 清空会话锁表 (active_session)
     await session.execute(text(f"DELETE FROM {ActiveSession.__tablename__}"))

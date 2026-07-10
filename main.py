@@ -18,22 +18,18 @@ from app.api.v1.scheduled_tasks import router as scheduled_task_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core.background_tasks.recovery import recover_pending_background_tasks
-from app.core.background_tasks.scheduler import scheduled_task_scheduler
 from app.core.log import LogManager, get_logger
-from app.core.message_platforms.manager import message_platform_polling_manager
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
+from app.core.session_notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
-from app.providers.database import AsyncSessionLocal
-from app.providers.database.bootstrap import init_system_data
 from app.tasks import background_log_cleaner, background_temp_cleaner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with AsyncSessionLocal() as session:
-        await init_system_data(session)
     await recover_pending_background_tasks()
+    await session_notifier.start()
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
     now_aware = get_local_time()
@@ -47,15 +43,12 @@ async def lifespan(app: FastAPI):
 
     cleaner_task = asyncio.create_task(background_log_cleaner(7))
     temp_cleaner_task = asyncio.create_task(background_temp_cleaner())
-    scheduled_task_scheduler.start()
-    message_platform_polling_manager.start()
 
     yield
 
     cleaner_task.cancel()
     temp_cleaner_task.cancel()
-    await scheduled_task_scheduler.stop()
-    await message_platform_polling_manager.stop()
+    await session_notifier.stop()
     for task in (cleaner_task, temp_cleaner_task):
         try:
             await task

@@ -1,0 +1,181 @@
+import subprocess
+import sys
+
+import pytest
+
+import start
+
+
+class ExitedProcess:
+    def __init__(self, return_code: int | None) -> None:
+        self.return_code = return_code
+
+    def poll(self) -> int | None:
+        return self.return_code
+
+
+def test_load_start_config_reads_worker_count_from_environment(monkeypatch):
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setenv("APP_HOST", "127.0.0.1")
+    monkeypatch.setenv("APP_PORT", "9000")
+    monkeypatch.setenv("APP_WORKERS", "3")
+
+    config = start.load_start_config()
+
+    assert config == start.StartConfig(host="127.0.0.1", port=9000, web_workers=3)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("APP_PORT", "0"),
+        ("APP_PORT", "65536"),
+        ("APP_PORT", "invalid"),
+        ("APP_WORKERS", "0"),
+        ("APP_WORKERS", "invalid"),
+    ],
+)
+def test_load_start_config_rejects_invalid_numeric_values(monkeypatch, name, value):
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setenv("APP_PORT", "8000")
+    monkeypatch.setenv("APP_WORKERS", "1")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError):
+        start.load_start_config()
+
+
+def test_build_web_command_uses_current_python_and_worker_count():
+    config = start.StartConfig(host="0.0.0.0", port=8001, web_workers=4)
+
+    command = start.build_web_command(config)
+
+    assert command == [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+        "--workers",
+        "4",
+    ]
+
+
+def test_build_message_platform_command_starts_exactly_one_worker_process():
+    assert start.build_message_platform_command() == [
+        sys.executable,
+        "-m",
+        "app.workers.message_platform",
+    ]
+
+
+def test_run_initializes_system_before_starting_processes(monkeypatch):
+    events = []
+    process = ExitedProcess(return_code=1)
+
+    def run_coroutine(coroutine):
+        events.append("initialize")
+        coroutine.close()
+
+    def start_process(*args, **kwargs):
+        events.append("process")
+        return process
+
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=2))
+    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+    monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: None)
+    monkeypatch.setattr(start, "stop_processes", lambda processes: None)
+
+    return_code = start.run()
+
+    assert return_code == 1
+    assert events == ["initialize", "process", "process"]
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("0.0.0.0", "127.0.0.1"),
+        ("::", "127.0.0.1"),
+        ("", "127.0.0.1"),
+        ("192.0.2.1", "192.0.2.1"),
+    ],
+)
+def test_connect_host_converts_wildcard_addresses(host, expected):
+    assert start._connect_host(host) == expected
+
+
+def test_wait_for_web_service_reports_early_process_exit():
+    process = ExitedProcess(return_code=7)
+    config = start.StartConfig(host="127.0.0.1", port=8001, web_workers=1)
+
+    with pytest.raises(RuntimeError, match="code 7"):
+        start.wait_for_web_service(process, config)
+
+
+def test_subprocess_options_match_current_platform():
+    options = start._subprocess_options()
+
+    if start.os.name == "nt":
+        assert options == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        assert options == {"start_new_session": True}
+
+
+def test_stop_processes_force_kills_after_graceful_timeout(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    requested = []
+    killed = []
+    wait_results = iter([False, True])
+
+    monkeypatch.setattr(start, "_request_process_stop", requested.append)
+    monkeypatch.setattr(start, "_kill_running_processes", lambda processes: killed.append(processes))
+    monkeypatch.setattr(start, "_wait_until_stopped", lambda processes, timeout: next(wait_results))
+
+    start.stop_processes([process])
+
+    assert requested == [process]
+    assert killed == [[process]]
+
+
+def test_stop_processes_force_kills_when_graceful_wait_is_interrupted(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    killed = []
+    wait_calls = 0
+
+    def wait_until_stopped(processes, timeout):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            raise KeyboardInterrupt
+        return True
+
+    monkeypatch.setattr(start, "_request_process_stop", lambda process: None)
+    monkeypatch.setattr(start, "_kill_running_processes", lambda processes: killed.append(processes))
+    monkeypatch.setattr(start, "_wait_until_stopped", wait_until_stopped)
+
+    start.stop_processes([process])
+
+    assert killed == [[process]]
+    assert wait_calls == 2
+
+
+def test_stop_processes_swallows_repeated_shutdown_interrupts(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    killed = []
+
+    monkeypatch.setattr(start, "_request_process_stop", lambda process: None)
+    monkeypatch.setattr(start, "_kill_running_processes", lambda processes: killed.append(processes))
+    monkeypatch.setattr(
+        start,
+        "_wait_until_stopped",
+        lambda processes, timeout: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    start.stop_processes([process])
+
+    assert killed == [[process], [process]]
