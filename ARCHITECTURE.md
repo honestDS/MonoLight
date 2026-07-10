@@ -145,13 +145,15 @@ app/core/background_tasks/
 ```text
 app/core/message_platforms/
 ├── __init__.py
-├── manager.py              # 消息平台轮询任务管理器
-└── notifier.py             # 消息平台状态通知与事件广播
+├── base.py                 # 消息平台处理器抽象接口
+├── manager.py              # 通用轮询任务注册与生命周期管理
+├── notifier.py             # 消息平台状态通知与事件广播
+└── weixin_openclaw.py      # 微信 OpenClaw 轮询、消息合并与会话事件处理
 ```
 
-消息平台管理器在应用生命周期中启动和停止，负责加载已启用、已绑定 `uid` 且已连接的平台，并为每个平台维护独立轮询任务。平台配置变更、启停、删除或扫码登录成功后，API 层会触发管理器重载或重启对应平台任务。
+消息平台管理器在应用生命周期中启动和停止，通过平台处理器注册表加载可轮询平台，并为每个平台维护独立任务。平台配置变更、启停、删除或扫码登录成功后，API 层会触发管理器重载或重启对应平台任务。新增消息平台时实现 `MessagePlatformHandler` 并注册到管理器，无需把平台专属逻辑写入通用管理器。
 
-微信 OpenClaw 平台轮询任务会复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后并发调用内部聊天调度流程，回复结果经适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库，并通过通知模块向前端推送状态变化。
+微信 OpenClaw 处理器复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后完成消息合并、上下文 token 保存和内部聊天调度，回复结果经适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库，并通过通知模块向前端推送状态变化。
 
 ### 数据访问：`app/core/crud/`
 
@@ -428,6 +430,8 @@ dashboard/src/composables/
 
 ```text
 tests/
+├── unit/
+│   └── test_message_platform_manager.py     # 消息平台处理器注册与事件路由测试
 ├── test_background_virtual_tool_feedback.py # 后台虚拟工具反馈测试
 ├── test_models_no_foreign_keys.py           # 模型外键约束约定测试
 └── test_shell_tool.py                       # Shell 工具测试
@@ -439,7 +443,7 @@ scripts/
 └── migration_20260709_add_chat_session_source.py       # 会话来源字段迁移脚本
 ```
 
-测试目录覆盖当前关键约定与工具行为；脚本目录保存项目维护和数据迁移相关脚本。
+测试目录覆盖当前关键约定、工具行为和消息平台管理器；新增单元测试按规范放置在 `tests/unit/`。脚本目录保存项目维护和数据迁移相关脚本。
 
 ## 运行期目录
 
