@@ -65,11 +65,13 @@ def process_markdown_response(ai_msg: InternalMessage, enable_markdown: bool) ->
     if enable_markdown or not ai_msg.content:
         return ai_msg
 
-    # 文件发送结构需要保持 JSON 原文，便于历史消息恢复文件卡片
+    # 文件发送结构需要保持协议格式，仅清洗其中的回复文本
     if isinstance(ai_msg.content, str):
         try:
             parsed = json.loads(ai_msg.content)
             if isinstance(parsed, dict) and parsed.get("type") == "assistant_files":
+                parsed["text"] = remove_markdown(str(parsed.get("text") or ""))
+                ai_msg.content = json.dumps(parsed, ensure_ascii=False)
                 return ai_msg
         except Exception:
             pass

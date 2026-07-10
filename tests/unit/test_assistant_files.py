@@ -2,6 +2,8 @@ import json
 
 from app.adapters.weixin_openclaw.response import extract_event_reply, extract_reply_files, extract_reply_text
 from app.core.utils.assistant_files import build_assistant_files_content, merge_assistant_files, parse_assistant_files_content
+from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
+from app.models.message import InternalMessage, MessageRole
 
 
 def test_assistant_files_content_only_restores_text():
@@ -20,6 +22,31 @@ def test_plain_text_content_is_not_treated_as_file_protocol():
 
     assert text == "普通回复"
     assert files == []
+
+
+def test_markdown_disabled_cleans_text_inside_assistant_files_protocol():
+    files = [{"id": "file-1", "name": "generated.png"}]
+    message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=build_assistant_files_content("**图片**已发送。\n\n- 结果一", files),
+    )
+
+    processed = process_markdown_response(message, enable_markdown=False)
+    payload = json.loads(processed.content)
+
+    assert payload["type"] == "assistant_files"
+    assert payload["text"] == "图片已发送。\n\n结果一"
+    assert payload["files"] == files
+
+
+def test_markdown_enabled_preserves_text_inside_assistant_files_protocol():
+    markdown_text = "**图片**已发送。\n\n- 结果一"
+    content = build_assistant_files_content(markdown_text, [{"id": "file-1"}])
+    message = InternalMessage(role=MessageRole.ASSISTANT, content=content)
+
+    processed = process_markdown_response(message, enable_markdown=True)
+
+    assert processed.content == content
 
 
 def test_merge_assistant_files_deduplicates_by_id_and_path():
