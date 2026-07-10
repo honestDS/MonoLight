@@ -6,11 +6,7 @@ MIGRATION_ID = "20260709_add_chat_session_source"
 
 async def ensure_column(session: AsyncSession, table_name: str, column_name: str) -> None:
     connection = await session.connection()
-    column_names = set(
-        await connection.run_sync(
-            lambda sync_connection: [column["name"] for column in inspect(sync_connection).get_columns(table_name)]
-        )
-    )
+    column_names = set(await connection.run_sync(lambda sync_connection: [column["name"] for column in inspect(sync_connection).get_columns(table_name)]))
     if column_name in column_names:
         return
 

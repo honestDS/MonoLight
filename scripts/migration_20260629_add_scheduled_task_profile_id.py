@@ -6,11 +6,7 @@ MIGRATION_ID = "20260629_add_scheduled_task_profile_id"
 
 async def ensure_column(session: AsyncSession, table_name: str, column_name: str) -> None:
     connection = await session.connection()
-    column_names = set(
-        await connection.run_sync(
-            lambda sync_connection: [column["name"] for column in inspect(sync_connection).get_columns(table_name)]
-        )
-    )
+    column_names = set(await connection.run_sync(lambda sync_connection: [column["name"] for column in inspect(sync_connection).get_columns(table_name)]))
     if column_name not in column_names:
         await session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} INTEGER NULL"))
 

@@ -71,9 +71,7 @@ async def migrate(session: AsyncSession) -> None:
                     updated_at TIMESTAMP NULL
                 )
                 """
-        await session.execute(
-            text(create_table_sql)
-        )
+        await session.execute(text(create_table_sql))
 
     await create_index(session, "message_platform", "ix_message_platform_id", "id")
     await create_index(session, "message_platform", "ix_message_platform_name", "name", unique=True)

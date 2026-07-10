@@ -60,14 +60,7 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         return list(result.scalars().all())
 
     async def list_active_user_tasks(self, db: AsyncSession, *, uid: str, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
-        stmt = (
-            select(BackgroundTask)
-            .where(BackgroundTask.uid == uid)
-            .where(BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING]))
-            .order_by(BackgroundTask.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
+        stmt = select(BackgroundTask).where(BackgroundTask.uid == uid).where(BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
         if session_id:
             stmt = stmt.where(BackgroundTask.session_id == session_id)
         result = await db.execute(stmt)

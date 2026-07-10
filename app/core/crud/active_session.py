@@ -30,6 +30,7 @@ class CRUDActiveSession(CRUDBase[ActiveSession, ActiveSession, ActiveSession]):
         释放会话锁
         如果发生 CancelledError，依然保证尝试执行释放逻辑。
         """
+
         async def _do_release():
             try:
                 stmt = delete(ActiveSession).where(ActiveSession.session_id == session_id)

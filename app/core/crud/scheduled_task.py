@@ -52,13 +52,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
 
     async def list_due(self, db: AsyncSession, *, limit: int = 100) -> list[ScheduledTask]:
         now = get_local_time()
-        stmt = (
-            select(ScheduledTask)
-            .where(ScheduledTask.status == ScheduledTaskStatus.ENABLED)
-            .where(ScheduledTask.next_run_at <= now)
-            .order_by(ScheduledTask.next_run_at.asc())
-            .limit(limit)
-        )
+        stmt = select(ScheduledTask).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED).where(ScheduledTask.next_run_at <= now).order_by(ScheduledTask.next_run_at.asc()).limit(limit)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 

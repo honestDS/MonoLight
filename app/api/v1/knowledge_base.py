@@ -112,12 +112,7 @@ async def load_user_knowledge_base(db: AsyncSession, kb_id: int, current_user: A
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
 
-    result = await db.execute(
-        select(Profile)
-        .join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id)
-        .where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id)
-        .where(Profile.uid == getattr(current_user, "uid", None))
-    )
+    result = await db.execute(select(Profile).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(Profile.uid == getattr(current_user, "uid", None)))
     profile = result.scalars().first()
     if not profile:
         raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
@@ -234,12 +229,7 @@ async def get_profile_knowledge_base_bindings(
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=403, detail=constants.ERR_SESSION_NO_PERMISSION)
 
-    result = await db.execute(
-        select(KnowledgeBaseProfileBinding.knowledge_base_id)
-        .join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id)
-        .where(KnowledgeBaseProfileBinding.profile_id == profile_id)
-        .where(KnowledgeBase.uid == profile.uid)
-    )
+    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBase.uid == profile.uid))
     return StandardResponse.success(data=list(result.scalars().all()))
 
 

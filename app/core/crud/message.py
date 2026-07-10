@@ -63,15 +63,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         用于前端分页加载会话历史记录
         """
-        stmt = (
-            select(Message)
-            .where(Message.session_id == session_id)
-            .where(Message.uid == uid)
-            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).order_by(Message.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return result.scalars().all()
 
@@ -100,14 +92,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.all()
 
     async def get_latest_session_profile_id(self, db: AsyncSession, *, session_id: str, uid: str) -> int | None:
-        stmt = (
-            select(Message.profile_id)
-            .where(Message.session_id == session_id)
-            .where(Message.uid == uid)
-            .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        )
+        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).order_by(Message.created_at.desc()).limit(1)
         result = await db.execute(stmt)
         return result.scalars().first()
 

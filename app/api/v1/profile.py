@@ -61,12 +61,7 @@ def get_profile_tool_options() -> list[dict[str, str]]:
 
 
 async def get_profile_knowledge_base_ids(db: AsyncSession, profile_id: int, uid: str | None) -> list[int]:
-    result = await db.execute(
-        select(KnowledgeBaseProfileBinding.knowledge_base_id)
-        .join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id)
-        .where(KnowledgeBaseProfileBinding.profile_id == profile_id)
-        .where(KnowledgeBase.uid == uid)
-    )
+    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBase.uid == uid))
     return list(result.scalars().all())
 
 
