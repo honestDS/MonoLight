@@ -131,7 +131,12 @@ async def _release_reply_claim(task_id: int, worker_id: str) -> None:
         )
 
 
-async def _converge_persisted_reply_success(task_id: int, worker_id: str) -> None:
+async def _converge_persisted_reply_state(
+    task_id: int,
+    worker_id: str,
+    status: BackgroundTaskReplyStatus,
+    error: str | None = None,
+) -> None:
     retry_delay = 1.0
     while True:
         try:
@@ -140,7 +145,8 @@ async def _converge_persisted_reply_success(task_id: int, worker_id: str) -> Non
                     db,
                     task_id=task_id,
                     worker_id=worker_id,
-                    status=BackgroundTaskReplyStatus.SUCCEEDED,
+                    status=status,
+                    error=error,
                 )
             if not completed:
                 logger.bind(task_id=task_id, worker_id=worker_id).warning(t("LOG_BACKGROUND_TASK_REPLY_STATE_CONVERGENCE_LOST"))
@@ -158,6 +164,23 @@ async def _converge_persisted_reply_success(task_id: int, worker_id: str) -> Non
             )
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, BACKGROUND_TASK_REPLY_STATE_RETRY_MAX_SECONDS)
+
+
+async def _converge_persisted_reply_success(task_id: int, worker_id: str) -> None:
+    await _converge_persisted_reply_state(
+        task_id,
+        worker_id,
+        BackgroundTaskReplyStatus.SUCCEEDED,
+    )
+
+
+async def _converge_persisted_reply_failure(task_id: int, worker_id: str, error: str) -> None:
+    await _converge_persisted_reply_state(
+        task_id,
+        worker_id,
+        BackgroundTaskReplyStatus.FAILED,
+        error,
+    )
 
 
 async def _save_and_notify_reply_error(task_id: int, worker_id: str, error_message: str) -> None:
@@ -196,14 +219,7 @@ async def _save_and_notify_reply_error(task_id: int, worker_id: str, error_messa
         },
     )
 
-    async with AsyncSessionLocal() as db:
-        await background_task_crud.complete_reply_claim(
-            db,
-            task_id=task_id,
-            worker_id=worker_id,
-            status=BackgroundTaskReplyStatus.FAILED,
-            error=error_message,
-        )
+    await _converge_persisted_reply_failure(task_id, worker_id, error_message)
 
 
 async def _execute_claimed_reply(task_id: int, worker_id: str) -> None:

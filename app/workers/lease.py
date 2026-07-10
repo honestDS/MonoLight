@@ -1,6 +1,8 @@
 import asyncio
+import os
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import NoReturn
 
 from app.core.crud.worker_lease import worker_lease_crud
 from app.core.log import get_logger
@@ -12,6 +14,8 @@ WORKER_LEASE_SECONDS = 30
 WORKER_LEASE_RENEW_INTERVAL_SECONDS = 10
 WORKER_LEASE_ACQUIRE_INTERVAL_SECONDS = 5
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 10
+WORKER_CANCEL_TIMEOUT_SECONDS = 5
+WORKER_FORCED_EXIT_CODE = 1
 
 
 async def _acquire_worker_lease(worker_name: str, owner_id: str) -> bool:
@@ -84,6 +88,25 @@ async def _maintain_worker_lease(
             return
 
 
+def _force_worker_process_exit(worker_name: str) -> NoReturn:
+    logger.critical(
+        "Worker cancellation timed out; forcing process exit",
+        extra={"worker_name": worker_name},
+    )
+    os._exit(WORKER_FORCED_EXIT_CODE)
+
+
+async def _cancel_owned_worker(worker_name: str, worker_task: asyncio.Task) -> None:
+    worker_task.cancel()
+    done, _pending = await asyncio.wait(
+        {worker_task},
+        timeout=WORKER_CANCEL_TIMEOUT_SECONDS,
+    )
+    if worker_task not in done:
+        _force_worker_process_exit(worker_name)
+    await asyncio.gather(worker_task, return_exceptions=True)
+
+
 async def _stop_owned_worker(worker_name: str, worker_task: asyncio.Task) -> None:
     done, _pending = await asyncio.wait(
         {worker_task},
@@ -97,8 +120,7 @@ async def _stop_owned_worker(worker_name: str, worker_task: asyncio.Task) -> Non
         "Worker graceful shutdown timed out",
         extra={"worker_name": worker_name},
     )
-    worker_task.cancel()
-    await asyncio.gather(worker_task, return_exceptions=True)
+    await _cancel_owned_worker(worker_name, worker_task)
 
 
 async def _run_owned_worker(
@@ -134,9 +156,8 @@ async def _run_owned_worker(
         renewal_task.cancel()
         shutdown_task.cancel()
         if not worker_task.done():
-            worker_task.cancel()
+            await _cancel_owned_worker(worker_name, worker_task)
         await asyncio.gather(
-            worker_task,
             renewal_task,
             shutdown_task,
             return_exceptions=True,

@@ -34,6 +34,7 @@ MESSAGES = {
     "LOG_DISPATCHER_NON_STREAM_RESPONSE_CONTINUE": "[Dispatcher/Non-stream] Response completed, but additional messages detected; continuing after merge.",
     "LOG_DISPATCHER_STREAM_CHANNEL_FAILED": "Streaming chat channel call failed, retrying next priority group: {error}",
     "LOG_DISPATCHER_STREAM_ERROR": "Streaming dispatcher error",
+    "LOG_DISPATCHER_UNKNOWN_EXCEPTION": "Dispatcher caught an unexpected internal exception",
     "LOG_DISPATCHER_STREAM_QUEUED": "[Dispatcher/Stream] Session {session_id} already has an active dispatcher, current request queued.",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] user message: {message}; attachments: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] turn {turn} | LLM response: {content}",

@@ -63,7 +63,6 @@ def _limit_result_content(content: Any) -> Any:
     return {
         "truncated": True,
         "original_chars": len(serialized),
-        "content": serialized[:MAX_BACKGROUND_TASK_RESULT_CHARS],
     }
 
 

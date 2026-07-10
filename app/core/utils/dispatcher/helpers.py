@@ -4,12 +4,16 @@ from typing import Any
 
 from app.core import constants
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
+from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
 
 BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES = {"send_file_to_user", "query_knowledge_base"}
+
+logger = get_logger(__name__)
 
 
 def get_multimodal_from_entry(model_entry: dict) -> tuple[bool, bool, bool]:
@@ -33,7 +37,11 @@ def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
 def format_exception_message(exc: Exception) -> str:
     if isinstance(exc, BaseBusinessException):
         return exc.render_message()
-    return str(exc)
+    logger.bind(
+        exception_type=type(exc).__name__,
+        exception_message=str(exc),
+    ).opt(exception=exc).error(t("LOG_DISPATCHER_UNKNOWN_EXCEPTION"))
+    return t(constants.ERR_INTERNAL_SERVER_ERROR)
 
 
 def extract_files_to_user(tool_responses: list[InternalMessage]) -> list[dict[str, Any]]:

@@ -34,6 +34,7 @@ MESSAGES = {
     "LOG_DISPATCHER_NON_STREAM_RESPONSE_CONTINUE": "【调度器/非流】响应完成，但检测到追加消息，合并后继续轮询。",
     "LOG_DISPATCHER_STREAM_CHANNEL_FAILED": "流式对话渠道调用失败，降级到下一优先级组重试: {error}",
     "LOG_DISPATCHER_STREAM_ERROR": "流式调度器错误",
+    "LOG_DISPATCHER_UNKNOWN_EXCEPTION": "调度器捕获到未预期的内部异常",
     "LOG_DISPATCHER_STREAM_QUEUED": "【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] 用户消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] 第 {turn} 轮 | LLM 响应: {content}",

@@ -119,7 +119,7 @@ class MessageResponse(MessageBase):
         if isinstance(v, str):
             try:
                 parsed = json.loads(v)
-                if isinstance(parsed, (list, dict)):
+                if isinstance(parsed, list):
                     return parsed
             except Exception:
                 pass

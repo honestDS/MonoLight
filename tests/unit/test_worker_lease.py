@@ -243,6 +243,50 @@ async def test_worker_lease_runner_stops_and_releases_after_lease_loss(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stop_owned_worker_forces_process_exit_after_cancel_timeout(monkeypatch):
+    class ForcedExit(Exception):
+        pass
+
+    force_exit_calls = []
+    cancellation_received = asyncio.Event()
+    keep_running = True
+
+    async def uncooperative_worker():
+        nonlocal keep_running
+        while keep_running:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_received.set()
+
+    def force_exit(worker_name):
+        force_exit_calls.append(worker_name)
+        raise ForcedExit
+
+    monkeypatch.setattr(lease_runner, "WORKER_SHUTDOWN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(lease_runner, "WORKER_CANCEL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(lease_runner, "_force_worker_process_exit", force_exit)
+
+    worker_task = asyncio.create_task(uncooperative_worker())
+    try:
+        with pytest.raises(ForcedExit):
+            await lease_runner._stop_owned_worker(
+                "background_task",
+                worker_task,
+            )
+
+        assert cancellation_received.is_set()
+        assert force_exit_calls == ["background_task"]
+    finally:
+        keep_running = False
+        worker_task.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(worker_task, return_exceptions=True),
+            timeout=1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_worker_lease_loss_cancels_worker_after_shutdown_timeout(monkeypatch):
     events = []
     worker_started = asyncio.Event()

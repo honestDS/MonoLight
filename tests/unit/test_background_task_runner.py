@@ -70,6 +70,27 @@ def test_to_json_compatible_replaces_circular_references():
     json.dumps(normalized, ensure_ascii=False)
 
 
+def test_limit_result_content_replaces_oversized_structure_with_valid_metadata(monkeypatch):
+    content = {
+        "items": [
+            {
+                "id": 1,
+                "value": "oversized",
+            }
+        ]
+    }
+    serialized = json.dumps(content, ensure_ascii=False)
+    monkeypatch.setattr(runner_module, "MAX_BACKGROUND_TASK_RESULT_CHARS", len(serialized) - 1)
+
+    limited = runner_module._limit_result_content(content)
+
+    assert limited == {
+        "truncated": True,
+        "original_chars": len(serialized),
+    }
+    assert json.loads(json.dumps(limited, ensure_ascii=False)) == limited
+
+
 @pytest.mark.asyncio
 async def test_renew_task_lease_retries_transient_database_error(monkeypatch):
     renew_calls = 0

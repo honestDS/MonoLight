@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import constants
 from app.core.background_tasks import reply_trigger
 from app.core.dispatcher import ChatDispatcher
+from app.core.i18n import t
 from app.models.background_task import BackgroundTaskReplyStatus
 
 
@@ -59,7 +61,8 @@ async def test_success_event_failure_does_not_mark_reply_succeeded(monkeypatch):
     await reply_trigger._execute_claimed_reply(task_id=1, worker_id="worker-1")
 
     assert BackgroundTaskReplyStatus.SUCCEEDED not in completed_statuses
-    assert notified_errors == ["session event write failed"]
+    assert notified_errors == [t(constants.ERR_INTERNAL_SERVER_ERROR)]
+    assert "session event write failed" not in notified_errors[0]
 
 
 @pytest.mark.asyncio
@@ -120,6 +123,56 @@ async def test_success_state_commit_failure_retries_without_user_visible_error(m
     assert sent_events == ["proactive_reply"]
     assert notified_errors == []
     assert completed_statuses == [BackgroundTaskReplyStatus.SUCCEEDED]
+    assert sleep_delays == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_error_state_commit_failure_retries_without_duplicate_event(monkeypatch):
+    completed_attempts = []
+    sent_events = []
+    sleep_delays = []
+
+    class FakeBackgroundTaskCrud:
+        async def get(self, db, task_id):
+            return SimpleNamespace(
+                id=task_id,
+                uid="user-1",
+                session_id="session-1",
+                profile_id=1,
+            )
+
+        async def complete_reply_claim(self, db, **kwargs):
+            completed_attempts.append((kwargs["status"], kwargs["error"]))
+            if len(completed_attempts) == 1:
+                raise RuntimeError("state commit failed")
+            return True
+
+    async def fake_save_message(*args, **kwargs):
+        return None
+
+    async def fake_send_session_event(uid, session_id, event):
+        sent_events.append(event["type"])
+
+    async def fake_sleep(delay):
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr(reply_trigger, "AsyncSessionLocal", FakeSessionContext)
+    monkeypatch.setattr(reply_trigger, "background_task_crud", FakeBackgroundTaskCrud())
+    monkeypatch.setattr(reply_trigger, "save_message", fake_save_message)
+    monkeypatch.setattr(reply_trigger, "_send_session_event", fake_send_session_event)
+    monkeypatch.setattr(reply_trigger.asyncio, "sleep", fake_sleep)
+
+    await reply_trigger._save_and_notify_reply_error(
+        task_id=1,
+        worker_id="worker-1",
+        error_message="reply failed",
+    )
+
+    assert sent_events == ["proactive_reply_error"]
+    assert completed_attempts == [
+        (BackgroundTaskReplyStatus.FAILED, "reply failed"),
+        (BackgroundTaskReplyStatus.FAILED, "reply failed"),
+    ]
     assert sleep_delays == [1.0]
 
 
