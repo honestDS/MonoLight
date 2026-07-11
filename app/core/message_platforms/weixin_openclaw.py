@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
-from app.adapters.weixin_openclaw.message import merge_message_pair
 from app.core.crud.message_platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -22,9 +21,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         adapter: WeixinOpenClawAdapter | None = None
         adapter_signature: tuple | None = None
         active_message_tasks: set[asyncio.Task] = set()
-        pending_messages: dict[tuple[str, str], WeixinOpenClawMessage] = {}
-        pending_uids: dict[tuple[str, str], str] = {}
-        pending_flush_tasks: dict[tuple[str, str], asyncio.Task] = {}
         try:
             while True:
                 platform_uid = ""
@@ -64,9 +60,6 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                                 platform_id=platform_id,
                                 adapter_signature=adapter_signature,
                                 active_message_tasks=active_message_tasks,
-                                pending_messages=pending_messages,
-                                pending_uids=pending_uids,
-                                pending_flush_tasks=pending_flush_tasks,
                             )
                     if adapter.config.poll_interval_ms > 0:
                         await asyncio.sleep(adapter.config.poll_interval_ms / 1000)
@@ -81,11 +74,8 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         finally:
             for task in active_message_tasks:
                 task.cancel()
-            for task in pending_flush_tasks.values():
-                task.cancel()
-            tasks_to_wait = list(active_message_tasks) + list(pending_flush_tasks.values())
-            if tasks_to_wait:
-                await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+            if active_message_tasks:
+                await asyncio.gather(*active_message_tasks, return_exceptions=True)
             if adapter is not None:
                 await adapter.close()
 
@@ -98,74 +88,10 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         platform_id: int,
         adapter_signature: tuple | None,
         active_message_tasks: set[asyncio.Task],
-        pending_messages: dict[tuple[str, str], WeixinOpenClawMessage],
-        pending_uids: dict[tuple[str, str], str],
-        pending_flush_tasks: dict[tuple[str, str], asyncio.Task],
     ) -> None:
-        if not adapter.config.merge_single_poll_messages:
-            task = asyncio.create_task(self._handle_message(adapter, message, uid=uid, platform_id=platform_id, adapter_signature=adapter_signature))
-            active_message_tasks.add(task)
-            task.add_done_callback(active_message_tasks.discard)
-            return
-
-        key = (message.user_id, message.session_id)
-        if key in pending_messages:
-            pending_messages[key] = merge_message_pair(pending_messages[key], message)
-        else:
-            pending_messages[key] = message
-        pending_uids[key] = uid
-
-        old_task = pending_flush_tasks.pop(key, None)
-        if old_task is not None and not old_task.done():
-            old_task.cancel()
-
-        delay_seconds = self._message_merge_delay_seconds(adapter)
-        task = asyncio.create_task(
-            self._flush_pending_message(
-                adapter,
-                key,
-                delay_seconds,
-                platform_id=platform_id,
-                adapter_signature=adapter_signature,
-                active_message_tasks=active_message_tasks,
-                pending_messages=pending_messages,
-                pending_uids=pending_uids,
-                pending_flush_tasks=pending_flush_tasks,
-            )
-        )
-        pending_flush_tasks[key] = task
-
-    @staticmethod
-    def _message_merge_delay_seconds(adapter: WeixinOpenClawAdapter) -> float:
-        return max(1.5, min(5.0, adapter.config.poll_interval_ms / 1000 + 0.5))
-
-    async def _flush_pending_message(
-        self,
-        adapter: WeixinOpenClawAdapter,
-        key: tuple[str, str],
-        delay_seconds: float,
-        *,
-        platform_id: int,
-        adapter_signature: tuple | None,
-        active_message_tasks: set[asyncio.Task],
-        pending_messages: dict[tuple[str, str], WeixinOpenClawMessage],
-        pending_uids: dict[tuple[str, str], str],
-        pending_flush_tasks: dict[tuple[str, str], asyncio.Task],
-    ) -> None:
-        try:
-            await asyncio.sleep(delay_seconds)
-            message = pending_messages.pop(key, None)
-            uid = pending_uids.pop(key, None)
-            pending_flush_tasks.pop(key, None)
-            if message is None or uid is None:
-                return
-            task = asyncio.create_task(self._handle_message(adapter, message, uid=uid, platform_id=platform_id, adapter_signature=adapter_signature))
-            active_message_tasks.add(task)
-            task.add_done_callback(active_message_tasks.discard)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.bind(session_id=key[1]).exception("message platform pending message flush failed")
+        task = asyncio.create_task(self._handle_message(adapter, message, uid=uid, platform_id=platform_id, adapter_signature=adapter_signature))
+        active_message_tasks.add(task)
+        task.add_done_callback(active_message_tasks.discard)
 
     async def _handle_message(self, adapter: WeixinOpenClawAdapter, message: WeixinOpenClawMessage, *, uid: str, platform_id: int, adapter_signature: tuple | None) -> None:
         try:

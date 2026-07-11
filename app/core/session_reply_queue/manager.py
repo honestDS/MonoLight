@@ -9,6 +9,9 @@ from sqlmodel import select
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.i18n import t
+from app.core.log import get_logger
+from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
@@ -17,6 +20,8 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+
+logger = get_logger(__name__)
 
 WORK_RESULT_POLL_INTERVAL_SECONDS = 0.2
 
@@ -208,6 +213,101 @@ class SessionReplyQueueManager:
             raise RuntimeError("Session reply work lease was lost while freezing input")
         await db.commit()
         return self._merge_messages(messages)
+
+    async def absorb_contiguous_foreground_messages(
+        self,
+        db: AsyncSession,
+        *,
+        work_id: int,
+        worker_id: str,
+    ) -> list[InternalMessage]:
+        work = await session_reply_work_item_crud.get(db, work_id)
+        if (
+            work is None
+            or work.status != SessionReplyWorkStatus.RUNNING
+            or work.locked_by != worker_id
+            or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY
+        ):
+            return []
+
+        contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
+        additional_work = [
+            item
+            for item in contiguous
+            if item.id != work.id
+            and item.status == SessionReplyWorkStatus.READY_FOR_LLM
+            and item.source_id
+        ]
+        if not additional_work:
+            return []
+
+        source_message_ids = [int(item.source_id) for item in additional_work]
+        message_result = await db.execute(
+            select(Message)
+            .where(
+                Message.id.in_(source_message_ids),
+                Message.uid == work.uid,
+                Message.session_id == work.session_id,
+                Message.role == MessageRole.USER,
+                Message.type == MessageType.TEXT,
+                Message.is_processed == False,  # noqa: E712
+            )
+            .order_by(Message.id)
+        )
+        messages = list(message_result.scalars().all())
+        message_ids = [message.id for message in messages if message.id is not None]
+        if not message_ids:
+            return []
+
+        await db.execute(update(Message).where(Message.id.in_(message_ids)).values(is_processed=True))
+        merged_work_ids = [item.id for item in additional_work if item.id is not None]
+        await db.execute(
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id.in_(merged_work_ids),
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+            )
+            .values(
+                status=SessionReplyWorkStatus.MERGED,
+                merged_into_id=work.id,
+                locked_by=None,
+                lock_until=None,
+            )
+        )
+        frozen_message_ids = list(work.input_message_ids or [])
+        updated = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work.id,
+            worker_id=worker_id,
+            values={"input_message_ids": [*frozen_message_ids, *message_ids]},
+            commit=False,
+        )
+        if not updated:
+            await db.rollback()
+            return []
+
+        await db.commit()
+        content, attachments, _ids = self._merge_messages(messages)
+        combined_message = InternalMessage(
+            id=message_ids[-1],
+            role=MessageRole.USER,
+            content=content or None,
+            attachments=attachments or None,
+        )
+        logger.bind(
+            uid=work.uid,
+            session_id=work.session_id,
+            work_id=work.id,
+            message_ids=message_ids,
+        ).info(
+            t(
+                "LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES",
+                message=content,
+                attachments=str(attachments),
+            )
+        )
+        await append_user_runtime_instructions(db, work.session_id, combined_message)
+        return [combined_message]
 
     async def _load_frozen_input(self, db: AsyncSession, message_ids: list[int]) -> tuple[str, list[str], list[int]]:
         result = await db.execute(select(Message).where(Message.id.in_(message_ids)).order_by(Message.id))

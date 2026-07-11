@@ -118,6 +118,33 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             )
         next_stream_sequence += 1
 
+    async def fetch_additional_user_messages() -> list[InternalMessage]:
+        return await session_reply_queue_manager.absorb_contiguous_foreground_messages(
+            db,
+            work_id=work.id,
+            worker_id=worker_id,
+        )
+
+    async def save_execution_checkpoint(checkpoint: dict[str, Any]) -> None:
+        state = {
+            **(work.execution_state or {}),
+            "dispatcher_checkpoint": checkpoint,
+        }
+        updated = await session_reply_work_item_crud.update_claimed(
+            db,
+            work_id=work.id,
+            worker_id=worker_id,
+            values={"execution_state": state},
+        )
+        if not updated:
+            raise RuntimeError("Session reply work lease was lost while saving execution checkpoint")
+        work.execution_state = state
+
+    execution_state = work.execution_state or {}
+    resume_state = execution_state.get("dispatcher_checkpoint")
+    if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
+        resume_state = None
+
     return await ChatDispatcher.dispatch(
         db=db,
         message=content,
@@ -130,6 +157,9 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         final_message_dedupe_key=_result_message_dedupe_key(work.id),
         persisted_profile_id=work.profile_id,
         stream_event_callback=publish_stream_event if stream_requested else None,
+        additional_user_messages_fetcher=fetch_additional_user_messages,
+        execution_resume_state=resume_state,
+        execution_checkpoint_callback=save_execution_checkpoint,
     )
 
 

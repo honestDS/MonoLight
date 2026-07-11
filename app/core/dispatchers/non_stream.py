@@ -60,13 +60,17 @@ class NonStreamDispatcherMixin:
         final_message_dedupe_key: str | None = None,
         persisted_profile_id: int | None = None,
         stream_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
+        execution_resume_state: dict[str, Any] | None = None,
+        execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await profile_crud.get_active(db, uid=uid)
 
-            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
+            if execution_resume_state is None:
+                logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
             await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
@@ -74,10 +78,30 @@ class NonStreamDispatcherMixin:
             initial_msg = persisted_initial_message or await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
             queue_managed = persisted_initial_message is not None
+
+            async def fetch_additional_user_messages() -> list[InternalMessage]:
+                if additional_user_messages_fetcher is not None:
+                    return await additional_user_messages_fetcher()
+                if queue_managed:
+                    return []
+                return await fetch_and_merge_new_user_messages(db, session_id, uid)
+
             final_ai_content = ""
-            turn_messages: list[InternalMessage] = []
-            files_to_user: list[dict[str, Any]] = []
-            is_first_iter = True
+            turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
+            files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
+            is_first_iter = execution_resume_state is None
+
+            async def save_execution_checkpoint(messages: list[InternalMessage], current_turn: int) -> None:
+                if execution_checkpoint_callback is None:
+                    return
+                await execution_checkpoint_callback(
+                    {
+                        "messages": [item.model_dump(mode="json") for item in messages],
+                        "turn_messages": [item.model_dump(mode="json") for item in turn_messages],
+                        "files_to_user": files_to_user,
+                        "current_turn": current_turn,
+                    }
+                )
 
             while True:
                 try:
@@ -97,18 +121,24 @@ class NonStreamDispatcherMixin:
                     img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                     chat_params = resolve_chat_params(model_entry, chat_channel)
 
-                    messages = await prepare_messages(
-                        db,
-                        session_id,
-                        uid,
-                        profile,
-                        cfg,
-                        initial_msg,
-                        message,
-                        is_first_iter,
-                        context_window_k=chat_params["context_window_k"],
-                        history_before_id=history_before_id,
-                    )
+                    if execution_resume_state is not None:
+                        messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("messages", [])]
+                        current_turn = int(execution_resume_state.get("current_turn", 0))
+                        execution_resume_state = None
+                    else:
+                        messages = await prepare_messages(
+                            db,
+                            session_id,
+                            uid,
+                            profile,
+                            cfg,
+                            initial_msg,
+                            message,
+                            is_first_iter,
+                            context_window_k=chat_params["context_window_k"],
+                            history_before_id=history_before_id,
+                        )
+                        current_turn = 0
 
                     # 重新组装带附件的多模态消息（使用模型实际的多模态能力）
                     for idx, m in enumerate(messages):
@@ -124,13 +154,10 @@ class NonStreamDispatcherMixin:
 
                     tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
-                    current_turn = 0
 
                     while current_turn <= max_turns:
-                        # 队列工作输入已经冻结，不再吸收后来到达的消息
-                        new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
+                        new_user_msgs = await fetch_additional_user_messages()
                         if new_user_msgs:
-                            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES"))
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
@@ -214,19 +241,8 @@ class NonStreamDispatcherMixin:
                                 chat_channel_obj, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                                 chat_params = resolve_chat_params(model_entry, chat_channel)
-                                # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
-                                messages = await prepare_messages(
-                                    db,
-                                    session_id,
-                                    uid,
-                                    profile,
-                                    cfg,
-                                    initial_msg,
-                                    message,
-                                    is_first_iter,
-                                    context_window_k=chat_params["context_window_k"],
-                                    history_before_id=history_before_id,
-                                )
+                                # 保留当前工具调用过程，仅按新渠道的多模态能力重新组装；
+                                # 下一次请求会使用新渠道预算裁剪同一份完整消息列表。
                                 reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
                         if not ai_msg.tool_calls and files_to_user:
@@ -237,13 +253,14 @@ class NonStreamDispatcherMixin:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
+                        new_user_msgs = await fetch_additional_user_messages() if not ai_msg.tool_calls else []
                         saved_msg = await save_assistant_message(
                             db,
                             session_id,
                             uid,
                             profile.id,
                             ai_msg,
-                            dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
+                            dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and not new_user_msgs else None,
                         )
                         if stream_event_callback is not None and saved_msg is not None:
                             await stream_event_callback(
@@ -256,7 +273,6 @@ class NonStreamDispatcherMixin:
 
                         if not ai_msg.tool_calls:
                             final_ai_content = ai_msg.content
-                            new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
 
@@ -264,10 +280,12 @@ class NonStreamDispatcherMixin:
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
 
                             current_turn = 0
+                            await save_execution_checkpoint(messages, current_turn)
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
                             await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
+                            await save_execution_checkpoint(messages, current_turn)
                             continue
 
                         if stream_event_callback is not None:
@@ -327,11 +345,14 @@ class NonStreamDispatcherMixin:
                                         "response_id": response_id,
                                     }
                                 )
+                        await save_execution_checkpoint(messages, current_turn)
 
                 finally:
                     is_first_iter = False
 
-                new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
+                if queue_managed:
+                    break
+                new_user_msgs = await fetch_additional_user_messages()
                 if not new_user_msgs:
                     break
 

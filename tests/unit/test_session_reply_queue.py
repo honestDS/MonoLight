@@ -286,6 +286,182 @@ async def test_foreground_freeze_merges_contiguous_work_and_is_stable(db_session
 
 
 @pytest.mark.asyncio
+async def test_running_foreground_work_absorbs_later_contiguous_messages(db_session: AsyncSession, monkeypatch):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+    await _add_message(db_session, 1, "first")
+    first = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
+    await db_session.commit()
+
+    first.status = SessionReplyWorkStatus.RUNNING
+    first.locked_by = "worker-1"
+    db_session.add(first)
+    await db_session.commit()
+    await manager.freeze_foreground_input(db_session, work=first, worker_id="worker-1")
+
+    await _add_message(db_session, 2, "second")
+    second = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
+    await _add_message(db_session, 3, "third")
+    third = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
+    await db_session.commit()
+
+    logged_messages: list[str] = []
+
+    class CapturingLogger:
+        def bind(self, **kwargs):
+            return self
+
+        def info(self, message):
+            logged_messages.append(message)
+
+    async def skip_runtime_instructions(db, session_id, message):
+        return None
+
+    monkeypatch.setattr("app.core.session_reply_queue.manager.logger", CapturingLogger())
+    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+
+    additional_messages = await manager.absorb_contiguous_foreground_messages(
+        db_session,
+        work_id=first.id,
+        worker_id="worker-1",
+    )
+
+    assert len(additional_messages) == 1
+    assert additional_messages[0].content == "second\nthird"
+    assert additional_messages[0].id == 3
+    assert len(logged_messages) == 1
+    assert "second\nthird" in logged_messages[0]
+    await db_session.refresh(first)
+    await db_session.refresh(second)
+    await db_session.refresh(third)
+    assert first.input_message_ids == [1, 2, 3]
+    assert second.status == SessionReplyWorkStatus.MERGED
+    assert second.merged_into_id == first.id
+    assert third.status == SessionReplyWorkStatus.MERGED
+    assert third.merged_into_id == first.id
+
+
+@pytest.mark.asyncio
+async def test_running_foreground_work_does_not_absorb_across_background_boundary(db_session: AsyncSession, monkeypatch):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+    await _add_message(db_session, 1, "first")
+    first = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
+    await db_session.commit()
+
+    first.status = SessionReplyWorkStatus.RUNNING
+    first.locked_by = "worker-1"
+    db_session.add(first)
+    await db_session.commit()
+    await manager.freeze_foreground_input(db_session, work=first, worker_id="worker-1")
+
+    await _add_message(db_session, 2, "before boundary")
+    before_boundary = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
+    await _enqueue(crud, db_session, work_type=SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, source_id=9, dedupe_key="background-task-summary:9")
+    await _add_message(db_session, 3, "after boundary")
+    after_boundary = await _enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
+    await db_session.commit()
+
+    async def skip_runtime_instructions(db, session_id, message):
+        return None
+
+    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+
+    additional_messages = await manager.absorb_contiguous_foreground_messages(
+        db_session,
+        work_id=first.id,
+        worker_id="worker-1",
+    )
+
+    assert len(additional_messages) == 1
+    assert additional_messages[0].content == "before boundary"
+    await db_session.refresh(before_boundary)
+    await db_session.refresh(after_boundary)
+    assert before_boundary.status == SessionReplyWorkStatus.MERGED
+    assert before_boundary.merged_into_id == first.id
+    assert after_boundary.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert after_boundary.merged_into_id is None
+
+
+@pytest.mark.asyncio
+async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
+    checkpoint = {
+        "messages": [
+            {"role": "user", "content": "original"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "tool-1", "name": "execute_shell", "arguments": {"command": "echo 1"}}],
+            },
+            {"role": "tool", "content": "1", "tool_call_id": "tool-1"},
+        ],
+        "turn_messages": [],
+        "files_to_user": [],
+        "current_turn": 1,
+    }
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by="worker-1",
+        input_message_ids=[1],
+        execution_state={"stream_requested": False, "dispatcher_checkpoint": checkpoint},
+    )
+    dispatch_kwargs = {}
+    checkpoint_updates = []
+
+    class FakeDb:
+        async def refresh(self, instance) -> None:
+            return None
+
+    class EventDb:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return EventDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def freeze_foreground_input(db, *, work, worker_id):
+        return "original", [], [1]
+
+    async def latest_sequence(db, *, work_id):
+        return 0
+
+    async def dispatch(**kwargs):
+        dispatch_kwargs.update(kwargs)
+        await kwargs["execution_checkpoint_callback"]({"messages": [{"role": "user", "content": "updated"}]})
+        return {"choices": []}
+
+    async def update_claimed(db, **kwargs):
+        checkpoint_updates.append(kwargs)
+        return True
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
+    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+
+    response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
+
+    assert response == {"choices": []}
+    assert dispatch_kwargs["execution_resume_state"] == checkpoint
+    assert dispatch_kwargs["message"] == "original"
+    assert checkpoint_updates[0]["values"]["execution_state"]["stream_requested"] is False
+    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["messages"][0]["content"] == "updated"
+
+
+@pytest.mark.asyncio
 async def test_executor_resumes_from_persisted_result_without_calling_llm(monkeypatch):
     work = SessionReplyWorkItem(
         id=7,
