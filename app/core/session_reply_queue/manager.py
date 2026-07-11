@@ -338,11 +338,11 @@ class SessionReplyQueueManager:
                 if work.status == SessionReplyWorkStatus.SUCCEEDED:
                     response = (work.execution_state or {}).get("response")
                     if isinstance(response, dict):
-                        return response
+                        return {**response, "work_id": work.id}
                     if work.result_message_id:
                         message = await db.get(Message, work.result_message_id)
-                        return {"content": message.content if message else ""}
-                    return {"content": ""}
+                        return {"content": message.content if message else "", "work_id": work.id}
+                    return {"content": "", "work_id": work.id}
                 if work.status in {
                     SessionReplyWorkStatus.FAILED,
                     SessionReplyWorkStatus.CANCELLED,

@@ -384,6 +384,54 @@ async def test_running_foreground_work_does_not_absorb_across_background_boundar
 
 
 @pytest.mark.asyncio
+async def test_wait_for_result_returns_resolved_work_id(monkeypatch):
+    manager = SessionReplyQueueManager()
+    resolved_work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.SUCCEEDED,
+        execution_state={
+            "response": {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "result"},
+                        "finish_reason": True,
+                    }
+                ]
+            }
+        },
+    )
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve_merged_target(db, work_id):
+        return resolved_work
+
+    monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+
+    response = await manager.wait_for_result(9)
+
+    assert response["work_id"] == 7
+    assert response["choices"][0]["message"]["content"] == "result"
+
+
+@pytest.mark.asyncio
 async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     checkpoint = {
         "messages": [

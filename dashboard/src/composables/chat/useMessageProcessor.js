@@ -270,6 +270,12 @@ export function useMessageProcessor() {
   
   // 处理完整的 AI 响应消息，WS 和 HTTP 共用
   const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
+    const workId = response.work_id
+    if (workId && messagesRef.value.some(message => message.work_id === workId)) {
+      removeThinkingMessage(messagesRef, thinkingId)
+      return
+    }
+
     const aiContent = response.choices?.[0]?.message?.content || ''
     const history = response.history || []
     const responseFiles = response.files || []
@@ -324,6 +330,9 @@ export function useMessageProcessor() {
 
     if (responseFiles.length > 0) {
       finalAiMsg.files = responseFiles
+    }
+    if (workId) {
+      finalAiMsg.work_id = workId
     }
 
     aiMessagesToInsert.push(finalAiMsg)
