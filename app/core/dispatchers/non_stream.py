@@ -1,6 +1,7 @@
 import asyncio
 import time
-from collections.abc import MutableSet
+import uuid
+from collections.abc import Awaitable, Callable, MutableSet
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,8 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel_router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
-from app.core.crud.active_session import active_session_crud
-from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
@@ -17,6 +16,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
+from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
@@ -43,8 +43,6 @@ from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
 
-SESSION_LOCK_RETRY_INTERVAL_SECONDS = 0.5
-
 
 class NonStreamDispatcherMixin:
     @classmethod
@@ -57,70 +55,31 @@ class NonStreamDispatcherMixin:
         attachments: list[str] | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
         session_source: str = "http",
-        wait_for_session_lock: bool = False,
+        persisted_initial_message: InternalMessage | None = None,
+        history_before_id: int | None = None,
+        final_message_dedupe_key: str | None = None,
+        persisted_profile_id: int | None = None,
+        stream_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
-            profile = await profile_crud.get_active(db, uid=uid)
-            profile_id = profile.id if profile else None
+            profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await profile_crud.get_active(db, uid=uid)
 
             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
             await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
-            # 1. 初始保存消息
-            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
+            # 1. 初始保存消息；队列消费者可传入已经冻结并持久化的输入边界
+            initial_msg = persisted_initial_message or await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
+            queue_managed = persisted_initial_message is not None
             final_ai_content = ""
             turn_messages: list[InternalMessage] = []
             files_to_user: list[dict[str, Any]] = []
             is_first_iter = True
-            waited_for_session_lock = False
-            queued_logged = False
-
-            # 2. 分布式会话状态机
-            if not wait_for_session_lock:
-                await active_session_crud.cleanup_expired_locks(db)
 
             while True:
-                lock_acquired = await active_session_crud.acquire_lock(db, session_id)
-
-                if not lock_acquired:
-                    if not queued_logged:
-                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_QUEUED", session_id=session_id))
-                        queued_logged = True
-                    if wait_for_session_lock:
-                        waited_for_session_lock = True
-                        await asyncio.sleep(SESSION_LOCK_RETRY_INTERVAL_SECONDS)
-                        continue
-                    return LLMResponse(
-                        choices=[
-                            LLMChoice(
-                                message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=""),
-                                finish_reason="queued",
-                                created_at=time.time(),
-                            )
-                        ],
-                        history=[],
-                    ).model_dump()
-
-                if waited_for_session_lock and is_first_iter:
-                    persisted_initial_msg = await message_crud.get(db, initial_msg.id)
-                    if persisted_initial_msg is None or persisted_initial_msg.is_processed:
-                        await active_session_crud.release_lock(db, session_id)
-                        return LLMResponse(
-                            choices=[
-                                LLMChoice(
-                                    message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=""),
-                                    finish_reason="queued",
-                                    created_at=time.time(),
-                                )
-                            ],
-                            history=[],
-                        ).model_dump()
-                    profile = await profile_crud.get_with_relations(db, profile_id) if profile_id is not None else None
-
                 try:
                     cfg = await validate_profile_and_cfg(db, profile)
 
@@ -148,6 +107,7 @@ class NonStreamDispatcherMixin:
                         message,
                         is_first_iter,
                         context_window_k=chat_params["context_window_k"],
+                        history_before_id=history_before_id,
                     )
 
                     # 重新组装带附件的多模态消息（使用模型实际的多模态能力）
@@ -167,8 +127,8 @@ class NonStreamDispatcherMixin:
                     current_turn = 0
 
                     while current_turn <= max_turns:
-                        # 检查新指令并合并
-                        new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                        # 队列工作输入已经冻结，不再吸收后来到达的消息
+                        new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
                         if new_user_msgs:
                             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES"))
                             current_turn = 0
@@ -184,8 +144,10 @@ class NonStreamDispatcherMixin:
                         else:
                             current_tools = tools
 
+                        response_id = str(uuid.uuid4())
                         excluded_priorities: set[int] = set()
                         while True:
+                            emitted_stream_content = False
                             try:
                                 request_messages = ContextManager.trim_messages_for_model_request(
                                     messages=messages,
@@ -195,18 +157,38 @@ class NonStreamDispatcherMixin:
                                     max_tokens=chat_params["max_tokens"],
                                     tools=current_tools,
                                 )
-                                response = await LLMClient.generate(
-                                    api_key=chat_channel_obj.get_decrypted_api_key(),
-                                    base_url=chat_channel_obj.base_url,
-                                    model_id=model_entry["model_id"],
-                                    messages=request_messages,
-                                    temperature=chat_params["temperature"],
-                                    top_p=chat_params["top_p"],
-                                    max_tokens=chat_params["max_tokens"],
-                                    tools=current_tools,
-                                    protocol=getattr(chat_channel_obj, "protocol", "openai"),
-                                    timeout=chat_params["chat_timeout"],
-                                )
+                                generation_kwargs = {
+                                    "api_key": chat_channel_obj.get_decrypted_api_key(),
+                                    "base_url": chat_channel_obj.base_url,
+                                    "model_id": model_entry["model_id"],
+                                    "messages": request_messages,
+                                    "temperature": chat_params["temperature"],
+                                    "top_p": chat_params["top_p"],
+                                    "max_tokens": chat_params["max_tokens"],
+                                    "tools": current_tools,
+                                    "protocol": getattr(chat_channel_obj, "protocol", "openai"),
+                                    "timeout": chat_params["chat_timeout"],
+                                }
+                                if stream_event_callback is None:
+                                    response = await LLMClient.generate(**generation_kwargs)
+                                else:
+
+                                    async def on_content(content: str) -> None:
+                                        nonlocal emitted_stream_content
+                                        emitted_stream_content = True
+                                        await stream_event_callback(
+                                            {
+                                                "type": "content",
+                                                "content": content,
+                                                "turn": current_turn,
+                                                "response_id": response_id,
+                                            }
+                                        )
+
+                                    response = await LLMClient.generate_with_stream_callback(
+                                        **generation_kwargs,
+                                        on_content=on_content,
+                                    )
                                 # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
                                 ai_msg = response.message
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
@@ -215,6 +197,9 @@ class NonStreamDispatcherMixin:
                             except ApiKeyException:
                                 raise
                             except LLMException as exc:
+                                # 已推送内容后不可切换渠道重试，否则前端会拼接两个渠道的部分回复
+                                if emitted_stream_content:
+                                    raise
                                 # 仅捕获 LLM 调用相关异常（连接失败/超时/状态码错误/空响应等）做降级，
                                 # 组装、协议转换或代码缺陷类异常向上抛出，避免掩盖真实问题
                                 excluded_priorities.add(_channel_rule.priority)
@@ -240,6 +225,7 @@ class NonStreamDispatcherMixin:
                                     message,
                                     is_first_iter,
                                     context_window_k=chat_params["context_window_k"],
+                                    history_before_id=history_before_id,
                                 )
                                 reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
@@ -251,11 +237,26 @@ class NonStreamDispatcherMixin:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
+                        saved_msg = await save_assistant_message(
+                            db,
+                            session_id,
+                            uid,
+                            profile.id,
+                            ai_msg,
+                            dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
+                        )
+                        if stream_event_callback is not None and saved_msg is not None:
+                            await stream_event_callback(
+                                {
+                                    "type": "turn_end",
+                                    "response_id": response_id,
+                                    "content": saved_msg.content,
+                                }
+                            )
 
                         if not ai_msg.tool_calls:
                             final_ai_content = ai_msg.content
-                            new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                            new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
                             if not new_user_msgs:
                                 break
 
@@ -268,6 +269,18 @@ class NonStreamDispatcherMixin:
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
                             await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             continue
+
+                        if stream_event_callback is not None:
+                            for tool_call in ai_msg.tool_calls:
+                                await stream_event_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "name": tool_call.name,
+                                        "arguments": tool_call.arguments,
+                                        "tool_call_id": tool_call.id,
+                                        "response_id": response_id,
+                                    }
+                                )
 
                         sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
 
@@ -303,12 +316,22 @@ class NonStreamDispatcherMixin:
                         files_to_user.extend(extract_files_to_user(tool_responses))
                         for tool_res in tool_responses:
                             await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                            if stream_event_callback is not None:
+                                tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
+                                await stream_event_callback(
+                                    {
+                                        "type": "tool_end",
+                                        "name": tool_call.name if tool_call else "unknown",
+                                        "result": sanitize_files_to_user_result(tool_res.content),
+                                        "tool_call_id": tool_res.tool_call_id,
+                                        "response_id": response_id,
+                                    }
+                                )
 
                 finally:
-                    await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
-                new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                new_user_msgs = [] if queue_managed else await fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break
 

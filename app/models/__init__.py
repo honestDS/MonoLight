@@ -12,6 +12,9 @@ from app.models.prompt import PromptLibrary as PromptLibrary
 from app.models.scheduled_task import ScheduledTask as ScheduledTask
 from app.models.session import ChatSession as ChatSession
 from app.models.session_event import SessionEvent as SessionEvent
+from app.models.session_reply_stream_event import SessionReplyStreamEvent as SessionReplyStreamEvent
+from app.models.session_reply_work_item import SessionReplySequence as SessionReplySequence
+from app.models.session_reply_work_item import SessionReplyWorkItem as SessionReplyWorkItem
 from app.models.system_log import SystemLog as SystemLog
 from app.models.system_setting import SystemSetting as SystemSetting
 from app.models.user import User as User

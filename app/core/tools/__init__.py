@@ -43,6 +43,9 @@ CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
 BACKGROUND_CAPABLE_TOOL_NAMES = {
     FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"],
     FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"],
+}
+
+ALWAYS_BACKGROUND_TOOL_NAMES = {
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"],
 }
 
@@ -105,6 +108,10 @@ def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
     return False
 
 
+def tool_runs_in_background(tool_name: str) -> bool:
+    return tool_name in ALWAYS_BACKGROUND_TOOL_NAMES
+
+
 def _get_enabled_tool_names(profile: Profile) -> set[str]:
     configs = profile.configs or {}
     tool_config = configs.get("tool", {}) if isinstance(configs, dict) else {}
@@ -159,9 +166,8 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
         if schema["function"]["name"] in enabled_tool_names:
             tool_schema = copy.deepcopy(schema)
             base_tools.append(_inject_background_control(tool_schema) if allow_background else tool_schema)
-    if IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
-        image_tool_schema = copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA)
-        base_tools.append(_inject_background_control(image_tool_schema) if allow_background else image_tool_schema)
+    if allow_background and IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
+        base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
     whitelist_ids = []
 
     try:

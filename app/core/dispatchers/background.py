@@ -15,7 +15,6 @@ from app.core.constants import (
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
 )
 from app.core.context import ContextManager
-from app.core.crud.active_session import active_session_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
@@ -40,6 +39,7 @@ from app.core.utils.dispatcher.helpers import (
     process_single_tool_with_isolated_db,
     validate_background_proactive_tool_calls,
 )
+from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
@@ -103,8 +103,10 @@ class BackgroundDispatcherMixin:
         call_context: str,
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
+        submission_context: list[InternalMessage] | None = None,
         restrict_tools_to_background_allowlist: bool = True,
         reply_source: str = "background_task",
+        final_message_dedupe_key: str | None = None,
     ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]]]:
         user = await user_crud.get_by_uid(db, uid)
         username = user.username if user else "Unknown"
@@ -127,19 +129,26 @@ class BackgroundDispatcherMixin:
 
         async def build_initial_request(chat_params):
             nonlocal messages
-            messages = await prepare_messages(
-                db,
-                session_id,
-                uid,
-                profile,
-                cfg,
-                None,
-                "",
-                False,
-                context_window_k=chat_params["context_window_k"],
-            )
+            if submission_context is None:
+                messages = await prepare_messages(
+                    db,
+                    session_id,
+                    uid,
+                    profile,
+                    cfg,
+                    None,
+                    "",
+                    False,
+                    context_window_k=chat_params["context_window_k"],
+                )
+            else:
+                system_prompt = await build_system_prompt(db, profile)
+                messages = inject_system_prompt_text(
+                    [message.model_copy(deep=True) for message in submission_context],
+                    system_prompt,
+                )
             if extra_messages:
-                messages.extend(extra_messages)
+                messages.extend(message.model_copy(deep=True) for message in extra_messages)
             return ContextManager.trim_messages_for_model_request(
                 messages=messages,
                 uid=uid,
@@ -247,7 +256,14 @@ class BackgroundDispatcherMixin:
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
         turn_messages = [ai_msg]
-        await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
+        await save_assistant_message(
+            db,
+            session_id,
+            uid,
+            profile.id,
+            ai_msg,
+            dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
+        )
         if not allow_tools or not ai_msg.tool_calls:
             return ai_msg, turn_messages, []
 
@@ -357,7 +373,14 @@ class BackgroundDispatcherMixin:
             final_msg.content = build_assistant_files_content(final_text, files_to_user)
         messages.append(final_msg)
         turn_messages.append(final_msg)
-        await save_assistant_message(db, session_id, uid, profile.id, final_msg)
+        await save_assistant_message(
+            db,
+            session_id,
+            uid,
+            profile.id,
+            final_msg,
+            dedupe_key=final_message_dedupe_key,
+        )
         return final_msg, turn_messages, files_to_user
 
     @classmethod
@@ -370,43 +393,29 @@ class BackgroundDispatcherMixin:
             task_session_id = task.session_id
             task_profile_id = task.profile_id
 
-            await active_session_crud.cleanup_expired_locks(db)
-            lock_acquired = await active_session_crud.acquire_lock(db, task_session_id)
-            if not lock_acquired:
-                return {
-                    "uid": task_uid,
-                    "session_id": task_session_id,
-                    "content": "",
-                    "history": [],
-                    "deferred": True,
-                }
-
-            try:
-                profile = await profile_crud.get_with_relations(db, task_profile_id)
-                if not profile or profile.uid != task_uid:
-                    logger.bind(
-                        task_id=task_id,
-                        uid=task_uid,
-                        session_id=task_session_id,
-                        profile_id=task_profile_id,
-                    ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE"))
-                    raise ServerException(message=ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
-                ai_msg, turn_messages, files = await cls._generate_reply_from_history(
-                    db,
+            profile = await profile_crud.get_with_relations(db, task_profile_id)
+            if not profile or profile.uid != task_uid:
+                logger.bind(
+                    task_id=task_id,
                     uid=task_uid,
                     session_id=task_session_id,
-                    profile=profile,
-                    call_context="background_task_proactive_reply",
-                    allow_tools=True,
-                    reply_source="background_task",
-                )
-                content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-                return {
-                    "uid": task_uid,
-                    "session_id": task_session_id,
-                    "content": content,
-                    "files": files,
-                    "history": dump_background_proactive_history(turn_messages),
-                }
-            finally:
-                await active_session_crud.release_lock(db, task_session_id)
+                    profile_id=task_profile_id,
+                ).error(t("LOG_BACKGROUND_TASK_PROFILE_UNAVAILABLE"))
+                raise ServerException(message=ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE)
+            ai_msg, turn_messages, files = await cls._generate_reply_from_history(
+                db,
+                uid=task_uid,
+                session_id=task_session_id,
+                profile=profile,
+                call_context="background_task_proactive_reply",
+                allow_tools=True,
+                reply_source="background_task",
+            )
+            content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+            return {
+                "uid": task_uid,
+                "session_id": task_session_id,
+                "content": content,
+                "files": files,
+                "history": dump_background_proactive_history(turn_messages),
+            }

@@ -75,6 +75,10 @@ def build_background_task_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.background_task"]
 
 
+def build_session_reply_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.session_reply"]
+
+
 def report_process_started(process_name: str, process: subprocess.Popen) -> None:
     print(f"{process_name} process started [PID {process.pid}]", flush=True)
 
@@ -200,6 +204,9 @@ def run() -> int:
         background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
         processes.append(background_task_process)
         report_process_started("Background task worker", background_task_process)
+        session_reply_process = subprocess.Popen(build_session_reply_command(), env=child_environment, **process_options)
+        processes.append(session_reply_process)
+        report_process_started("Session reply worker", session_reply_process)
 
         while True:
             for process in processes:

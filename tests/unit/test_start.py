@@ -81,6 +81,14 @@ def test_build_background_task_command_starts_exactly_one_worker_process():
     ]
 
 
+def test_build_session_reply_command_starts_exactly_one_worker_process():
+    assert start.build_session_reply_command() == [
+        sys.executable,
+        "-m",
+        "app.workers.session_reply",
+    ]
+
+
 def test_report_process_started_includes_name_and_pid(capsys):
     process = ExitedProcess(return_code=None, pid=4321)
 
@@ -110,7 +118,7 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["initialize", "process", "process", "process"]
+    assert events == ["initialize", "process", "process", "process", "process"]
 
 
 @pytest.mark.parametrize(

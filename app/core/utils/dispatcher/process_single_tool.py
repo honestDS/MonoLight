@@ -20,6 +20,7 @@ from app.core.log import (
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
+    tool_runs_in_background,
     tool_schema_has_parameter,
 )
 from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
@@ -105,13 +106,21 @@ async def process_single_tool(
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
-    run_in_background = bool(args.pop("run_in_background", False))
+    background_requested = bool(args.pop("run_in_background", False))
+    background_required = tool_runs_in_background(tool_name)
+    run_in_background = background_required or background_requested
 
     LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id, uid)
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
-    elif run_in_background and (not allow_background_submission or not tool_schema_has_parameter(tool_name, "run_in_background")):
+    elif run_in_background and (
+        not allow_background_submission
+        or (
+            not background_required
+            and not tool_schema_has_parameter(tool_name, "run_in_background")
+        )
+    ):
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
         cmd_result = await audit_tool_call(
@@ -138,6 +147,7 @@ async def process_single_tool(
             arguments=args,
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             source="llm_tool_call",
+            messages=messages,
         )
         cmd_result = _build_background_task_queued_result(tool_name, task.id)
 

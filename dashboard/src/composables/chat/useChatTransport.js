@@ -28,12 +28,11 @@ export function useChatTransport() {
     const requestId = data.request_id || 'default'
     const callbacks = callbacksMap.get(requestId)
     if (callbacks) {
+      if (data.session_id && callbacks.sessionId && data.session_id !== callbacks.sessionId) return
       handleWsMessage(data, callbacks)
-    } else if (data.type === 'session_id' || data.type === 'proactive_reply' || data.type === 'proactive_reply_error') {
-      // 会话 ID 同步、主动回复等全局事件处理（若未带 requestId，尝试分发给第一个活跃请求或会话级回调）
-      const firstCallbacks = callbacksMap.values().next().value || sessionEventCallbacks
-      if (firstCallbacks) {
-        handleWsMessage(data, firstCallbacks)
+    } else if (data.type === 'proactive_reply' || data.type === 'proactive_reply_error') {
+      if (sessionEventCallbacks) {
+        handleWsMessage(data, sessionEventCallbacks)
       }
     }
   })
@@ -237,7 +236,7 @@ export function useChatTransport() {
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
 
-    const finalCallbacks = { ...callbacks, requestId }
+    const finalCallbacks = { ...callbacks, requestId, sessionId }
     sessionEventCallbacks = finalCallbacks
     if (requestId) {
       callbacksMap.set(requestId, finalCallbacks)

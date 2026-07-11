@@ -18,6 +18,7 @@ class SystemSetting(SystemSettingBase, table=True):
 class SystemRuntimeSettings(SQLModel):
     log_locale: str = Field(default=DEFAULT_LOCALE)
     temp_dir_max_size_mb: int = Field(default=1024, ge=1, le=1048576)
+    session_reply_max_concurrency: int = Field(default=4, ge=1, le=100)
 
     model_config = ConfigDict(validate_assignment=True)
 

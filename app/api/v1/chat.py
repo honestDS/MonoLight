@@ -2,6 +2,7 @@ import asyncio
 import time
 import uuid
 import weakref
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -21,6 +22,7 @@ from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
+from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
 from app.core.exceptions import BaseBusinessException, LLMException
@@ -35,7 +37,7 @@ from app.core.log import (
 )
 from app.core.security import get_current_user
 from app.core.session_notifier import session_notifier
-from app.core.utils.dispatcher.save_initial_message import save_initial_message
+from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.session import generate_session_title
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig
@@ -56,6 +58,15 @@ logger = get_logger(__name__)
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"], dependencies=[Depends(get_current_user)])
+
+
+def _event_matches_session(event: object, session_id: str | None, *, require_session_id: bool = False) -> bool:
+    if not session_id or not isinstance(event, dict):
+        return False
+    event_session_id = event.get("session_id")
+    if event_session_id is None:
+        return not require_session_id
+    return event_session_id == session_id
 
 
 @router.post("/completions")
@@ -121,17 +132,33 @@ async def delete_session(
 ):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
-    row_count = await message_crud.remove_session(db, session_id=session_id, uid=uid, is_admin=is_admin)
+    row_count = await message_crud.remove_session(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+        commit=False,
+    )
 
     if row_count == 0:
+        await db.rollback()
         return StandardResponse.error(code=404, message=constants.ERR_SESSION_NOT_FOUND)
 
+    await session_reply_work_item_crud.cancel_session(
+        db,
+        session_id=session_id,
+        uid=uid,
+        is_admin=is_admin,
+        commit=False,
+    )
+    await db.commit()
     return StandardResponse.success(message=constants.MSG_SESSION_CLEARED)
 
 
 class SessionSettingRequest(BaseModel):
     session_id: str
-    enable_markdown: bool
+    enable_markdown: bool | None = None
+    reply_target_source: Literal["http", "ws"] | None = None
 
 
 @router.post("/sessions/setting")
@@ -150,7 +177,10 @@ async def update_session_setting(
     if not is_admin and session.uid != uid:
         return StandardResponse.error(message=constants.ERR_SESSION_NO_PERMISSION)
 
-    session.enable_markdown = request.enable_markdown
+    if request.enable_markdown is not None:
+        session.enable_markdown = request.enable_markdown
+    if request.reply_target_source is not None:
+        session.reply_target_source = request.reply_target_source
     await db.commit()
 
     return StandardResponse.success(message=constants.MSG_SESSION_UPDATED)
@@ -310,6 +340,7 @@ async def chat_websocket(
 
     async def run_chat(message_text, session_id, attachments=None, request_id=None):
         nonlocal active_task
+        running_task = asyncio.current_task()
         active_tasks.clear()
         try:
             async with AsyncSessionLocal() as db:
@@ -322,6 +353,10 @@ async def chat_websocket(
                     request_id=request_id,
                     active_tasks=active_tasks,
                 ):
+                    if session_id != current_session_id:
+                        continue
+                    if not _event_matches_session(response, session_id):
+                        continue
                     await websocket.send_json(response)
         except RuntimeError as e:
             # 拦截断开连接后的发送错误
@@ -334,12 +369,21 @@ async def chat_websocket(
             raise
         except Exception:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
-            try:
-                await websocket.send_json({"type": "error", "message": t(constants.ERR_INTERNAL_SERVER_ERROR), "request_id": request_id})
-            except Exception:
-                pass
+            if session_id == current_session_id:
+                try:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": t(constants.ERR_INTERNAL_SERVER_ERROR),
+                            "session_id": session_id,
+                            "request_id": request_id,
+                        }
+                    )
+                except Exception:
+                    pass
         finally:
-            active_task = None
+            if active_task is running_task:
+                active_task = None
 
     try:
         while True:
@@ -350,7 +394,9 @@ async def chat_websocket(
                 pending_task.cancel()
 
             if notify_task in done:
-                await websocket.send_json(notify_task.result())
+                event = notify_task.result()
+                if _event_matches_session(event, current_session_id, require_session_id=True):
+                    await websocket.send_json(event)
                 continue
 
             # 接收 JSON 消息
@@ -368,7 +414,14 @@ async def chat_websocket(
                 continue
 
             if not message and not attachments:
-                await websocket.send_json({"type": "error", "message": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED), "request_id": request_id})
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED),
+                        "session_id": current_session_id,
+                        "request_id": request_id,
+                    }
+                )
                 continue
 
             # 会话 ID 解析与切换逻辑
@@ -377,7 +430,13 @@ async def chat_websocket(
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
                 if not active_task or active_task.done():
                     current_session_id = str(uuid.uuid4())
-                    await websocket.send_json({"type": "session_id", "session_id": current_session_id})
+                    await websocket.send_json(
+                        {
+                            "type": "session_id",
+                            "session_id": current_session_id,
+                            "request_id": request_id,
+                        }
+                    )
                 session_id = current_session_id
             else:
                 current_session_id = session_id
@@ -393,11 +452,8 @@ async def chat_websocket(
             # 如果当前已有任务在运行
             if active_task and not active_task.done():
                 if is_session_switched:
-                    # 1. 切换会话场景：取消旧任务，显式清理锁后再启动新会话任务
+                    # 1. 切换会话场景：仅取消旧连接上的结果等待，持久化工作继续执行
                     await cancel_all_tasks()
-
-                    # 强制显式清理旧会话锁
-                    await ws_chat_adapter.release_session_lock(old_session_id)
 
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
                     active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
@@ -408,15 +464,22 @@ async def chat_websocket(
                         try:
                             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
                         except BaseBusinessException as exc:
-                            await websocket.send_json({"type": "error", "message": t(exc.message, **exc.kwargs), "request_id": request_id})
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "message": t(exc.message, **exc.kwargs),
+                                    "session_id": session_id,
+                                    "request_id": request_id,
+                                }
+                            )
                             continue
-                        await save_initial_message(
+                        await session_reply_queue_manager.enqueue_foreground_message(
                             db,
-                            session_id,
-                            uid,
-                            profile,
-                            message,
-                            attachments,
+                            uid=uid,
+                            session_id=session_id,
+                            profile=profile,
+                            message=message,
+                            attachments=attachments,
                             source="ws",
                         )
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
@@ -444,13 +507,8 @@ async def chat_websocket(
             reset_system_log_locale(log_locale_token)
         reset_current_locale(locale_token)
 
-        # 确保任务被取消并释放锁
+        # 连接断开只取消本地等待，不取消已经持久化的回复工作
         await cancel_all_tasks()
 
-        # 显式清理当前会话锁
         if current_session_id:
             await session_notifier.unregister(uid, current_session_id, notifier_queue)
-            try:
-                await ws_chat_adapter.release_session_lock(current_session_id)
-            except Exception:
-                logger.bind(uid=uid, session_id=current_session_id).error(t("LOG_CHAT_WS_RELEASE_LOCK_FAILED"), exc_info=True)

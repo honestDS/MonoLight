@@ -5,10 +5,11 @@ import pytest
 
 from app.core.background_tasks import manager as manager_module
 from app.core.background_tasks.manager import BackgroundTaskManager
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
 @pytest.mark.asyncio
-async def test_submit_only_creates_background_task_record(monkeypatch):
+async def test_submit_persists_submission_context_with_task_record(monkeypatch):
     manager = BackgroundTaskManager()
     created_task = SimpleNamespace(id=7)
     create_calls = []
@@ -29,10 +30,26 @@ async def test_submit_only_creates_background_task_record(monkeypatch):
         tool_call_id="call-1",
         tool_name="execute_shell",
         arguments={"command": "pwd"},
+        messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="runtime system prompt"),
+            InternalMessage(role=MessageRole.USER, content="生成两个文件"),
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[
+                    InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "pwd"}),
+                    InternalToolCall(id="call-2", name="execute_shell", arguments={"command": "ls"}),
+                ],
+            ),
+        ],
     )
 
     assert result is created_task
     assert len(create_calls) == 1
+    extra = create_calls[0][1]["extra"]
+    assert extra["source"] == "llm_tool_call"
+    assert [message["role"] for message in extra["submission_context"]] == ["user", "assistant"]
+    assert extra["submission_context"][0]["content"] == "生成两个文件"
+    assert [tool_call["id"] for tool_call in extra["submission_context"][1]["tool_calls"]] == ["call-1"]
     assert manager._task is None
     assert manager._running_by_profile == {}
 

@@ -116,6 +116,8 @@ export default {
   log_locale_hint: '控制系统日志写入数据库时使用的语言，影响日志列表、实时日志等系统日志内容。',
   temp_dir_max_size_mb: '临时目录上限(MB)',
   temp_dir_max_size_mb_hint: '控制每个用户临时目录允许占用的最大空间。超过上限后，后台清理任务会优先删除最旧的临时文件。',
+  session_reply_max_concurrency: '会话回复总并发数',
+  session_reply_max_concurrency_hint: '限制所有配置、来源和会话合计同时生成最终回复的数量。同一会话始终依次处理；保存后会在后续调度中动态生效。',
   load_settings_failed: '加载全局设置失败',
   save_settings_failed: '保存全局设置失败',
   system_settings_saved: '全局设置已保存',

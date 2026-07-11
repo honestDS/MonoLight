@@ -27,6 +27,7 @@ export function useSessionManager() {
   const sessionCreating = ref(false)
   let isFirstLoad = true
   let loadedPageCount = 0
+  let sessionGeneration = 0
 
   // 加载历史记录的回调（由外部注入）
   let loadHistoryCallback = null
@@ -61,6 +62,7 @@ export function useSessionManager() {
     if (disconnect && disconnectCallback) {
       disconnectCallback()
     }    
+    sessionGeneration += 1
     currentSessionId.value = session?.session_id
     if (!loadHistory){
       return
@@ -81,13 +83,19 @@ export function useSessionManager() {
   // 加载会话历史记录；pageCount 为页数
   const loadSessionHistory = async (pageCount = 1) => {
     if (!currentSessionId.value || historyLoading.value || !hasMore.value) return
-    
+
+    const requestedSessionId = currentSessionId.value
+    const requestedGeneration = sessionGeneration
     historyLoading.value = true
     try {
       const totalSize = PAGE_SIZE * pageCount
-      const res = await chatApi.sessionsHistory(currentSessionId.value, 1, totalSize)
+      const res = await chatApi.sessionsHistory(requestedSessionId, 1, totalSize)
+      if (requestedGeneration !== sessionGeneration || requestedSessionId !== currentSessionId.value) {
+        return []
+      }
+
       const historyData = res.data?.data || []
-      
+
       if (historyData.length > 0) {
         loadedPageCount += pageCount
         if (historyData.length < totalSize) {
@@ -98,10 +106,14 @@ export function useSessionManager() {
       }
       return historyData
     } catch (err) {
-      ElMessage.error(err.message || t('chat.load_history_failed'))
+      if (requestedGeneration === sessionGeneration && requestedSessionId === currentSessionId.value) {
+        ElMessage.error(err.message || t('chat.load_history_failed'))
+      }
       return []
     } finally {
-      historyLoading.value = false
+      if (requestedGeneration === sessionGeneration) {
+        historyLoading.value = false
+      }
     }
   }
 
@@ -111,6 +123,7 @@ export function useSessionManager() {
     if (disconnectCallback) {
       disconnectCallback()
     }
+    sessionGeneration += 1
     currentSessionId.value = null
     // 设置新建会话状态为 true
     sessionCreating.value = true

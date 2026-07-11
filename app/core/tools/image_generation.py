@@ -47,11 +47,6 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
                     "description": "Image quality.",
                     "default": "auto",
                 },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Set true when image generation may take a long time. The task will run in the background and the model should proactively reply after completion,default is True.",
-                    "default": True,
-                },
             },
             "required": ["prompt"],
         },

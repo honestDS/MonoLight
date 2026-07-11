@@ -333,6 +333,10 @@
           <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
           <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
         </el-form-item>
+        <el-form-item :label="$t('profiles.session_reply_max_concurrency')">
+          <el-input-number v-model="systemSettings.session_reply_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
+          <div class="help-text mt-5">{{ $t('profiles.session_reply_max_concurrency_hint') }}</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="settingsDialogVisible = false" size="default">{{ $t('profiles.cancel') }}</el-button>
@@ -380,7 +384,8 @@ const localeOptions = SUPPORT_LOCALES
 
 const systemSettings = reactive({
   log_locale: 'zh',
-  temp_dir_max_size_mb: 1024
+  temp_dir_max_size_mb: 1024,
+  session_reply_max_concurrency: 4
 })
 
 const auditModelOptions = computed(() => {

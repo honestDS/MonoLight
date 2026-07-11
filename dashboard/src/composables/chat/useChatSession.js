@@ -60,8 +60,9 @@ export function useChatSession() {
   })
 
   const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
-    if (!sessionId) return
+    if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
     const res = await chatApi.sessionsHistory(sessionId, 1, 20)
+    if (sessionId !== sessionManager.currentSessionId.value) return
     const historyData = res.data?.data || []
     if (!historyData.length) return
 
@@ -86,9 +87,11 @@ export function useChatSession() {
     const maxAttempts = 60
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await sleep(Math.max(1, intervalSeconds) * 1000)
+      if (sessionId !== sessionManager.currentSessionId.value) return
       await mergeLatestSessionHistory(sessionId)
 
       const res = await chatApi.backgroundTasks({ session_id: sessionId, page: 1, size: 20 })
+      if (sessionId !== sessionManager.currentSessionId.value) return
       const tasks = res.data?.data || []
       const hasUnfinishedTasks = tasks.some(task => ['pending', 'running'].includes(task.status) || ['pending', 'running'].includes(task.reply_status))
       if (!hasUnfinishedTasks) {
@@ -174,22 +177,23 @@ export function useChatSession() {
     const thinkingId = userMsgId + 1
     chatState.addMessage({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
 
-    await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId)
+    await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, sessionManager.currentSessionId.value)
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, thinkingId, attachmentsToSent = [], userMsgId = null) => {
+  const performHttpSend = async (text, thinkingId, attachmentsToSent = [], userMsgId = null, requestSessionId = null) => {
     try {
       const response = await transport.httpSend({
         message: text,
-        sessionId: sessionManager.currentSessionId.value,
+        sessionId: requestSessionId,
         attachments: attachmentsToSent
       })
 
       // 处理后端生成的 UUID (新建会话模式)
       if (response.choices?.[0]?.finish_reason === 'new_session') {
+        if (requestSessionId !== sessionManager.currentSessionId.value) return
         const newId = response.choices[0].message.content
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
@@ -205,8 +209,10 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, thinkingId, attachmentsToSent, userMsgId)
+        return performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, newId)
       }
+
+      if (requestSessionId !== sessionManager.currentSessionId.value) return
 
       // 成功收到响应时清除当前消息的排队标记
       const userMsg = chatState.messages.value.find(m => m.id === userMsgId && m.role === 'user')
@@ -217,13 +223,14 @@ export function useChatSession() {
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
 
       if (response.has_background_tasks) {
-        void pollBackgroundTasksUntilSettled(sessionManager.currentSessionId.value, response.background_task_poll_interval || 2).catch(err => {
+        void pollBackgroundTasksUntilSettled(requestSessionId, response.background_task_poll_interval || 2).catch(err => {
           console.error('Background task polling failed:', err)
         })
       }
 
       nextTick(() => chatState.scrollToBottom())
     } catch (err) {
+      if (requestSessionId !== sessionManager.currentSessionId.value) return
       // 出错时也应清除排队标记，以便重新发送或其他操作
       const userMsg = chatState.messages.value.find(m => m.id === userMsgId && m.role === 'user')
       if (userMsg && userMsg.status === 'queued') {
@@ -232,10 +239,12 @@ export function useChatSession() {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       ElMessage.error(err.message || t('chat.send_failed'))
     } finally {
-      // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
-      const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
-      if (!hasThinking) {
-        chatState.loading.value = false
+      if (requestSessionId === sessionManager.currentSessionId.value) {
+        // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
+        const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
+        if (!hasThinking) {
+          chatState.loading.value = false
+        }
       }
     }
   }
@@ -290,10 +299,14 @@ export function useChatSession() {
       content: 'Thinking...' 
     })
     
+    let requestSessionId = sessionManager.currentSessionId.value
+    const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
+
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
       thinkingId,
       onTaskStart: () => {
+        if (!isCurrentRequestSession()) return
         // 调度器明确发来了合并/开始信号，说明它正在处理最新的队列消息了，清除队列视觉状态
         chatState.messages.value.forEach(m => {
           if (m.role === 'user' && m.status === 'queued') {
@@ -302,15 +315,19 @@ export function useChatSession() {
         })
       },
       onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam) => {
+        if (!isCurrentRequestSession()) return
         messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason, responseId, requestIdParam)
       },
       onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam) => {
+        if (!isCurrentRequestSession()) return
         messageProcessor.processStreamToolStart(chatState.messages, toolCall, thinkingId, responseId, requestIdParam)
       },
       onToolEnd: (toolEnd, responseId, requestIdParam) => {
+        if (!isCurrentRequestSession()) return
         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam) => {
+        if (!isCurrentRequestSession()) return
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
         // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败：
         // 清除全部排队消息的视觉状态，并清理残留的 thinking 占位（含追加消息产生的占位）
@@ -338,6 +355,8 @@ export function useChatSession() {
         })
       },
       onSessionId: (newSessionId) => {
+        if (requestSessionId !== sessionManager.currentSessionId.value) return
+        requestSessionId = newSessionId
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
         sessionManager.selectSession({ session_id: newSessionId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value }, null, false, false)
@@ -351,6 +370,8 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newSessionId, text)
       },
       onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
+        if (!isCurrentRequestSession()) return
+        if (data.session_id && data.session_id !== requestSessionId) return
         chatState.messages.value.forEach(m => {
           if (m.role === 'user' && m.status === 'queued') {
             delete m.status
@@ -393,60 +414,30 @@ export function useChatSession() {
           }
         }
 
-        // 以下是原先在 type === 'done' (完全结束) 时的逻辑
-        // 精确清理对应的 thinking 占位符
+        // 流式正文和工具消息已经按事件逐条渲染，结束事件只负责清理占位符。
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
-        
-        // （如果还需要兜底的历史匹配的话，由于平时都已经靠 turn_end 精确匹配过了，这里只需要针对没有覆盖到的兜一下）
-        if (data && data.history && data.history.length > 0) {
-          const newMessages = [...chatState.messages.value]
-          
-          const historyAssistants = data.history.filter(m => m.role === 'assistant' && (!m.tool_calls || m.tool_calls.length === 0) && m.content)
-          const frontAssistants = []
-          newMessages.forEach((m, idx) => {
-            if (m.role === 'assistant' && (!m.tool_calls || m.tool_calls.length === 0)) {
-              frontAssistants.push({ msg: m, idx })
-            }
-          })
-
-          let historyIdx = historyAssistants.length - 1
-          for (let i = frontAssistants.length - 1; i >= 0 && historyIdx >= 0; i--) {
-            const frontMsg = frontAssistants[i].msg
-            const histMsg = historyAssistants[historyIdx]
-
-            const checkLength = Math.min(20, frontMsg.content?.length || 0, histMsg.content?.length || 0)
-            if (checkLength > 5 && frontMsg.content.substring(0, checkLength) === histMsg.content.substring(0, checkLength)) {
-              if (frontMsg.content !== histMsg.content) {
-                newMessages[frontAssistants[i].idx] = { ...frontMsg, content: histMsg.content }
-              }
-              historyIdx--
-            } else if (!frontMsg.content || frontMsg.content.length <= 5) {
-               newMessages[frontAssistants[i].idx] = { ...frontMsg, content: histMsg.content }
-               historyIdx--
-            } else {
-               historyIdx--
-               i++ 
-            }
-          }
-          chatState.messages.value = newMessages
-        }
       },
-      scrollToBottom: () => nextTick(() => chatState.scrollToBottom()),
-      setLoading: (val) => { chatState.loading.value = val }
+      scrollToBottom: () => {
+        if (isCurrentRequestSession()) nextTick(() => chatState.scrollToBottom())
+      },
+      setLoading: (val) => {
+        if (isCurrentRequestSession()) chatState.loading.value = val
+      }
     }
     
     try {
       await transport.wsSend({
         message: text,
-        sessionId: sessionManager.currentSessionId.value,
+        sessionId: requestSessionId,
         attachments: attachmentsToSent,
         requestId,
         callbacks
       })
     } catch (e) {
       console.error('WebSocket发送失败:', e)
+      if (!isCurrentRequestSession()) return
       ElMessage.error(t('chat.ws_send_failed'))
-      messageProcessor.removeThinkingMessage(chatState.messages, transport.getCurrentThinkingId())
+      messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       chatState.loading.value = false
       transport.setTransportMode('http')
     }

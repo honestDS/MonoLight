@@ -49,10 +49,11 @@ app/
 
 ### 应用入口层
 
-- `start.py`：跨平台统一启动器；读取 `.env` 中的 `APP_PORT`、`APP_HOST` 和 `APP_WORKERS`，在父进程中完成一次数据库与系统数据初始化，再按操作系统创建并托管 Uvicorn Web 进程、唯一消息平台 Worker 与唯一后台任务 Worker。
+- `start.py`：跨平台统一启动器；读取 `.env` 中的 `APP_PORT`、`APP_HOST` 和 `APP_WORKERS`，在父进程中完成一次数据库与系统数据初始化，再按操作系统创建并托管 Uvicorn Web 进程、唯一消息平台 Worker、唯一后台任务 Worker 与唯一会话回复 Worker。
 - `main.py`：创建 FastAPI 应用，注册中间件、异常处理器和 API 路由；每个 Web Worker 只启动数据库会话事件订阅，不执行后台任务、定时任务、周期清理或消息平台长轮询。
 - `app/workers/message_platform.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担定时任务调度、消息平台长轮询和 Outbox 投递。
 - `app/workers/background_task.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担后台工具任务恢复、认领、按 Profile 并发调度以及日志和临时目录清理。
+- `app/workers/session_reply.py`：独立会话最终回复进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，恢复过期工作并按全局设置并发调度不同会话。
 - `app/workers/lease.py`：管理独立 Worker 的数据库租约获取、续租、失效停止和释放。
 - `app/workers/signals.py`：为独立 Worker 统一注册 POSIX 信号和 Windows `SIGBREAK` 关闭处理。
 - `app/handler.py`：注册 CORS、语言环境中间件、根路径、favicon 路由，以及数据库、校验、业务异常、LLM 异常和兜底异常处理器。
@@ -98,7 +99,7 @@ app/adapters/
     └── schemas.py          # OpenClaw 内部数据结构
 ```
 
-适配层负责把不同传输协议或消息平台的输入转换为统一的内部对话请求，并把调度结果转换回对应通道响应。微信 OpenClaw 适配包封装登录、长轮询收信、回调字段兼容、上下文 token、同步游标、媒体消息和消息发送，并复用内部聊天调度链路生成回复；业务异常和未知异常会被转换为本地化错误回复发送给用户。
+适配层负责把不同传输协议或消息平台的输入转换为统一的内部对话请求。HTTP、WebSocket 与微信 OpenClaw 的前台消息均通过同一入口保存并创建会话回复工作；微信收信处理只负责入队，不在长轮询协程内等待最终回复。最终结果由会话事件或消息平台 Outbox 投递，业务异常和未知异常会被转换为本地化错误回复。
 
 ## 核心层：`app/core/`
 
@@ -113,6 +114,7 @@ app/core/
 ├── middleware/             # 工具安全审计中间件
 ├── rerank/                 # 知识库重排编排
 ├── retrieval/              # 混合检索、稀疏检索、融合策略
+├── session_reply_queue/    # 按会话顺序执行最终回复工作
 ├── tools/                  # LLM 可调用工具实现
 ├── utils/                  # 通用工具函数与调度辅助函数
 ├── channel_router.py       # 模型渠道选择与加权轮询
@@ -145,7 +147,19 @@ app/core/background_tasks/
 └── schemas.py              # 后台任务内部结构
 ```
 
-该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消、状态更新和主动回复。Web Worker 只写入后台任务记录，唯一后台任务 Worker 负责恢复、认领和按 Profile 并发调度，确保并发上限不会随 Web Worker 数量扩大。定时任务调度器只在唯一消息平台 Worker 中启动，避免多个 Uvicorn Web Worker 重复触发同一计划任务。
+该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消和状态更新。Web Worker 只写入后台任务记录，唯一后台任务 Worker 负责恢复、认领和按 Profile 并发执行工具；工具完成后，`reply_trigger.py` 在同一事务中保存结果消息并创建后台总结工作。定时任务调度器只在唯一消息平台 Worker 中启动，原子推进单次触发并在同一事务中保存触发消息与创建计划任务总结工作，不直接调用 LLM。
+
+### 会话最终回复队列：`app/core/session_reply_queue/`
+
+```text
+app/core/session_reply_queue/
+├── __init__.py             # 队列管理器与消费者导出
+├── consumer.py             # 原子认领、动态并发调度与租约续期
+├── executor.py             # 前台、后台工具与计划任务最终回复执行
+└── manager.py              # 原子入队、输入冻结合并与结果等待
+```
+
+队列使用 `session_reply_sequence` 为同一会话的三类工作分配统一顺序号，并使用 `session_reply_work_item` 持久化来源、输入边界、状态、租约、重试和结果。消费者只认领每个会话最早的非终态工作，不会越过等待中的较早工作；不同会话可并行。进程总并发由全局设置 `session_reply_max_concurrency` 控制，默认值为 4、范围为 1 到 100，设置变更在后续调度中动态生效。连续前台工作可在首次执行前合并，但不会跨过后台工具总结或计划任务总结。
 
 ### 消息平台：`app/core/message_platforms/`
 
@@ -164,13 +178,12 @@ app/core/message_platforms/
 
 WebSocket 主动事件采用数据库广播：事件写入 `session_event` 后，每个 Web Worker 使用独立递增游标读取并投递到本进程的 WebSocket 队列，因此连接所在进程都能观察到事件。新 Worker 从启动时的最新事件 ID 开始消费，避免重放历史消息；事件保留 24 小时并由通知轮询器定期清理。
 
-微信 OpenClaw 处理器复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后完成消息合并、上下文 token 保存和内部聊天调度，回复结果经适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库。
+微信 OpenClaw 处理器复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后完成平台侧消息合并、上下文 token 保存和前台工作入队。会话回复 Worker 生成最终结果后通过持久化 Outbox 交由适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库。
 
 ### 数据访问：`app/core/crud/`
 
 ```text
 app/core/crud/
-├── active_session.py       # 活跃会话访问
 ├── background_task.py      # 后台任务访问
 ├── base.py                 # 通用 CRUD 基类
 ├── channel.py              # 模型渠道访问
@@ -184,6 +197,7 @@ app/core/crud/
 ├── scheduled_task.py       # 定时任务访问
 ├── session.py              # 会话访问
 ├── session_event.py        # WebSocket 跨进程广播事件访问
+├── session_reply_work_item.py # 会话回复顺序、入队、认领与恢复
 ├── system_setting.py       # 系统设置访问
 ├── user.py                 # 用户访问
 └── worker_lease.py         # 独立 Worker 数据库租约访问
@@ -308,7 +322,6 @@ app/core/utils/
 ```text
 app/models/
 ├── __init__.py             # 模型包导出
-├── active_session.py       # 活跃会话模型
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由游标模型
@@ -321,13 +334,14 @@ app/models/
 ├── scheduled_task.py       # 定时任务模型
 ├── session.py              # 会话模型
 ├── session_event.py        # WebSocket 跨进程广播事件模型
+├── session_reply_work_item.py # 会话回复工作与顺序计数模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型
 ├── user.py                 # 用户模型
 └── worker_lease.py         # 独立 Worker 数据库租约模型
 ```
 
-模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。`message_platform_outbox` 保存待投递事件、处理状态、认领所有者、租约、重试次数和错误信息；`session_event` 保存供所有 Web Worker 读取的短期主动会话事件；`worker_lease` 保存两个独立 Worker 的当前所有者和租约有效期。
+模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。`message_platform_outbox` 保存待投递事件、处理状态、认领所有者、租约、重试次数和错误信息；`session_event` 保存供所有 Web Worker 读取的短期主动会话事件；`session_reply_work_item` 保存统一最终回复队列；`session_reply_sequence` 原子分配会话内顺序号；`worker_lease` 保存独立 Worker 的当前所有者和租约有效期。
 
 ## Provider 层：`app/providers/`
 
@@ -441,7 +455,7 @@ dashboard/src/composables/
 └── useWebSocket.js         # WebSocket 通用封装
 ```
 
-前端采用 Vue 3、Vue Router、Element Plus、Axios 和 vue-i18n。`api/index.js` 集中封装后端 REST API 与 WebSocket 地址，`router/index.js` 定义页面路由和登录态守卫。消息平台页面提供平台列表、状态展示、启停、删除、配置编辑、创建后扫码登录，以及微信 OpenClaw 二维码状态刷新。
+前端采用 Vue 3、Vue Router、Element Plus、Axios 和 vue-i18n。`api/index.js` 集中封装后端 REST API 与 WebSocket 地址，`router/index.js` 定义页面路由和登录态守卫。配置管理页的全局设置弹窗可配置日志语言、临时目录上限和会话回复总并发数。消息平台页面提供平台列表、状态展示、启停、删除、配置编辑、创建后扫码登录，以及微信 OpenClaw 二维码状态刷新。
 
 ## 测试与脚本
 
@@ -453,6 +467,7 @@ tests/
     ├── test_message_platform_outbox.py      # Outbox 去重、认领、恢复与重试测试
     ├── test_models_no_foreign_keys.py       # 模型外键约束约定测试
     ├── test_session_notifier.py             # 数据库会话事件广播与清理测试
+    ├── test_session_reply_queue.py           # 会话回复顺序、认领与合并测试
     ├── test_start.py                        # 跨平台启动器配置与命令测试
     ├── test_shell_tool.py                   # Shell 工具测试
     └── test_worker_lease.py                 # 独立 Worker 数据库租约测试
@@ -464,7 +479,9 @@ scripts/
 ├── migration_20260709_add_chat_session_source.py       # 会话来源字段迁移脚本
 ├── migration_20260710_add_message_platform_outbox.py   # 消息平台 Outbox 表迁移
 ├── migration_20260710_add_session_event.py             # WebSocket 会话事件广播表迁移
-└── migration_20260711_add_worker_lease.py              # 独立 Worker 数据库租约表迁移
+├── migration_20260711_add_worker_lease.py              # 独立 Worker 数据库租约表迁移
+├── migration_20260712_add_session_reply_queue.py       # 会话最终回复队列表迁移
+└── migration_20260712_drop_active_session.py           # 删除旧会话互斥表
 ```
 
 测试目录覆盖当前关键约定、工具行为和消息平台管理器；新增单元测试按规范放置在 `tests/unit/`。脚本目录保存项目维护和数据迁移相关脚本。

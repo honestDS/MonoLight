@@ -544,8 +544,23 @@ const send = async () => {
 
 // 通信模式切换
 const handleModeChange = async (val) => {
+  const mode = val ? 'ws' : 'http'
+
+  if (currentSessionId.value) {
+    try {
+      await chatApi.updateSessionReplyTarget(currentSessionId.value, mode)
+      const session = sessions.value.find(item => item.session_id === currentSessionId.value)
+      if (session) {
+        session.reply_target_source = mode
+      }
+    } catch (error) {
+      ElMessage.error(error.message || t('chat.setting_failed'))
+      return
+    }
+  }
+
   isWsMode.value = val
-  await setTransportMode(val ? 'ws' : 'http')
+  await setTransportMode(mode)
 }
 
 // 上传组件文件列表状态绑定

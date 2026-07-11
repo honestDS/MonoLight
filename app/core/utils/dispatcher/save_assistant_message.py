@@ -18,6 +18,7 @@ async def save_assistant_message(
     uid: str,
     profile_id: int,
     ai_msg: InternalMessage,
+    dedupe_key: str | None = None,
 ):
     session = await session_crud.get_by_session_id(db, session_id)
     enable_markdown = session.enable_markdown if session else False
@@ -34,5 +35,6 @@ async def save_assistant_message(
         ai_msg,
         profile_id,
         is_processed=True,
+        dedupe_key=dedupe_key,
     )
     return saved_msg

@@ -13,6 +13,7 @@ from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.background_task import BackgroundTask
+from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
@@ -22,6 +23,18 @@ BACKGROUND_TASK_POLL_INTERVAL_SECONDS = 0.5
 BACKGROUND_TASK_RECOVERY_INTERVAL_SECONDS = 30
 BACKGROUND_TASK_PROFILE_FETCH_LIMIT = 100
 BACKGROUND_TASK_REPLY_MAX_CONCURRENCY = 4
+
+
+def _build_submission_context(messages: list[InternalMessage], tool_call_id: str) -> list[dict[str, Any]]:
+    context: list[InternalMessage] = []
+    for message in messages:
+        if message.role == MessageRole.SYSTEM:
+            continue
+        copied_message = message.model_copy(deep=True)
+        if copied_message.role == MessageRole.ASSISTANT and copied_message.tool_calls and any(tool_call.id == tool_call_id for tool_call in copied_message.tool_calls):
+            copied_message.tool_calls = [tool_call for tool_call in copied_message.tool_calls if tool_call.id == tool_call_id]
+        context.append(copied_message)
+    return [message.model_dump(mode="json", exclude_none=True) for message in context]
 
 
 class BackgroundTaskManager:
@@ -44,6 +57,7 @@ class BackgroundTaskManager:
         arguments: dict[str, Any],
         allowed_knowledge_base_ids: list[int] | None = None,
         source: str = "llm_tool_call",
+        messages: list[InternalMessage] | None = None,
     ) -> BackgroundTask:
         task = await background_task_crud.create_task(
             db,
@@ -54,7 +68,11 @@ class BackgroundTaskManager:
             tool_name=tool_name,
             arguments=arguments,
             auto_reply=True,
-            extra={"allowed_knowledge_base_ids": allowed_knowledge_base_ids or [], "source": source},
+            extra={
+                "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
+                "source": source,
+                "submission_context": _build_submission_context(messages or [], tool_call_id),
+            },
         )
         logger.bind(
             task_id=task.id,

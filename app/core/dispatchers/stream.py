@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel_router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
-from app.core.crud.active_session import active_session_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException
@@ -73,17 +72,7 @@ class StreamDispatcherMixin:
             final_response_id: str | None = None
             is_first_iter = True
 
-            # 2. 分布式会话状态机
             while True:
-                await active_session_crud.cleanup_expired_locks(db)
-                lock_acquired = await active_session_crud.acquire_lock(db, session_id)
-
-                if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_STREAM_QUEUED", session_id=session_id))
-                    yield {"type": "content", "content": "", "turn": 0, "finish_reason": "queued", "request_id": request_id}
-                    yield {"type": "done", "session_id": session_id, "history": [], "request_id": request_id}
-                    return
-
                 try:
                     yield {"type": "task_start", "request_id": request_id}
 
@@ -365,7 +354,6 @@ class StreamDispatcherMixin:
                             }
 
                 finally:
-                    await active_session_crud.release_lock(db, session_id)
                     is_first_iter = False
 
                 new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)

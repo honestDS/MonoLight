@@ -116,6 +116,8 @@ export default {
   log_locale_hint: 'Controls the language used when system logs are written to the database, including log lists and live logs.',
   temp_dir_max_size_mb: 'Temp Directory Limit (MB)',
   temp_dir_max_size_mb_hint: 'Controls the maximum space allowed for each user temp directory. When the limit is exceeded, the background cleaner removes the oldest temporary files first.',
+  session_reply_max_concurrency: 'Session Reply Global Concurrency',
+  session_reply_max_concurrency_hint: 'Limits final replies generated concurrently across all profiles, sources, and sessions. A single session always runs replies in order. Changes apply dynamically to subsequent scheduling.',
   load_settings_failed: 'Failed to load global settings',
   save_settings_failed: 'Failed to save global settings',
   system_settings_saved: 'Global settings saved',

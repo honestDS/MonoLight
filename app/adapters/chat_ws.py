@@ -7,11 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_VALIDATION_FAILED
+from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_notifier import session_notifier
+from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -40,16 +42,20 @@ class WebSocketChatAdapter(BaseChatAdapter):
         if not session_id:
             raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
         try:
-            async for chunk in ChatDispatcher.dispatch_stream(
-                db=db,
-                message=message,
+            profile = await profile_crud.get_active(db, uid=uid)
+            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+            _initial_message, work = await session_reply_queue_manager.enqueue_foreground_message(
+                db,
                 uid=uid,
                 session_id=session_id,
+                profile=profile,
+                message=message,
                 attachments=attachments,
-                request_id=request_id,
-                active_tasks=active_tasks,
-                session_source="ws",
-            ):
+                source="ws",
+            )
+            async for chunk in session_reply_queue_manager.wait_for_stream(work.id):
+                if request_id and isinstance(chunk, dict):
+                    chunk.setdefault("request_id", request_id)
                 yield chunk
         except BaseBusinessException as e:
             yield LLMResponse(

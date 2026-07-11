@@ -17,21 +17,26 @@ export function useWebSocket() {
     let messageHandlers = []
     // 存储 token 用于重连
     let storedToken = ''
+    let connectionGeneration = 0
     
     // 连接 WebSocket
     const connect = (token) => {
         return new Promise((resolve, reject) => {
             storedToken = token
-            ws.value = chatApi.createWebSocket(token)
+            const generation = ++connectionGeneration
+            const socket = chatApi.createWebSocket(token)
+            ws.value = socket
             
-            ws.value.onopen = () => {
+            socket.onopen = () => {
+                if (generation !== connectionGeneration || ws.value !== socket) return
                 console.log('WebSocket connected')
                 isConnected.value = true
                 reconnectAttempts.value = 0  // 重置重连计数
                 resolve()
             }
             
-            ws.value.onmessage = (event) => {
+            socket.onmessage = (event) => {
+                if (generation !== connectionGeneration || ws.value !== socket) return
                 try {
                     // 尝试解析 JSON
                     const data = JSON.parse(event.data)
@@ -43,13 +48,15 @@ export function useWebSocket() {
                 }
             }
             
-            ws.value.onerror = (error) => {
+            socket.onerror = (error) => {
+                if (generation !== connectionGeneration || ws.value !== socket) return
                 console.error('WebSocket error:', error)
                 isConnected.value = false
                 reject(error)
             }
             
-            ws.value.onclose = (event) => {
+            socket.onclose = (event) => {
+                if (generation !== connectionGeneration || ws.value !== socket) return
                 console.log('WebSocket closed', event.code, event.reason)
                 isConnected.value = false
                 // 检查是否是正常关闭 (code 1000 = CLOSE_NORMAL, 1001 = GOING_AWAY)
@@ -78,10 +85,12 @@ export function useWebSocket() {
     // 断开连接
     const disconnect = () => {
         storedToken = ''
+        connectionGeneration += 1
         reconnectAttempts.value = MAX_RECONNECT_ATTEMPTS  // 阻止自动重连
         if (ws.value) {
-            ws.value.close(1000, 'User initiated close')  // 正常关闭
+            const socket = ws.value
             ws.value = null
+            socket.close(1000, 'User initiated close')  // 正常关闭
         }
         isConnected.value = false
     }

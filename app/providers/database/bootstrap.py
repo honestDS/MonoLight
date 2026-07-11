@@ -13,7 +13,6 @@ from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.crud.user import user_crud
-from app.models.active_session import ActiveSession
 from app.models.profile import (
     ProfileConfig,
 )
@@ -144,11 +143,6 @@ async def init_database_schema(session: AsyncSession) -> None:
 async def init_system_data(session: AsyncSession):
     # 1. 基础表初始化与迁移
     await init_database_schema(session)
-
-    # 清空会话锁表 (active_session)
-    await session.execute(text(f"DELETE FROM {ActiveSession.__tablename__}"))
-    await session.commit()
-    logger.info("INIT: active_session table cleared")
 
     # 2. 业务配置初始化
     await system_setting_crud.ensure_defaults(session)

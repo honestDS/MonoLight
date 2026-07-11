@@ -24,13 +24,15 @@ from app.adapters.weixin_openclaw.message import (
     text_item,
     update_sync_buf,
 )
-from app.adapters.weixin_openclaw.response import extract_event_reply, extract_reply_files, extract_reply_text
+from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID, ERR_VALIDATION_FAILED
+from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.session import generate_session_title_for_active_profile
 
 logger = get_logger(__name__)
@@ -148,20 +150,18 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         if not session_id:
             raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
         try:
-            llm_response = await ChatDispatcher.dispatch(
-                db=db,
-                message=message,
+            profile = await profile_crud.get_active(db, uid=uid)
+            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+            await session_reply_queue_manager.enqueue_foreground_message(
+                db,
                 uid=uid,
                 session_id=session_id,
+                profile=profile,
+                message=message,
                 attachments=attachments,
-                active_tasks=active_tasks,
-                session_source="weixin-openclaw",
-                wait_for_session_lock=True,
+                source="weixin-openclaw",
             )
-            return WeixinOpenClawChatResult(
-                text=extract_reply_text(llm_response),
-                files=extract_reply_files(llm_response),
-            )
+            return WeixinOpenClawChatResult()
         except BaseBusinessException as exc:
             return WeixinOpenClawChatResult(text=t(exc.message, default=exc.message, **exc.kwargs))
         except Exception as exc:
@@ -242,7 +242,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 return False
 
             dispatch_text = message.text
-            result = await self.chat(
+            await self.chat(
                 db=db,
                 message=dispatch_text,
                 uid=resolved_uid,
@@ -255,19 +255,13 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 logger.bind(uid=resolved_uid, session_id=message.session_id).warning(t("LOG_WEIXIN_OPENCLAW_RUNTIME_INVALID_BEFORE_REPLY"))
                 return False
 
-            sent = False
-            if result.text:
-                sent = await self.reply_text(message.user_id, result.text, context_token=message.context_token)
-            for file_item in result.files:
-                sent = await self.reply_file_item(message.user_id, file_item, context_token=message.context_token) or sent
-
             await generate_session_title_for_active_profile(
                 db=db,
                 uid=resolved_uid,
                 session_id=message.session_id,
                 first_message=dispatch_text,
             )
-            return sent
+            return True
         except BaseBusinessException as exc:
             return await self._reply_error(message, exc.message, **exc.kwargs)
         except Exception as exc:

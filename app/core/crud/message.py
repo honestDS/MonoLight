@@ -122,7 +122,14 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().first()
 
-    async def remove_session(self, db: AsyncSession, session_id: str, uid: str = None, is_admin: bool = False) -> int:
+    async def remove_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        uid: str = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
         stmt = delete(Message).where(Message.session_id == session_id)
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
@@ -135,7 +142,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 session_stmt = session_stmt.where(ChatSession.uid == uid)
             await db.execute(session_stmt)
 
-        await db.commit()
+        if commit:
+            await db.commit()
         return deleted_count
 
 

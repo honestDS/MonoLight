@@ -33,6 +33,7 @@ async def prepare_messages(
     message: Any,
     is_first_iter: bool,
     context_window_k: int = 4,
+    history_before_id: int | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
@@ -49,7 +50,7 @@ async def prepare_messages(
         uid,
         profile,
         message,
-        before_id=initial_msg.id if is_first_iter else None,
+        before_id=history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None,
         context_window_k=context_window_k,
         reserved_tokens=reserved_tokens,
     )
