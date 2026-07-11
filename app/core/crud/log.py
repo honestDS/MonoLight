@@ -23,6 +23,18 @@ class CRUDSystemLog(CRUDBase[SystemLog, SystemLogCreate, SystemLogCreate]):
         result = await db.execute(stmt)
         return result.scalars().all()
 
+    async def get_latest_id(self, db: AsyncSession) -> int:
+        result = await db.execute(select(func.max(SystemLog.id)))
+        return result.scalar() or 0
+
+    async def get_recent_through_id(self, db: AsyncSession, *, through_id: int, limit: int = 100) -> list[SystemLog]:
+        result = await db.execute(select(SystemLog).where(SystemLog.id <= through_id).order_by(SystemLog.id.desc()).limit(limit))
+        return list(result.scalars().all())
+
+    async def list_after_id(self, db: AsyncSession, *, after_id: int, limit: int = 100) -> list[SystemLog]:
+        result = await db.execute(select(SystemLog).where(SystemLog.id > after_id).order_by(SystemLog.id.asc()).limit(limit))
+        return list(result.scalars().all())
+
     async def count_filtered(self, db: AsyncSession, *, level: str | None = None, uid: str | None = None, session_id: str | None = None) -> int:
         stmt = select(func.count()).select_from(SystemLog)
         if level:

@@ -15,7 +15,6 @@ from app.core import constants
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
-from app.core.log_broadcaster import log_broadcaster
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
 from app.core.utils.time import get_local_time
 
@@ -56,7 +55,7 @@ class LogManager:
     def _truncate_tool_log_message(record: dict) -> str:
         """对工具类日志的超大 message 做字符级截断。
 
-        仅用于 ws_sink 和 db_sink，避免超大工具结果撑大数据库存储体积与前端广播 payload；
+        用于数据库 sink，避免超大工具结果撑大数据库存储体积与前端广播 payload；
         文件 sink 直接使用 record["message"] 原文写入，不受此截断影响，保留完整数据用于审计。
         """
         message = record["message"]
@@ -69,42 +68,6 @@ class LogManager:
     def setup(cls, log_path: str = str(DEFAULT_LOG_FILE_PATH), level: str = "INFO"):
         if cls._configured:
             return
-
-        # 异步 WebSocket 推送器
-        async def ws_sink(message):
-            try:
-                record = message.record
-                uid = record["extra"].get("uid")
-                session_id = record["extra"].get("session_id")
-
-                # 序列化 extra 时使用 default=str 避免非基本类型序列化失败
-                # 排除 name, uid, session_id，因为它们已经有专门的字段
-                extra_data = {}
-                for extra_key, extra_value in record["extra"].items():
-                    if extra_key not in ["name", "uid", "session_id"]:
-                        extra_data[extra_key] = extra_value
-
-                # 使用系统本地时间戳推送给前端
-                local_now = get_local_time()
-                # 优先使用 extra 中的 name 作为 module
-                module_name = record["extra"].get("name") or record["name"]
-
-                # 仅对工具类日志（tool_call / tool_result）的超大 message 做截断，
-                # 避免工具结果撑大实时推送 payload 导致前端卡顿
-                log_message = cls._truncate_tool_log_message(record)
-
-                log_entry = {
-                    "timestamp": local_now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-                    "level": record["level"].name,
-                    "module": module_name,
-                    "message": log_message,
-                    "uid": uid,
-                    "session_id": session_id,
-                    "extra": extra_data,
-                }
-                await log_broadcaster.broadcast(log_entry)
-            except Exception as e:
-                sys.stderr.write(f"Error in WS log sink: {str(e)}\n")
 
         # 异步数据库写入器
         async def db_sink(message):
@@ -164,19 +127,6 @@ class LogManager:
             except Exception as e:
                 sys.stderr.write(f"Critical error in DB log sink wrapper: {str(e)}\n")
 
-        # 封装异步函数供 loguru 使用 (WS)
-        def ws_sink_wrapper(message):
-            try:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-
-                if loop and loop.is_running():
-                    loop.create_task(ws_sink(message))
-            except Exception as e:
-                sys.stderr.write(f"Critical error in WS log sink wrapper: {str(e)}\n")
-
         # 确保工作目录
         os.getcwd()
         if not os.path.isabs(log_path):
@@ -223,20 +173,15 @@ class LogManager:
             format="[{time:YYYY-MM-DD HH:mm:ss.SSS}] [{level}] {message}",
         )
 
-        # 添加数据库 Sink (仅记录 INFO 及以上级别)
-        # 注意：此处必须 enqueue=False，否则会在无事件循环 of 线程运行导致异步任务丢失
+        # 数据库同时承担跨进程实时日志传输，因此需记录 DEBUG 及以上级别。
+        # 此处必须 enqueue=False，否则会在线程中因缺少事件循环导致异步任务丢失。
         logger.add(
             db_sink_wrapper,
-            level="INFO",
-            enqueue=False,
-        )
-
-        # 添加 WebSocket Sink (记录全量级别以支持前端实时调试)
-        logger.add(
-            ws_sink_wrapper,
             level="DEBUG",
             enqueue=False,
         )
+
+        # WebSocket 由各 Web Worker 轮询数据库日志后广播，确保跨进程日志可见且不会重复推送。
 
         # 拦截标准 logging
         class InterceptHandler(logging.Handler):

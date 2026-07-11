@@ -17,14 +17,18 @@ from app.api.v1.scheduled_tasks import router as scheduled_task_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core.log import LogManager, get_logger
+from app.core.log_broadcaster import log_broadcaster
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.session_notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
+from app.providers.database.bootstrap import create_database_tables
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 兼容直接运行 main.py 或 uvicorn main:app，不能依赖父启动器预先建表。
+    await create_database_tables()
     await session_notifier.start()
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库
@@ -34,11 +38,13 @@ async def lifespan(app: FastAPI):
         log_path=log_file_path,
         level=os.getenv("LOG_LEVEL", "INFO"),
     )
+    await log_broadcaster.start()
 
     get_logger("app.core.log").info(f"Log system initialized. Path: {log_file_path} | Time: {now_aware.isoformat()}")
 
     yield
 
+    await log_broadcaster.stop()
     await session_notifier.stop()
 
 

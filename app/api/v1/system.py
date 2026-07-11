@@ -82,14 +82,12 @@ async def system_logs_websocket(
     # 语言上下文需在 accept 之前设置；WebSocket 的 accept 统一由 log_broadcaster.connect 内部完成，此处不再重复 accept
     lang_param = websocket.query_params.get("lang")
     locale_token = set_current_locale(normalize_locale(lang_param if lang_param is not None else ""))
-    await log_broadcaster.connect(websocket)
-    try:
-        # 1. 回溯历史日志 (最近 100 条)
-        history_logs = await system_log_crud.get_multi_filtered(db, limit=100)
-        # 注意：CRUD 返回的是按时间倒序的，发送前需反转
+
+    async def build_history_snapshot() -> tuple[int, dict]:
+        latest_history_id = await system_log_crud.get_latest_id(db)
+        history_logs = await system_log_crud.get_recent_through_id(db, through_id=latest_history_id, limit=100)
         history_logs.reverse()
 
-        # 历史日志集中一次性推送，使用 type=history 标识批量消息，避免逐条发送的网络开销
         history_payload = []
         for log in history_logs:
             extra_str = log.extra or ""
@@ -108,9 +106,13 @@ async def system_logs_websocket(
                     "extra": extra_dict,
                 }
             )
-        await websocket.send_json({"type": "history", "logs": history_payload})
+        return latest_history_id, {"type": "history", "logs": history_payload}
 
-        # 2. 保持连接，等待广播器推送（保持心跳或等待断开）
+    try:
+        # 历史快照发送与实时订阅注册由广播器串行化，避免首次连接时重复或遗漏日志。
+        await log_broadcaster.connect(websocket, build_history_snapshot)
+
+        # 保持连接，等待广播器推送（保持心跳或等待断开）
         while True:
             # 维持连接活跃，检测断开
             await websocket.receive_text()
