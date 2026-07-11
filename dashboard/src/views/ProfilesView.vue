@@ -184,6 +184,14 @@
                     <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
                     <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
                   </el-form-item>
+                  <el-form-item :label="$t('profiles.background_task_max_concurrency')">
+                    <el-input-number v-model="form.configs.tool.background_task_max_concurrency" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.background_task_max_concurrency_hint') }}</div>
+                  </el-form-item>
+                  <el-form-item :label="$t('profiles.scheduled_task_max_concurrency')">
+                    <el-input-number v-model="form.configs.tool.scheduled_task_max_concurrency" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
+                    <div class="help-text mt-5">{{ $t('profiles.scheduled_task_max_concurrency_hint') }}</div>
+                  </el-form-item>
                   <el-form-item :label="$t('profiles.max_turns')">
                     <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
                   </el-form-item>

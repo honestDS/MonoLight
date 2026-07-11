@@ -48,6 +48,7 @@ class ToolConfig(BaseModel):
     max_parallel_tools: int = PydanticField(5, ge=1, le=20, description="允许的最大并行工具调用数量")
     max_turns: int = PydanticField(5, ge=1, le=20, description="允许的最大连续工具调用轮数")
     background_task_max_concurrency: int = PydanticField(2, ge=1, le=20, description="允许的最大后台任务并发数量")
+    scheduled_task_max_concurrency: int = PydanticField(4, ge=1, le=20, description="允许的最大计划任务回复并发数量")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
     enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
     allowed_file_send_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 允许发送文件的安全目录白名单，目录必须使用绝对路径")
@@ -94,6 +95,7 @@ class ProfileConfig(BaseModel):
                 "max_parallel_tools",
                 "max_turns",
                 "background_task_max_concurrency",
+                "scheduled_task_max_concurrency",
                 "firecrawl_api_key",
                 "enabled_tools",
                 "allowed_file_send_dirs",
@@ -145,6 +147,7 @@ PROFILE_EXAMPLE = {
             "max_parallel_tools": 5,
             "max_turns": 5,
             "background_task_max_concurrency": 2,
+            "scheduled_task_max_concurrency": 4,
             "firecrawl_api_key": "",
             "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"],
             "allowed_file_send_dirs": [],

@@ -12,6 +12,7 @@ from app.core.log import get_logger
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.profile import ProfileConfig
 from app.models.scheduled_task import ScheduledTask
 from app.providers.database import AsyncSessionLocal
 
@@ -19,7 +20,6 @@ logger = get_logger(__name__)
 
 SCHEDULED_TASK_POLL_INTERVAL_SECONDS = 1
 SCHEDULED_TASK_FETCH_LIMIT = 100
-SCHEDULED_TASK_MAX_CONCURRENT_REPLIES = 4
 
 
 class ScheduledTaskScheduler:
@@ -29,7 +29,8 @@ class ScheduledTaskScheduler:
         self._active_dispatch_tasks: set[asyncio.Task] = set()
         self._active_reply_tasks: set[asyncio.Task] = set()
         self._inflight_task_ids: set[int] = set()
-        self._reply_semaphore = asyncio.Semaphore(SCHEDULED_TASK_MAX_CONCURRENT_REPLIES)
+        self._running_replies_by_profile: dict[int, int] = {}
+        self._reply_condition = asyncio.Condition()
 
     def start(self) -> asyncio.Task:
         if self._task and not self._task.done():
@@ -105,6 +106,7 @@ class ScheduledTaskScheduler:
             log.bind(profile_id=profile_id).warning(t("LOG_SCHEDULED_TASK_PROFILE_MISSING"))
             await scheduled_task_crud.disable_task(db, scheduled_task=scheduled_task)
             return
+        cfg = ProfileConfig.model_validate(profile.configs or {})
 
         user = await user_crud.get_by_uid(db, scheduled_task.uid)
         username = user.username if user else "Unknown"
@@ -122,16 +124,50 @@ class ScheduledTaskScheduler:
         )
         await scheduled_task_crud.mark_dispatched(db, scheduled_task=scheduled_task, message_id=saved_message.id)
         log.bind(message_id=saved_message.id, profile_id=profile.id).info(t("LOG_SCHEDULED_TASK_MESSAGE_QUEUED"))
-        reply_task = asyncio.create_task(self._generate_reply(scheduled_task.id, scheduled_task.uid, scheduled_task.session_id, profile.id, saved_message.id))
+        reply_task = asyncio.create_task(
+            self._generate_reply(
+                scheduled_task.id,
+                scheduled_task.uid,
+                scheduled_task.session_id,
+                profile.id,
+                saved_message.id,
+                cfg.tool.scheduled_task_max_concurrency,
+            )
+        )
         self._active_reply_tasks.add(reply_task)
         reply_task.add_done_callback(self._active_reply_tasks.discard)
 
-    async def _generate_reply(self, scheduled_task_id: int | None, uid: str, session_id: str, profile_id: int, trigger_message_id: int | None) -> None:
+    async def _generate_reply(
+        self,
+        scheduled_task_id: int | None,
+        uid: str,
+        session_id: str,
+        profile_id: int,
+        trigger_message_id: int | None,
+        max_concurrency: int,
+    ) -> None:
         from app.core.dispatcher import ChatDispatcher
         from app.core.message_platforms.notifier import send_session_event
 
-        async with self._reply_semaphore:
+        await self._acquire_reply_slot(profile_id, max_concurrency)
+        try:
             await self._generate_reply_locked(send_session_event, ChatDispatcher, scheduled_task_id, uid, session_id, profile_id, trigger_message_id)
+        finally:
+            await self._release_reply_slot(profile_id)
+
+    async def _acquire_reply_slot(self, profile_id: int, max_concurrency: int) -> None:
+        async with self._reply_condition:
+            await self._reply_condition.wait_for(lambda: self._running_replies_by_profile.get(profile_id, 0) < max_concurrency)
+            self._running_replies_by_profile[profile_id] = self._running_replies_by_profile.get(profile_id, 0) + 1
+
+    async def _release_reply_slot(self, profile_id: int) -> None:
+        async with self._reply_condition:
+            running_count = self._running_replies_by_profile.get(profile_id, 0)
+            if running_count <= 1:
+                self._running_replies_by_profile.pop(profile_id, None)
+            else:
+                self._running_replies_by_profile[profile_id] = running_count - 1
+            self._reply_condition.notify_all()
 
     async def _generate_reply_locked(
         self,

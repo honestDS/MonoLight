@@ -39,6 +39,8 @@ export const defaultProfileConfigs = () => ({
     max_parallel_tools: 5,
     executor_max_workers: 10,
     max_turns: 5,
+    background_task_max_concurrency: 2,
+    scheduled_task_max_concurrency: 4,
     firecrawl_api_key: '',
     enabled_tools: ['execute_shell', 'write_file', 'firecrawl_search', 'firecrawl_scrape', 'send_file_to_user', 'list_background_tasks', 'cancel_background_task', 'generate_image', 'query_knowledge_base'],
     allowed_file_send_dirs: [],
