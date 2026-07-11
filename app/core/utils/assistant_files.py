@@ -3,10 +3,11 @@ from typing import Any
 
 
 def build_assistant_files_content(text: Any, files: list[dict[str, Any]]) -> str:
+    safe_text, _untrusted_files = parse_assistant_files_content(text)
     return json.dumps(
         {
             "type": "assistant_files",
-            "text": str(text or ""),
+            "text": safe_text,
             "files": files,
         },
         ensure_ascii=False,

@@ -156,6 +156,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 attachments=attachments,
                 active_tasks=active_tasks,
                 session_source="weixin-openclaw",
+                wait_for_session_lock=True,
             )
             return WeixinOpenClawChatResult(
                 text=extract_reply_text(llm_response),

@@ -246,19 +246,15 @@ async def _execute_claimed_reply(task_id: int, worker_id: str) -> None:
     try:
         from app.core.dispatcher import ChatDispatcher
 
-        response = await ChatDispatcher.dispatch_proactive_reply(task_id)
-
-        async with AsyncSessionLocal() as db:
-            if response.get("deferred"):
-                completed = await background_task_crud.complete_reply_claim(
-                    db,
-                    task_id=task_id,
-                    worker_id=worker_id,
-                    status=BackgroundTaskReplyStatus.PENDING,
-                )
-                if completed:
-                    logger.bind(task_id=task_id, uid=response["uid"], session_id=response["session_id"]).info(t("LOG_BACKGROUND_TASK_REPLY_DEFERRED"))
-                return
+        deferred_logged = False
+        while True:
+            response = await ChatDispatcher.dispatch_proactive_reply(task_id)
+            if not response.get("deferred"):
+                break
+            if not deferred_logged:
+                logger.bind(task_id=task_id, uid=response["uid"], session_id=response["session_id"]).info(t("LOG_BACKGROUND_TASK_REPLY_DEFERRED"))
+                deferred_logged = True
+            await asyncio.sleep(1)
 
         await _send_session_event(
             response["uid"],

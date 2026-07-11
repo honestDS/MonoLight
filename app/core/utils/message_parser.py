@@ -21,6 +21,29 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
     ]
 
 
+def _remove_completed_file_send_chains(messages: list[InternalMessage]) -> list[InternalMessage]:
+    completed_tool_call_ids = {message.tool_call_id for message in messages if message.role == MessageRole.TOOL and message.tool_call_id}
+    file_send_call_ids = {tool_call.id for message in messages if message.role == MessageRole.ASSISTANT and message.tool_calls for tool_call in message.tool_calls if tool_call.name == "send_file_to_user" and tool_call.id in completed_tool_call_ids}
+    if not file_send_call_ids:
+        return messages
+
+    filtered_messages: list[InternalMessage] = []
+    for message in messages:
+        if message.role == MessageRole.TOOL and message.tool_call_id in file_send_call_ids:
+            continue
+        if message.role != MessageRole.ASSISTANT or not message.tool_calls:
+            filtered_messages.append(message)
+            continue
+
+        remaining_tool_calls = [tool_call for tool_call in message.tool_calls if tool_call.id not in file_send_call_ids]
+        if remaining_tool_calls:
+            filtered_messages.append(message.model_copy(update={"tool_calls": remaining_tool_calls}))
+        elif message.content:
+            filtered_messages.append(message.model_copy(update={"tool_calls": None}))
+
+    return filtered_messages
+
+
 def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalMessage]:
     """
     将数据库存储的原始 Message 对象列表解析并转换为业务协议所需的 InternalMessage 列表。
@@ -78,4 +101,4 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             )
         except Exception:
             continue
-    return parsed_history
+    return _remove_completed_file_send_chains(parsed_history)

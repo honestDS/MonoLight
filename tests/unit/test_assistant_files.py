@@ -24,6 +24,21 @@ def test_plain_text_content_is_not_treated_as_file_protocol():
     assert files == []
 
 
+def test_build_assistant_files_content_unwraps_existing_protocol():
+    old_file = {"id": "old-file", "name": "old.png"}
+    current_file = {"id": "current-file", "name": "current.png"}
+    nested_content = build_assistant_files_content("图片已重新发送。", [old_file])
+
+    content = build_assistant_files_content(nested_content, [current_file])
+    payload = json.loads(content)
+
+    assert payload == {
+        "type": "assistant_files",
+        "text": "图片已重新发送。",
+        "files": [current_file],
+    }
+
+
 def test_markdown_disabled_cleans_text_inside_assistant_files_protocol():
     files = [{"id": "file-1", "name": "generated.png"}]
     message = InternalMessage(

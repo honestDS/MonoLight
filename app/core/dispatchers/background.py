@@ -297,7 +297,7 @@ class BackgroundDispatcherMixin:
             uid=uid,
             session_id=session_id,
             tools=None,
-            require_content_or_tools=True,
+            require_content_or_tools=False,
         )
         final_msg = final_response.message
         if final_msg.tool_calls:

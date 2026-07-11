@@ -16,6 +16,7 @@ from app.models.message import InternalMessage, InternalResponse, InternalToolCa
         (False, False, None),
         (False, True, "正在重新发送文件。"),
         (False, False, "已再次执行操作。"),
+        (None, True, None),
     ],
 )
 @pytest.mark.asyncio
@@ -42,13 +43,14 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         arguments={"files": [{"path": "/tmp/generated.png"}]},
     )
     corrected_message = InternalMessage(role=MessageRole.ASSISTANT, content="图片已生成并发送。") if correction_succeeds else InternalMessage(role=MessageRole.ASSISTANT, content=repeated_tool_content, tool_calls=[repeated_tool_call])
+    final_response_message = InternalMessage(role=MessageRole.ASSISTANT, content="") if correction_succeeds is None else InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[repeated_tool_call])
     responses = [
         InternalResponse(
             message=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[initial_tool_call]),
             model="test-model",
         ),
         InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[repeated_tool_call]),
+            message=final_response_message,
             model="test-model",
         ),
         InternalResponse(
@@ -150,7 +152,9 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     )
 
     assert final_msg.tool_calls in (None, [])
-    if correction_succeeds:
+    if correction_succeeds is None:
+        expected_text = ""
+    elif correction_succeeds:
         expected_text = "图片已生成并发送。"
     elif has_files:
         expected_text = "后台任务已完成，但未能生成最终说明，请查看本回复附带的任务结果"
@@ -164,16 +168,19 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
     assert "后台主动回复的最终结果不允许继续调用工具" not in final_msg.content
     assert files == ([sent_file] if has_files else [])
     assert len(turn_messages) == 3
-    assert [request["call_context"] for request in requests] == [
+    expected_contexts = [
         "background_task_proactive_reply",
         "background_task_proactive_reply_final",
-        "background_task_proactive_reply_final_tool_correction",
     ]
+    if correction_succeeds is not None:
+        expected_contexts.append("background_task_proactive_reply_final_tool_correction")
+    assert [request["call_context"] for request in requests] == expected_contexts
     assert requests[1]["tools"] is None
-    assert requests[2]["tools"] is None
 
-    correction_messages = requests[2]["messages"]
-    correction_tool_message = correction_messages[-1]
-    assert correction_tool_message.role == MessageRole.TOOL
-    assert correction_tool_message.tool_call_id == repeated_tool_call.id
-    assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT in correction_tool_message.content
+    if correction_succeeds is not None:
+        assert requests[2]["tools"] is None
+        correction_messages = requests[2]["messages"]
+        correction_tool_message = correction_messages[-1]
+        assert correction_tool_message.role == MessageRole.TOOL
+        assert correction_tool_message.tool_call_id == repeated_tool_call.id
+        assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT in correction_tool_message.content

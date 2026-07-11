@@ -254,3 +254,65 @@ async def test_error_reply_is_completed_after_event_is_persisted(monkeypatch):
         ("send_event", "proactive_reply_error"),
         ("complete", BackgroundTaskReplyStatus.FAILED),
     ]
+
+
+@pytest.mark.asyncio
+async def test_deferred_reply_waits_in_same_claim_without_repeating_result_save(monkeypatch):
+    dispatch_count = 0
+    result_save_count = 0
+    sleep_delays = []
+    sent_events = []
+    completed_statuses = []
+
+    class FakeBackgroundTaskCrud:
+        async def get(self, db, task_id):
+            return SimpleNamespace(id=task_id, session_id="session-1")
+
+        async def complete_reply_claim(self, db, **kwargs):
+            completed_statuses.append(kwargs["status"])
+            return True
+
+    class FakeSessionCrud:
+        async def get_by_session_id(self, db, session_id):
+            return SimpleNamespace(id=1)
+
+    async def fake_save_background_task_result_message(db, task):
+        nonlocal result_save_count
+        result_save_count += 1
+
+    async def fake_dispatch_proactive_reply(task_id):
+        nonlocal dispatch_count
+        dispatch_count += 1
+        if dispatch_count == 1:
+            return {
+                "uid": "user-1",
+                "session_id": "session-1",
+                "deferred": True,
+            }
+        return {
+            "uid": "user-1",
+            "session_id": "session-1",
+            "content": "reply",
+        }
+
+    async def fake_send_session_event(uid, session_id, event):
+        sent_events.append(event["type"])
+
+    async def fake_sleep(delay):
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr(reply_trigger, "AsyncSessionLocal", FakeSessionContext)
+    monkeypatch.setattr(reply_trigger, "background_task_crud", FakeBackgroundTaskCrud())
+    monkeypatch.setattr(reply_trigger, "session_crud", FakeSessionCrud())
+    monkeypatch.setattr(reply_trigger, "_save_background_task_result_message", fake_save_background_task_result_message)
+    monkeypatch.setattr(reply_trigger, "_send_session_event", fake_send_session_event)
+    monkeypatch.setattr(reply_trigger.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ChatDispatcher, "dispatch_proactive_reply", fake_dispatch_proactive_reply)
+
+    await reply_trigger._execute_claimed_reply(task_id=1, worker_id="worker-1")
+
+    assert dispatch_count == 2
+    assert result_save_count == 1
+    assert sleep_delays == [1]
+    assert sent_events == ["proactive_reply"]
+    assert completed_statuses == [BackgroundTaskReplyStatus.SUCCEEDED]

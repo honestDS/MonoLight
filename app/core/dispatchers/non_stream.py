@@ -1,5 +1,4 @@
 import asyncio
-import json
 import time
 from collections.abc import MutableSet
 from typing import Any
@@ -10,6 +9,7 @@ from app.core.channel_router import select_channel
 from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_EMPTY_RESPONSE
 from app.core.context import ContextManager
 from app.core.crud.active_session import active_session_crud
+from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
@@ -17,6 +17,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
+from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
@@ -42,6 +43,8 @@ from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 logger = get_logger(__name__)
 
+SESSION_LOCK_RETRY_INTERVAL_SECONDS = 0.5
+
 
 class NonStreamDispatcherMixin:
     @classmethod
@@ -54,11 +57,13 @@ class NonStreamDispatcherMixin:
         attachments: list[str] | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
         session_source: str = "http",
+        wait_for_session_lock: bool = False,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
             profile = await profile_crud.get_active(db, uid=uid)
+            profile_id = profile.id if profile else None
 
             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
 
@@ -71,14 +76,24 @@ class NonStreamDispatcherMixin:
             turn_messages: list[InternalMessage] = []
             files_to_user: list[dict[str, Any]] = []
             is_first_iter = True
+            waited_for_session_lock = False
+            queued_logged = False
 
             # 2. 分布式会话状态机
-            while True:
+            if not wait_for_session_lock:
                 await active_session_crud.cleanup_expired_locks(db)
+
+            while True:
                 lock_acquired = await active_session_crud.acquire_lock(db, session_id)
 
                 if not lock_acquired:
-                    logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_QUEUED", session_id=session_id))
+                    if not queued_logged:
+                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_QUEUED", session_id=session_id))
+                        queued_logged = True
+                    if wait_for_session_lock:
+                        waited_for_session_lock = True
+                        await asyncio.sleep(SESSION_LOCK_RETRY_INTERVAL_SECONDS)
+                        continue
                     return LLMResponse(
                         choices=[
                             LLMChoice(
@@ -89,6 +104,22 @@ class NonStreamDispatcherMixin:
                         ],
                         history=[],
                     ).model_dump()
+
+                if waited_for_session_lock and is_first_iter:
+                    persisted_initial_msg = await message_crud.get(db, initial_msg.id)
+                    if persisted_initial_msg is None or persisted_initial_msg.is_processed:
+                        await active_session_crud.release_lock(db, session_id)
+                        return LLMResponse(
+                            choices=[
+                                LLMChoice(
+                                    message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=""),
+                                    finish_reason="queued",
+                                    created_at=time.time(),
+                                )
+                            ],
+                            history=[],
+                        ).model_dump()
+                    profile = await profile_crud.get_with_relations(db, profile_id) if profile_id is not None else None
 
                 try:
                     cfg = await validate_profile_and_cfg(db, profile)
@@ -213,14 +244,7 @@ class NonStreamDispatcherMixin:
                                 reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
 
                         if not ai_msg.tool_calls and files_to_user:
-                            ai_msg.content = json.dumps(
-                                {
-                                    "type": "assistant_files",
-                                    "text": ai_msg.content or "",
-                                    "files": files_to_user,
-                                },
-                                ensure_ascii=False,
-                            )
+                            ai_msg.content = build_assistant_content(ai_msg.content, files_to_user)
 
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
 

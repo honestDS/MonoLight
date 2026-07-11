@@ -67,6 +67,232 @@ def test_background_task_result_is_preserved_as_new_user_trigger():
     assert audited[-1].content == result_content
 
 
+def test_historical_file_send_chain_is_removed_without_dropping_parallel_tools():
+    raw_messages = [
+        Message(
+            id=5,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="计算结果是 12.59375，图片已发送。",
+            is_processed=True,
+        ),
+        Message(
+            id=4,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=json.dumps(
+                {
+                    "tool_call_id": "call-shell",
+                    "content": json.dumps({"stdout": "12.59375"}),
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=3,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=json.dumps(
+                {
+                    "tool_call_id": "call-send-file",
+                    "content": json.dumps(
+                        {
+                            "type": "files_to_user_result",
+                            "status": "success",
+                        }
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=2,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=json.dumps(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-send-file",
+                            "name": "send_file_to_user",
+                            "arguments": {"files": [{"path": "generated.png"}]},
+                        },
+                        {
+                            "id": "call-shell",
+                            "name": "execute_shell",
+                            "arguments": {"command": 'python -c "print(12.59375)"'},
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=1,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="计算并发送图片。",
+            is_processed=True,
+        ),
+    ]
+
+    parsed = list(reversed(parse_db_messages_to_internal(raw_messages)))
+    audited = ContextManager.audit_tool_chain(parsed, uid="u1", session_id="s1")
+
+    assert [message.role for message in audited] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+    ]
+    assert [tool_call.name for tool_call in audited[1].tool_calls] == ["execute_shell"]
+    assert audited[2].tool_call_id == "call-shell"
+    assert audited[3].content == "计算结果是 12.59375，图片已发送。"
+    assert all(message.tool_call_id != "call-send-file" for message in audited)
+
+
+def test_historical_file_send_only_chain_is_removed_but_final_reply_is_kept():
+    raw_messages = [
+        Message(
+            id=4,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="图片已发送。",
+            is_processed=True,
+        ),
+        Message(
+            id=3,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=json.dumps(
+                {
+                    "tool_call_id": "call-send-file",
+                    "content": json.dumps(
+                        {
+                            "type": "files_to_user_result",
+                            "status": "success",
+                        }
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=2,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=json.dumps(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-send-file",
+                            "name": "send_file_to_user",
+                            "arguments": {"files": [{"path": "generated.png"}]},
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=1,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="发送图片。",
+            is_processed=True,
+        ),
+    ]
+
+    parsed = list(reversed(parse_db_messages_to_internal(raw_messages)))
+
+    assert [(message.role, message.content) for message in parsed] == [
+        (MessageRole.USER, "发送图片。"),
+        (MessageRole.ASSISTANT, "图片已发送。"),
+    ]
+
+
+def test_incomplete_historical_file_send_chain_is_kept_for_tool_audit():
+    raw_messages = [
+        Message(
+            id=2,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TOOL_CALL,
+            content=json.dumps(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-send-file",
+                            "name": "send_file_to_user",
+                            "arguments": {"files": [{"path": "generated.png"}]},
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            is_processed=True,
+        ),
+        Message(
+            id=1,
+            session_id="s1",
+            uid="u1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="发送图片。",
+            is_processed=True,
+        ),
+    ]
+
+    parsed = list(reversed(parse_db_messages_to_internal(raw_messages)))
+    audited = ContextManager.audit_tool_chain(parsed, uid="u1", session_id="s1")
+
+    assert [message.role for message in audited] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert audited[1].tool_calls[0].name == "send_file_to_user"
+    assert audited[2].tool_call_id == "call-send-file"
+
+
 def test_virtual_tool_feedback_builds_matched_tool_chain():
     ai_msg = InternalMessage(
         role=MessageRole.ASSISTANT,
