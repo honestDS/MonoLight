@@ -56,7 +56,6 @@ class SessionReplyQueueManager:
                 uid=uid,
                 profile_id=profile_id,
                 source=source,
-                reply_target_source=source,
             )
 
         message_row = Message(
@@ -222,22 +221,11 @@ class SessionReplyQueueManager:
         worker_id: str,
     ) -> list[InternalMessage]:
         work = await session_reply_work_item_crud.get(db, work_id)
-        if (
-            work is None
-            or work.status != SessionReplyWorkStatus.RUNNING
-            or work.locked_by != worker_id
-            or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY
-        ):
+        if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY:
             return []
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
-        additional_work = [
-            item
-            for item in contiguous
-            if item.id != work.id
-            and item.status == SessionReplyWorkStatus.READY_FOR_LLM
-            and item.source_id
-        ]
+        additional_work = [item for item in contiguous if item.id != work.id and item.status == SessionReplyWorkStatus.READY_FOR_LLM and item.source_id]
         if not additional_work:
             return []
 

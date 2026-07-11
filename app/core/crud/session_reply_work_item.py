@@ -1,7 +1,7 @@
 import time
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, update
+from sqlalchemy import and_, exists, or_, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -107,15 +107,44 @@ class CRUDSessionReplyWorkItem:
         *,
         worker_id: str,
         lease_seconds: int,
+        scheduled_profile_limits: dict[int, int] | None = None,
     ) -> SessionReplyWorkItem | None:
         now = int(time.time())
         earlier_work = SessionReplyWorkItem.__table__.alias("earlier_session_reply_work")
         active_running = SessionReplyWorkItem.__table__.alias("active_running_session_reply_work")
+        scheduled_running = SessionReplyWorkItem.__table__.alias("scheduled_running_session_reply_work")
+        scheduled_limits = scheduled_profile_limits or {}
+        scheduled_limit_conditions = [
+            and_(
+                SessionReplyWorkItem.profile_id == profile_id,
+                select(scheduled_running.c.id)
+                .where(
+                    scheduled_running.c.profile_id == profile_id,
+                    scheduled_running.c.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY.value,
+                    scheduled_running.c.status == SessionReplyWorkStatus.RUNNING.value,
+                    scheduled_running.c.lock_until > now,
+                )
+                .limit(limit)
+                .offset(limit - 1)
+                .scalar_subquery()
+                .is_(None),
+            )
+            for profile_id, limit in scheduled_limits.items()
+        ]
+        scheduled_capacity_available = (
+            or_(
+                SessionReplyWorkItem.work_type != SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                *scheduled_limit_conditions,
+            )
+            if scheduled_limits
+            else true()
+        )
         candidate = (
             select(SessionReplyWorkItem.id)
             .where(
                 SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
                 SessionReplyWorkItem.available_at <= now,
+                scheduled_capacity_available,
                 ~exists(
                     select(1).where(
                         earlier_work.c.session_id == SessionReplyWorkItem.session_id,
@@ -154,6 +183,70 @@ class CRUDSessionReplyWorkItem:
         claimed = result.scalars().first()
         await db.commit()
         return claimed
+
+    async def get_active_claims(
+        self,
+        db: AsyncSession,
+        claims: dict[int, str],
+    ) -> set[tuple[int, str]]:
+        if not claims:
+            return set()
+        claim_conditions = [
+            and_(
+                SessionReplyWorkItem.id == work_id,
+                SessionReplyWorkItem.locked_by == worker_id,
+            )
+            for work_id, worker_id in claims.items()
+        ]
+        result = await db.execute(
+            select(SessionReplyWorkItem.id, SessionReplyWorkItem.locked_by).where(
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+                or_(*claim_conditions),
+            )
+        )
+        return {(work_id, worker_id) for work_id, worker_id in result.all() if worker_id is not None}
+
+    async def renew_active_claims(
+        self,
+        db: AsyncSession,
+        *,
+        claims: dict[int, str],
+        lease_seconds: int,
+    ) -> set[tuple[int, str]]:
+        active_claims = await self.get_active_claims(db, claims)
+        if active_claims:
+            await db.execute(
+                update(SessionReplyWorkItem)
+                .where(
+                    or_(
+                        *[
+                            and_(
+                                SessionReplyWorkItem.id == work_id,
+                                SessionReplyWorkItem.locked_by == worker_id,
+                            )
+                            for work_id, worker_id in active_claims
+                        ]
+                    ),
+                    SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+                )
+                .values(
+                    lock_until=int(time.time()) + lease_seconds,
+                    updated_at=get_local_time(),
+                )
+            )
+            await db.commit()
+        return active_claims
+
+    async def list_ready_scheduled_profile_ids(self, db: AsyncSession) -> set[int]:
+        result = await db.execute(
+            select(SessionReplyWorkItem.profile_id)
+            .where(
+                SessionReplyWorkItem.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+            )
+            .distinct()
+        )
+        return set(result.scalars().all())
 
     async def renew_lease(
         self,
@@ -232,7 +325,7 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return result.rowcount or 0
 
-    async def recover_expired(self, db: AsyncSession) -> int:
+    async def recover_expired(self, db: AsyncSession) -> tuple[int, list[tuple[int, str, str]]]:
         now = int(time.time())
         expired_conditions = [
             SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
@@ -243,20 +336,36 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
             )
         )
-        failed_result = await db.execute(
-            update(SessionReplyWorkItem)
-            .where(*expired_conditions, streamed_work)
-            .values(
-                status=SessionReplyWorkStatus.FAILED,
-                locked_by=None,
-                lock_until=None,
-                error="Stream interrupted after partial response",
-                updated_at=get_local_time(),
+        terminal_result = await db.execute(
+            select(
+                SessionReplyWorkItem.id,
+                SessionReplyWorkItem.locked_by,
+                streamed_work.label("stream_started"),
+            ).where(
+                *expired_conditions,
+                or_(
+                    streamed_work,
+                    SessionReplyWorkItem.attempt_count >= SessionReplyWorkItem.max_attempts,
+                ),
+                SessionReplyWorkItem.locked_by.is_not(None),
             )
         )
+        terminal_claims = [
+            (
+                work_id,
+                worker_id,
+                "Stream interrupted after partial response" if stream_started else "Maximum retry attempts reached after worker interruption",
+            )
+            for work_id, worker_id, stream_started in terminal_result.all()
+            if worker_id is not None
+        ]
         retry_result = await db.execute(
             update(SessionReplyWorkItem)
-            .where(*expired_conditions, ~streamed_work)
+            .where(
+                *expired_conditions,
+                ~streamed_work,
+                SessionReplyWorkItem.attempt_count < SessionReplyWorkItem.max_attempts,
+            )
             .values(
                 status=SessionReplyWorkStatus.READY_FOR_LLM,
                 locked_by=None,
@@ -266,7 +375,7 @@ class CRUDSessionReplyWorkItem:
             )
         )
         await db.commit()
-        return (failed_result.rowcount or 0) + (retry_result.rowcount or 0)
+        return len(terminal_claims) + (retry_result.rowcount or 0), terminal_claims
 
     async def update_claimed(
         self,

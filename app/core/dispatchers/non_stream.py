@@ -300,6 +300,10 @@ class NonStreamDispatcherMixin:
                                     }
                                 )
 
+                        # 在任何工具开始前持久化完整调用意图。恢复时未落库的工具结果会被视为
+                        # 执行状态未知并交给模型核实，而不会重新执行原工具。
+                        await save_execution_checkpoint(messages, current_turn)
+
                         sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
 
                         async def wrapped_tool_call(tc):
@@ -328,24 +332,29 @@ class NonStreamDispatcherMixin:
                                     if active_tasks is not None:
                                         active_tasks.discard(task)
 
-                        tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
-                        tool_responses = await asyncio.gather(*tasks)
-
-                        files_to_user.extend(extract_files_to_user(tool_responses))
-                        for tool_res in tool_responses:
-                            await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
-                            if stream_event_callback is not None:
-                                tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
-                                await stream_event_callback(
-                                    {
-                                        "type": "tool_end",
-                                        "name": tool_call.name if tool_call else "unknown",
-                                        "result": sanitize_files_to_user_result(tool_res.content),
-                                        "tool_call_id": tool_res.tool_call_id,
-                                        "response_id": response_id,
-                                    }
-                                )
-                        await save_execution_checkpoint(messages, current_turn)
+                        tasks = [asyncio.create_task(wrapped_tool_call(tc)) for tc in ai_msg.tool_calls]
+                        try:
+                            for completed_task in asyncio.as_completed(tasks):
+                                tool_res = await completed_task
+                                files_to_user.extend(extract_files_to_user([tool_res]))
+                                await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                                await save_execution_checkpoint(messages, current_turn)
+                                if stream_event_callback is not None:
+                                    tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
+                                    await stream_event_callback(
+                                        {
+                                            "type": "tool_end",
+                                            "name": tool_call.name if tool_call else "unknown",
+                                            "result": sanitize_files_to_user_result(tool_res.content),
+                                            "tool_call_id": tool_res.tool_call_id,
+                                            "response_id": response_id,
+                                        }
+                                    )
+                        finally:
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
 
                 finally:
                     is_first_iter = False

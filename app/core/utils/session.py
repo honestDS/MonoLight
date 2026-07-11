@@ -1,10 +1,10 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL
+from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL, ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
 from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
-from app.core.exceptions import BaseBusinessException, LLMException
+from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
@@ -15,6 +15,27 @@ from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
+
+WEB_SESSION_SOURCES = frozenset({"http", "ws"})
+
+
+def is_web_session_source(source: str | None) -> bool:
+    return (source or "http") in WEB_SESSION_SOURCES
+
+
+async def ensure_web_session_writable(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+) -> None:
+    session = await session_crud.get_by_session_id(db, session_id)
+    if session is None:
+        return
+    if session.uid != uid:
+        raise ForbiddenException(message=ERR_SESSION_NO_PERMISSION)
+    if not is_web_session_source(session.source):
+        raise ForbiddenException(message=ERR_SESSION_READ_ONLY)
 
 
 async def generate_session_title(

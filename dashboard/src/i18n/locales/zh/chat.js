@@ -18,6 +18,7 @@ export default {
   non_stream: '非流',
   stream: '流式',
   input_placeholder: '输入消息或粘贴截图...',
+  external_session_read_only: '该会话来自外部消息平台，网页端仅允许查看',
   unknown_file: '未知文件',
   upload_success: '附件上传成功',
   upload_failed: '上传失败',

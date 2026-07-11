@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 
@@ -220,14 +219,102 @@ async def test_recover_expired_does_not_retry_work_with_emitted_stream_content(d
     )
     await db_session.commit()
 
-    recovered_count = await crud.recover_expired(db_session)
+    recovered_count, exhausted_claims = await crud.recover_expired(db_session)
 
     await db_session.refresh(streamed)
     await db_session.refresh(retryable)
     assert recovered_count == 2
-    assert streamed.status == SessionReplyWorkStatus.FAILED
-    assert streamed.error == "Stream interrupted after partial response"
+    assert exhausted_claims == [
+        (
+            streamed.id,
+            "lost-worker-1",
+            "Stream interrupted after partial response",
+        )
+    ]
+    assert streamed.status == SessionReplyWorkStatus.RUNNING
+    assert streamed.locked_by == "lost-worker-1"
     assert retryable.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+async def test_recover_expired_fails_work_at_max_attempts(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    exhausted = await _enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key="foreground-message:1",
+    )
+    exhausted.status = SessionReplyWorkStatus.RUNNING
+    exhausted.locked_by = "lost-worker"
+    exhausted.lock_until = 0
+    exhausted.attempt_count = exhausted.max_attempts
+    await db_session.commit()
+
+    recovered_count, exhausted_claims = await crud.recover_expired(db_session)
+
+    await db_session.refresh(exhausted)
+    assert recovered_count == 1
+    assert exhausted_claims == [
+        (
+            exhausted.id,
+            "lost-worker",
+            "Maximum retry attempts reached after worker interruption",
+        )
+    ]
+    assert exhausted.status == SessionReplyWorkStatus.RUNNING
+    assert exhausted.locked_by == "lost-worker"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_claim_respects_profile_limit_and_still_claims_other_work(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    running = await _enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        source_id=1,
+        dedupe_key="scheduled-task-summary:1",
+    )
+    running.status = SessionReplyWorkStatus.RUNNING
+    running.locked_by = "worker-1"
+    running.lock_until = 9999999999
+
+    scheduled, _created = await crud.enqueue(
+        db_session,
+        uid="user-1",
+        session_id="session-2",
+        profile_id=1,
+        work_type=SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+        source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
+        source_id=2,
+        dedupe_key="scheduled-task-summary:2",
+        commit=False,
+    )
+    foreground, _created = await crud.enqueue(
+        db_session,
+        uid="user-1",
+        session_id="session-3",
+        profile_id=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id=3,
+        dedupe_key="foreground-message:3",
+        commit=False,
+    )
+    await db_session.commit()
+
+    claimed = await crud.claim_next(
+        db_session,
+        worker_id="worker-2",
+        lease_seconds=300,
+        scheduled_profile_limits={1: 1},
+    )
+
+    assert claimed.id == foreground.id
+    await db_session.refresh(scheduled)
+    assert scheduled.status == SessionReplyWorkStatus.READY_FOR_LLM
 
 
 @pytest.mark.asyncio
@@ -581,40 +668,45 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
 
 
 @pytest.mark.asyncio
-async def test_consumer_cancels_execution_after_lease_loss(monkeypatch):
+async def test_consumer_recovery_runs_full_failure_flow_for_exhausted_claims(monkeypatch):
     consumer = consumer_module.SessionReplyConsumer()
-    execution_started = asyncio.Event()
-    execution_cancelled = asyncio.Event()
     failure_calls = []
-    retry_calls = []
 
-    async def execute_work(work_id: int, worker_id: str) -> None:
-        execution_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            execution_cancelled.set()
+    class FakeSession:
+        pass
 
-    async def renew_lease(work_id: int, worker_id: str) -> bool:
-        await execution_started.wait()
-        return False
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def recover_expired(db):
+        return 1, [
+            (
+                7,
+                "lost-worker",
+                "Maximum retry attempts reached after worker interruption",
+            )
+        ]
 
     async def fail_work(work_id: int, worker_id: str, error: str) -> None:
         failure_calls.append((work_id, worker_id, error))
 
-    async def release_for_retry(*args, **kwargs) -> None:
-        retry_calls.append((args, kwargs))
-
-    monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
-    monkeypatch.setattr(consumer, "_renew_lease", renew_lease)
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "recover_expired", recover_expired)
     monkeypatch.setattr(consumer_module, "fail_session_reply_work", fail_work)
-    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "release_for_retry", release_for_retry)
 
-    await consumer._run_claimed(work_id=7, worker_id="worker-1", attempt_count=1, max_attempts=3)
+    await consumer._recover_expired()
 
-    assert execution_cancelled.is_set()
-    assert failure_calls == []
-    assert retry_calls == []
+    assert failure_calls == [
+        (
+            7,
+            "lost-worker",
+            "Maximum retry attempts reached after worker interruption",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -636,10 +728,6 @@ async def test_consumer_does_not_retry_after_stream_content_was_emitted(monkeypa
     async def execute_work(work_id: int, worker_id: str) -> None:
         raise RuntimeError("stream interrupted")
 
-    async def renew_lease(work_id: int, worker_id: str) -> bool:
-        await asyncio.Event().wait()
-        return True
-
     async def has_events(db, *, work_id: int) -> bool:
         return True
 
@@ -651,7 +739,6 @@ async def test_consumer_does_not_retry_after_stream_content_was_emitted(monkeypa
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
-    monkeypatch.setattr(consumer, "_renew_lease", renew_lease)
     monkeypatch.setattr(consumer_module.session_reply_stream_event_crud, "has_events", has_events)
     monkeypatch.setattr(consumer_module, "fail_session_reply_work", fail_work)
     monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "release_for_retry", release_for_retry)

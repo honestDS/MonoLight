@@ -52,7 +52,7 @@ def build_outbox_dedupe_key(uid: str, session_id: str, source: str, event: dict[
 async def send_session_event(uid: str, session_id: str, event: dict[str, Any]) -> None:
     async with AsyncSessionLocal() as db:
         session = await session_crud.get_by_session_id(db, session_id)
-        source = session.reply_target_source if session and session.reply_target_source else session.source if session else "http"
+        source = session.source if session and session.source else "http"
 
         normalized_event = normalize_outbox_event(event)
         dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)

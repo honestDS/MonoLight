@@ -114,13 +114,7 @@ async def process_single_tool(
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
-    elif run_in_background and (
-        not allow_background_submission
-        or (
-            not background_required
-            and not tool_schema_has_parameter(tool_name, "run_in_background")
-        )
-    ):
+    elif run_in_background and (not allow_background_submission or (not background_required and not tool_schema_has_parameter(tool_name, "run_in_background"))):
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
         cmd_result = await audit_tool_call(

@@ -3,6 +3,7 @@ MESSAGES = {
     "ERR_SESSION_NOT_FOUND": "Session not found or deleted",
     "MSG_SESSION_CLEARED": "Successfully cleared all history for session {session_id}",
     "ERR_SESSION_NO_PERMISSION": "No permission to operate on this session",
+    "ERR_SESSION_READ_ONLY": "This session comes from an external message platform and is read-only on the web",
     "MSG_SESSION_UPDATED": "Session settings updated",
     "ERR_NO_VALID_CHANNEL": "No valid model channel configured",
     "ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED": "Message content or attachments cannot be empty",

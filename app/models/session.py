@@ -17,7 +17,12 @@ class ChatSession(SQLModel, table=True):
     uid: str = Field(index=True, max_length=100)
     profile_id: int | None = Field(default=None, index=True)
     source: str = Field(default="http", max_length=50, index=True)
-    reply_target_source: str = Field(default="http", max_length=50, index=True)
+    reply_target_source: str = Field(
+        default="http",
+        max_length=50,
+        index=True,
+        description="预留兼容字段，当前不参与会话来源判断、消息投递或网页通信模式切换",
+    )
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
     created_at: datetime = Field(

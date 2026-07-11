@@ -90,7 +90,6 @@ export const chatApi = {
   generateTitle: (data) => request.post('/chat/sessions/generate-title', data),
   // 更新会话设置
   updateSessionSetting: (sessionId, enableMarkdown) => request.post('/chat/sessions/setting', { session_id: sessionId, enable_markdown: enableMarkdown }),
-  updateSessionReplyTarget: (sessionId, replyTargetSource) => request.post('/chat/sessions/setting', { session_id: sessionId, reply_target_source: replyTargetSource }),
   // 后台任务列表
   backgroundTasks: (params) => request.get('/chat/background-tasks', { params }),
 }

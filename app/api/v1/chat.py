@@ -2,7 +2,6 @@ import asyncio
 import time
 import uuid
 import weakref
-from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -11,7 +10,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.chat_web import web_chat_adapter
@@ -38,7 +37,7 @@ from app.core.log import (
 from app.core.security import get_current_user
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import session_reply_queue_manager
-from app.core.utils.session import generate_session_title
+from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig
 from app.models.message import (
@@ -117,7 +116,6 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
                 "source": row.source or "http",
-                "reply_target_source": row.reply_target_source or row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             }
         )
@@ -132,6 +130,10 @@ async def delete_session(
 ):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
+    session = await session_crud.get_by_session_id(db, session_id)
+    if session and session.source not in {"http", "ws"}:
+        return StandardResponse.error(code=403, message=constants.ERR_SESSION_READ_ONLY)
+
     row_count = await message_crud.remove_session(
         db,
         session_id=session_id,
@@ -156,9 +158,10 @@ async def delete_session(
 
 
 class SessionSettingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str
     enable_markdown: bool | None = None
-    reply_target_source: Literal["http", "ws"] | None = None
 
 
 @router.post("/sessions/setting")
@@ -176,11 +179,11 @@ async def update_session_setting(
 
     if not is_admin and session.uid != uid:
         return StandardResponse.error(message=constants.ERR_SESSION_NO_PERMISSION)
+    if session.source not in {"http", "ws"}:
+        return StandardResponse.error(code=403, message=constants.ERR_SESSION_READ_ONLY)
 
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
-    if request.reply_target_source is not None:
-        session.reply_target_source = request.reply_target_source
     await db.commit()
 
     return StandardResponse.success(message=constants.MSG_SESSION_UPDATED)
@@ -198,6 +201,15 @@ async def generate_title(
     current_user: dict = Depends(get_current_user),
 ):
     uid = getattr(current_user, "uid", None)
+
+    try:
+        await ensure_web_session_writable(
+            db,
+            session_id=request.session_id,
+            uid=uid,
+        )
+    except BaseBusinessException as exc:
+        return StandardResponse.error(code=exc.code, message=exc.message)
 
     profile = await profile_crud.get_active(db, uid=uid)
     if not profile:
@@ -344,6 +356,11 @@ async def chat_websocket(
         active_tasks.clear()
         try:
             async with AsyncSessionLocal() as db:
+                await ensure_web_session_writable(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                )
                 async for response in ws_chat_adapter.chat(
                     db=db,
                     message=message_text,
@@ -358,6 +375,16 @@ async def chat_websocket(
                     if not _event_matches_session(response, session_id):
                         continue
                     await websocket.send_json(response)
+        except BaseBusinessException as exc:
+            if session_id == current_session_id:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(exc.message, **exc.kwargs),
+                        "session_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
         except RuntimeError as e:
             # 拦截断开连接后的发送错误
             if "websocket.send" in str(e) and "websocket.close" in str(e):
@@ -462,6 +489,11 @@ async def chat_websocket(
                     async with AsyncSessionLocal() as db:
                         profile = await profile_crud.get_active(db, uid=uid)
                         try:
+                            await ensure_web_session_writable(
+                                db,
+                                session_id=session_id,
+                                uid=uid,
+                            )
                             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
                         except BaseBusinessException as exc:
                             await websocket.send_json(

@@ -110,6 +110,7 @@ class ScheduledTaskScheduler:
                 next_run_at=now + timedelta(seconds=scheduled_task.interval_seconds),
                 updated_at=now,
             )
+            .execution_options(synchronize_session=False)
         )
         if (claimed.rowcount or 0) != 1:
             await db.rollback()
@@ -129,7 +130,7 @@ class ScheduledTaskScheduler:
         )
         db.add(trigger_message)
         await db.flush()
-        await db.execute(update(ScheduledTask).where(ScheduledTask.id == scheduled_task.id).values(last_message_id=trigger_message.id))
+        await db.execute(update(ScheduledTask).where(ScheduledTask.id == scheduled_task.id).values(last_message_id=trigger_message.id).execution_options(synchronize_session=False))
         await session_reply_queue_manager.enqueue_scheduled_summary(
             db,
             uid=scheduled_task.uid,

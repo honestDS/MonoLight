@@ -63,7 +63,7 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         user_id = _parse_weixin_openclaw_session_user_id(session_id)
         session_result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id, ChatSession.uid == uid))
         session = session_result.scalars().first()
-        if session is not None and session.reply_target_source != source:
+        if session is not None and session.source != source:
             return None
 
         result = await db.execute(

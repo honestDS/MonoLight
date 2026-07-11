@@ -45,7 +45,7 @@
               </div>
             </div>
           </div>
-          <div class="session-actions">
+          <div v-if="['http', 'ws'].includes(session.source || 'http')" class="session-actions">
             <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
           </div>
         </div>
@@ -210,6 +210,9 @@
         </template>
       </div>
       <div class="input-area">
+        <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
+          {{ $t('chat.external_session_read_only') }}
+        </div>
         <div class="toolbar-row">
           <el-button type="primary" @click="createNewSession" class="new-session-btn">
             <i class="el-icon-plus"></i> {{ $t('chat.new_session') }}
@@ -222,7 +225,8 @@
               :http-request="handleUpload"
               :show-file-list="false"
               multiple
-              :before-upload="() => true"
+              :disabled="isCurrentSessionReadOnly"
+              :before-upload="() => !isCurrentSessionReadOnly"
             >
               <el-button :title="$t('chat.upload')">{{ $t('chat.upload') }}</el-button>
             </el-upload>
@@ -233,13 +237,13 @@
               type="button" 
               :class="['mode-btn', { active: !currentSessionEnableMarkdown }]"
               @click="toggleMarkdown(false)"
-              :disabled="loading"
+              :disabled="loading || isCurrentSessionReadOnly"
             >{{ $t('chat.plain_text') }}</button>
             <button 
               type="button" 
               :class="['mode-btn', { active: currentSessionEnableMarkdown }]"
               @click="toggleMarkdown(true)"
-              :disabled="loading"
+              :disabled="loading || isCurrentSessionReadOnly"
             >{{ $t('chat.md_render') }}</button>
           </div>
 
@@ -248,13 +252,13 @@
               type="button" 
               :class="['mode-btn', { active: !isWsModeComputed }]"
               @click="handleModeChange(false)"
-              :disabled="loading"
+              :disabled="loading || isCurrentSessionReadOnly"
             >{{ $t('chat.non_stream') }}</button>
             <button 
               type="button" 
               :class="['mode-btn', { active: isWsModeComputed }]"
               @click="handleModeChange(true)"
-              :disabled="loading"
+              :disabled="loading || isCurrentSessionReadOnly"
             >{{ $t('chat.stream') }}</button>
           </div>
         </div>
@@ -287,7 +291,8 @@
 
               <el-input
                 v-model="inputMsg" 
-                :placeholder="$t('chat.input_placeholder')" 
+                :placeholder="isCurrentSessionReadOnly ? $t('chat.external_session_read_only') : $t('chat.input_placeholder')"
+                :disabled="isCurrentSessionReadOnly"
                 @keyup.enter="send"
                 @paste="handlePaste"
                 type="textarea"
@@ -300,7 +305,7 @@
                 <el-button 
                   type="primary" 
                   @click="send" 
-                  :disabled="!inputMsg.trim() && attachments.length === 0"
+                  :disabled="isCurrentSessionReadOnly || (!inputMsg.trim() && attachments.length === 0)"
                   class="action-btn"                  
                   circle
                 >
@@ -425,6 +430,11 @@ const currentSessionEnableMarkdown = computed({
 
 // 切换 Markdown 状态
 const toggleMarkdown = async (val) => {
+  if (isCurrentSessionReadOnly.value) {
+    ElMessage.warning(t('chat.external_session_read_only'))
+    return
+  }
+
   // 先更新本地状态
   currentSessionEnableMarkdown.value = val
   
@@ -461,7 +471,8 @@ const {
   transportMode,
   wsConnected,
   sessionCreating,
-  attachments
+  attachments,
+  isCurrentSessionReadOnly
 } = chat
 
 // 用于管理 VirtualizedCode 的引用
@@ -518,6 +529,11 @@ const handleImageLoad = () => {
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
+  if (isCurrentSessionReadOnly.value) {
+    ElMessage.warning(t('chat.external_session_read_only'))
+    return
+  }
+
   if (loading.value) {
     // LLM响应中，加入前端队列并显示临时消息
     const tempMsg = inputMsg.value
@@ -544,21 +560,12 @@ const send = async () => {
 
 // 通信模式切换
 const handleModeChange = async (val) => {
-  const mode = val ? 'ws' : 'http'
-
-  if (currentSessionId.value) {
-    try {
-      await chatApi.updateSessionReplyTarget(currentSessionId.value, mode)
-      const session = sessions.value.find(item => item.session_id === currentSessionId.value)
-      if (session) {
-        session.reply_target_source = mode
-      }
-    } catch (error) {
-      ElMessage.error(error.message || t('chat.setting_failed'))
-      return
-    }
+  if (isCurrentSessionReadOnly.value) {
+    ElMessage.warning(t('chat.external_session_read_only'))
+    return
   }
 
+  const mode = val ? 'ws' : 'http'
   isWsMode.value = val
   await setTransportMode(mode)
 }
@@ -569,7 +576,13 @@ const uploadFileList = ref([])
 // 附件上传处理
 const handleUpload = async (options) => {
   const { file, onSuccess, onError } = options
-  
+
+  if (isCurrentSessionReadOnly.value) {
+    if (onError) onError(new Error(t('chat.external_session_read_only')))
+    ElMessage.warning(t('chat.external_session_read_only'))
+    return
+  }
+
   try {
     // 允许 session_id 为空，由后端分配未绑定的临时目录
     const res = await fileApi.upload(file, currentSessionId.value || '')
@@ -621,6 +634,8 @@ const handleRemoveCustomFile = (file) => {
 
 // 处理粘贴上传
 const handlePaste = (e) => {
+  if (isCurrentSessionReadOnly.value) return
+
   const clipboardData = e.clipboardData || window.clipboardData
   if (!clipboardData) return
   

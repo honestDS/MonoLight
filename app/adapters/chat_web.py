@@ -14,6 +14,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.session import ensure_web_session_writable
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -55,6 +56,11 @@ class WebChatAdapter(BaseChatAdapter):
         if not session_id:
             raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
         try:
+            await ensure_web_session_writable(
+                db,
+                session_id=session_id,
+                uid=uid,
+            )
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
             _initial_message, work = await session_reply_queue_manager.enqueue_foreground_message(

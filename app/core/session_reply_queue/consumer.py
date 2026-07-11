@@ -1,12 +1,14 @@
 import asyncio
 import uuid
 
+from app.core.crud.profile import profile_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.log import get_logger
 from app.core.session_reply_queue.executor import execute_session_reply_work, fail_session_reply_work, retry_delay_seconds
 from app.core.utils.dispatcher.helpers import format_exception_message
+from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -21,8 +23,9 @@ class SessionReplyConsumer:
     def __init__(self) -> None:
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
-        self._running: dict[int, asyncio.Task] = {}
+        self._running: dict[int, tuple[asyncio.Task, str]] = {}
         self._last_recovery_at = 0.0
+        self._last_lease_renewal_at = 0.0
 
     def start(self) -> asyncio.Task:
         if self._task and not self._task.done():
@@ -35,7 +38,7 @@ class SessionReplyConsumer:
         self._stop_event.set()
         if self._task:
             self._task.cancel()
-        tasks = [task for task in self._running.values() if not task.done()]
+        tasks = [task for task, _worker_id in self._running.values() if not task.done()]
         for task in tasks:
             task.cancel()
         if self._task:
@@ -49,13 +52,33 @@ class SessionReplyConsumer:
         while not self._stop_event.is_set():
             try:
                 now = loop.time()
-                if now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS:
+                claims = {work_id: worker_id for work_id, (_task, worker_id) in self._running.items()}
+                if claims:
                     async with AsyncSessionLocal() as db:
-                        await session_reply_work_item_crud.recover_expired(db)
+                        if now - self._last_lease_renewal_at >= SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS:
+                            active_claims = await session_reply_work_item_crud.renew_active_claims(
+                                db,
+                                claims=claims,
+                                lease_seconds=SESSION_REPLY_LEASE_SECONDS,
+                            )
+                            self._last_lease_renewal_at = now
+                        else:
+                            active_claims = await session_reply_work_item_crud.get_active_claims(db, claims)
+                    for work_id, worker_id in claims.items():
+                        if (work_id, worker_id) not in active_claims:
+                            task_entry = self._running.get(work_id)
+                            if task_entry is not None and not task_entry[0].done():
+                                task_entry[0].cancel()
+
+                if now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS:
+                    await self._recover_expired()
                     self._last_recovery_at = now
 
                 async with AsyncSessionLocal() as db:
                     settings = await system_setting_crud.get_runtime_settings(db)
+                    scheduled_profile_ids = await session_reply_work_item_crud.list_ready_scheduled_profile_ids(db)
+                    profiles = await profile_crud.get_by_ids(db, scheduled_profile_ids)
+                scheduled_profile_limits = {profile.id: ProfileConfig.model_validate(profile.configs).tool.scheduled_task_max_concurrency for profile in profiles if profile.id is not None}
                 available_slots = max(0, settings.session_reply_max_concurrency - len(self._running))
                 claimed_count = 0
                 for _ in range(available_slots):
@@ -65,11 +88,12 @@ class SessionReplyConsumer:
                             db,
                             worker_id=worker_id,
                             lease_seconds=SESSION_REPLY_LEASE_SECONDS,
+                            scheduled_profile_limits=scheduled_profile_limits,
                         )
                     if work is None or work.id is None:
                         break
                     task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts))
-                    self._running[work.id] = task
+                    self._running[work.id] = (task, worker_id)
                     task.add_done_callback(lambda _task, work_id=work.id: self._running.pop(work_id, None))
                     claimed_count += 1
 
@@ -84,21 +108,9 @@ class SessionReplyConsumer:
                 await asyncio.sleep(SESSION_REPLY_POLL_INTERVAL_SECONDS)
 
     async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int) -> None:
-        execution_task = asyncio.create_task(execute_session_reply_work(work_id, worker_id))
-        renewal_task = asyncio.create_task(self._renew_lease(work_id, worker_id))
         try:
-            done, _pending = await asyncio.wait(
-                {execution_task, renewal_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if renewal_task in done and not renewal_task.result():
-                execution_task.cancel()
-                await asyncio.gather(execution_task, return_exceptions=True)
-                return
-            await execution_task
+            await execute_session_reply_work(work_id, worker_id)
         except asyncio.CancelledError:
-            execution_task.cancel()
-            await asyncio.gather(execution_task, return_exceptions=True)
             raise
         except Exception as exc:
             error = format_exception_message(exc)
@@ -119,22 +131,12 @@ class SessionReplyConsumer:
                         error=error,
                         delay_seconds=retry_delay_seconds(attempt_count),
                     )
-        finally:
-            renewal_task.cancel()
-            await asyncio.gather(renewal_task, return_exceptions=True)
 
-    async def _renew_lease(self, work_id: int, worker_id: str) -> bool:
-        while True:
-            await asyncio.sleep(SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS)
-            async with AsyncSessionLocal() as db:
-                renewed = await session_reply_work_item_crud.renew_lease(
-                    db,
-                    work_id=work_id,
-                    worker_id=worker_id,
-                    lease_seconds=SESSION_REPLY_LEASE_SECONDS,
-                )
-            if not renewed:
-                return False
+    async def _recover_expired(self) -> None:
+        async with AsyncSessionLocal() as db:
+            _recovered_count, terminal_claims = await session_reply_work_item_crud.recover_expired(db)
+        for work_id, worker_id, error in terminal_claims:
+            await fail_session_reply_work(work_id, worker_id, error)
 
 
 session_reply_consumer = SessionReplyConsumer()

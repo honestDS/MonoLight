@@ -6,6 +6,7 @@ from sqlalchemy import delete, update
 from sqlmodel import select
 
 from app.core.crud.message_platform_outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
+from app.core.message_platforms import notifier as notifier_module
 from app.core.message_platforms.base import MessagePlatformHandler
 from app.core.message_platforms.manager import OUTBOX_DELIVERY_TIMEOUT_SECONDS, MessagePlatformPollingManager
 from app.core.message_platforms.notifier import build_outbox_dedupe_key, normalize_outbox_event
@@ -46,6 +47,74 @@ async def clean_outbox_table():
     async with AsyncSessionLocal() as db:
         await db.execute(delete(MessagePlatformOutbox))
         await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_event_uses_fixed_external_session_source(monkeypatch):
+    session = type(
+        "Session",
+        (),
+        {
+            "source": "weixin-openclaw",
+            "reply_target_source": "ws",
+        },
+    )()
+    enqueue_calls = []
+    web_notify_calls = []
+
+    class FakeDb:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_by_session_id(db, session_id):
+        return session
+
+    async def enqueue(db, **kwargs):
+        enqueue_calls.append(kwargs)
+        return type("OutboxItem", (), {"id": 7})(), True
+
+    async def notify(*args, **kwargs):
+        web_notify_calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        notifier_module.session_crud,
+        "get_by_session_id",
+        get_by_session_id,
+    )
+    monkeypatch.setattr(
+        notifier_module.message_platform_outbox_crud,
+        "enqueue",
+        enqueue,
+    )
+    monkeypatch.setattr(notifier_module.session_notifier, "notify", notify)
+
+    event = {
+        "event_id": "session-reply-work:59:event",
+        "type": "proactive_reply",
+        "source": "scheduled_task",
+        "session_id": "weixin-openclaw:user-1",
+        "work_id": 59,
+        "trigger_message_id": 142,
+        "content": "done",
+    }
+    await notifier_module.send_session_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        event,
+    )
+
+    assert web_notify_calls == []
+    assert len(enqueue_calls) == 1
+    assert enqueue_calls[0]["source"] == "weixin-openclaw"
+    assert enqueue_calls[0]["event"] == event
 
 
 @pytest.mark.asyncio

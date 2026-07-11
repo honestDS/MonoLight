@@ -1,5 +1,5 @@
 // 聊天会话管理 composable，聚合状态、会话、通信与消息处理
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
@@ -45,6 +45,22 @@ export function useChatSession() {
   
   // 4. 消息处理
   const messageProcessor = useMessageProcessor()
+
+  const currentSession = computed(() =>
+    sessionManager.sessions.value.find(
+      session => session.session_id === sessionManager.currentSessionId.value
+    ) || null
+  )
+  const isCurrentSessionReadOnly = computed(() => {
+    const source = currentSession.value?.source
+    return Boolean(source && !['http', 'ws'].includes(source))
+  })
+
+  const rejectReadOnlySession = () => {
+    if (!isCurrentSessionReadOnly.value) return false
+    ElMessage.warning(t('chat.external_session_read_only'))
+    return true
+  }
 
   // ==================== 设置模块间连接 ====================
   
@@ -107,6 +123,8 @@ export function useChatSession() {
    * 仅用于连续发送时插入一条携带 queued 状态的消息占位，并直接发送
    */
   const enqueueMessage = (text, attachments = []) => {
+    if (rejectReadOnlySession()) return
+
     const userMsgId = Date.now() + Math.random()
     
     // 添加用户消息到界面，增加排队标记
@@ -134,6 +152,7 @@ export function useChatSession() {
    * 发送消息（统一入口）
    */
   const send = async () => {
+    if (rejectReadOnlySession()) return
     if (transport.transportMode.value === 'ws') {
       return wsSend(chatState.inputMsg.value, attachments.value.map(a => a.path))
     } else {
@@ -145,6 +164,8 @@ export function useChatSession() {
    * HTTP 方式发送消息
    */
   const httpSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    if (rejectReadOnlySession()) return
+
     const text = textParam !== null ? textParam : chatState.inputMsg.value
     const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
     
@@ -253,6 +274,8 @@ export function useChatSession() {
    * WebSocket 方式发送消息
    */
   const wsSend = async (textParam = null, attachmentsParam = null, existingMsgId = null) => {
+    if (rejectReadOnlySession()) return
+
     const text = textParam !== null ? textParam : chatState.inputMsg.value
     const attachmentsToSent = attachmentsParam !== null ? attachmentsParam : attachments.value.map(a => a.path)
     
@@ -523,6 +546,8 @@ export function useChatSession() {
     activeCollapse: sessionManager.activeCollapse,
     hasMore: sessionManager.hasMore,
     sessionCreating: sessionManager.sessionCreating,
+    currentSession,
+    isCurrentSessionReadOnly,
     
     // 状态 - 通信相关
     transportMode: transport.transportMode,

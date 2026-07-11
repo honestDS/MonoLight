@@ -22,7 +22,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         await db.refresh(session)
         return session
 
-    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http", reply_target_source: str | None = None) -> ChatSession:
+    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http") -> ChatSession:
         session = await self.get_by_session_id(db, session_id)
         if session:
             if session.uid != uid:
@@ -30,11 +30,9 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             session.profile_id = profile_id
             if not session.source:
                 session.source = source
-            if reply_target_source is not None:
-                session.reply_target_source = reply_target_source
             db.add(session)
         else:
-            session = ChatSession(session_id=session_id, uid=uid, profile_id=profile_id, source=source, reply_target_source=reply_target_source or source)
+            session = ChatSession(session_id=session_id, uid=uid, profile_id=profile_id, source=source)
             db.add(session)
         await db.flush()
         return session

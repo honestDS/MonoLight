@@ -35,6 +35,12 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_by_ids(self, db: AsyncSession, profile_ids: set[int]) -> list[Profile]:
+        if not profile_ids:
+            return []
+        result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+        return list(result.scalars().all())
+
     async def count(self, db: AsyncSession, uid: str | None = None) -> int:
         result = await db.execute(select(func.count()).select_from(Profile).where(Profile.uid == uid))
         return result.scalar()

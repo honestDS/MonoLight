@@ -18,6 +18,7 @@ export default {
   non_stream: 'Non-stream',
   stream: 'Stream',
   input_placeholder: 'Type a message or paste a screenshot...',
+  external_session_read_only: 'This session comes from an external message platform and is read-only on the web',
   unknown_file: 'Unknown file',
   upload_success: 'Attachment uploaded successfully',
   upload_failed: 'Upload failed',

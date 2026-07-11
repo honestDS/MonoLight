@@ -4,12 +4,15 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import constants
 from app.core.exceptions import ForbiddenException, ResourceNotFoundException, ServerException
 from app.core.paths import TEMP_DIR, get_user_temp_dir
 from app.core.security import get_current_user
 from app.core.tools.send_file_to_user import resolve_file_token
+from app.core.utils.session import ensure_web_session_writable
+from app.providers.database import get_db
 
 router = APIRouter()
 
@@ -19,8 +22,15 @@ async def upload_file(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    if not session_id:
+    if session_id:
+        await ensure_web_session_writable(
+            db,
+            session_id=session_id,
+            uid=getattr(current_user, "uid", None),
+        )
+    else:
         session_id = f"unassigned_{uuid.uuid4().hex[:8]}"
 
     session_dir = get_user_temp_dir(TEMP_DIR.parent, session_id)

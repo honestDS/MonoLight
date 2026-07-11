@@ -103,7 +103,6 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 ChatSession.title,
                 ChatSession.enable_markdown,
                 ChatSession.source,
-                ChatSession.reply_target_source,
                 ChatSession.created_at,
             )
             .join(User, Message.uid == User.uid)
@@ -113,7 +112,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if not is_admin:
             stmt = stmt.where(Message.uid == uid)
 
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.source, ChatSession.reply_target_source, ChatSession.created_at).order_by(desc("last_active"))
+        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.source, ChatSession.created_at).order_by(desc("last_active"))
         result = await db.execute(stmt)
         return result.all()
 
