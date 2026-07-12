@@ -262,6 +262,9 @@
       position: relative; /* 确保 queued-indicator 能相对 message-item 绝对定位 */
       transition: opacity 0.3s, transform 0.3s;
 
+      .tool-call-message{
+        margin-bottom: 10px;
+      }
       &.queued {
         opacity: 0.8;
         .content {

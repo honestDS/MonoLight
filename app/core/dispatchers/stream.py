@@ -278,7 +278,7 @@ class StreamDispatcherMixin:
                             yield {
                                 "type": "turn_end",
                                 "response_id": response_id,
-                                "content": saved_msg.content,
+                                "content": ai_msg.content if ai_msg.tool_calls else saved_msg.content,
                                 "request_id": request_id,
                                 "session_id": session_id,
                             }

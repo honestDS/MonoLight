@@ -63,6 +63,7 @@ class NonStreamDispatcherMixin:
         additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        expose_tool_call_content: bool = True,
     ):
         try:
             user = await user_crud.get_by_uid(db, uid)
@@ -175,6 +176,7 @@ class NonStreamDispatcherMixin:
                         excluded_priorities: set[int] = set()
                         while True:
                             emitted_stream_content = False
+                            buffered_content_chunks: list[str] = []
                             try:
                                 request_messages = ContextManager.trim_messages_for_model_request(
                                     messages=messages,
@@ -203,14 +205,17 @@ class NonStreamDispatcherMixin:
                                     async def on_content(content: str) -> None:
                                         nonlocal emitted_stream_content
                                         emitted_stream_content = True
-                                        await stream_event_callback(
-                                            {
-                                                "type": "content",
-                                                "content": content,
-                                                "turn": current_turn,
-                                                "response_id": response_id,
-                                            }
-                                        )
+                                        if not expose_tool_call_content:
+                                            buffered_content_chunks.append(content)
+                                        else:
+                                            await stream_event_callback(
+                                                {
+                                                    "type": "content",
+                                                    "content": content,
+                                                    "turn": current_turn,
+                                                    "response_id": response_id,
+                                                }
+                                            )
 
                                     response = await LLMClient.generate_with_stream_callback(
                                         **generation_kwargs,
@@ -220,6 +225,16 @@ class NonStreamDispatcherMixin:
                                 ai_msg = response.message
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                if not expose_tool_call_content and not ai_msg.tool_calls:
+                                    for content_chunk in buffered_content_chunks:
+                                        await stream_event_callback(
+                                            {
+                                                "type": "content",
+                                                "content": content_chunk,
+                                                "turn": current_turn,
+                                                "response_id": response_id,
+                                            }
+                                        )
                                 break
                             except ApiKeyException:
                                 raise
@@ -263,11 +278,14 @@ class NonStreamDispatcherMixin:
                             dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and not new_user_msgs else None,
                         )
                         if stream_event_callback is not None and saved_msg is not None:
+                            turn_end_content = saved_msg.content
+                            if ai_msg.tool_calls:
+                                turn_end_content = ai_msg.content if expose_tool_call_content else None
                             await stream_event_callback(
                                 {
                                     "type": "turn_end",
                                     "response_id": response_id,
-                                    "content": saved_msg.content,
+                                    "content": turn_end_content,
                                 }
                             )
 
@@ -367,7 +385,10 @@ class NonStreamDispatcherMixin:
 
             return LLMResponse(
                 choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
-                history=dump_output_history(turn_messages),
+                history=dump_output_history(
+                    turn_messages,
+                    expose_tool_call_content=expose_tool_call_content,
+                ),
                 files=files_to_user or None,
             ).model_dump()
 

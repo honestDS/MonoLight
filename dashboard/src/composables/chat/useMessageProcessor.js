@@ -136,6 +136,7 @@ export function useMessageProcessor() {
         ...existingMsg,
         content: JSON.stringify({
           role: 'assistant',
+          content: existingContent?.content,
           tool_calls: [{
             ...existingContent?.tool_calls?.[0],
             id: toolCall.id,
@@ -149,8 +150,20 @@ export function useMessageProcessor() {
       return
     }
 
+    const streamedContentIdx = responseId
+      ? messagesRef.value.findIndex(message =>
+        message.response_id === responseId &&
+        message.role === 'assistant' &&
+        !isToolCall(message)
+      )
+      : -1
+    const streamedContentMsg = streamedContentIdx !== -1
+      ? messagesRef.value[streamedContentIdx]
+      : null
+
     const contentObj = {
       role: 'assistant',
+      content: streamedContentMsg?.content || undefined,
       tool_calls: [{
         id: toolCall.id,
         name: toolCall.name,
@@ -165,6 +178,14 @@ export function useMessageProcessor() {
       response_id: responseId,
       request_id: requestId,
       created_at: Date.now() / 1000
+    }
+
+    // 工具调用与同轮流式正文属于同一条助手消息，合并后可避免后续事件将正文覆盖掉。
+    if (streamedContentIdx !== -1) {
+      newMsg.id = streamedContentMsg.id
+      newMsg.created_at = streamedContentMsg.created_at || newMsg.created_at
+      messagesRef.value[streamedContentIdx] = newMsg
+      return
     }
 
     // 1. 优先替换匹配当前请求的占位符

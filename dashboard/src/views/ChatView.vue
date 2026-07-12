@@ -70,6 +70,28 @@
               <div class="message-header">
                 <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
               </div>
+              <div
+                v-if="getToolCallContent(msg).trim() && currentSessionEnableMarkdown"
+                class="content markdown-body tool-call-message"
+                v-html="renderMarkdown(getToolCallContent(msg))"
+              ></div>
+              <div
+                v-else-if="getToolCallContent(msg).trim()"
+                class="content tool-call-message"
+                style="white-space: pre-wrap;"
+              >
+                <template v-for="(part, idx) in renderTextWithLinks(getToolCallContent(msg))" :key="idx">
+                  <el-link
+                    v-if="part.type === 'link'"
+                    :href="part.href"
+                    class="message-link"
+                    type="primary"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    underline
+                  >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
+                </template>
+              </div>
               <el-collapse v-model="activeCollapse">
                 <el-collapse-item :name="msg.id">
                   <template #title>
@@ -511,6 +533,7 @@ const {
   isToolResult,
   getToolName,
   getToolArguments,
+  getToolCallContent,
   getToolResultName,
   getToolResultContent,
   getMessageTimestamp,

@@ -4,7 +4,8 @@ import pytest
 
 from app.core.session_reply_queue.executor import _execute_foreground
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
-from app.models.message import InternalMessage, MessageRole
+from app.core.utils.dispatcher.helpers import dump_output_history
+from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.llm.client import LLMClient
 
@@ -82,6 +83,96 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+def test_dump_output_history_can_hide_tool_call_content_without_mutating_messages():
+    tool_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content="准备查询资料",
+        tool_calls=[
+            InternalToolCall(
+                id="call-1",
+                name="search",
+                arguments={"query": "MonoLight"},
+            )
+        ],
+    )
+
+    visible_history = dump_output_history([tool_message])
+    hidden_history = dump_output_history(
+        [tool_message],
+        expose_tool_call_content=False,
+    )
+
+    assert visible_history[0]["content"] == "准备查询资料"
+    assert "content" not in hidden_history[0]
+    assert hidden_history[0]["tool_calls"][0]["name"] == "search"
+    assert tool_message.content == "准备查询资料"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "stream_requested", "expose_tool_call_content"),
+    [
+        ("http", False, True),
+        ("ws", True, True),
+        ("weixin-openclaw", False, False),
+    ],
+)
+async def test_enqueue_foreground_controls_tool_call_content_by_source(
+    monkeypatch,
+    source,
+    stream_requested,
+    expose_tool_call_content,
+):
+    manager = SessionReplyQueueManager()
+    work = SimpleNamespace(execution_state={}, id=7)
+
+    class FakeDb:
+        def add(self, instance):
+            return None
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, instance):
+            if isinstance(instance, InternalMessage):
+                return
+            if getattr(instance, "created_at", None) is None:
+                instance.created_at = SimpleNamespace(timestamp=lambda: 1.0)
+            if getattr(instance, "id", None) is None:
+                instance.id = 11
+
+    async def upsert_profile(*args, **kwargs):
+        return None
+
+    async def enqueue(*args, **kwargs):
+        return work, True
+
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_crud.upsert_profile",
+        upsert_profile,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_work_item_crud.enqueue",
+        enqueue,
+    )
+
+    _message, queued_work = await manager.enqueue_foreground_message(
+        FakeDb(),
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=3),
+        message="测试",
+        attachments=None,
+        source=source,
+    )
+
+    assert queued_work.execution_state["stream_requested"] is stream_requested
+    assert queued_work.execution_state["expose_tool_call_content"] is expose_tool_call_content
 
 
 @pytest.mark.asyncio
@@ -177,9 +268,13 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         uid="user-1",
         session_id="session-1",
         profile_id=3,
-        execution_state={"stream_requested": True},
+        execution_state={
+            "stream_requested": True,
+            "expose_tool_call_content": False,
+        },
     )
     published: list[tuple[int, dict]] = []
+    dispatch_kwargs: dict = {}
 
     class FakeDb:
         async def refresh(self, instance):
@@ -205,6 +300,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         published.append((sequence_no, event))
 
     async def dispatch(**kwargs):
+        dispatch_kwargs.update(kwargs)
         callback = kwargs["stream_event_callback"]
         await callback(
             {
@@ -252,6 +348,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     result = await _execute_foreground(FakeDb(), work, "worker-1")
 
     assert result == {"history": [], "files": None}
+    assert dispatch_kwargs["expose_tool_call_content"] is False
     assert [sequence_no for sequence_no, _event in published] == [1, 2, 3]
     assert [event["type"] for _sequence_no, event in published] == [
         "tool_start",

@@ -141,6 +141,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         work.execution_state = state
 
     execution_state = work.execution_state or {}
+    expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
@@ -160,6 +161,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         additional_user_messages_fetcher=fetch_additional_user_messages,
         execution_resume_state=resume_state,
         execution_checkpoint_callback=save_execution_checkpoint,
+        expose_tool_call_content=expose_tool_call_content,
     )
 
 

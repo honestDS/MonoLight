@@ -5,7 +5,7 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
-import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
+import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
@@ -406,7 +406,19 @@ export function useChatSession() {
           const newMessages = [...chatState.messages.value]
           const targetIdx = newMessages.findIndex(m => m.response_id === data.response_id && m.role === 'assistant')
           if (targetIdx !== -1) {
-            newMessages[targetIdx] = { ...newMessages[targetIdx], content: data.content }
+            const targetMessage = newMessages[targetIdx]
+            if (isToolCall(targetMessage)) {
+              const toolCallContent = normalizeMessageContent(targetMessage.content)
+              newMessages[targetIdx] = {
+                ...targetMessage,
+                content: JSON.stringify({
+                  ...toolCallContent,
+                  content: data.content
+                })
+              }
+            } else {
+              newMessages[targetIdx] = { ...targetMessage, content: data.content }
+            }
             chatState.messages.value = newMessages
           }
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
@@ -574,6 +586,7 @@ export function useChatSession() {
     isToolResult,
     getToolName,
     getToolArguments,
+    getToolCallContent,
     getToolResultName,
     getToolResultContent,
     getMessageTimestamp,

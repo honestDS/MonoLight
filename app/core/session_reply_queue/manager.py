@@ -85,6 +85,9 @@ class SessionReplyQueueManager:
             work.execution_state = {
                 **(work.execution_state or {}),
                 "stream_requested": source == "ws",
+                # 微信 OpenClaw 对发送频率有限制，工具调用阶段的正文只保留在
+                # 数据库和日志中，不作为额外的用户可见消息发送到微信。
+                "expose_tool_call_content": source != "weixin-openclaw",
             }
             db.add(work)
         await db.commit()
@@ -194,6 +197,7 @@ class SessionReplyQueueManager:
                 )
             )
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
+        expose_tool_call_content = all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in contiguous)
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work.id,
@@ -203,6 +207,7 @@ class SessionReplyQueueManager:
                 "execution_state": {
                     **(work.execution_state or {}),
                     "stream_requested": stream_requested,
+                    "expose_tool_call_content": expose_tool_call_content,
                 },
             },
             commit=False,

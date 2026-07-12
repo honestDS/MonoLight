@@ -85,6 +85,17 @@ export const isToolCall = (msg) => {
   }
 }
 
+// 获取工具调用阶段同时返回的正文
+export const getToolCallContent = (msg) => {
+  try {
+    const content = normalizeMessageContent(msg.content)
+    if (!content || typeof content !== 'object') return ''
+    return typeof content.content === 'string' ? content.content : ''
+  } catch {
+    return ''
+  }
+}
+
 // 获取工具调用名称
 export const getToolName = (msg) => {
   try {
