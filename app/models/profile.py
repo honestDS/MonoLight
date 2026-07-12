@@ -3,6 +3,7 @@
 import os
 from typing import (
     Any,
+    Literal,
 )
 
 from pydantic import (
@@ -67,7 +68,10 @@ class ToolConfig(BaseModel):
 class OtherConfig(BaseModel):
     """杂项系统参数配置"""
 
-    pass
+    context_summary_threshold_percent: Literal[50, 60, 70, 80, 90] = PydanticField(
+        90,
+        description="触发上下文摘要的可用输入窗口占用百分比",
+    )
 
 
 class ProfileConfig(BaseModel):
@@ -105,7 +109,7 @@ class ProfileConfig(BaseModel):
                 "file_send_blocked_extensions",
                 "executor_max_workers",
             ],
-            "other": [],
+            "other": ["context_summary_threshold_percent"],
         }
         return standardize_config(data, schema_map)
 
@@ -157,7 +161,9 @@ PROFILE_EXAMPLE = {
             "file_send_blocked_extensions": [],
             "executor_max_workers": 10,
         },
-        "other": {},
+        "other": {
+            "context_summary_threshold_percent": 90,
+        },
     },
 }
 

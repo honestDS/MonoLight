@@ -24,6 +24,8 @@ export default {
   unique_name: 'Unique Profile Name',
   associated_prompt: 'Associated Prompt',
   optional_prompt: 'Optional associated prompt',
+  context_summary_threshold: 'Context Summary Trigger',
+  context_summary_threshold_hint: 'Automatically summarizes older conversation content when context usage reaches the selected percentage of the model input budget. Default: 90%.',
   chat_channel: 'Chat Channel',
   chat_channel_label: 'Chat Models',
   chat_model: 'Chat Model',

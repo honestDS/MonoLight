@@ -111,7 +111,11 @@ async def ensure_context_summary(
         context_window_k * 1024 - max(max_tokens, 0) - tools_tokens - max(safety_margin_tokens, 0),
     )
     required_tokens = reserved_tokens + summary_tokens + history_tokens + estimate_tokens(current_message)
-    if required_tokens < input_budget:
+    summary_trigger_tokens = max(
+        1,
+        input_budget * cfg.other.context_summary_threshold_percent // 100,
+    )
+    if required_tokens < summary_trigger_tokens:
         return state
 
     available_history_tokens = max(1, input_budget - reserved_tokens - summary_tokens)

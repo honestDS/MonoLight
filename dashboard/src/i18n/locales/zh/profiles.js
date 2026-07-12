@@ -24,6 +24,8 @@ export default {
   unique_name: '唯一配置名称',
   associated_prompt: '关联提示词库',
   optional_prompt: '可选关联提示词',
+  context_summary_threshold: '上下文摘要触发阈值',
+  context_summary_threshold_hint: '当已用上下文达到模型可用输入窗口的所选比例时，自动总结较早的对话内容。默认 90%。',
   chat_channel: '对话渠道 (Chat Channel)',
   chat_channel_label: '对话模型',
   chat_model: '对话模型',

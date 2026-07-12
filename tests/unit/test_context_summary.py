@@ -2,12 +2,14 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app.core import context_summary as summary_module
 from app.core.context import ContextManager
 from app.core.context_summary import ContextSummaryState, _select_summary_segment, _serialize_message
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+from app.models.profile import ProfileConfig
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
 
@@ -130,6 +132,13 @@ class _SummaryChannel:
         return "secret"
 
 
+def _summary_cfg(threshold_percent: int = 90) -> SimpleNamespace:
+    return SimpleNamespace(
+        channel=SimpleNamespace(chat_channel=object()),
+        other=SimpleNamespace(context_summary_threshold_percent=threshold_percent),
+    )
+
+
 def _summary_history() -> list[InternalMessage]:
     return [
         InternalMessage(id=1, role=MessageRole.USER, content="u1" * 100),
@@ -193,7 +202,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        cfg=_summary_cfg(),
         before_id=10,
         current_message="current",
         context_window_k=1,
@@ -216,6 +225,81 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert len(generated_calls) == 1
 
 
+@pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])
+def test_profile_config_accepts_context_summary_threshold_options(threshold_percent):
+    cfg = ProfileConfig.model_validate(
+        {"other": {"context_summary_threshold_percent": threshold_percent}}
+    )
+
+    assert cfg.other.context_summary_threshold_percent == threshold_percent
+
+
+def test_profile_config_defaults_context_summary_threshold_to_ninety_percent():
+    cfg = ProfileConfig.model_validate({})
+
+    assert cfg.other.context_summary_threshold_percent == 90
+
+
+@pytest.mark.parametrize("threshold_percent", [0, 49, 55, 100, "90"])
+def test_profile_config_rejects_invalid_context_summary_threshold(threshold_percent):
+    with pytest.raises(ValidationError):
+        ProfileConfig.model_validate(
+            {"other": {"context_summary_threshold_percent": threshold_percent}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_context_summary_triggers_only_after_configured_threshold(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 100
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
+    below_ninety_state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(90),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert below_ninety_state == ContextSummaryState(content=None, message_id=None)
+    assert selected_calls == []
+    assert update_calls == []
+    assert generated_calls == []
+
+    at_fifty_state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert at_fifty_state == ContextSummaryState(content="compressed history", message_id=2)
+    assert len(selected_calls) == 1
+    assert len(update_calls) == 1
+    assert len(generated_calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch):
     selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(
@@ -228,7 +312,7 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        cfg=_summary_cfg(),
         before_id=None,
         current_message="current",
         context_window_k=1,
@@ -266,7 +350,7 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        cfg=_summary_cfg(),
         before_id=None,
         current_message="current",
         context_window_k=1,

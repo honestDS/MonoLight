@@ -72,6 +72,17 @@
                     <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
                   </el-select>
                 </el-form-item>
+                <el-form-item :label="$t('profiles.context_summary_threshold')">
+                  <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
+                    <el-option
+                      v-for="percent in contextSummaryThresholdOptions"
+                      :key="percent"
+                      :label="`${percent}%`"
+                      :value="percent"
+                    ></el-option>
+                  </el-select>
+                  <div class="help-text mt-5">{{ $t('profiles.context_summary_threshold_hint') }}</div>
+                </el-form-item>
               </div>
             </div>
           </el-tab-pane>
@@ -381,6 +392,7 @@ const activeTab = ref('base')
 const allowedFileSendDirInput = ref('')
 const fileSendBlockedExtensionInput = ref('')
 const localeOptions = SUPPORT_LOCALES
+const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 
 const systemSettings = reactive({
   log_locale: 'zh',

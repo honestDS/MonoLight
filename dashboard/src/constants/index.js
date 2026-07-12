@@ -49,7 +49,9 @@ export const defaultProfileConfigs = () => ({
     file_send_max_total_size_mb: 100,
     file_send_blocked_extensions: []
   },
-  other: {},
+  other: {
+    context_summary_threshold_percent: 90
+  },
 })
 
 // 默认渠道规则
