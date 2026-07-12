@@ -204,7 +204,6 @@ class NonStreamDispatcherMixin:
 
                                     async def on_content(content: str) -> None:
                                         nonlocal emitted_stream_content
-                                        emitted_stream_content = True
                                         if not expose_tool_call_content:
                                             buffered_content_chunks.append(content)
                                         else:
@@ -216,6 +215,7 @@ class NonStreamDispatcherMixin:
                                                     "response_id": response_id,
                                                 }
                                             )
+                                            emitted_stream_content = True
 
                                     response = await LLMClient.generate_with_stream_callback(
                                         **generation_kwargs,
