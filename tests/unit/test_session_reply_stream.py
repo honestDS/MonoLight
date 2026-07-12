@@ -3,7 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.session_reply_queue.executor import _execute_foreground
-from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.session_reply_queue.manager import (
+    SessionReplyQueueManager,
+    build_foreground_message_dedupe_key,
+)
 from app.core.utils.dispatcher.helpers import dump_output_history
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkStatus
@@ -85,6 +88,16 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     assert response.usage["total_tokens"] == 3
 
 
+def test_foreground_message_dedupe_key_scopes_reused_message_id_to_session():
+    first = build_foreground_message_dedupe_key("session-1", 1)
+    second = build_foreground_message_dedupe_key("session-2", 1)
+
+    assert first != second
+    assert first == build_foreground_message_dedupe_key("session-1", 1)
+    assert first.startswith("foreground-message:")
+    assert len(first) <= 160
+
+
 def test_dump_output_history_can_hide_tool_call_content_without_mutating_messages():
     tool_message = InternalMessage(
         role=MessageRole.ASSISTANT,
@@ -127,13 +140,18 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
 ):
     manager = SessionReplyQueueManager()
     work = SimpleNamespace(execution_state={}, id=7)
+    enqueue_calls = []
 
     class FakeDb:
+        def __init__(self):
+            self.pending = None
+
         def add(self, instance):
-            return None
+            self.pending = instance
 
         async def flush(self):
-            return None
+            if getattr(self.pending, "id", None) is None:
+                self.pending.id = 11
 
         async def commit(self):
             return None
@@ -150,6 +168,7 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
         return None
 
     async def enqueue(*args, **kwargs):
+        enqueue_calls.append(kwargs)
         return work, True
 
     monkeypatch.setattr(
@@ -173,6 +192,7 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
 
     assert queued_work.execution_state["stream_requested"] is stream_requested
     assert queued_work.execution_state["expose_tool_call_content"] is expose_tool_call_content
+    assert enqueue_calls[0]["dedupe_key"] == build_foreground_message_dedupe_key("session-1", 11)
 
 
 @pytest.mark.asyncio

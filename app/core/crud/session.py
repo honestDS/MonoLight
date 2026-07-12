@@ -1,4 +1,4 @@
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -48,6 +48,27 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         await db.flush()
         return (result.rowcount or 0) == 1
 
+    async def delete_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        conditions = [ChatSession.session_id == session_id]
+        if not is_admin:
+            conditions.append(ChatSession.uid == uid)
+        result = await db.execute(
+            delete(ChatSession)
+            .where(*conditions)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return result.rowcount or 0
+
     async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http") -> ChatSession:
         session = await self.get_by_session_id(db, session_id)
         if session:
@@ -56,9 +77,16 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             session.profile_id = profile_id
             if not session.source:
                 session.source = source
+            session.reply_target_source = session.source
             db.add(session)
         else:
-            session = ChatSession(session_id=session_id, uid=uid, profile_id=profile_id, source=source)
+            session = ChatSession(
+                session_id=session_id,
+                uid=uid,
+                profile_id=profile_id,
+                source=source,
+                reply_target_source=source,
+            )
             db.add(session)
         await db.flush()
         return session

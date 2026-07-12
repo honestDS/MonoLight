@@ -48,6 +48,27 @@ class CRUDSessionEvent(CRUDBase[SessionEvent, SessionEvent, SessionEvent]):
         result = await db.execute(select(SessionEvent).where(SessionEvent.id > after_id).order_by(SessionEvent.id).limit(limit))
         return list(result.scalars().all())
 
+    async def delete_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        conditions = [SessionEvent.session_id == session_id]
+        if not is_admin:
+            conditions.append(SessionEvent.uid == uid)
+        result = await db.execute(
+            delete(SessionEvent)
+            .where(*conditions)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return result.rowcount or 0
+
     async def cleanup_expired(self, db: AsyncSession, *, retention_hours: int = SESSION_EVENT_RETENTION_HOURS) -> int:
         cutoff = get_local_time() - timedelta(hours=retention_hours)
         result = await db.execute(delete(SessionEvent).where(SessionEvent.created_at < cutoff).execution_options(synchronize_session=False))

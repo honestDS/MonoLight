@@ -242,7 +242,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 return False
 
             dispatch_text = message.text
-            await self.chat(
+            result = await self.chat(
                 db=db,
                 message=dispatch_text,
                 uid=resolved_uid,
@@ -250,6 +250,13 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 attachments=message.attachments or None,
                 active_tasks=active_tasks,
             )
+            if result.text or result.files:
+                sent = False
+                if result.text:
+                    sent = await self.reply_text(message.user_id, result.text, context_token=message.context_token)
+                for file_item in result.files:
+                    sent = await self.reply_file_item(message.user_id, file_item, context_token=message.context_token) or sent
+                return sent
 
             if runtime_validator is not None and not await runtime_validator():
                 logger.bind(uid=resolved_uid, session_id=message.session_id).warning(t("LOG_WEIXIN_OPENCLAW_RUNTIME_INVALID_BEFORE_REPLY"))

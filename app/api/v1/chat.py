@@ -21,7 +21,6 @@ from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
 from app.core.exceptions import BaseBusinessException, LLMException
@@ -35,6 +34,7 @@ from app.core.log import (
     set_system_log_locale,
 )
 from app.core.security import get_current_user
+from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
@@ -131,25 +131,16 @@ async def delete_session(
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
 
-    row_count = await message_crud.remove_session(
+    deleted = await delete_session_data(
         db,
         session_id=session_id,
         uid=uid,
         is_admin=is_admin,
-        commit=False,
     )
-
-    if row_count == 0:
+    if not deleted:
         await db.rollback()
         return StandardResponse.error(code=404, message=constants.ERR_SESSION_NOT_FOUND)
 
-    await session_reply_work_item_crud.cancel_session(
-        db,
-        session_id=session_id,
-        uid=uid,
-        is_admin=is_admin,
-        commit=False,
-    )
     await db.commit()
     return StandardResponse.success(message=constants.MSG_SESSION_CLEARED)
 

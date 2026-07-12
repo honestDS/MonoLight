@@ -47,6 +47,7 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
     adapter = object.__new__(WeixinOpenClawAdapter)
     adapter.context_tokens = {}
     captured = {}
+    title_calls = []
 
     async def resolve_inbound_image(item):
         return Path("temp/weixin_openclaw/inbound.jpg")
@@ -56,6 +57,7 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
         return WeixinOpenClawChatResult()
 
     async def generate_title(**kwargs):
+        title_calls.append(kwargs)
         return None
 
     monkeypatch.setattr(adapter, "resolve_inbound_image", resolve_inbound_image)
@@ -98,3 +100,43 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
     assert handled is True
     assert captured["message"] == "测试一下你的识图能力"
     assert captured["attachments"] == [expected_attachment]
+    assert title_calls[0]["first_message"] == captured["message"]
+
+
+@pytest.mark.asyncio
+async def test_failed_chat_does_not_generate_title(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    adapter.context_tokens = {}
+    reply_calls = []
+    title_calls = []
+
+    async def chat(**kwargs):
+        return WeixinOpenClawChatResult(text="消息入队失败")
+
+    async def reply_text(user_id, text, *, context_token=""):
+        reply_calls.append((user_id, text, context_token))
+        return True
+
+    async def generate_title(**kwargs):
+        title_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(adapter, "chat", chat)
+    monkeypatch.setattr(adapter, "reply_text", reply_text)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_active_profile", generate_title)
+
+    handled = await adapter.handle_message(
+        SimpleNamespace(),
+        SimpleNamespace(
+            user_id="weixin-user",
+            text="请帮我分析这个问题",
+            session_id="weixin-openclaw:weixin-user",
+            context_token="context-token",
+            attachments=[],
+        ),
+        uid="owner",
+    )
+
+    assert handled is True
+    assert reply_calls == [("weixin-user", "消息入队失败", "context-token")]
+    assert title_calls == []

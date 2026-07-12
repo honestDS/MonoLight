@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -34,6 +35,11 @@ def _serialize_message_content(content: Any) -> str:
     if hasattr(content, "model_dump"):
         content = content.model_dump(mode="json")
     return json.dumps(content, ensure_ascii=False)
+
+
+def build_foreground_message_dedupe_key(session_id: str, message_id: int) -> str:
+    session_digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    return f"foreground-message:{session_digest}:{message_id}"
 
 
 class SessionReplyQueueManager:
@@ -78,7 +84,7 @@ class SessionReplyQueueManager:
             work_type=SessionReplyWorkType.FOREGROUND_REPLY,
             source_type=SessionReplySourceType.USER_MESSAGE,
             source_id=message_row.id,
-            dedupe_key=f"foreground-message:{message_row.id}",
+            dedupe_key=build_foreground_message_dedupe_key(session_id, message_row.id),
             commit=False,
         )
         if created:

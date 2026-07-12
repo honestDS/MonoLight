@@ -122,6 +122,27 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
         await db.commit()
         return result.rowcount == 1
 
+    async def delete_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        conditions = [MessagePlatformOutbox.session_id == session_id]
+        if not is_admin:
+            conditions.append(MessagePlatformOutbox.uid == uid)
+        result = await db.execute(
+            delete(MessagePlatformOutbox)
+            .where(*conditions)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return result.rowcount or 0
+
     async def cleanup_terminal_items(
         self,
         db: AsyncSession,

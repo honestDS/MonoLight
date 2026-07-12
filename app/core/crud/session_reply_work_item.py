@@ -1,7 +1,7 @@
 import time
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, true, update
+from sqlalchemy import and_, delete, exists, or_, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -295,6 +295,39 @@ class CRUDSessionReplyWorkItem:
         )
         await db.commit()
         return (result.rowcount or 0) == 1
+
+    async def delete_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        work_conditions = [SessionReplyWorkItem.session_id == session_id]
+        if not is_admin:
+            work_conditions.append(SessionReplyWorkItem.uid == uid)
+
+        work_ids = select(SessionReplyWorkItem.id).where(*work_conditions)
+        await db.execute(
+            delete(SessionReplyStreamEvent)
+            .where(SessionReplyStreamEvent.work_id.in_(work_ids))
+            .execution_options(synchronize_session=False)
+        )
+        result = await db.execute(
+            delete(SessionReplyWorkItem)
+            .where(*work_conditions)
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(
+            delete(SessionReplySequence)
+            .where(SessionReplySequence.session_id == session_id)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return result.rowcount or 0
 
     async def cancel_session(
         self,

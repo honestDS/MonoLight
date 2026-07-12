@@ -55,19 +55,13 @@ async def test_update_web_session_setting_changes_markdown(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_external_session_uses_standard_owner_cleanup(monkeypatch):
     db = FakeDb()
-    remove_calls = []
-    cancel_calls = []
+    cleanup_calls = []
 
-    async def remove_session(db_arg, *, session_id, uid, is_admin, commit):
-        remove_calls.append((db_arg, session_id, uid, is_admin, commit))
-        return 2
+    async def cleanup_session(db_arg, *, session_id, uid, is_admin):
+        cleanup_calls.append((db_arg, session_id, uid, is_admin))
+        return True
 
-    async def cancel_session(db_arg, *, session_id, uid, is_admin, commit):
-        cancel_calls.append((db_arg, session_id, uid, is_admin, commit))
-        return 1
-
-    monkeypatch.setattr(chat_api.message_crud, "remove_session", remove_session)
-    monkeypatch.setattr(chat_api.session_reply_work_item_crud, "cancel_session", cancel_session)
+    monkeypatch.setattr(chat_api, "delete_session_data", cleanup_session)
 
     response = await chat_api.delete_session(
         "weixin-openclaw:user-1",
@@ -76,8 +70,7 @@ async def test_delete_external_session_uses_standard_owner_cleanup(monkeypatch):
     )
 
     assert response.code == 200
-    assert remove_calls == [(db, "weixin-openclaw:user-1", "user-1", False, False)]
-    assert cancel_calls == [(db, "weixin-openclaw:user-1", "user-1", False, False)]
+    assert cleanup_calls == [(db, "weixin-openclaw:user-1", "user-1", False)]
     assert db.commit_count == 1
     assert db.rollback_count == 0
 

@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -106,6 +106,27 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         if scheduled_tasks:
             await db.commit()
         return len(scheduled_tasks)
+
+    async def delete_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        conditions = [ScheduledTask.session_id == session_id]
+        if not is_admin:
+            conditions.append(ScheduledTask.uid == uid)
+        result = await db.execute(
+            delete(ScheduledTask)
+            .where(*conditions)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return result.rowcount or 0
 
     async def delete_task(self, db: AsyncSession, *, scheduled_task: ScheduledTask) -> None:
         await db.delete(scheduled_task)

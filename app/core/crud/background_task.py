@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import String, case, cast, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -180,6 +180,63 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
         )
         await db.commit()
         return result.rowcount
+
+    async def cleanup_by_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str | None = None,
+        is_admin: bool = False,
+        commit: bool = True,
+    ) -> int:
+        conditions = [BackgroundTask.session_id == session_id]
+        if not is_admin:
+            conditions.append(BackgroundTask.uid == uid)
+
+        cancelled_result = await db.execute(
+            update(BackgroundTask)
+            .where(
+                *conditions,
+                BackgroundTask.status.in_(
+                    [
+                        BackgroundTaskStatus.PENDING,
+                        BackgroundTaskStatus.RUNNING,
+                    ]
+                ),
+            )
+            .values(
+                status=BackgroundTaskStatus.CANCELLED,
+                session_id=case(
+                    (
+                        BackgroundTask.status == BackgroundTaskStatus.RUNNING,
+                        "deleted-session:" + cast(BackgroundTask.id, String),
+                    ),
+                    else_=BackgroundTask.session_id,
+                ),
+                auto_reply=False,
+                reply_status=BackgroundTaskReplyStatus.NONE,
+                finished_at=get_local_time(),
+                locked_by=None,
+                lock_until=None,
+                reply_locked_by=None,
+                reply_lock_until=None,
+            )
+            .returning(BackgroundTask.session_id)
+            .execution_options(synchronize_session=False)
+        )
+        retained_count = sum(
+            returned_session_id != session_id
+            for returned_session_id in cancelled_result.scalars().all()
+        )
+        delete_result = await db.execute(
+            delete(BackgroundTask)
+            .where(*conditions)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return retained_count + (delete_result.rowcount or 0)
 
     async def list_active_user_tasks(self, db: AsyncSession, *, uid: str, session_id: str | None = None, skip: int = 0, limit: int = 100) -> list[BackgroundTask]:
         stmt = select(BackgroundTask).where(BackgroundTask.uid == uid).where(BackgroundTask.status.in_([BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING])).order_by(BackgroundTask.created_at.desc()).offset(skip).limit(limit)
