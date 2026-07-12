@@ -140,6 +140,8 @@ class BackgroundDispatcherMixin:
                     "",
                     False,
                     context_window_k=chat_params["context_window_k"],
+                    max_tokens=chat_params["max_tokens"],
+                    tools=tools,
                 )
             else:
                 system_prompt = await build_system_prompt(db, profile)

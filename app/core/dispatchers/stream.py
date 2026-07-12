@@ -91,6 +91,7 @@ class StreamDispatcherMixin:
                     chat_channel_obj, model_entry, _channel_rule = selection
                     img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                     chat_params = resolve_chat_params(model_entry, chat_channel)
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
 
                     messages = await prepare_messages(
                         db,
@@ -102,6 +103,8 @@ class StreamDispatcherMixin:
                         message,
                         is_first_iter,
                         context_window_k=chat_params["context_window_k"],
+                        max_tokens=chat_params["max_tokens"],
+                        tools=tools,
                     )
 
                     # 重新组装带附件的多模态消息
@@ -116,7 +119,6 @@ class StreamDispatcherMixin:
                                 is_history=is_history,
                             )
 
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
                     current_turn = 0
 
@@ -236,6 +238,8 @@ class StreamDispatcherMixin:
                                     message,
                                     is_first_iter,
                                     context_window_k=chat_params["context_window_k"],
+                                    max_tokens=chat_params["max_tokens"],
+                                    tools=tools,
                                 )
                                 reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
                                 current_tool_calls_map = {}

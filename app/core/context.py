@@ -59,6 +59,7 @@ class ContextManager:
         profile: Profile,
         current_message: str,
         before_id: int | None = None,
+        after_id: int | None = None,
         context_window_k: int = 4,
         reserved_tokens: int = 0,
     ) -> list[InternalMessage]:
@@ -71,7 +72,14 @@ class ContextManager:
         limit_tokens = cls.get_history_budget_tokens(context_window_k=context_window_k, reserved_tokens=reserved_tokens)
 
         # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
-        raw_history = await message_crud.get_history(db, session_id=session_id, uid=uid, limit=5000, before_id=before_id)
+        raw_history = await message_crud.get_history(
+            db,
+            session_id=session_id,
+            uid=uid,
+            limit=5000,
+            before_id=before_id,
+            after_id=after_id,
+        )
         parsed_history = parse_db_messages_to_internal(raw_history)
 
         # 2. 策略分发

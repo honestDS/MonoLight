@@ -27,6 +27,7 @@ MESSAGES = {
     "LOG_CONTEXT_ORPHAN_TOOL_RESULT": "检测到孤立的工具结果. ID: {tool_call_id}",
     "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE": "Tool chain incomplete. Required: {required_ids}, Found: {found_ids}. Injecting virtual compensation.",
     "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED": "历史扫描阶段发现 {count} 条工具响应过大，已按上下文窗口预截断，移除字符数 {removed_chars}，context_window_k={context_window_k}",
+    "LOG_CONTEXT_SUMMARY_CHANNEL_FAILED": "上下文总结渠道调用失败：{error}",
     "LOG_DISPATCHER_ERROR": "调度器错误",
     "LOG_DISPATCHER_NON_STREAM_ADDITIONAL_MESSAGES": "【调度器/非流】检测到追加消息，已合并并重置轮次计数。消息原文: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_NON_STREAM_CHANNEL_FAILED": "对话渠道调用失败，降级到下一优先级组重试: {error}",

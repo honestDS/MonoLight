@@ -59,6 +59,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         uid: str,
         limit: int = 100,
         before_id: int | None = None,
+        after_id: int | None = None,
     ) -> list[Message]:
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
@@ -66,6 +67,8 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
+        if after_id is not None:
+            stmt = stmt.where(Message.id > after_id)
 
         stmt = stmt.order_by(Message.created_at.desc()).limit(limit)
         result = await db.execute(stmt)

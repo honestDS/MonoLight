@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import (
 from app.core.context import (
     ContextManager,
 )
+from app.core.context_summary import ensure_context_summary
+from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instruction_text, build_user_runtime_instructions
 from app.core.utils.message_assembler import MessageAssembler
@@ -33,12 +35,35 @@ async def prepare_messages(
     message: Any,
     is_first_iter: bool,
     context_window_k: int = 4,
+    max_tokens: int = 0,
+    tools: list[dict] | None = None,
     history_before_id: int | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
     system_prompt = await build_system_prompt(db, profile)
     user_runtime_instructions = await build_user_runtime_instructions(db, session_id) if is_first_iter else ""
+    history_before_id = history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None
+    summary_state = await ensure_context_summary(
+        db,
+        session_id=session_id,
+        uid=uid,
+        profile=profile,
+        cfg=cfg,
+        before_id=history_before_id,
+        current_message=str(message),
+        context_window_k=context_window_k,
+        max_tokens=max_tokens,
+        reserved_tokens=estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions),
+        tools=tools,
+    )
+    if summary_state.content:
+        system_prompt = "\n\n".join(
+            [
+                system_prompt,
+                CONTEXT_SUMMARY_WRAPPER.format(content=summary_state.content),
+            ]
+        )
     reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
 
     # 获取上下文
@@ -50,7 +75,8 @@ async def prepare_messages(
         uid,
         profile,
         message,
-        before_id=history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None,
+        before_id=history_before_id,
+        after_id=summary_state.message_id,
         context_window_k=context_window_k,
         reserved_tokens=reserved_tokens,
     )

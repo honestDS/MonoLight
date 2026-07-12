@@ -121,6 +121,7 @@ class NonStreamDispatcherMixin:
                     chat_channel_obj, model_entry, _channel_rule = selection
                     img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                     chat_params = resolve_chat_params(model_entry, chat_channel)
+                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
 
                     if execution_resume_state is not None:
                         messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("messages", [])]
@@ -137,6 +138,8 @@ class NonStreamDispatcherMixin:
                             message,
                             is_first_iter,
                             context_window_k=chat_params["context_window_k"],
+                            max_tokens=chat_params["max_tokens"],
+                            tools=tools,
                             history_before_id=history_before_id,
                         )
                         current_turn = 0
@@ -153,7 +156,6 @@ class NonStreamDispatcherMixin:
                                 is_history=is_history,
                             )
 
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
                     max_turns = cfg.tool.max_turns
 
                     while current_turn <= max_turns:

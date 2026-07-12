@@ -1,0 +1,396 @@
+from importlib import import_module
+from types import SimpleNamespace
+
+import pytest
+
+from app.core import context_summary as summary_module
+from app.core.context import ContextManager
+from app.core.context_summary import ContextSummaryState, _select_summary_segment, _serialize_message
+from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+
+prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
+
+
+def test_select_summary_segment_keeps_recent_turns_and_ends_before_user():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="first question"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="first answer"),
+        InternalMessage(id=3, role=MessageRole.USER, content="second question"),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="second answer"),
+        InternalMessage(id=5, role=MessageRole.USER, content="recent question"),
+        InternalMessage(id=6, role=MessageRole.ASSISTANT, content="recent answer"),
+    ]
+
+    segment = _select_summary_segment(messages, target_tokens=10_000)
+
+    assert [message.id for message in segment] == [1, 2, 3, 4]
+    assert messages[len(segment)].role == MessageRole.USER
+
+
+def test_select_summary_segment_does_not_split_tool_chain():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="run it"),
+        InternalMessage(
+            id=2,
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-1", name="shell", arguments={"command": "echo ok"})],
+        ),
+        InternalMessage(id=3, role=MessageRole.TOOL, tool_call_id="call-1", content="ok"),
+        InternalMessage(id=4, role=MessageRole.USER, content="what happened"),
+        InternalMessage(id=5, role=MessageRole.ASSISTANT, content="it succeeded"),
+    ]
+
+    segment = _select_summary_segment(messages, target_tokens=10_000)
+
+    assert [message.id for message in segment] == [1, 2, 3]
+    assert segment[-1].role == MessageRole.TOOL
+
+
+def test_select_summary_segment_requires_a_complete_old_turn():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="only question"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="only answer"),
+    ]
+
+    assert _select_summary_segment(messages, target_tokens=10_000) == []
+
+
+def test_select_summary_segment_skips_oversized_first_turn():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="x" * 20_000),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="answer"),
+        InternalMessage(id=3, role=MessageRole.USER, content="recent"),
+    ]
+
+    assert _select_summary_segment(messages, target_tokens=10) == []
+
+
+def test_serialize_message_supports_multimodal_content():
+    message = InternalMessage(
+        id=1,
+        role=MessageRole.USER,
+        content=[
+            TextPart(text="describe"),
+            ImagePart(image_url={"url": "data:image/png;base64,abc"}),
+        ],
+        attachments=["ignored.png"],
+    )
+
+    serialized = _serialize_message(message)
+
+    assert '"type":"text"' in serialized
+    assert '"type":"image_url"' in serialized
+    assert "attachments" not in serialized
+    assert "created_at" not in serialized
+
+
+def test_summary_state_builds_stable_system_message():
+    state = ContextSummaryState(content="The user selected option A.", message_id=12)
+
+    message = state.as_message()
+
+    assert message is not None
+    assert message.role == MessageRole.SYSTEM
+    assert message.content == CONTEXT_SUMMARY_WRAPPER.format(content=state.content)
+
+
+def test_summary_survives_request_sliding_window_with_recent_original_messages():
+    summary_content = CONTEXT_SUMMARY_WRAPPER.format(content="compressed old turns")
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content=f"stable prompt\n\n{summary_content}"),
+        InternalMessage(id=21, role=MessageRole.USER, content="old recent question " * 120),
+        InternalMessage(id=22, role=MessageRole.ASSISTANT, content="old recent answer " * 120),
+        InternalMessage(id=23, role=MessageRole.USER, content="latest question"),
+    ]
+
+    request = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=256,
+        tools=None,
+        safety_margin_tokens=64,
+    )
+
+    assert request[0].role == MessageRole.SYSTEM
+    assert summary_content in request[0].content
+    assert request[-1].id == 23
+    assert request[-1].content == "latest question"
+
+
+class _SummaryChannel:
+    id = 1
+    base_url = "https://example.invalid"
+    protocol = "openai"
+    name = "summary-channel"
+
+    def get_decrypted_api_key(self):
+        return "secret"
+
+
+def _summary_history() -> list[InternalMessage]:
+    return [
+        InternalMessage(id=1, role=MessageRole.USER, content="u1" * 100),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="a1" * 100),
+        InternalMessage(id=3, role=MessageRole.USER, content="u2" * 100),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="a2" * 100),
+        InternalMessage(id=5, role=MessageRole.USER, content="recent"),
+    ]
+
+
+def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_error=None):
+    selected_calls = []
+    update_calls = []
+    generated_calls = []
+
+    async def get_state(_db, *, session_id, uid):
+        return ContextSummaryState(content=None, message_id=None)
+
+    async def get_history(*_args, **_kwargs):
+        return [object()]
+
+    async def select_channel(*_args, **kwargs):
+        selected_calls.append(kwargs)
+        if kwargs.get("excluded_priorities"):
+            return None
+        return _SummaryChannel(), {"model_id": "summary-model"}, SimpleNamespace(priority=1)
+
+    async def generate(**kwargs):
+        generated_calls.append(kwargs)
+        if generation_error is not None:
+            raise generation_error
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="compressed history"),
+            model="summary-model",
+        )
+
+    async def update_summary(*_args, **kwargs):
+        update_calls.append(kwargs)
+        return update_result
+
+    monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
+    monkeypatch.setattr(summary_module.message_crud, "get_history", get_history)
+    monkeypatch.setattr(summary_module, "parse_db_messages_to_internal", lambda _raw: _summary_history())
+    monkeypatch.setattr(summary_module, "select_channel", select_channel)
+    monkeypatch.setattr(
+        summary_module,
+        "resolve_chat_params",
+        lambda *_args: {"context_window_k": 4, "chat_timeout": 30},
+    )
+    monkeypatch.setattr(summary_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(summary_module.session_crud, "update_context_summary", update_summary)
+    return selected_calls, update_calls, generated_calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolated_cursor(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=500,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content="compressed history", message_id=4)
+    assert selected_calls[0]["cursor_key"] == "9:CHAT:CONTEXT_SUMMARY"
+    assert update_calls == [
+        {
+            "session_id": "session-1",
+            "uid": "user-1",
+            "expected_message_id": None,
+            "summary": "compressed history",
+            "message_id": 4,
+        }
+    ]
+    assert len(generated_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch):
+    selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(
+        monkeypatch,
+        generation_error=RuntimeError("provider unavailable"),
+    )
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        before_id=None,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=500,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content=None, message_id=None)
+    assert update_calls == []
+    assert len(selected_calls) == 2
+    assert selected_calls[1]["excluded_priorities"] == {1}
+
+
+@pytest.mark.asyncio
+async def test_ensure_context_summary_concurrent_update_returns_winning_state(monkeypatch):
+    selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(
+        monkeypatch,
+        update_result=False,
+    )
+    states = iter(
+        [
+            ContextSummaryState(content="old summary", message_id=8),
+            ContextSummaryState(content="newer concurrent summary", message_id=12),
+        ]
+    )
+
+    async def get_state(_db, *, session_id, uid):
+        return next(states)
+
+    monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=SimpleNamespace(channel=SimpleNamespace(chat_channel=object())),
+        before_id=None,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=500,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content="newer concurrent summary", message_id=12)
+    assert update_calls[0]["expected_message_id"] == 8
+    assert selected_calls[0]["cursor_key"] == "9:CHAT:CONTEXT_SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_messages_combines_summary_with_history_after_boundary(monkeypatch):
+    get_messages_calls = []
+
+    async def build_system_prompt(_db, _profile):
+        return "stable system prompt"
+
+    async def build_runtime_instructions(_db, _session_id):
+        return ""
+
+    async def ensure_summary(*_args, **_kwargs):
+        return ContextSummaryState(content="compressed old turns", message_id=20)
+
+    async def get_messages(*_args, **kwargs):
+        get_messages_calls.append(kwargs)
+        return [
+            InternalMessage(id=21, role=MessageRole.USER, content="recent question"),
+            InternalMessage(id=22, role=MessageRole.ASSISTANT, content="recent answer"),
+        ]
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+    monkeypatch.setattr(prepare_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(prepare_module, "ensure_context_summary", ensure_summary)
+    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", get_messages)
+
+    messages = await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        None,
+        "",
+        False,
+        context_window_k=4,
+        max_tokens=512,
+    )
+
+    assert get_messages_calls[0]["after_id"] == 20
+    assert messages[0].role == MessageRole.SYSTEM
+    assert "stable system prompt" in messages[0].content
+    assert CONTEXT_SUMMARY_WRAPPER.format(content="compressed old turns") in messages[0].content
+    assert [message.id for message in messages[1:]] == [21, 22]
+
+
+@pytest.mark.asyncio
+async def test_prepare_messages_keeps_provider_prefix_stable_across_unsummarized_turns(monkeypatch):
+    history_versions = [
+        [
+            InternalMessage(id=21, role=MessageRole.USER, content="recent question"),
+            InternalMessage(id=22, role=MessageRole.ASSISTANT, content="recent answer"),
+        ],
+        [
+            InternalMessage(id=21, role=MessageRole.USER, content="recent question"),
+            InternalMessage(id=22, role=MessageRole.ASSISTANT, content="recent answer"),
+            InternalMessage(id=23, role=MessageRole.USER, content="new question"),
+            InternalMessage(id=24, role=MessageRole.ASSISTANT, content="new answer"),
+        ],
+    ]
+
+    async def build_system_prompt(_db, _profile):
+        return "stable system prompt"
+
+    async def build_runtime_instructions(_db, _session_id):
+        return ""
+
+    async def ensure_summary(*_args, **_kwargs):
+        return ContextSummaryState(content="unchanged summary", message_id=20)
+
+    async def get_messages(*_args, **_kwargs):
+        return [message.model_copy(deep=True) for message in history_versions.pop(0)]
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+    monkeypatch.setattr(prepare_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(prepare_module, "ensure_context_summary", ensure_summary)
+    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", get_messages)
+
+    first_request = await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        None,
+        "",
+        False,
+        context_window_k=4,
+        max_tokens=512,
+    )
+    second_request = await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        None,
+        "",
+        False,
+        context_window_k=4,
+        max_tokens=512,
+    )
+
+    def provider_prefix(messages):
+        return [
+            message.model_dump(
+                mode="json",
+                exclude={"id", "attachments", "created_at"},
+                exclude_none=True,
+            )
+            for message in messages
+        ]
+
+    assert provider_prefix(second_request[: len(first_request)]) == provider_prefix(first_request)
+    assert [message.id for message in second_request[len(first_request) :]] == [23, 24]
