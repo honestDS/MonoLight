@@ -139,43 +139,36 @@ async def extract_text_and_attachments(adapter: Any, item_list: list[dict[str, A
     attachments: list[str] = []
     for item in item_list:
         item_type = int(item.get("type") or 0)
+        supported = True
         if item_type == TEXT_ITEM_TYPE:
             text = str(item.get("text_item", {}).get("text", "")).strip()
             if text:
                 texts.append(text)
-            continue
-
-        if item_type == IMAGE_ITEM_TYPE:
+        elif item_type == IMAGE_ITEM_TYPE:
             media_path = await adapter.resolve_inbound_image(item)
             if media_path:
                 attachments.append(str(media_path))
-            continue
-
-        if item_type == FILE_ITEM_TYPE:
+        elif item_type == FILE_ITEM_TYPE:
             media_path = await adapter.resolve_inbound_file(item)
             if media_path:
                 texts.append(f"[文件:{media_path.name}]")
                 attachments.append(str(media_path))
-            continue
-
-        if item_type == VOICE_ITEM_TYPE:
+        elif item_type == VOICE_ITEM_TYPE:
             voice_text = str(item.get("voice_item", {}).get("text", "")).strip()
             texts.append(voice_text or SKIPPED_MEDIA_PLACEHOLDERS[VOICE_ITEM_TYPE])
-            continue
-
-        if item_type == VIDEO_ITEM_TYPE:
+        elif item_type == VIDEO_ITEM_TYPE:
             texts.append(SKIPPED_MEDIA_PLACEHOLDERS[VIDEO_ITEM_TYPE])
-            continue
+        else:
+            supported = False
 
         ref = item.get("ref_msg")
-        if isinstance(ref, dict):
-            ref_item = ref.get("message_item")
-            if isinstance(ref_item, dict):
-                ref_text, _ref_attachments = await extract_text_and_attachments(adapter, [ref_item])
-                if ref_text:
-                    texts.append(f"[引用:{ref_text}]")
-            continue
-
-        logger.bind(item_type=item_type, item_keys=list(item.keys())).warning(t("LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED"))
+        ref_item = ref.get("message_item") if isinstance(ref, dict) else None
+        if isinstance(ref_item, dict):
+            ref_text, ref_attachments = await extract_text_and_attachments(adapter, [ref_item])
+            if ref_text:
+                texts.append(f"[引用:{ref_text}]")
+            attachments.extend(ref_attachments)
+        elif not supported:
+            logger.bind(item_type=item_type, item_keys=list(item.keys())).warning(t("LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED"))
 
     return "\n".join(texts).strip(), attachments

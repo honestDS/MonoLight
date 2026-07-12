@@ -119,7 +119,7 @@ MESSAGES = {
     "LOG_MESSAGE_PLATFORM_OUTBOX_FAILED": "Message platform outbox delivery exhausted all retries",
     "LOG_MESSAGE_PLATFORM_OUTBOX_SENT": "Message platform outbox event sent",
     "LOG_WEIXIN_OPENCLAW_UNEXPECTED_ERROR": "Unexpected error in Weixin OpenClaw adapter: {error}",
-    "LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED": "Weixin OpenClaw inbound message contains an unsupported item, ignored",
+    "LOG_WEIXIN_OPENCLAW_UNSUPPORTED_ITEM_IGNORED": "Weixin OpenClaw cannot parse quoted messages with the current platform capability; related item ignored",
     "LOG_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING": "Weixin OpenClaw getuploadurl response has no usable CDN upload URL",
     "LOG_OPENAI_CHAT_FAILED": "OpenAI chat API call failed: {error}",
     "LOG_OPENAI_EMBEDDING_FAILED": "Embedding model API call failed: {error}",

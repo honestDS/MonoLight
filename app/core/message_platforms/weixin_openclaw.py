@@ -3,10 +3,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
+from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
+from app.adapters.weixin_openclaw.message import merge_message_pair
 from app.core.crud.message_platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.base import MessagePlatformHandler
+from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.models.message_platform import MessagePlatform, MessagePlatformStatus, MessagePlatformType
 from app.providers.database import AsyncSessionLocal
 
@@ -20,7 +23,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     async def run(self, platform_id: int) -> None:
         adapter: WeixinOpenClawAdapter | None = None
         adapter_signature: tuple | None = None
-        active_message_tasks: set[asyncio.Task] = set()
+        collector: InboundMessageCollector[tuple[str, str], WeixinOpenClawMessage] | None = None
         try:
             while True:
                 platform_uid = ""
@@ -35,13 +38,29 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     previous_sync_buf = str((platform.state or {}).get("sync_buf") or "")
                     next_signature = self._adapter_signature(platform)
                     if adapter is None or adapter_signature != next_signature:
-                        if adapter is not None and active_message_tasks:
-                            await asyncio.gather(*active_message_tasks, return_exceptions=True)
-                            active_message_tasks.clear()
+                        if collector is not None:
+                            await collector.close()
+                            collector = None
                         if adapter is not None:
                             await adapter.close()
                         adapter = self._build_adapter(platform)
                         adapter_signature = next_signature
+
+                        async def dispatch_collected(message: WeixinOpenClawMessage) -> None:
+                            await self._handle_message(
+                                adapter,
+                                message,
+                                uid=platform_uid or message.user_id,
+                                platform_id=platform_id,
+                                adapter_signature=adapter_signature,
+                            )
+
+                        collector = InboundMessageCollector(
+                            quiet_period_seconds=INBOUND_COLLECTION_QUIET_PERIOD_SECONDS,
+                            max_wait_seconds=INBOUND_COLLECTION_MAX_WAIT_SECONDS,
+                            merge=merge_message_pair,
+                            dispatch=dispatch_collected,
+                        )
                     else:
                         adapter.sync_buf = previous_sync_buf
                     messages = await adapter.poll_messages_once()
@@ -52,15 +71,9 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         assert platform is not None
                         if adapter.sync_buf != previous_sync_buf:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
+                        assert collector is not None
                         for message in messages:
-                            self._enqueue_message(
-                                adapter,
-                                message,
-                                uid=platform_uid or message.user_id,
-                                platform_id=platform_id,
-                                adapter_signature=adapter_signature,
-                                active_message_tasks=active_message_tasks,
-                            )
+                            await collector.add((message.user_id, message.session_id), message)
                     if adapter.config.poll_interval_ms > 0:
                         await asyncio.sleep(adapter.config.poll_interval_ms / 1000)
                 except asyncio.CancelledError:
@@ -72,26 +85,10 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     await self._mark_error(platform_id, str(exc))
                     await asyncio.sleep(5)
         finally:
-            for task in active_message_tasks:
-                task.cancel()
-            if active_message_tasks:
-                await asyncio.gather(*active_message_tasks, return_exceptions=True)
+            if collector is not None:
+                await collector.close()
             if adapter is not None:
                 await adapter.close()
-
-    def _enqueue_message(
-        self,
-        adapter: WeixinOpenClawAdapter,
-        message: WeixinOpenClawMessage,
-        *,
-        uid: str,
-        platform_id: int,
-        adapter_signature: tuple | None,
-        active_message_tasks: set[asyncio.Task],
-    ) -> None:
-        task = asyncio.create_task(self._handle_message(adapter, message, uid=uid, platform_id=platform_id, adapter_signature=adapter_signature))
-        active_message_tasks.add(task)
-        task.add_done_callback(active_message_tasks.discard)
 
     async def _handle_message(self, adapter: WeixinOpenClawAdapter, message: WeixinOpenClawMessage, *, uid: str, platform_id: int, adapter_signature: tuple | None) -> None:
         try:
