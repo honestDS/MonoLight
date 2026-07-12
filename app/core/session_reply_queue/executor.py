@@ -300,12 +300,18 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         await db.commit()
 
 
-async def fail_session_reply_work(work_id: int, worker_id: str, error: str) -> None:
+async def fail_session_reply_work(
+    work_id: int,
+    worker_id: str,
+    error: str,
+    *,
+    user_error: str | None = None,
+) -> None:
     async with AsyncSessionLocal() as db:
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
-        error_content = t(constants.ERR_LLM_UNEXPECTED_ERROR)
+        error_content = user_error or t(constants.ERR_LLM_UNEXPECTED_ERROR)
         error_message = await save_message(
             db,
             work.session_id,

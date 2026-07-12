@@ -5,6 +5,7 @@ from app.core.crud.profile import profile_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
+from app.core.exceptions import BaseBusinessException
 from app.core.log import get_logger
 from app.core.session_reply_queue.executor import execute_session_reply_work, fail_session_reply_work, retry_delay_seconds
 from app.core.utils.dispatcher.helpers import format_exception_message
@@ -17,6 +18,9 @@ SESSION_REPLY_POLL_INTERVAL_SECONDS = 0.2
 SESSION_REPLY_LEASE_SECONDS = 300
 SESSION_REPLY_LEASE_RENEW_INTERVAL_SECONDS = 100
 SESSION_REPLY_RECOVERY_INTERVAL_SECONDS = 30
+SESSION_REPLY_CLEANUP_INTERVAL_SECONDS = 3600
+SESSION_REPLY_CLEANUP_BATCH_SIZE = 500
+SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN = 5000
 
 
 class SessionReplyConsumer:
@@ -26,11 +30,13 @@ class SessionReplyConsumer:
         self._running: dict[int, tuple[asyncio.Task, str]] = {}
         self._last_recovery_at = 0.0
         self._last_lease_renewal_at = 0.0
+        self._next_cleanup_at = 0.0
 
     def start(self) -> asyncio.Task:
         if self._task and not self._task.done():
             return self._task
         self._stop_event.clear()
+        self._next_cleanup_at = 0.0
         self._task = asyncio.create_task(self._run())
         return self._task
 
@@ -73,6 +79,8 @@ class SessionReplyConsumer:
                 if now - self._last_recovery_at >= SESSION_REPLY_RECOVERY_INTERVAL_SECONDS:
                     await self._recover_expired()
                     self._last_recovery_at = now
+
+                await self._cleanup_terminal_items_if_due(now)
 
                 async with AsyncSessionLocal() as db:
                     settings = await system_setting_crud.get_runtime_settings(db)
@@ -120,7 +128,14 @@ class SessionReplyConsumer:
                     db,
                     work_id=work_id,
                 )
-            if attempt_count >= max_attempts or stream_started:
+            if isinstance(exc, BaseBusinessException):
+                await fail_session_reply_work(
+                    work_id,
+                    worker_id,
+                    error,
+                    user_error=exc.render_message(),
+                )
+            elif attempt_count >= max_attempts or stream_started:
                 await fail_session_reply_work(work_id, worker_id, error)
             else:
                 async with AsyncSessionLocal() as db:
@@ -137,6 +152,40 @@ class SessionReplyConsumer:
             _recovered_count, terminal_claims = await session_reply_work_item_crud.recover_expired(db)
         for work_id, worker_id, error in terminal_claims:
             await fail_session_reply_work(work_id, worker_id, error)
+
+    async def _cleanup_terminal_items_if_due(self, now: float) -> None:
+        if now < self._next_cleanup_at:
+            return
+        await self._cleanup_terminal_items()
+        self._next_cleanup_at = now + SESSION_REPLY_CLEANUP_INTERVAL_SECONDS
+
+    async def _cleanup_terminal_items(self) -> None:
+        work_item_count = 0
+        stream_event_count = 0
+        sequence_count = 0
+        remaining = SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN
+
+        while remaining > 0:
+            batch_size = min(SESSION_REPLY_CLEANUP_BATCH_SIZE, remaining)
+            async with AsyncSessionLocal() as db:
+                cleanup_result = await session_reply_work_item_crud.cleanup_terminal_items(
+                    db,
+                    batch_size=batch_size,
+                )
+            work_item_count += cleanup_result.work_items
+            stream_event_count += cleanup_result.stream_events
+            sequence_count += cleanup_result.sequences
+            remaining -= cleanup_result.total
+            if cleanup_result.total < batch_size or remaining <= 0:
+                break
+            await asyncio.sleep(0)
+
+        if work_item_count + stream_event_count + sequence_count > 0:
+            logger.bind(
+                work_item_count=work_item_count,
+                stream_event_count=stream_event_count,
+                sequence_count=sequence_count,
+            ).info("Expired session reply data cleaned")
 
 
 session_reply_consumer = SessionReplyConsumer()

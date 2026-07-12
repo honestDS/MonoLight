@@ -1,4 +1,6 @@
 import time
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import and_, delete, exists, or_, true, update
@@ -7,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.utils.time import get_local_time
+from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SESSION_REPLY_TERMINAL_STATUSES,
@@ -18,6 +21,19 @@ from app.models.session_reply_work_item import (
 )
 
 _TERMINAL_STATUS_VALUES = [status.value for status in SESSION_REPLY_TERMINAL_STATUSES]
+SESSION_REPLY_WORK_RETENTION_HOURS = 24
+SESSION_REPLY_CLEANUP_BATCH_SIZE = 500
+
+
+@dataclass(frozen=True)
+class SessionReplyCleanupResult:
+    work_items: int = 0
+    stream_events: int = 0
+    sequences: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.work_items + self.stream_events + self.sequences
 
 
 class CRUDSessionReplyWorkItem:
@@ -80,7 +96,7 @@ class CRUDSessionReplyWorkItem:
                 execution_state={},
                 event_sent=False,
                 attempt_count=0,
-                max_attempts=5,
+                max_attempts=2,
                 available_at=int(time.time()),
                 created_at=now,
                 updated_at=now,
@@ -310,24 +326,112 @@ class CRUDSessionReplyWorkItem:
             work_conditions.append(SessionReplyWorkItem.uid == uid)
 
         work_ids = select(SessionReplyWorkItem.id).where(*work_conditions)
-        await db.execute(
-            delete(SessionReplyStreamEvent)
-            .where(SessionReplyStreamEvent.work_id.in_(work_ids))
-            .execution_options(synchronize_session=False)
-        )
-        result = await db.execute(
-            delete(SessionReplyWorkItem)
-            .where(*work_conditions)
-            .execution_options(synchronize_session=False)
-        )
-        await db.execute(
-            delete(SessionReplySequence)
-            .where(SessionReplySequence.session_id == session_id)
-            .execution_options(synchronize_session=False)
-        )
+        await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.work_id.in_(work_ids)).execution_options(synchronize_session=False))
+        result = await db.execute(delete(SessionReplyWorkItem).where(*work_conditions).execution_options(synchronize_session=False))
+        await db.execute(delete(SessionReplySequence).where(SessionReplySequence.session_id == session_id).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         return result.rowcount or 0
+
+    async def cleanup_terminal_items(
+        self,
+        db: AsyncSession,
+        *,
+        retention_hours: int = SESSION_REPLY_WORK_RETENTION_HOURS,
+        batch_size: int = SESSION_REPLY_CLEANUP_BATCH_SIZE,
+    ) -> SessionReplyCleanupResult:
+        cutoff = get_local_time() - timedelta(hours=retention_hours)
+        remaining = max(1, batch_size)
+        work_item_count = 0
+        stream_event_count = 0
+        sequence_count = 0
+        expired_work_conditions = [
+            SessionReplyWorkItem.status.in_(_TERMINAL_STATUS_VALUES),
+            SessionReplyWorkItem.updated_at < cutoff,
+        ]
+
+        expired_event_ids = (
+            select(SessionReplyStreamEvent.id)
+            .where(
+                SessionReplyStreamEvent.work_id.in_(
+                    select(SessionReplyWorkItem.id).where(*expired_work_conditions),
+                )
+            )
+            .order_by(SessionReplyStreamEvent.id)
+            .limit(remaining)
+        )
+        event_result = await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.id.in_(expired_event_ids)).execution_options(synchronize_session=False))
+        await db.commit()
+        deleted = event_result.rowcount or 0
+        stream_event_count += deleted
+        remaining -= deleted
+
+        if remaining > 0:
+            expired_work_ids = (
+                select(SessionReplyWorkItem.id)
+                .where(
+                    *expired_work_conditions,
+                    ~exists(
+                        select(1).where(
+                            SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
+                        )
+                    ),
+                )
+                .order_by(SessionReplyWorkItem.id)
+                .limit(remaining)
+            )
+            work_result = await db.execute(delete(SessionReplyWorkItem).where(SessionReplyWorkItem.id.in_(expired_work_ids)).execution_options(synchronize_session=False))
+            await db.commit()
+            deleted = work_result.rowcount or 0
+            work_item_count += deleted
+            remaining -= deleted
+
+        if remaining > 0:
+            orphan_event_ids = (
+                select(SessionReplyStreamEvent.id)
+                .where(
+                    ~exists(
+                        select(1).where(
+                            SessionReplyWorkItem.id == SessionReplyStreamEvent.work_id,
+                        )
+                    )
+                )
+                .order_by(SessionReplyStreamEvent.id)
+                .limit(remaining)
+            )
+            orphan_event_result = await db.execute(delete(SessionReplyStreamEvent).where(SessionReplyStreamEvent.id.in_(orphan_event_ids)).execution_options(synchronize_session=False))
+            await db.commit()
+            deleted = orphan_event_result.rowcount or 0
+            stream_event_count += deleted
+            remaining -= deleted
+
+        if remaining > 0:
+            orphan_sequence_ids = (
+                select(SessionReplySequence.session_id)
+                .where(
+                    ~exists(
+                        select(1).where(
+                            ChatSession.session_id == SessionReplySequence.session_id,
+                        )
+                    ),
+                    ~exists(
+                        select(1).where(
+                            SessionReplyWorkItem.session_id == SessionReplySequence.session_id,
+                        )
+                    ),
+                )
+                .order_by(SessionReplySequence.session_id)
+                .limit(remaining)
+            )
+            orphan_sequence_result = await db.execute(delete(SessionReplySequence).where(SessionReplySequence.session_id.in_(orphan_sequence_ids)).execution_options(synchronize_session=False))
+            await db.commit()
+            sequence_count += orphan_sequence_result.rowcount or 0
+
+        return SessionReplyCleanupResult(
+            work_items=work_item_count,
+            stream_events=stream_event_count,
+            sequences=sequence_count,
+        )
 
     async def cancel_session(
         self,

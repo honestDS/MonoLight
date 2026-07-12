@@ -196,6 +196,18 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
 @pytest.mark.asyncio
 async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolated_cursor(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    bound_fields = {}
+    debug_calls = []
+
+    class CapturingLogger:
+        def bind(self, **kwargs):
+            bound_fields.update(kwargs)
+            return self
+
+        def debug(self, message, **kwargs):
+            debug_calls.append((message, kwargs))
+
+    monkeypatch.setattr(summary_module, "logger", CapturingLogger())
 
     state = await summary_module.ensure_context_summary(
         object(),
@@ -223,13 +235,21 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         }
     ]
     assert len(generated_calls) == 1
+    assert debug_calls[0][0].startswith("Context summary check:")
+    assert debug_calls[-1] == (
+        "Context summary generated:\n{summary}",
+        {"summary": "compressed history"},
+    )
+    assert bound_fields["uid"] == "user-1"
+    assert bound_fields["session_id"] == "session-1"
+    assert bound_fields["summarized_through_message_id"] == 4
+    assert bound_fields["summarized_message_count"] == 2
+    assert bound_fields["summary_tokens"] > 0
 
 
 @pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])
 def test_profile_config_accepts_context_summary_threshold_options(threshold_percent):
-    cfg = ProfileConfig.model_validate(
-        {"other": {"context_summary_threshold_percent": threshold_percent}}
-    )
+    cfg = ProfileConfig.model_validate({"other": {"context_summary_threshold_percent": threshold_percent}})
 
     assert cfg.other.context_summary_threshold_percent == threshold_percent
 
@@ -243,9 +263,7 @@ def test_profile_config_defaults_context_summary_threshold_to_ninety_percent():
 @pytest.mark.parametrize("threshold_percent", [0, 49, 55, 100, "90"])
 def test_profile_config_rejects_invalid_context_summary_threshold(threshold_percent):
     with pytest.raises(ValidationError):
-        ProfileConfig.model_validate(
-            {"other": {"context_summary_threshold_percent": threshold_percent}}
-        )
+        ProfileConfig.model_validate({"other": {"context_summary_threshold_percent": threshold_percent}})
 
 
 @pytest.mark.asyncio
@@ -295,6 +313,40 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
     )
 
     assert at_fifty_state == ContextSummaryState(content="compressed history", message_id=2)
+    assert len(selected_calls) == 1
+    assert len(update_calls) == 1
+    assert len(generated_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_context_summary_threshold_includes_tool_definition_tokens(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content.startswith("["):
+            return 150
+        if content.startswith('{"role":'):
+            return 100
+        return 0
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        tools=[{"type": "function", "function": {"name": "search"}}],
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content="compressed history", message_id=2)
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
@@ -362,6 +414,85 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     assert state == ContextSummaryState(content="newer concurrent summary", message_id=12)
     assert update_calls[0]["expected_message_id"] == 8
     assert selected_calls[0]["cursor_key"] == "9:CHAT:CONTEXT_SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_messages_counts_system_prompt_runtime_instruction_and_current_input_for_summary(monkeypatch):
+    ensure_summary_calls = []
+
+    async def build_system_prompt(_db, _profile):
+        return "system prompt"
+
+    async def build_runtime_instructions(_db, _session_id):
+        return "runtime instruction"
+
+    async def ensure_summary(*_args, **kwargs):
+        ensure_summary_calls.append(kwargs)
+        return ContextSummaryState(content=None, message_id=None)
+
+    async def get_messages(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+    monkeypatch.setattr(prepare_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(prepare_module, "ensure_context_summary", ensure_summary)
+    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", get_messages)
+    monkeypatch.setattr(
+        prepare_module,
+        "estimate_tokens",
+        lambda content: {
+            "system prompt": 120,
+            "runtime instruction": 30,
+        }.get(content, 0),
+    )
+
+    current_message = "current user input"
+    await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        InternalMessage(id=7, role=MessageRole.USER, content=current_message),
+        current_message,
+        True,
+        context_window_k=4,
+        max_tokens=512,
+    )
+
+    assert ensure_summary_calls[0]["current_message"] == current_message
+    assert ensure_summary_calls[0]["reserved_tokens"] == 150
+
+
+@pytest.mark.asyncio
+async def test_context_summary_trigger_includes_reserved_and_current_message_tokens(monkeypatch):
+    selected_calls, _update_calls, _generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content == "large current input":
+            return 250
+        if content.startswith('{"role":'):
+            return 100
+        return 0
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(90),
+        before_id=10,
+        current_message="large current input",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=300,
+        safety_margin_tokens=0,
+    )
+
+    assert state == ContextSummaryState(content="compressed history", message_id=4)
+    assert len(selected_calls) == 1
 
 
 @pytest.mark.asyncio

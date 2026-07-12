@@ -2,6 +2,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -21,7 +22,29 @@ if not DATABASE_URL:
 if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
     DATABASE_URL = f"sqlite+aiosqlite:///{TEST_SESSION_DB_PATH}"
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+_engine_kwargs = {
+    "echo": False,
+    "pool_pre_ping": True,
+}
+if DATABASE_URL.startswith("sqlite+"):
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
+
+
+if DATABASE_URL.startswith("sqlite+"):
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
+
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 

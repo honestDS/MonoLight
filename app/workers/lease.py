@@ -2,7 +2,10 @@ import asyncio
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from time import monotonic
 from typing import NoReturn
+
+from sqlalchemy.exc import OperationalError
 
 from app.core.crud.worker_lease import worker_lease_crud
 from app.core.log import get_logger
@@ -10,12 +13,18 @@ from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
-WORKER_LEASE_SECONDS = 30
+WORKER_LEASE_SECONDS = 60
 WORKER_LEASE_RENEW_INTERVAL_SECONDS = 10
 WORKER_LEASE_ACQUIRE_INTERVAL_SECONDS = 5
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 10
 WORKER_CANCEL_TIMEOUT_SECONDS = 5
 WORKER_FORCED_EXIT_CODE = 1
+WORKER_LEASE_LOCK_RETRY_INTERVAL_SECONDS = 1
+WORKER_LEASE_RENEW_SAFETY_SECONDS = 5
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, OperationalError) and "database is locked" in str(exc).lower()
 
 
 async def _acquire_worker_lease(worker_name: str, owner_id: str) -> bool:
@@ -69,15 +78,25 @@ async def _maintain_worker_lease(
             owned_stop_event.set()
             return
 
-        try:
-            renewed = await _renew_worker_lease(worker_name, owner_id)
-        except Exception:
-            logger.exception(
-                "Worker lease renewal failed",
-                extra={"worker_name": worker_name},
-            )
-            owned_stop_event.set()
-            return
+        retry_deadline = monotonic() + WORKER_LEASE_SECONDS - WORKER_LEASE_RENEW_INTERVAL_SECONDS - WORKER_LEASE_RENEW_SAFETY_SECONDS
+        while True:
+            try:
+                renewed = await _renew_worker_lease(worker_name, owner_id)
+                break
+            except Exception as exc:
+                if not _is_sqlite_locked_error(exc) or monotonic() >= retry_deadline:
+                    logger.exception(
+                        "Worker lease renewal failed",
+                        extra={"worker_name": worker_name},
+                    )
+                    owned_stop_event.set()
+                    return
+                if await _wait_for_stop(
+                    shutdown_event,
+                    WORKER_LEASE_LOCK_RETRY_INTERVAL_SECONDS,
+                ):
+                    owned_stop_event.set()
+                    return
 
         if not renewed:
             logger.error(

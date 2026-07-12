@@ -6,6 +6,8 @@ from typing import (
 
 from app.core import constants
 from app.core.exceptions import LLMException
+from app.core.log import get_logger
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
     InternalMessage,
     InternalResponse,
@@ -13,6 +15,69 @@ from app.models.message import (
     MessageRole,
 )
 from app.transformers.openai import OpenAITransformer
+
+logger = get_logger(__name__)
+
+
+def _estimate_request_context_tokens(
+    messages: list[InternalMessage],
+    tools: list[dict[str, Any]] | None,
+) -> int:
+    message_payload = [
+        message.model_dump(
+            mode="json",
+            exclude={"id", "attachments", "created_at"},
+            exclude_none=True,
+        )
+        for message in messages
+    ]
+    serialized_context = json.dumps(
+        {
+            "messages": message_payload,
+            "tools": tools or [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return estimate_tokens(serialized_context)
+
+
+def _log_request_context(
+    *,
+    model_id: str,
+    protocol: str,
+    messages: list[InternalMessage],
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int,
+    streaming: bool,
+) -> None:
+    role_counts: dict[str, int] = {}
+    for message in messages:
+        role = message.role.value if hasattr(message.role, "value") else str(message.role)
+        role_counts[role] = role_counts.get(role, 0) + 1
+    message_count = len(messages)
+    tool_count = len(tools or [])
+    estimated_context_tokens = _estimate_request_context_tokens(messages, tools)
+    logger.bind(
+        model_id=model_id,
+        protocol=protocol,
+        streaming=streaming,
+        message_count=message_count,
+        role_counts=role_counts,
+        tool_count=tool_count,
+        estimated_context_tokens=estimated_context_tokens,
+        max_output_tokens=max_tokens,
+    ).debug(
+        "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, estimated_tokens={estimated_context_tokens}, max_output_tokens={max_tokens}",
+        model_id=model_id,
+        protocol=protocol,
+        streaming=streaming,
+        message_count=message_count,
+        role_counts=role_counts,
+        tool_count=tool_count,
+        estimated_context_tokens=estimated_context_tokens,
+        max_tokens=max_tokens,
+    )
 
 
 class LLMClient:
@@ -57,6 +122,14 @@ class LLMClient:
         if not transformer:
             raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
 
+        _log_request_context(
+            model_id=model_id,
+            protocol=protocol,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            streaming=True,
+        )
         async for chunk in transformer.generate_stream(
             api_key=api_key,
             base_url=base_url,
@@ -181,6 +254,14 @@ class LLMClient:
         if not transformer:
             raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
 
+        _log_request_context(
+            model_id=model_id,
+            protocol=protocol,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            streaming=False,
+        )
         raw_response = await transformer.generate(
             api_key=api_key,
             base_url=base_url,

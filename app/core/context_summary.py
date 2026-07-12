@@ -106,21 +106,79 @@ async def ensure_context_summary(
     summary_tokens = estimate_tokens(CONTEXT_SUMMARY_WRAPPER.format(content=state.content)) if state.content else 0
     history_tokens = sum(estimate_tokens(_serialize_message(message)) for message in messages)
     tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
+    context_window_tokens = context_window_k * 1024
+    output_tokens = max(max_tokens, 0)
+    safety_tokens = max(safety_margin_tokens, 0)
     input_budget = max(
         1,
-        context_window_k * 1024 - max(max_tokens, 0) - tools_tokens - max(safety_margin_tokens, 0),
+        context_window_tokens - output_tokens - safety_tokens,
     )
-    required_tokens = reserved_tokens + summary_tokens + history_tokens + estimate_tokens(current_message)
+    current_message_tokens = estimate_tokens(current_message)
+    required_tokens = reserved_tokens + summary_tokens + history_tokens + current_message_tokens + tools_tokens
+    threshold_percent = cfg.other.context_summary_threshold_percent
     summary_trigger_tokens = max(
         1,
-        input_budget * cfg.other.context_summary_threshold_percent // 100,
+        input_budget * threshold_percent // 100,
+    )
+    logger.bind(
+        uid=uid,
+        session_id=session_id,
+        context_window_tokens=context_window_tokens,
+        output_tokens=output_tokens,
+        safety_margin_tokens=safety_tokens,
+        input_budget=input_budget,
+        threshold_percent=threshold_percent,
+        summary_trigger_tokens=summary_trigger_tokens,
+        required_tokens=required_tokens,
+        reserved_tokens=reserved_tokens,
+        summary_tokens=summary_tokens,
+        history_tokens=history_tokens,
+        current_message_tokens=current_message_tokens,
+        tools_tokens=tools_tokens,
+        history_message_count=len(messages),
+    ).debug(
+        "Context summary check: required={required_tokens}, trigger={summary_trigger_tokens}, "
+        "threshold={threshold_percent}%, input_budget={input_budget}, output={output_tokens}, "
+        "safety={safety_tokens}, reserved={reserved_tokens}, summary={summary_tokens}, "
+        "history={history_tokens}, current={current_message_tokens}, tools={tools_tokens}, "
+        "history_messages={history_message_count}",
+        required_tokens=required_tokens,
+        summary_trigger_tokens=summary_trigger_tokens,
+        threshold_percent=threshold_percent,
+        input_budget=input_budget,
+        output_tokens=output_tokens,
+        safety_tokens=safety_tokens,
+        reserved_tokens=reserved_tokens,
+        summary_tokens=summary_tokens,
+        history_tokens=history_tokens,
+        current_message_tokens=current_message_tokens,
+        tools_tokens=tools_tokens,
+        history_message_count=len(messages),
     )
     if required_tokens < summary_trigger_tokens:
+        logger.bind(uid=uid, session_id=session_id).debug(
+            "Context summary skipped: threshold not reached, required={required_tokens}, trigger={summary_trigger_tokens}",
+            required_tokens=required_tokens,
+            summary_trigger_tokens=summary_trigger_tokens,
+        )
         return state
 
-    available_history_tokens = max(1, input_budget - reserved_tokens - summary_tokens)
-    segment = _select_summary_segment(messages, max(1, available_history_tokens // 2))
+    available_history_tokens = max(1, input_budget - reserved_tokens - summary_tokens - current_message_tokens - tools_tokens)
+    segment_target_tokens = max(1, available_history_tokens // 2)
+    segment = _select_summary_segment(messages, segment_target_tokens)
     if not segment or segment[-1].id is None:
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            history_message_count=len(messages),
+            available_history_tokens=available_history_tokens,
+            segment_target_tokens=segment_target_tokens,
+        ).debug(
+            "Context summary skipped: no complete historical turn can be summarized, history_messages={history_message_count}, available_history_tokens={available_history_tokens}, segment_target_tokens={segment_target_tokens}",
+            history_message_count=len(messages),
+            available_history_tokens=available_history_tokens,
+            segment_target_tokens=segment_target_tokens,
+        )
         return state
 
     conversation = "\n".join(_serialize_message(message) for message in segment)
@@ -171,6 +229,14 @@ async def ensure_context_summary(
             summary = (response.message.content or "").strip()
             if not summary:
                 return state
+
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                summarized_through_message_id=segment[-1].id,
+                summarized_message_count=len(segment),
+                summary_tokens=estimate_tokens(summary),
+            ).debug("Context summary generated:\n{summary}", summary=summary)
 
             updated = await session_crud.update_context_summary(
                 db,

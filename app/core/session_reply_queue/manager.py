@@ -7,9 +7,11 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core import constants
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
@@ -40,6 +42,15 @@ def _serialize_message_content(content: Any) -> str:
 def build_foreground_message_dedupe_key(session_id: str, message_id: int) -> str:
     session_digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
     return f"foreground-message:{session_digest}:{message_id}"
+
+
+async def _raise_work_failure(db: AsyncSession, work: SessionReplyWorkItem) -> None:
+    message = await db.get(Message, work.result_message_id) if work.result_message_id else None
+    error_content = message.content if message and message.content else None
+    raise BaseBusinessException(
+        message=error_content or constants.ERR_LLM_UNEXPECTED_ERROR,
+        default_message=error_content,
+    )
 
 
 class SessionReplyQueueManager:
@@ -342,10 +353,9 @@ class SessionReplyQueueManager:
                         message = await db.get(Message, work.result_message_id)
                         return {"content": message.content if message else "", "work_id": work.id}
                     return {"content": "", "work_id": work.id}
-                if work.status in {
-                    SessionReplyWorkStatus.FAILED,
-                    SessionReplyWorkStatus.CANCELLED,
-                }:
+                if work.status == SessionReplyWorkStatus.FAILED:
+                    await _raise_work_failure(db, work)
+                if work.status == SessionReplyWorkStatus.CANCELLED:
                     raise RuntimeError(work.error or f"Session reply work ended with status {work.status}")
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)
 
@@ -385,10 +395,9 @@ class SessionReplyQueueManager:
                         "files": response.get("files"),
                     }
                     return
-                if work.status in {
-                    SessionReplyWorkStatus.FAILED,
-                    SessionReplyWorkStatus.CANCELLED,
-                }:
+                if work.status == SessionReplyWorkStatus.FAILED:
+                    await _raise_work_failure(db, work)
+                if work.status == SessionReplyWorkStatus.CANCELLED:
                     raise RuntimeError(work.error or f"Session reply work ended with status {work.status}")
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)
 

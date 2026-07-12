@@ -48,6 +48,12 @@ def profile_log_locale(profile: object | None) -> Iterator[None]:
         reset_current_log_locale(token)
 
 
+def build_process_log_path(log_path: str, process_id: int | None = None) -> str:
+    path = Path(log_path)
+    pid = process_id if process_id is not None else os.getpid()
+    return str(path.with_name(f"{path.stem}.{pid}{path.suffix}"))
+
+
 class LogManager:
     _configured = False
 
@@ -148,9 +154,11 @@ class LogManager:
             format=("<green>[{time:YYYY-MM-DD HH:mm:ss.SSS}]</green> <level>[{level}]</level> <cyan>[{file}:{line}]</cyan>: <level>{message}</level>"),
         )
 
-        # 添加文件输出 (自动滚动)
+        process_log_path = build_process_log_path(abs_log_path)
+
+        # 每个进程写入独立文件，避免 Windows 下多个进程同时轮转同一文件时发生占用冲突。
         logger.add(
-            abs_log_path,
+            process_log_path,
             level=level,
             rotation="10 MB",
             retention="1 week",
@@ -161,7 +169,7 @@ class LogManager:
         )
 
         # 添加专用工具日志
-        tool_log_path = str(Path(abs_log_path).parent / TOOLS_LOG_FILENAME)
+        tool_log_path = build_process_log_path(str(Path(abs_log_path).parent / TOOLS_LOG_FILENAME))
         logger.add(
             tool_log_path,
             filter=lambda record: "tool_call" in record["extra"] or "tool_result" in record["extra"],

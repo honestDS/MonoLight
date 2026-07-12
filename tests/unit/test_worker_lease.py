@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 from sqlalchemy import delete, update
+from sqlalchemy.exc import OperationalError
 
 from app.core.crud.worker_lease import worker_lease_crud
 from app.models.worker_lease import WorkerLease
@@ -150,6 +151,42 @@ async def test_worker_lease_runner_waits_then_starts_after_acquiring(monkeypatch
 
     assert acquire_attempts == 2
     assert worker_started is True
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_renewal_retries_transient_sqlite_lock(monkeypatch):
+    renew_attempts = 0
+    shutdown_event = asyncio.Event()
+    owned_stop_event = asyncio.Event()
+
+    async def renew(worker_name, owner_id):
+        nonlocal renew_attempts
+        renew_attempts += 1
+        if renew_attempts == 1:
+            raise OperationalError(
+                "UPDATE worker_lease SET lease_until=?",
+                {},
+                Exception("database is locked"),
+            )
+        shutdown_event.set()
+        return True
+
+    async def wait_for_stop(stop_event, timeout):
+        return False
+
+    monkeypatch.setattr(lease_runner, "_renew_worker_lease", renew)
+    monkeypatch.setattr(lease_runner, "_wait_for_stop", wait_for_stop)
+    monkeypatch.setattr(lease_runner, "monotonic", lambda: 100.0)
+
+    await lease_runner._maintain_worker_lease(
+        "session_reply",
+        "worker-a",
+        shutdown_event,
+        owned_stop_event,
+    )
+
+    assert renew_attempts == 2
+    assert owned_stop_event.is_set() is False
 
 
 @pytest.mark.asyncio

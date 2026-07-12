@@ -6,7 +6,19 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import log_broadcaster as broadcaster_module
+from app.core.log import build_process_log_path
 from app.core.log_broadcaster import LogBroadcaster
+
+
+def test_process_log_paths_are_isolated_by_process_id():
+    first = build_process_log_path("data/logs/monolight.log", process_id=1001)
+    second = build_process_log_path("data/logs/monolight.log", process_id=1002)
+    tool = build_process_log_path("data/logs/tools.log", process_id=1001)
+
+    assert first.endswith("monolight.1001.log")
+    assert second.endswith("monolight.1002.log")
+    assert tool.endswith("tools.1001.log")
+    assert first != second
 
 
 class FakeSessionContext:

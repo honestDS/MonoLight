@@ -60,7 +60,7 @@ class SessionReplyWorkItem(SQLModel, table=True):
     locked_by: str | None = Field(default=None, index=True, max_length=100)
     lock_until: int | None = Field(default=None, index=True)
     attempt_count: int = Field(default=0, ge=0)
-    max_attempts: int = Field(default=5, ge=1)
+    max_attempts: int = Field(default=2, ge=1)
     available_at: int = Field(default=0, index=True)
     error: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))

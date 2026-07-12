@@ -10,7 +10,65 @@ from app.core.session_reply_queue.manager import (
 from app.core.utils.dispatcher.helpers import dump_output_history
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkStatus
+from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
+
+
+def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monkeypatch):
+    bound_fields = {}
+    logged_messages = []
+
+    class CapturingLogger:
+        def bind(self, **kwargs):
+            bound_fields.update(kwargs)
+            return self
+
+        def debug(self, message, **kwargs):
+            logged_messages.append((message, kwargs))
+
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(role=MessageRole.USER, content="question"),
+        InternalMessage(role=MessageRole.ASSISTANT, content="answer"),
+    ]
+    tools = [{"type": "function", "function": {"name": "search"}}]
+    monkeypatch.setattr(llm_client_module, "logger", CapturingLogger())
+    monkeypatch.setattr(llm_client_module, "estimate_tokens", lambda _content: 321)
+
+    llm_client_module._log_request_context(
+        model_id="model-1",
+        protocol="openai",
+        messages=messages,
+        tools=tools,
+        max_tokens=512,
+        streaming=False,
+    )
+
+    assert logged_messages == [
+        (
+            "LLM request context: model={model_id}, protocol={protocol}, streaming={streaming}, messages={message_count}, roles={role_counts}, tools={tool_count}, estimated_tokens={estimated_context_tokens}, max_output_tokens={max_tokens}",
+            {
+                "model_id": "model-1",
+                "protocol": "openai",
+                "streaming": False,
+                "message_count": 3,
+                "role_counts": {"system": 1, "user": 1, "assistant": 1},
+                "tool_count": 1,
+                "estimated_context_tokens": 321,
+                "max_tokens": 512,
+            },
+        )
+    ]
+    assert bound_fields == {
+        "model_id": "model-1",
+        "protocol": "openai",
+        "streaming": False,
+        "message_count": 3,
+        "role_counts": {"system": 1, "user": 1, "assistant": 1},
+        "tool_count": 1,
+        "estimated_context_tokens": 321,
+        "max_output_tokens": 512,
+    }
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -6,11 +7,14 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem
+from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem, SessionReplyCleanupResult
+from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.session_reply_queue import executor as executor_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.utils.time import get_local_time
 from app.models.message import Message, MessageRole, MessageType
+from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySequence,
@@ -30,6 +34,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                 sync_connection,
                 tables=[
                     Message.__table__,
+                    ChatSession.__table__,
                     SessionReplySequence.__table__,
                     SessionReplyWorkItem.__table__,
                     SessionReplyStreamEvent.__table__,
@@ -89,6 +94,22 @@ async def test_sequence_numbers_are_shared_by_all_work_types(db_session: AsyncSe
     await db_session.commit()
 
     assert [first.sequence_no, second.sequence_no, third.sequence_no] == [1, 2, 3]
+    assert [first.max_attempts, second.max_attempts, third.max_attempts] == [2, 2, 2]
+
+
+def test_session_reply_work_model_defaults_to_two_attempts():
+    work = SessionReplyWorkItem(
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+    )
+
+    assert work.max_attempts == 2
 
 
 @pytest.mark.asyncio
@@ -185,6 +206,308 @@ async def test_cancel_session_only_cancels_owned_non_terminal_work(db_session: A
     assert ready.status == SessionReplyWorkStatus.CANCELLED
     assert succeeded.status == SessionReplyWorkStatus.SUCCEEDED
     assert other.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminal_items_removes_only_expired_terminal_work_and_stream_events(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    old_time = get_local_time() - timedelta(hours=25)
+
+    expired_terminal = []
+    for index, status in enumerate(
+        [
+            SessionReplyWorkStatus.MERGED,
+            SessionReplyWorkStatus.SUCCEEDED,
+            SessionReplyWorkStatus.FAILED,
+            SessionReplyWorkStatus.CANCELLED,
+        ],
+        start=1,
+    ):
+        work = await _enqueue(
+            crud,
+            db_session,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=index,
+            dedupe_key=f"foreground-message:{index}",
+        )
+        work.status = status
+        work.updated_at = old_time
+        expired_terminal.append(work)
+
+    recent_terminal = await _enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=10,
+        dedupe_key="foreground-message:10",
+    )
+    recent_terminal.status = SessionReplyWorkStatus.SUCCEEDED
+
+    old_ready = await _enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=11,
+        dedupe_key="foreground-message:11",
+    )
+    old_ready.updated_at = old_time
+
+    old_running = await _enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=12,
+        dedupe_key="foreground-message:12",
+    )
+    old_running.status = SessionReplyWorkStatus.RUNNING
+    old_running.updated_at = old_time
+
+    for work in [*expired_terminal, recent_terminal, old_ready, old_running]:
+        db_session.add(
+            SessionReplyStreamEvent(
+                work_id=work.id,
+                sequence_no=1,
+                event={"type": "content", "content": str(work.id)},
+            )
+        )
+    db_session.add(
+        SessionReplyStreamEvent(
+            work_id=999999,
+            sequence_no=1,
+            event={"type": "content", "content": "orphan"},
+        )
+    )
+    db_session.add(
+        SessionReplySequence(
+            session_id="orphan-session",
+            next_sequence_no=2,
+        )
+    )
+    db_session.add(
+        ChatSession(
+            session_id="active-empty-session",
+            uid="user-1",
+        )
+    )
+    db_session.add(
+        SessionReplySequence(
+            session_id="active-empty-session",
+            next_sequence_no=2,
+        )
+    )
+    await db_session.commit()
+
+    cleanup_result = await crud.cleanup_terminal_items(db_session)
+
+    remaining_work = list((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_events = list((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    remaining_sequences = list((await db_session.execute(select(SessionReplySequence))).scalars().all())
+    expired_ids = {work.id for work in expired_terminal}
+
+    assert cleanup_result == SessionReplyCleanupResult(
+        work_items=4,
+        stream_events=5,
+        sequences=1,
+    )
+    assert cleanup_result.total == 10
+    assert {work.id for work in remaining_work} == {
+        recent_terminal.id,
+        old_ready.id,
+        old_running.id,
+    }
+    assert {event.work_id for event in remaining_events} == {
+        recent_terminal.id,
+        old_ready.id,
+        old_running.id,
+    }
+    assert not expired_ids.intersection(event.work_id for event in remaining_events)
+    assert {sequence.session_id for sequence in remaining_sequences} == {
+        "session-1",
+        "active-empty-session",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminal_items_limits_each_delete_batch(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    old_time = get_local_time() - timedelta(hours=25)
+    expired_work = []
+    for index in range(3):
+        work = await _enqueue(
+            crud,
+            db_session,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=index + 1,
+            dedupe_key=f"foreground-message:{index + 1}",
+        )
+        work.status = SessionReplyWorkStatus.SUCCEEDED
+        work.updated_at = old_time
+        expired_work.append(work)
+        for sequence_no in range(2):
+            db_session.add(
+                SessionReplyStreamEvent(
+                    work_id=work.id,
+                    sequence_no=sequence_no + 1,
+                    event={"type": "content", "content": str(work.id)},
+                )
+            )
+    await db_session.commit()
+
+    first_result = await crud.cleanup_terminal_items(db_session, batch_size=2)
+
+    remaining_work_count = len((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_event_count = len((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    assert first_result == SessionReplyCleanupResult(
+        work_items=0,
+        stream_events=2,
+        sequences=0,
+    )
+    assert first_result.total == 2
+    assert remaining_work_count == 3
+    assert remaining_event_count == 4
+
+    second_result = await crud.cleanup_terminal_items(db_session, batch_size=2)
+
+    remaining_work_count = len((await db_session.execute(select(SessionReplyWorkItem))).scalars().all())
+    remaining_event_count = len((await db_session.execute(select(SessionReplyStreamEvent))).scalars().all())
+    assert second_result == SessionReplyCleanupResult(
+        work_items=0,
+        stream_events=2,
+        sequences=0,
+    )
+    assert second_result.total == 2
+    assert remaining_work_count == 3
+    assert remaining_event_count == 2
+
+
+@pytest.mark.asyncio
+async def test_consumer_cleanup_processes_multiple_batches_and_yields(monkeypatch):
+    consumer = consumer_module.SessionReplyConsumer()
+    cleanup_calls = []
+    sleep_calls = []
+    results = iter(
+        [
+            SessionReplyCleanupResult(work_items=100, stream_events=400),
+            SessionReplyCleanupResult(work_items=50, stream_events=25, sequences=5),
+        ]
+    )
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def cleanup_terminal_items(db, *, batch_size):
+        cleanup_calls.append((db, batch_size))
+        return next(results)
+
+    async def sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        consumer_module.session_reply_work_item_crud,
+        "cleanup_terminal_items",
+        cleanup_terminal_items,
+    )
+    monkeypatch.setattr(consumer_module.asyncio, "sleep", sleep)
+
+    await consumer._cleanup_terminal_items()
+
+    assert [batch_size for _db, batch_size in cleanup_calls] == [500, 500]
+    assert sleep_calls == [0]
+
+
+@pytest.mark.asyncio
+async def test_consumer_cleanup_stops_at_per_run_limit(monkeypatch):
+    consumer = consumer_module.SessionReplyConsumer()
+    cleanup_batch_sizes = []
+    sleep_calls = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def cleanup_terminal_items(db, *, batch_size):
+        cleanup_batch_sizes.append(batch_size)
+        return SessionReplyCleanupResult(stream_events=batch_size)
+
+    async def sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        consumer_module.session_reply_work_item_crud,
+        "cleanup_terminal_items",
+        cleanup_terminal_items,
+    )
+    monkeypatch.setattr(consumer_module.asyncio, "sleep", sleep)
+
+    await consumer._cleanup_terminal_items()
+
+    assert sum(cleanup_batch_sizes) == consumer_module.SESSION_REPLY_CLEANUP_MAX_ITEMS_PER_RUN
+    assert cleanup_batch_sizes == [consumer_module.SESSION_REPLY_CLEANUP_BATCH_SIZE] * 10
+    assert sleep_calls == [0] * 9
+
+
+@pytest.mark.asyncio
+async def test_consumer_cleanup_runs_immediately_then_once_per_hour(monkeypatch):
+    consumer = consumer_module.SessionReplyConsumer()
+    cleanup_times = []
+
+    async def cleanup_terminal_items():
+        cleanup_times.append(consumer._next_cleanup_at)
+
+    monkeypatch.setattr(consumer, "_cleanup_terminal_items", cleanup_terminal_items)
+
+    await consumer._cleanup_terminal_items_if_due(5.0)
+    await consumer._cleanup_terminal_items_if_due(3604.9)
+    await consumer._cleanup_terminal_items_if_due(3605.0)
+
+    assert cleanup_times == [0.0, 3605.0]
+    assert consumer._next_cleanup_at == 7205.0
+
+
+@pytest.mark.asyncio
+async def test_consumer_cleanup_delegates_to_terminal_item_cleanup(monkeypatch):
+    consumer = consumer_module.SessionReplyConsumer()
+    cleanup_calls = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def cleanup_terminal_items(db, *, batch_size):
+        cleanup_calls.append((db, batch_size))
+        return SessionReplyCleanupResult()
+
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        consumer_module.session_reply_work_item_crud,
+        "cleanup_terminal_items",
+        cleanup_terminal_items,
+    )
+
+    await consumer._cleanup_terminal_items()
+
+    assert len(cleanup_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -707,6 +1030,96 @@ async def test_consumer_recovery_runs_full_failure_flow_for_exhausted_claims(mon
             "Maximum retry attempts reached after worker interruption",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_consumer_does_not_retry_business_failure_after_channel_fallback_is_exhausted(monkeypatch):
+    consumer = consumer_module.SessionReplyConsumer()
+    failure_calls = []
+    retry_calls = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def execute_work(work_id: int, worker_id: str) -> None:
+        raise LLMException(message="ERR_LLM_CONNECTION_FAILED", detail="provider unavailable")
+
+    async def has_events(db, *, work_id: int) -> bool:
+        return False
+
+    async def fail_work(
+        work_id: int,
+        worker_id: str,
+        error: str,
+        *,
+        user_error: str | None = None,
+    ) -> None:
+        failure_calls.append((work_id, worker_id, error, user_error))
+
+    async def release_for_retry(*args, **kwargs) -> None:
+        retry_calls.append((args, kwargs))
+
+    monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
+    monkeypatch.setattr(consumer_module.session_reply_stream_event_crud, "has_events", has_events)
+    monkeypatch.setattr(consumer_module, "fail_session_reply_work", fail_work)
+    monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "release_for_retry", release_for_retry)
+
+    await consumer._run_claimed(work_id=7, worker_id="worker-1", attempt_count=1, max_attempts=5)
+
+    assert len(failure_calls) == 1
+    assert failure_calls[0][:2] == (7, "worker-1")
+    assert failure_calls[0][3] == LLMException(message="ERR_LLM_CONNECTION_FAILED", detail="provider unavailable").render_message()
+    assert retry_calls == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_result_restores_persisted_user_error_for_adapter(monkeypatch):
+    manager = SessionReplyQueueManager()
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.FAILED,
+        result_message_id=9,
+        error="internal provider failure",
+    )
+    error_message = SimpleNamespace(content="所有对话渠道均不可用")
+
+    class FakeSession:
+        async def get(self, model, object_id):
+            assert model is Message
+            assert object_id == 9
+            return error_message
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve_merged_target(db, work_id):
+        return work
+
+    monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+
+    with pytest.raises(BaseBusinessException, match="所有对话渠道均不可用"):
+        await manager.wait_for_result(7)
 
 
 @pytest.mark.asyncio
