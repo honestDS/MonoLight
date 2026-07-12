@@ -130,9 +130,6 @@ async def delete_session(
 ):
     uid = getattr(current_user, "uid", None)
     is_admin = getattr(current_user, "is_superuser", False)
-    session = await session_crud.get_by_session_id(db, session_id)
-    if session and session.source not in {"http", "ws"}:
-        return StandardResponse.error(code=403, message=constants.ERR_SESSION_READ_ONLY)
 
     row_count = await message_crud.remove_session(
         db,

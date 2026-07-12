@@ -45,7 +45,7 @@
               </div>
             </div>
           </div>
-          <div v-if="['http', 'ws'].includes(session.source || 'http')" class="session-actions">
+          <div class="session-actions">
             <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
           </div>
         </div>
