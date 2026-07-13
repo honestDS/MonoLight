@@ -1,4 +1,5 @@
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import delete, exists, or_, update
@@ -18,6 +19,14 @@ from app.models.message import Message
 
 CONTEXT_SUMMARY_CLEANUP_BATCH_SIZE = 200
 CONTEXT_SUMMARY_CLEANUP_MAX_BATCH_SIZE = 1000
+CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE = 200
+CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE = 500
+
+
+@dataclass(frozen=True)
+class CompletedContextSummaryFragmentPage:
+    stage: ContextSummaryStage
+    fragments: tuple[ContextSummaryFragment, ...]
 
 
 def build_context_summary_fragment_dedupe_key(
@@ -58,6 +67,62 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             )
         )
         return result.scalars().first()
+
+    async def get_completed_fragment_page(
+        self,
+        db: AsyncSession,
+        *,
+        work_dedupe_key: str,
+        lower_stage_key: str,
+        page_after_message_id: int | None = None,
+        limit: int = CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
+    ) -> CompletedContextSummaryFragmentPage | None:
+        if not 1 <= limit <= CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE:
+            raise ValueError(
+                f"limit must be between 1 and {CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE}",
+            )
+        if page_after_message_id is not None and page_after_message_id < 1:
+            raise ValueError("page_after_message_id must be positive")
+
+        stage_result = await db.execute(
+            select(ContextSummaryStage).where(
+                ContextSummaryStage.work_dedupe_key == work_dedupe_key,
+                ContextSummaryStage.stage_key == lower_stage_key,
+                ContextSummaryStage.status == ContextSummaryStageStatus.COMPLETED,
+                ContextSummaryStage.succeeded_fragment_count == ContextSummaryStage.expected_fragment_count,
+            )
+        )
+        stage = stage_result.scalars().first()
+        if stage is None:
+            return None
+
+        fragment_query = select(ContextSummaryFragment).where(
+            ContextSummaryFragment.uid == stage.uid,
+            ContextSummaryFragment.session_id == stage.session_id,
+            ContextSummaryFragment.work_id == stage.work_id,
+            ContextSummaryFragment.work_dedupe_key == stage.work_dedupe_key,
+            ContextSummaryFragment.snapshot_key == stage.snapshot_key,
+            ContextSummaryFragment.stage_key == stage.stage_key,
+            ContextSummaryFragment.model_key == stage.model_key,
+            ContextSummaryFragment.channel_id == stage.channel_id,
+            ContextSummaryFragment.model_id == stage.model_id,
+            ContextSummaryFragment.status == ContextSummaryFragmentStatus.COMPLETED,
+        )
+        if page_after_message_id is not None:
+            fragment_query = fragment_query.where(
+                ContextSummaryFragment.message_start_id > page_after_message_id,
+            )
+
+        fragment_result = await db.execute(
+            fragment_query.order_by(
+                ContextSummaryFragment.message_start_id,
+                ContextSummaryFragment.fragment_index,
+            ).limit(limit)
+        )
+        return CompletedContextSummaryFragmentPage(
+            stage=stage,
+            fragments=tuple(fragment_result.scalars().all()),
+        )
 
     async def create_stage(
         self,

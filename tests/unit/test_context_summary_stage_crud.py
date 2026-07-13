@@ -253,6 +253,126 @@ async def test_ordered_fragment_write_counts_once_and_completes_atomically(
 
 
 @pytest.mark.asyncio
+async def test_completed_fragment_page_uses_fixed_lower_stage_and_message_cursor(
+    db_session: AsyncSession,
+):
+    await _create_messages(db_session, list(range(1, 51)))
+    await context_summary_stage_crud.create_stage(
+        db_session,
+        stage=_make_stage(
+            expected_fragment_count=5,
+            persistent_summary_target_id=50,
+        ),
+    )
+    for fragment_index in range(5):
+        _, created = await context_summary_fragment_crud.write_ordered(
+            db_session,
+            fragment=_make_fragment(fragment_index=fragment_index),
+        )
+        assert created is True
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is True
+    )
+
+    first_page = await context_summary_stage_crud.get_completed_fragment_page(
+        db_session,
+        work_dedupe_key="work-key",
+        lower_stage_key="stage-0",
+        limit=2,
+    )
+    second_page = await context_summary_stage_crud.get_completed_fragment_page(
+        db_session,
+        work_dedupe_key="work-key",
+        lower_stage_key="stage-0",
+        page_after_message_id=20,
+        limit=2,
+    )
+    final_page = await context_summary_stage_crud.get_completed_fragment_page(
+        db_session,
+        work_dedupe_key="work-key",
+        lower_stage_key="stage-0",
+        page_after_message_id=40,
+        limit=2,
+    )
+
+    assert first_page is not None
+    assert first_page.stage.stage_key == "stage-0"
+    assert [fragment.fragment_index for fragment in first_page.fragments] == [0, 1]
+    assert second_page is not None
+    assert [fragment.fragment_index for fragment in second_page.fragments] == [2, 3]
+    assert final_page is not None
+    assert [fragment.fragment_index for fragment in final_page.fragments] == [4]
+    assert (
+        await context_summary_stage_crud.get_completed_fragment_page(
+            db_session,
+            work_dedupe_key="work-key",
+            lower_stage_key="other-stage",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage_status",
+    [
+        ContextSummaryStageStatus.RUNNING,
+        ContextSummaryStageStatus.FAILED,
+        ContextSummaryStageStatus.INVALIDATED,
+    ],
+)
+async def test_completed_fragment_page_rejects_unfinished_lower_stage(
+    db_session: AsyncSession,
+    stage_status: ContextSummaryStageStatus,
+):
+    stage = _make_stage(expected_fragment_count=1)
+    stage.status = stage_status
+    if stage_status != ContextSummaryStageStatus.RUNNING:
+        stage.error = "stage unavailable"
+    db_session.add(stage)
+    db_session.add(_make_fragment(fragment_index=0))
+    await db_session.commit()
+
+    page = await context_summary_stage_crud.get_completed_fragment_page(
+        db_session,
+        work_dedupe_key="work-key",
+        lower_stage_key="stage-0",
+    )
+
+    assert page is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("page_after_message_id", "limit"),
+    [
+        (0, 200),
+        (None, 0),
+        (None, 501),
+    ],
+)
+async def test_completed_fragment_page_rejects_invalid_pagination(
+    db_session: AsyncSession,
+    page_after_message_id: int | None,
+    limit: int,
+):
+    with pytest.raises(ValueError):
+        await context_summary_stage_crud.get_completed_fragment_page(
+            db_session,
+            work_dedupe_key="work-key",
+            lower_stage_key="stage-0",
+            page_after_message_id=page_after_message_id,
+            limit=limit,
+        )
+
+
+@pytest.mark.asyncio
 async def test_completion_validation_accepts_global_message_id_gaps(
     db_session: AsyncSession,
 ):
