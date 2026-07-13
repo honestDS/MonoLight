@@ -57,6 +57,7 @@ class NonStreamDispatcherMixin:
         session_source: str = "http",
         persisted_initial_message: InternalMessage | None = None,
         history_before_id: int | None = None,
+        frozen_user_message_ids: list[int] | None = None,
         final_message_dedupe_key: str | None = None,
         persisted_profile_id: int | None = None,
         stream_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -141,6 +142,7 @@ class NonStreamDispatcherMixin:
                             max_tokens=chat_params["max_tokens"],
                             tools=tools,
                             history_before_id=history_before_id,
+                            frozen_user_message_ids=frozen_user_message_ids,
                         )
                         current_turn = 0
 

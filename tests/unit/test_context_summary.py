@@ -176,8 +176,35 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
     async def get_state(_db, *, session_id, uid):
         return ContextSummaryState(content=None, message_id=None)
 
-    async def get_history(*_args, **_kwargs):
-        return [object()]
+    async def build_snapshot(
+        _db,
+        *,
+        expected_summary_message_id,
+        before_id,
+        frozen_user_message_ids=None,
+        **_kwargs,
+    ):
+        target_id = (expected_summary_message_id or 0) + 4
+        return summary_module.ContextSummarySnapshot(
+            expected_summary_message_id=expected_summary_message_id,
+            snapshot_before_id=before_id,
+            snapshot_max_message_id=target_id + 1,
+            persistent_summary_target_id=target_id,
+            recent_round_start_ids=(target_id + 1,),
+            frozen_user_message_ids=tuple(frozen_user_message_ids or ()),
+            recent_messages=(InternalMessage(id=target_id + 1, role=MessageRole.USER, content="recent"),),
+        )
+
+    async def iter_rounds(_db, *, snapshot, **_kwargs):
+        start_id = snapshot.expected_summary_message_id or 0
+        yield [
+            InternalMessage(id=start_id + 1, role=MessageRole.USER, content="u1" * 100),
+            InternalMessage(id=start_id + 2, role=MessageRole.ASSISTANT, content="a1" * 100),
+        ]
+        yield [
+            InternalMessage(id=start_id + 3, role=MessageRole.USER, content="u2" * 100),
+            InternalMessage(id=start_id + 4, role=MessageRole.ASSISTANT, content="a2" * 100),
+        ]
 
     async def select_model(*_args, **kwargs):
         selected_calls.append(kwargs)
@@ -215,8 +242,8 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
         return update_result
 
     monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
-    monkeypatch.setattr(summary_module.message_crud, "get_history", get_history)
-    monkeypatch.setattr(summary_module, "parse_db_messages_to_internal", lambda _raw: list(reversed(_summary_history())))
+    monkeypatch.setattr(summary_module, "build_context_summary_snapshot", build_snapshot)
+    monkeypatch.setattr(summary_module, "iter_persistent_summary_rounds", iter_rounds)
     monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
     monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
     monkeypatch.setattr(summary_module.session_crud, "update_context_summary", update_summary)
@@ -278,7 +305,6 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert generated_calls[0]["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
     assert debug_calls[0][0].startswith("Context summary check:")
     assert any(call[0].startswith("Context summary generated:") for call in debug_calls)
-    assert any(call[0].startswith("Context summary recheck:") for call in debug_calls)
     assert bound_fields["uid"] == "user-1"
     assert bound_fields["session_id"] == "session-1"
     assert bound_fields["summarized_through_message_id"] == 4
@@ -519,6 +545,7 @@ async def test_prepare_messages_counts_system_prompt_runtime_instruction_and_cur
 
     assert ensure_summary_calls[0]["current_message"] == current_message
     assert ensure_summary_calls[0]["reserved_tokens"] == 150
+    assert ensure_summary_calls[0]["frozen_user_message_ids"] == [7]
 
 
 @pytest.mark.asyncio
@@ -553,7 +580,7 @@ async def test_context_summary_trigger_includes_reserved_and_current_message_tok
 
 
 @pytest.mark.asyncio
-async def test_first_summary_prompt_includes_recent_two_rounds(monkeypatch):
+async def test_first_summary_prompt_excludes_recent_protected_rounds(monkeypatch):
     _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 
     def estimate_tokens(content):
@@ -586,7 +613,8 @@ async def test_first_summary_prompt_includes_recent_two_rounds(monkeypatch):
     assert state.content == "compressed history"
     prompt = generated_calls[0]["messages"][0].content
     assert "Recent dialogue for task context only" in prompt
-    assert '"content":"u2u2' in prompt or '"content":"recent"' in prompt
+    assert '"content":"recent"' not in prompt
+    assert "(none)" in prompt
     assert "## Goal" in prompt
 
 
@@ -654,7 +682,8 @@ async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
     assert state.content == "short summary"
     assert state.message_id == 4
     assert len(generated_calls) == 3
-    assert len(update_calls) == 3
+    assert len(update_calls) == 1
+    assert update_calls[0]["summary"] == "short summary"
     assert "Further compress the summary below" in generated_calls[1]["messages"][0].content
     assert "Further compress the summary below" in generated_calls[2]["messages"][0].content
     assert "Conversation segment to compress" not in generated_calls[1]["messages"][0].content

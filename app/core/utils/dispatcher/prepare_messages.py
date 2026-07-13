@@ -38,11 +38,14 @@ async def prepare_messages(
     max_tokens: int = 0,
     tools: list[dict] | None = None,
     history_before_id: int | None = None,
+    frozen_user_message_ids: list[int] | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
     system_prompt = await build_system_prompt(db, profile)
     user_runtime_instructions = await build_user_runtime_instructions(db, session_id) if is_first_iter else ""
+    inferred_frozen_ids = [initial_msg.id] if initial_msg is not None and initial_msg.id is not None else None
+    summary_frozen_user_message_ids = frozen_user_message_ids or inferred_frozen_ids
     history_before_id = history_before_id if is_first_iter and history_before_id is not None else initial_msg.id if is_first_iter else None
     summary_state = await ensure_context_summary(
         db,
@@ -56,6 +59,7 @@ async def prepare_messages(
         max_tokens=max_tokens,
         reserved_tokens=estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions),
         tools=tools,
+        frozen_user_message_ids=summary_frozen_user_message_ids,
     )
     if summary_state.content:
         system_prompt = "\n\n".join(

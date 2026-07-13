@@ -204,6 +204,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         session_source="queue",
         persisted_initial_message=initial_message,
         history_before_id=message_ids[0],
+        frozen_user_message_ids=message_ids,
         final_message_dedupe_key=_result_message_dedupe_key(work),
         persisted_profile_id=work.profile_id,
         stream_event_callback=publish_stream_event if stream_requested else None,
