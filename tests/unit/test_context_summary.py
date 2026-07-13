@@ -311,6 +311,10 @@ def _patch_multifragment_completion_barrier(
     async def fail_stage(*, stage, error):
         events.append(("fail", stage.stage_key, error))
 
+    async def invalidate_stage(*, stage):
+        events.append(("invalidate", stage.stage_key))
+        return True
+
     class SessionContext:
         async def __aenter__(self):
             return object()
@@ -327,6 +331,7 @@ def _patch_multifragment_completion_barrier(
     monkeypatch.setattr(summary_module, "_write_summary_fragment", write_fragment)
     monkeypatch.setattr(summary_module, "_mark_summary_stage_completed", complete_stage)
     monkeypatch.setattr(summary_module, "_mark_summary_stage_failed", fail_stage)
+    monkeypatch.setattr(summary_module, "_invalidate_summary_stage", invalidate_stage)
     monkeypatch.setattr(summary_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
         summary_module,
@@ -593,7 +598,7 @@ async def test_context_summary_threshold_includes_tool_definition_tokens(monkeyp
 
 @pytest.mark.asyncio
 async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch):
-    selected_calls, update_calls, _generated_calls = _patch_summary_dependencies(
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(
         monkeypatch,
         generation_error=RuntimeError("provider unavailable"),
     )
@@ -623,8 +628,10 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
 
     assert state == ContextSummaryState(content=None, message_id=None)
     assert update_calls == []
-    assert len(selected_calls) == 1
+    assert len(generated_calls) == summary_module.CONTEXT_SUMMARY_MODEL_ATTEMPTS
+    assert len(selected_calls) == 2
     assert selected_calls[0]["excluded_priorities"] == set()
+    assert selected_calls[1]["excluded_priorities"] == {1}
 
 
 @pytest.mark.asyncio

@@ -244,3 +244,50 @@ async def test_pipeline_rejects_non_contiguous_fragment_plan():
         )
 
     assert any("continuous order" in str(error) for error in exc_info.value.exceptions)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_cancels_inflight_tasks_after_fragment_failure():
+    blocking_started = asyncio.Event()
+    blocking_cancelled = asyncio.Event()
+    persisted_indices: list[int] = []
+
+    async def fragments():
+        for index in range(2):
+            yield SummaryFragmentInput(
+                fragment_index=index,
+                message_start_id=index + 1,
+                message_end_id=index + 1,
+                token_count=100,
+                content=f"fragment-{index}",
+            )
+
+    async def process(fragment):
+        if fragment.fragment_index == 0:
+            await blocking_started.wait()
+            raise RuntimeError("selected model failed")
+
+        blocking_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            blocking_cancelled.set()
+            raise
+
+    async def persist(result):
+        persisted_indices.append(result.fragment_index)
+
+    with pytest.raises(ExceptionGroup):
+        await asyncio.wait_for(
+            run_bounded_fragment_pipeline(
+                fragments=fragments(),
+                expected_fragment_count=2,
+                process_fragment=process,
+                persist_fragment=persist,
+                concurrency=2,
+            ),
+            timeout=1,
+        )
+
+    assert blocking_cancelled.is_set()
+    assert persisted_indices == []

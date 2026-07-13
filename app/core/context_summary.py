@@ -50,6 +50,12 @@ from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
 
+CONTEXT_SUMMARY_MODEL_ATTEMPTS = 2
+
+
+class ContextSummaryLayerError(RuntimeError):
+    pass
+
 
 @dataclass(frozen=True)
 class ContextSummaryState:
@@ -228,6 +234,36 @@ async def get_context_summary_state(
     )
 
 
+async def _call_fixed_summary_model(
+    *,
+    model: ContextSummaryModelSnapshot,
+    prompt: str,
+    input_tokens: int,
+) -> str:
+    last_error: Exception | None = None
+    for _attempt in range(CONTEXT_SUMMARY_MODEL_ATTEMPTS):
+        try:
+            generated = await call_context_summary_model(
+                model=model,
+                prompt=prompt,
+            )
+            if not generated:
+                raise RuntimeError(
+                    "Context summary model returned an empty result",
+                )
+            if estimate_tokens(generated) >= input_tokens:
+                raise RuntimeError(
+                    "Context summary model did not reduce its input",
+                )
+            return generated
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(
+        "Context summary model failed after fixed-model retries",
+    ) from last_error
+
+
 async def _generate_summary_text(
     db: AsyncSession,
     *,
@@ -249,7 +285,7 @@ async def _generate_summary_text(
             profile_id=profile.id,
             channel_config=summary_channel,
             safety_margin_tokens=safety_margin_tokens,
-            excluded_priorities=excluded_priorities,
+            excluded_priorities=set(excluded_priorities),
             call_context=call_context,
         )
         if model is None:
@@ -265,7 +301,11 @@ async def _generate_summary_text(
         await _release_db_session(db)
 
         try:
-            return await call_context_summary_model(model=model, prompt=prompt)
+            return await _call_fixed_summary_model(
+                model=model,
+                prompt=prompt,
+                input_tokens=prompt_tokens,
+            )
         except Exception as exc:
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
@@ -442,6 +482,7 @@ def _build_stage_identity(
         {
             "channel_id": model.channel_id,
             "model_id": model.model_id,
+            "priority": model.priority,
             "context_window_tokens": model.context_window_tokens,
             "max_output_tokens": model.max_output_tokens,
             "safety_margin_tokens": model.safety_margin_tokens,
@@ -525,17 +566,28 @@ async def _mark_summary_stage_failed(
         )
 
 
-async def _generate_snapshot_summary(
+async def _invalidate_summary_stage(
+    *,
+    stage: ContextSummaryStage,
+) -> bool:
+    async with AsyncSessionLocal() as stage_db:
+        return await context_summary_stage_crud.invalidate(
+            stage_db,
+            work_dedupe_key=stage.work_dedupe_key,
+            stage_key=stage.stage_key,
+            model_key=stage.model_key,
+        )
+
+
+async def _generate_snapshot_summary_with_model(
     db: AsyncSession,
     *,
     session_id: str,
     uid: str,
-    profile: Profile,
-    cfg: ProfileConfig,
     snapshot: ContextSummarySnapshot,
     existing_summary: str | None,
     existing_summary_revision: int,
-    safety_margin_tokens: int,
+    model: ContextSummaryModelSnapshot,
 ) -> tuple[str | None, int]:
     total_tokens, summarized_message_count = await _measure_persistent_history(
         db,
@@ -546,18 +598,6 @@ async def _generate_snapshot_summary(
     if total_tokens <= 0:
         return None, summarized_message_count
 
-    model = await select_context_summary_model(
-        db,
-        profile_id=profile.id,
-        channel_config=cfg.channel.context_summary_channel,
-        safety_margin_tokens=safety_margin_tokens,
-        excluded_priorities=set(),
-        call_context="context_summary",
-    )
-    if model is None:
-        await _release_db_session(db)
-        return None, summarized_message_count
-
     empty_prompt = CONTEXT_SUMMARY_PROMPT.format(
         existing_summary=existing_summary or "(none)",
         recent_dialogue="(none)",
@@ -566,8 +606,9 @@ async def _generate_snapshot_summary(
     prompt_overhead_tokens = estimate_tokens(empty_prompt)
     max_fragment_tokens = model.input_budget_tokens - prompt_overhead_tokens - 32
     if max_fragment_tokens <= 0:
-        await _release_db_session(db)
-        return None, summarized_message_count
+        raise ContextSummaryLayerError(
+            "Context summary model has no usable input budget",
+        )
 
     fragment_target_tokens = balanced_fragment_target_tokens(
         total_tokens,
@@ -582,8 +623,9 @@ async def _generate_snapshot_summary(
         max_fragment_tokens=max_fragment_tokens,
     )
     if expected_fragment_count <= 0:
-        await _release_db_session(db)
-        return None, summarized_message_count
+        raise ContextSummaryLayerError(
+            "Context summary layer cannot be split for the selected model",
+        )
 
     fragments = _iter_summary_fragments(
         db,
@@ -596,42 +638,33 @@ async def _generate_snapshot_summary(
     if expected_fragment_count == 1:
         fragment = await anext(fragments, None)
         if fragment is None:
-            await _release_db_session(db)
-            return None, summarized_message_count
+            raise ContextSummaryLayerError(
+                "Context summary layer did not produce its planned fragment",
+            )
         prompt = _fragment_prompt(fragment)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
-            await _release_db_session(db)
-            return None, summarized_message_count
+            raise ContextSummaryLayerError(
+                "Context summary fragment exceeds the selected model window",
+            )
         await _release_db_session(db)
         try:
-            generated = await call_context_summary_model(
+            generated = await _call_fixed_summary_model(
                 model=model,
                 prompt=prompt,
+                input_tokens=fragment.token_count,
             )
         except Exception as exc:
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                channel_id=model.channel_id,
-                channel_name=model.channel_name,
-                model_id=model.model_id,
-            ).warning(
-                t(
-                    "LOG_CONTEXT_SUMMARY_CHANNEL_FAILED",
-                    default="Context summary channel failed: {error}",
-                    error=format_exception_message(exc),
-                )
-            )
-            return None, summarized_message_count
-        if not generated or estimate_tokens(generated) >= total_tokens:
-            return None, summarized_message_count
+            raise ContextSummaryLayerError(
+                "Context summary single-fragment layer failed",
+            ) from exc
         return generated, summarized_message_count
 
     snapshot_max_message_id = snapshot.snapshot_max_message_id
     persistent_summary_target_id = snapshot.persistent_summary_target_id
     if snapshot_max_message_id is None or persistent_summary_target_id is None:
-        await _release_db_session(db)
-        return None, summarized_message_count
+        raise ContextSummaryLayerError(
+            "Context summary snapshot has no persistent range",
+        )
 
     (
         work_id,
@@ -674,16 +707,21 @@ async def _generate_snapshot_summary(
             stage=stage,
         )
     if persisted_stage.model_key != model_key or persisted_stage.expected_fragment_count != expected_fragment_count or persisted_stage.status != ContextSummaryStageStatus.RUNNING or persisted_stage.succeeded_fragment_count > expected_fragment_count:
-        return None, summarized_message_count
+        raise ContextSummaryLayerError(
+            "Context summary layer conflicts with an existing stage",
+        )
 
     first_fragment_index = persisted_stage.succeeded_fragment_count
     if first_fragment_index == expected_fragment_count:
-        if not await _mark_summary_stage_completed(stage=persisted_stage):
-            await _mark_summary_stage_failed(
-                stage=persisted_stage,
-                error="Context summary fragment stage failed completion validation",
-            )
-        return None, summarized_message_count
+        if await _mark_summary_stage_completed(stage=persisted_stage):
+            return None, summarized_message_count
+        error = "Context summary fragment stage failed completion validation"
+        await _mark_summary_stage_failed(
+            stage=persisted_stage,
+            error=error,
+        )
+        await _invalidate_summary_stage(stage=persisted_stage)
+        raise ContextSummaryLayerError(error)
 
     fragments = _iter_summary_fragments(
         db,
@@ -703,19 +741,12 @@ async def _generate_snapshot_summary(
             raise RuntimeError(
                 "Context summary fragment exceeds the selected model window",
             )
-        generated = await call_context_summary_model(
+        generated = await _call_fixed_summary_model(
             model=model,
             prompt=prompt,
+            input_tokens=fragment.token_count,
         )
-        if not generated:
-            raise RuntimeError(
-                "Context summary fragment returned an empty result",
-            )
         output_tokens = estimate_tokens(generated)
-        if output_tokens >= fragment.token_count:
-            raise RuntimeError(
-                "Context summary fragment did not reduce its input",
-            )
         return SummaryFragmentResult(
             fragment_index=fragment.fragment_index,
             message_start_id=fragment.message_start_id,
@@ -740,20 +771,15 @@ async def _generate_snapshot_summary(
                 "Context summary fragment stage failed completion validation",
             )
     except Exception as exc:
+        error = format_exception_message(exc)
         await _mark_summary_stage_failed(
             stage=persisted_stage,
-            error=format_exception_message(exc),
+            error=error,
         )
-        logger.bind(
-            uid=uid,
-            session_id=session_id,
-            stage_key=stage_key,
-            model_key=model_key,
-        ).warning(
-            "Context summary fragment stage failed: {error}",
-            error=format_exception_message(exc),
-        )
-        return None, summarized_message_count
+        await _invalidate_summary_stage(stage=persisted_stage)
+        raise ContextSummaryLayerError(
+            "Context summary fragment layer failed",
+        ) from exc
 
     logger.bind(
         uid=uid,
@@ -769,6 +795,66 @@ async def _generate_snapshot_summary(
         "Context summary fragment stage passed validation and was completed",
     )
     return None, summarized_message_count
+
+
+async def _generate_snapshot_summary(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    profile: Profile,
+    cfg: ProfileConfig,
+    snapshot: ContextSummarySnapshot,
+    existing_summary: str | None,
+    existing_summary_revision: int,
+    safety_margin_tokens: int,
+) -> tuple[str | None, int]:
+    excluded_priorities: set[int] = set()
+    call_context = "context_summary"
+
+    while True:
+        model = await select_context_summary_model(
+            db,
+            profile_id=profile.id,
+            channel_config=cfg.channel.context_summary_channel,
+            safety_margin_tokens=safety_margin_tokens,
+            excluded_priorities=set(excluded_priorities),
+            call_context=call_context,
+        )
+        if model is None or model.priority in excluded_priorities:
+            _total_tokens, summarized_message_count = await _measure_persistent_history(
+                db,
+                session_id=session_id,
+                uid=uid,
+                snapshot=snapshot,
+            )
+            await _release_db_session(db)
+            return None, summarized_message_count
+
+        try:
+            return await _generate_snapshot_summary_with_model(
+                db,
+                session_id=session_id,
+                uid=uid,
+                snapshot=snapshot,
+                existing_summary=existing_summary,
+                existing_summary_revision=existing_summary_revision,
+                model=model,
+            )
+        except ContextSummaryLayerError as exc:
+            excluded_priorities.add(model.priority)
+            call_context = "context_summary_retry"
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                channel_id=model.channel_id,
+                channel_name=model.channel_name,
+                model_id=model.model_id,
+                stage_priority=model.priority,
+            ).warning(
+                "Context summary layer invalidated before model fallback: {error}",
+                error=format_exception_message(exc),
+            )
 
 
 async def ensure_context_summary(
