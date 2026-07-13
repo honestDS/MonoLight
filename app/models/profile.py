@@ -1,5 +1,6 @@
 """Profile 配置模型：含渠道管理的 Profile"""
 
+import copy
 import os
 from typing import (
     Any,
@@ -29,8 +30,20 @@ class ChannelGroupConfig(BaseModel):
     """渠道管理组配置（渠道管理架构）"""
 
     chat_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="对话渠道配置")
+    context_summary_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="上下文总结渠道配置")
     rerank_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="重排渠道配置")
     image_generation_channel: ChannelConfig = PydanticField(default_factory=ChannelConfig, description="图像生成渠道配置")
+
+    @model_validator(mode="before")
+    @classmethod
+    def fallback_context_summary_channel(cls, data: Any) -> Any:
+        """旧配置缺少总结渠道时，运行期使用对话渠道的独立副本。"""
+        if not isinstance(data, dict) or "context_summary_channel" in data:
+            return data
+
+        normalized = dict(data)
+        normalized["context_summary_channel"] = copy.deepcopy(data.get("chat_channel", {}))
+        return normalized
 
 
 class SecurityConfig(BaseModel):
@@ -89,6 +102,7 @@ class ProfileConfig(BaseModel):
         schema_map = {
             "channel": [
                 "chat_channel",
+                "context_summary_channel",
                 "rerank_channel",
                 "image_generation_channel",
             ],
@@ -124,6 +138,11 @@ PROFILE_EXAMPLE = {
                 "chat_timeout": 60.0,
                 "rules": [
                     {"channel_id": 1, "model_id": "gpt-4o", "priority": 1, "weight": 100},
+                ],
+            },
+            "context_summary_channel": {
+                "rules": [
+                    {"channel_id": 1, "model_id": "gpt-4o-mini", "priority": 1, "weight": 100},
                 ],
             },
             "rerank_channel": {

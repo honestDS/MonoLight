@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,8 @@ async def test_background_summary_uses_submission_context_and_task_result(monkey
         uid="user-1",
         session_id="session-1",
         profile_id=3,
+        dedupe_key="background-task:8",
+        created_at=datetime(2026, 7, 14, 0, 0, 0),
     )
     profile = SimpleNamespace(id=3, uid="user-1")
     captured = {}

@@ -1,4 +1,4 @@
-﻿import json
+import json
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -210,12 +210,12 @@ async def _generate_summary_text(
     uid: str,
     session_id: str,
 ) -> str | None:
-    chat_channel = cfg.channel.chat_channel
+    summary_channel = cfg.channel.context_summary_channel
     cursor_key = f"{profile.id}:CHAT:CONTEXT_SUMMARY"
     excluded_priorities: set[int] = set()
     selection = await select_channel(
         db,
-        chat_channel,
+        summary_channel,
         "CHAT",
         call_context="context_summary",
         cursor_key=cursor_key,
@@ -223,7 +223,7 @@ async def _generate_summary_text(
 
     while selection:
         channel, model_entry, rule = selection
-        chat_params = resolve_chat_params(model_entry, chat_channel)
+        chat_params = resolve_chat_params(model_entry, summary_channel)
         summary_max_tokens = min(1024, max(256, chat_params["context_window_k"] * 64))
         summary_input_tokens = estimate_tokens(prompt)
         summary_input_budget = max(
@@ -234,7 +234,7 @@ async def _generate_summary_text(
             excluded_priorities.add(rule.priority)
             selection = await select_channel(
                 db,
-                chat_channel,
+                summary_channel,
                 "CHAT",
                 call_context="context_summary_retry",
                 excluded_priorities=excluded_priorities,
@@ -278,7 +278,7 @@ async def _generate_summary_text(
             )
             selection = await select_channel(
                 db,
-                chat_channel,
+                summary_channel,
                 "CHAT",
                 call_context="context_summary_retry",
                 excluded_priorities=excluded_priorities,
@@ -404,10 +404,7 @@ async def ensure_context_summary(
             tools_tokens=usage["tools_tokens"],
             history_message_count=usage["history_message_count"],
         ).debug(
-            "Context summary recheck: required={required_tokens}, trigger={summary_trigger_tokens}, "
-            "goal={compression_goal_tokens}, reserved={reserved_tokens}, summary={summary_tokens}, "
-            "history={history_tokens}, current={current_message_tokens}, tools={tools_tokens}, "
-            "history_messages={history_message_count}",
+            "Context summary recheck: required={required_tokens}, trigger={summary_trigger_tokens}, goal={compression_goal_tokens}, reserved={reserved_tokens}, summary={summary_tokens}, history={history_tokens}, current={current_message_tokens}, tools={tools_tokens}, history_messages={history_message_count}",
             required_tokens=usage["required_tokens"],
             summary_trigger_tokens=usage["summary_trigger_tokens"],
             compression_goal_tokens=usage["compression_goal_tokens"],
@@ -424,21 +421,13 @@ async def ensure_context_summary(
 
         available_history_tokens = max(
             1,
-            usage["input_budget"]
-            - reserved_tokens
-            - usage["summary_tokens"]
-            - usage["current_message_tokens"]
-            - usage["tools_tokens"],
+            usage["input_budget"] - reserved_tokens - usage["summary_tokens"] - usage["current_message_tokens"] - usage["tools_tokens"],
         )
         segment_target_tokens = max(1, available_history_tokens // 2)
         segment = _select_summary_segment(remaining_messages, segment_target_tokens)
 
         if segment and segment[-1].id is not None:
-            recent_dialogue = (
-                _join_messages(_select_recent_rounds(original_messages, 2))
-                if is_first_summary
-                else "(none)"
-            )
+            recent_dialogue = _join_messages(_select_recent_rounds(original_messages, 2)) if is_first_summary else "(none)"
             prompt = CONTEXT_SUMMARY_PROMPT.format(
                 existing_summary=state.content or "(none)",
                 recent_dialogue=recent_dialogue,

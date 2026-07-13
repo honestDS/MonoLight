@@ -60,6 +60,7 @@ router = APIRouter(prefix="/channels", tags=["Channels"], dependencies=[Depends(
 # 渠道用途映射：统一定义，避免重复
 CHANNEL_USAGE_MAP = {
     "chat_channel": ModelUsage.CHAT.value,
+    "context_summary_channel": ModelUsage.CHAT.value,
     "rerank_channel": ModelUsage.RERANK.value,
     "image_generation_channel": ModelUsage.IMAGE_GENERATION.value,
 }

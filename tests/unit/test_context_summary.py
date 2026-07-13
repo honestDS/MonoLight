@@ -49,8 +49,6 @@ def test_select_summary_segment_does_not_split_tool_chain():
     assert segment[-1].role == MessageRole.TOOL
 
 
-
-
 def test_select_recent_rounds_returns_last_two_user_led_rounds():
     messages = [
         InternalMessage(id=1, role=MessageRole.USER, content="first question"),
@@ -151,7 +149,10 @@ class _SummaryChannel:
 
 def _summary_cfg(threshold_percent: int = 90) -> SimpleNamespace:
     return SimpleNamespace(
-        channel=SimpleNamespace(chat_channel=object()),
+        channel=SimpleNamespace(
+            chat_channel=object(),
+            context_summary_channel=object(),
+        ),
         other=SimpleNamespace(context_summary_threshold_percent=threshold_percent),
     )
 
@@ -539,8 +540,6 @@ async def test_context_summary_trigger_includes_reserved_and_current_message_tok
     assert len(selected_calls) >= 1
 
 
-
-
 @pytest.mark.asyncio
 async def test_first_summary_prompt_includes_recent_two_rounds(monkeypatch):
     _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
@@ -644,8 +643,6 @@ async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
     assert "Further compress the summary below" in generated_calls[2]["messages"][0].content
     assert "Conversation segment to compress" not in generated_calls[1]["messages"][0].content
     assert len(selected_calls) >= 1
-
-
 
 
 @pytest.mark.asyncio

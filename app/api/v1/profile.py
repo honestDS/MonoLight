@@ -1,6 +1,6 @@
 """Profile API：渠道管理架构适配版
 
-CRUD 支持 chat_channel/rerank_channel/image_generation_channel；activate 校验适配
+CRUD 支持对话、上下文总结、重排和图像生成渠道；activate 校验适配
 """
 
 from fastapi import (
@@ -141,12 +141,14 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
     """校验 channel 配置中的渠道配置合法性。
 
     - chat_channel：至少需要一条启用规则
+    - context_summary_channel：可选，有配置则按 CHAT 用途校验
     - rerank_channel：可选，有配置则校验
     - image_generation_channel：可选，有配置则校验
     - 每条规则必须引用对应用途的模型条目
     """
     channel_usage_map = {
         "chat_channel": ModelUsage.CHAT,
+        "context_summary_channel": ModelUsage.CHAT,
         "rerank_channel": ModelUsage.RERANK,
         "image_generation_channel": ModelUsage.IMAGE_GENERATION,
     }
