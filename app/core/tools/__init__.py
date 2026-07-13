@@ -21,7 +21,7 @@ from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
 
 logger = get_logger(__name__)
 
-# Tool Registry
+# 可由 Profile 配置启用或禁用的常规工具 Schema
 CONFIGURABLE_TOOL_SCHEMAS = [
     SHELL_TOOL_SCHEMA,
     FILE_WRITER_TOOL_SCHEMA,
@@ -32,26 +32,29 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA,
 ]
 
+# 满足运行条件后才会向模型暴露的工具 Schema
 CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS = [
     IMAGE_GENERATION_TOOL_SCHEMA,
 ]
 
+# 需要根据运行时数据动态调整内容的工具 Schema
 CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
 ]
 
+# 可由模型通过 run_in_background 参数选择后台执行的工具名称
 BACKGROUND_CAPABLE_TOOL_NAMES = {
-    FIRECRAWL_SEARCH_TOOL_SCHEMA["function"]["name"],
-    FIRECRAWL_SCRAPE_TOOL_SCHEMA["function"]["name"],
 }
 
+# 无需模型传参且始终通过后台任务执行的工具名称
 ALWAYS_BACKGROUND_TOOL_NAMES = {
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"],
 }
 
+# 常规可配置工具 Schema 的兼容别名
 ALL_TOOLS_SCHEMAS = CONFIGURABLE_TOOL_SCHEMAS
 
-# Tool Executor Mapping
+# 工具名称与执行器类的映射
 TOOL_EXECUTOR_MAP = {
     SHELL_TOOL_SCHEMA["function"]["name"]: ShellExecutor,
     FILE_WRITER_TOOL_SCHEMA["function"]["name"]: FileWriterExecutor,

@@ -62,6 +62,7 @@ MESSAGES = {
     "ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN": "后台主动回复的最终结果不允许继续调用工具",
     "ERR_FAVICON_NOT_FOUND": "图标文件不存在",
     "ERR_TOOL_MISSING_REQUIRED_ARGUMENTS": "缺少必填参数: {fields}",
+    "ERR_TOOL_UNSUPPORTED_ARGUMENTS": "工具 {tool_name} 的 Schema 未声明以下参数: {fields}，请移除这些参数后重新调用",
     "ERR_TOOL_INVALID_INTEGER_ARGUMENT": "参数 {field} 非法: {value}，必须为整数",
     "ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE": "无权访问知识库 {knowledge_base_id}，该知识库不在当前允许范围内",
     "ERR_TOOL_RUNTIME_CONTEXT_MISSING": "运行时上下文缺失",

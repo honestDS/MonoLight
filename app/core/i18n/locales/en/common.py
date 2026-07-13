@@ -62,6 +62,7 @@ MESSAGES = {
     "ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN": "The final background proactive reply must not contain additional tool calls.",
     "ERR_FAVICON_NOT_FOUND": "Favicon not found",
     "ERR_TOOL_MISSING_REQUIRED_ARGUMENTS": "Missing required arguments: {fields}",
+    "ERR_TOOL_UNSUPPORTED_ARGUMENTS": "The schema for tool {tool_name} does not declare the following arguments: {fields}. Remove them and call the tool again.",
     "ERR_TOOL_INVALID_INTEGER_ARGUMENT": "Invalid argument {field}: {value}. It must be an integer",
     "ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE": "Unauthorized knowledge_base_id: {knowledge_base_id}. It is not in the whitelist of allowed knowledge bases",
     "ERR_TOOL_RUNTIME_CONTEXT_MISSING": "Runtime context is missing",

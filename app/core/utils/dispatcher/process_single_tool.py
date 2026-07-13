@@ -89,6 +89,22 @@ def _build_tool_error_result(tool_name: str, error_message: str) -> str:
     )
 
 
+def _build_unsupported_arguments_result(tool_name: str, unsupported_arguments: list[str]) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "tool_name": tool_name,
+            "error": t(
+                constants.ERR_TOOL_UNSUPPORTED_ARGUMENTS,
+                tool_name=tool_name,
+                fields=", ".join(unsupported_arguments),
+            ),
+            "unsupported_arguments": unsupported_arguments,
+        },
+        ensure_ascii=False,
+    )
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -106,6 +122,11 @@ async def process_single_tool(
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
+    unsupported_arguments = sorted(
+        argument_name
+        for argument_name in args
+        if not tool_schema_has_parameter(tool_name, argument_name)
+    )
     background_requested = bool(args.pop("run_in_background", False))
     background_required = tool_runs_in_background(tool_name)
     run_in_background = background_required or background_requested
@@ -114,7 +135,9 @@ async def process_single_tool(
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
-    elif run_in_background and (not allow_background_submission or (not background_required and not tool_schema_has_parameter(tool_name, "run_in_background"))):
+    elif unsupported_arguments:
+        cmd_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
+    elif run_in_background and not allow_background_submission:
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
         cmd_result = await audit_tool_call(
