@@ -497,6 +497,19 @@ async def _write_summary_fragment(
         )
 
 
+async def _mark_summary_stage_completed(
+    *,
+    stage: ContextSummaryStage,
+) -> bool:
+    async with AsyncSessionLocal() as stage_db:
+        return await context_summary_stage_crud.mark_completed(
+            stage_db,
+            work_dedupe_key=stage.work_dedupe_key,
+            stage_key=stage.stage_key,
+            model_key=stage.model_key,
+        )
+
+
 async def _mark_summary_stage_failed(
     *,
     stage: ContextSummaryStage,
@@ -665,6 +678,11 @@ async def _generate_snapshot_summary(
 
     first_fragment_index = persisted_stage.succeeded_fragment_count
     if first_fragment_index == expected_fragment_count:
+        if not await _mark_summary_stage_completed(stage=persisted_stage):
+            await _mark_summary_stage_failed(
+                stage=persisted_stage,
+                error="Context summary fragment stage failed completion validation",
+            )
         return None, summarized_message_count
 
     fragments = _iter_summary_fragments(
@@ -717,6 +735,10 @@ async def _generate_snapshot_summary(
                 result=result,
             ),
         )
+        if not await _mark_summary_stage_completed(stage=persisted_stage):
+            raise RuntimeError(
+                "Context summary fragment stage failed completion validation",
+            )
     except Exception as exc:
         await _mark_summary_stage_failed(
             stage=persisted_stage,
@@ -744,7 +766,7 @@ async def _generate_snapshot_summary(
         max_result_queue_size=stats.max_result_queue_size,
         max_reorder_size=stats.max_reorder_size,
     ).debug(
-        "Context summary fragments were written to the staging table",
+        "Context summary fragment stage passed validation and was completed",
     )
     return None, summarized_message_count
 

@@ -1,7 +1,7 @@
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import delete, exists, update
+from sqlalchemy import delete, exists, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -14,6 +14,7 @@ from app.models.context_summary_stage import (
     ContextSummaryStage,
     ContextSummaryStageStatus,
 )
+from app.models.message import Message
 
 CONTEXT_SUMMARY_CLEANUP_BATCH_SIZE = 200
 CONTEXT_SUMMARY_CLEANUP_MAX_BATCH_SIZE = 1000
@@ -88,10 +89,114 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
         stage_key: str,
         model_key: str,
     ) -> bool:
+        stage_result = await db.execute(
+            select(ContextSummaryStage)
+            .where(
+                ContextSummaryStage.work_dedupe_key == work_dedupe_key,
+                ContextSummaryStage.stage_key == stage_key,
+                ContextSummaryStage.model_key == model_key,
+                ContextSummaryStage.status == ContextSummaryStageStatus.RUNNING,
+            )
+            .with_for_update()
+        )
+        stage = stage_result.scalars().first()
+        if stage is None or stage.succeeded_fragment_count != stage.expected_fragment_count:
+            await db.rollback()
+            return False
+
+        fragment_result = await db.stream_scalars(
+            select(ContextSummaryFragment)
+            .where(
+                ContextSummaryFragment.work_dedupe_key == work_dedupe_key,
+                ContextSummaryFragment.stage_key == stage_key,
+            )
+            .order_by(ContextSummaryFragment.fragment_index)
+        )
+        fragment_count = 0
+        previous_message_end_id: int | None = None
+        async for fragment in fragment_result:
+            if (
+                fragment.fragment_index != fragment_count
+                or fragment.uid != stage.uid
+                or fragment.session_id != stage.session_id
+                or fragment.work_id != stage.work_id
+                or fragment.snapshot_key != stage.snapshot_key
+                or fragment.model_key != stage.model_key
+                or fragment.channel_id != stage.channel_id
+                or fragment.model_id != stage.model_id
+                or fragment.status != ContextSummaryFragmentStatus.COMPLETED
+                or fragment.message_start_id > fragment.message_end_id
+                or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id)
+            ):
+                await db.rollback()
+                return False
+            if fragment_count == 0 and fragment.message_start_id <= (stage.expected_summary_message_id or 0):
+                await db.rollback()
+                return False
+            previous_message_end_id = fragment.message_end_id
+            fragment_count += 1
+
+        if fragment_count != stage.expected_fragment_count or previous_message_end_id != stage.persistent_summary_target_id:
+            await db.rollback()
+            return False
+
+        fragment_identity = (
+            ContextSummaryFragment.work_dedupe_key == work_dedupe_key,
+            ContextSummaryFragment.stage_key == stage_key,
+            ContextSummaryFragment.model_key == model_key,
+            ContextSummaryFragment.status == ContextSummaryFragmentStatus.COMPLETED,
+        )
+        start_message_exists = exists().where(
+            Message.id == ContextSummaryFragment.message_start_id,
+            Message.uid == stage.uid,
+            Message.session_id == stage.session_id,
+        )
+        end_message_exists = exists().where(
+            Message.id == ContextSummaryFragment.message_end_id,
+            Message.uid == stage.uid,
+            Message.session_id == stage.session_id,
+        )
+        invalid_endpoint = (
+            await db.execute(
+                select(ContextSummaryFragment.id)
+                .where(
+                    *fragment_identity,
+                    or_(~start_message_exists, ~end_message_exists),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if invalid_endpoint is not None:
+            await db.rollback()
+            return False
+
+        covered_by_fragment = exists().where(
+            *fragment_identity,
+            ContextSummaryFragment.message_start_id <= Message.id,
+            ContextSummaryFragment.message_end_id >= Message.id,
+        )
+        missing_message = (
+            await db.execute(
+                select(Message.id)
+                .where(
+                    Message.uid == stage.uid,
+                    Message.session_id == stage.session_id,
+                    Message.id > (stage.expected_summary_message_id or 0),
+                    Message.id <= stage.persistent_summary_target_id,
+                    ~covered_by_fragment,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if missing_message is not None:
+            await db.rollback()
+            return False
+
         now = get_local_time()
-        result = await db.execute(
+        completed_result = await db.execute(
             update(ContextSummaryStage)
             .where(
+                ContextSummaryStage.id == stage.id,
                 ContextSummaryStage.work_dedupe_key == work_dedupe_key,
                 ContextSummaryStage.stage_key == stage_key,
                 ContextSummaryStage.model_key == model_key,
@@ -105,8 +210,11 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             )
             .execution_options(synchronize_session=False)
         )
+        if completed_result.rowcount != 1:
+            await db.rollback()
+            return False
         await db.commit()
-        return result.rowcount == 1
+        return True
 
     async def mark_failed(
         self,

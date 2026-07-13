@@ -18,6 +18,7 @@ from app.models.context_summary_stage import (
     ContextSummaryStage,
     ContextSummaryStageStatus,
 )
+from app.models.message import Message, MessageRole
 
 
 @pytest_asyncio.fixture
@@ -28,6 +29,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
                 tables=[
+                    Message.__table__,
                     ContextSummaryStage.__table__,
                     ContextSummaryFragment.__table__,
                 ],
@@ -45,8 +47,10 @@ def _make_stage(
     stage_key: str = "stage-0",
     model_key: str = "model-key",
     expected_fragment_count: int = 2,
+    persistent_summary_target_id: int | None = None,
     created_at=None,
 ) -> ContextSummaryStage:
+    target_id = persistent_summary_target_id or expected_fragment_count * 10
     return ContextSummaryStage(
         uid="user-1",
         session_id="session-1",
@@ -63,8 +67,8 @@ def _make_stage(
         safety_margin_tokens=512,
         expected_summary_message_id=None,
         expected_summary_revision=0,
-        snapshot_max_message_id=100,
-        persistent_summary_target_id=80,
+        snapshot_max_message_id=max(100, target_id),
+        persistent_summary_target_id=target_id,
         expected_fragment_count=expected_fragment_count,
         created_at=created_at or get_local_time(),
     )
@@ -76,6 +80,8 @@ def _make_fragment(
     work_dedupe_key: str = "work-key",
     stage_key: str = "stage-0",
     model_key: str = "model-key",
+    message_start_id: int | None = None,
+    message_end_id: int | None = None,
     created_at=None,
 ) -> ContextSummaryFragment:
     return ContextSummaryFragment(
@@ -93,8 +99,8 @@ def _make_fragment(
         stage_key=stage_key,
         model_key=model_key,
         fragment_index=fragment_index,
-        message_start_id=fragment_index * 10 + 1,
-        message_end_id=fragment_index * 10 + 10,
+        message_start_id=message_start_id or fragment_index * 10 + 1,
+        message_end_id=message_end_id or fragment_index * 10 + 10,
         channel_id=10,
         model_id="summary-model",
         token_count=20,
@@ -109,6 +115,47 @@ async def _count_rows(
 ) -> int:
     result = await db.execute(select(func.count()).select_from(model))
     return int(result.scalar_one())
+
+
+async def _create_messages(
+    db: AsyncSession,
+    message_ids: list[int],
+    *,
+    session_id: str = "session-1",
+    uid: str = "user-1",
+) -> None:
+    db.add_all(
+        [
+            Message(
+                id=message_id,
+                session_id=session_id,
+                uid=uid,
+                profile_id=1,
+                role=MessageRole.USER,
+                content=f"message-{message_id}",
+            )
+            for message_id in message_ids
+        ]
+    )
+    await db.commit()
+
+
+async def _write_complete_stage(
+    db: AsyncSession,
+    *,
+    message_ids: list[int] | None = None,
+) -> None:
+    await _create_messages(db, message_ids or list(range(1, 21)))
+    await context_summary_stage_crud.create_stage(
+        db,
+        stage=_make_stage(),
+    )
+    for fragment_index in range(2):
+        _, created = await context_summary_fragment_crud.write_ordered(
+            db,
+            fragment=_make_fragment(fragment_index=fragment_index),
+        )
+        assert created is True
 
 
 @pytest.mark.asyncio
@@ -132,6 +179,7 @@ async def test_stage_creation_is_idempotent(db_session: AsyncSession):
 async def test_ordered_fragment_write_counts_once_and_completes_atomically(
     db_session: AsyncSession,
 ):
+    await _create_messages(db_session, list(range(1, 21)))
     await context_summary_stage_crud.create_stage(
         db_session,
         stage=_make_stage(),
@@ -202,6 +250,170 @@ async def test_ordered_fragment_write_counts_once_and_completes_atomically(
     assert stage.status == ContextSummaryStageStatus.COMPLETED
     assert stage.completed_at is not None
     assert await _count_rows(db_session, ContextSummaryFragment) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_validation_accepts_global_message_id_gaps(
+    db_session: AsyncSession,
+):
+    await _create_messages(db_session, [1, 2, 11, 12])
+    await _create_messages(
+        db_session,
+        list(range(3, 11)),
+        session_id="other-session",
+    )
+    await context_summary_stage_crud.create_stage(
+        db_session,
+        stage=_make_stage(persistent_summary_target_id=12),
+    )
+    first, first_created = await context_summary_fragment_crud.write_ordered(
+        db_session,
+        fragment=_make_fragment(
+            fragment_index=0,
+            message_start_id=1,
+            message_end_id=2,
+        ),
+    )
+    second, second_created = await context_summary_fragment_crud.write_ordered(
+        db_session,
+        fragment=_make_fragment(
+            fragment_index=1,
+            message_start_id=11,
+            message_end_id=12,
+        ),
+    )
+
+    assert first is not None
+    assert first_created is True
+    assert second is not None
+    assert second_created is True
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("fragment_index", 2),
+        ("message_start_id", 10),
+        ("message_start_id", 12),
+        ("message_end_id", 19),
+        ("model_key", "other-model"),
+        ("channel_id", 11),
+        ("model_id", "other-summary-model"),
+        ("snapshot_key", "other-snapshot"),
+        ("status", ContextSummaryFragmentStatus.INVALIDATED),
+    ],
+)
+async def test_completion_validation_rejects_invalid_fragment_set(
+    db_session: AsyncSession,
+    field_name: str,
+    invalid_value,
+):
+    await _write_complete_stage(db_session)
+    second = await context_summary_fragment_crud.get_by_dedupe_key(
+        db_session,
+        dedupe_key=build_context_summary_fragment_dedupe_key(
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+            fragment_index=1,
+        ),
+    )
+    assert second is not None
+    setattr(second, field_name, invalid_value)
+    db_session.add(second)
+    await db_session.commit()
+
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is False
+    )
+    stage = await context_summary_stage_crud.get_by_identity(
+        db_session,
+        work_dedupe_key="work-key",
+        stage_key="stage-0",
+    )
+    assert stage is not None
+    assert stage.status == ContextSummaryStageStatus.RUNNING
+    assert stage.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_completion_validation_rejects_missing_fragment(
+    db_session: AsyncSession,
+):
+    await _write_complete_stage(db_session)
+    second = await context_summary_fragment_crud.get_by_dedupe_key(
+        db_session,
+        dedupe_key=build_context_summary_fragment_dedupe_key(
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+            fragment_index=1,
+        ),
+    )
+    assert second is not None
+    await db_session.delete(second)
+    await db_session.commit()
+
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_validation_rejects_non_running_stage(
+    db_session: AsyncSession,
+):
+    await _write_complete_stage(db_session)
+    assert (
+        await context_summary_stage_crud.mark_failed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+            error="cancelled before completion",
+        )
+        is True
+    )
+
+    assert (
+        await context_summary_stage_crud.mark_completed(
+            db_session,
+            work_dedupe_key="work-key",
+            stage_key="stage-0",
+            model_key="model-key",
+        )
+        is False
+    )
+    stage = await context_summary_stage_crud.get_by_identity(
+        db_session,
+        work_dedupe_key="work-key",
+        stage_key="stage-0",
+    )
+    assert stage is not None
+    assert stage.status == ContextSummaryStageStatus.FAILED
+    assert stage.completed_at is None
 
 
 @pytest.mark.asyncio
