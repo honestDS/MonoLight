@@ -102,6 +102,17 @@
               </div>
 
               <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.context_summary_channel') }}</div>
+                <ChannelEditor
+                  :channel="form.configs.channel.context_summary_channel"
+                  :channels="channels"
+                  usage="CHAT"
+                  :label="$t('profiles.context_summary_model')"
+                />
+                <div class="help-text mt-5">{{ $t('profiles.context_summary_channel_hint') }}</div>
+              </div>
+
+              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.rerank_channel') }}</div>
                 <ChannelEditor
                   :channel="form.configs.channel.rerank_channel"
@@ -634,6 +645,11 @@ const showDialog = (type, row = null) => {
         const p = row.configs.channel
         // 深合并渠道配置
         if (p.chat_channel) Object.assign(base.channel.chat_channel, JSON.parse(JSON.stringify(p.chat_channel)))
+        if (p.context_summary_channel) {
+          Object.assign(base.channel.context_summary_channel, JSON.parse(JSON.stringify(p.context_summary_channel)))
+        } else {
+          base.channel.context_summary_channel = JSON.parse(JSON.stringify(base.channel.chat_channel))
+        }
         if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
         if (p.image_generation_channel) Object.assign(base.channel.image_generation_channel, JSON.parse(JSON.stringify(p.image_generation_channel)))
       }
@@ -676,6 +692,7 @@ const submitForm = async () => {
     }
   }
   cleanChannel(form.configs.channel.chat_channel)
+  cleanChannel(form.configs.channel.context_summary_channel)
   cleanChannel(form.configs.channel.rerank_channel)
   cleanChannel(form.configs.channel.image_generation_channel)
   addAllowedFileSendDir()
