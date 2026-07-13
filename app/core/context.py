@@ -18,6 +18,7 @@ from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
     InternalMessage,
+    Message,
     MessageRole,
 )
 from app.models.profile import (
@@ -26,6 +27,8 @@ from app.models.profile import (
 
 load_dotenv()
 logger = get_logger(__name__)
+
+CONTEXT_HISTORY_PAGE_SIZE = 200
 
 
 def _is_background_tool_result_message(msg: InternalMessage) -> bool:
@@ -51,6 +54,70 @@ class ContextRequestBudget:
 
 class ContextManager:
     @classmethod
+    async def _load_history_backward_by_id(
+        cls,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        before_id: int | None,
+        after_id: int | None,
+        limit_tokens: int,
+        current_msg_tokens: int,
+        context_window_k: int,
+        page_size: int = CONTEXT_HISTORY_PAGE_SIZE,
+    ) -> list[Message]:
+        raw_history: list[Message] = []
+        page_before_id = before_id
+        estimated_scan_tokens = current_msg_tokens
+        max_scanned_messages = max(1, limit_tokens - current_msg_tokens)
+
+        while True:
+            page = await message_crud.get_history_backward_by_id(
+                db,
+                session_id=session_id,
+                uid=uid,
+                after_id=after_id,
+                before_id=before_id,
+                page_before_id=page_before_id,
+                limit=page_size,
+            )
+            if not page:
+                break
+
+            reached_safe_budget_boundary = False
+            for raw_message in page:
+                raw_history.append(raw_message)
+                estimated_scan_tokens += max(1, estimate_tokens(raw_message.content or ""))
+
+                if raw_message.role != MessageRole.USER or estimated_scan_tokens < limit_tokens:
+                    continue
+
+                parsed_candidate = parse_db_messages_to_internal(raw_history)
+                _, probe = cls._strategy_atomic_truncate(
+                    uid=uid,
+                    session_id=session_id,
+                    parsed_history=parsed_candidate,
+                    limit_tokens=limit_tokens,
+                    current_msg_tokens=current_msg_tokens,
+                    context_window_k=context_window_k,
+                    emit_logs=False,
+                )
+                if probe["is_hard_truncated"] or len(raw_history) >= max_scanned_messages:
+                    reached_safe_budget_boundary = True
+                    break
+
+            if reached_safe_budget_boundary or len(page) < page_size:
+                break
+
+            last_id = page[-1].id
+            if last_id is None:
+                break
+            page_before_id = last_id
+
+        return raw_history
+
+    @classmethod
     async def get_messages(
         cls,
         db: AsyncSession,
@@ -71,20 +138,22 @@ class ContextManager:
         """
         limit_tokens = cls.get_history_budget_tokens(context_window_k=context_window_k, reserved_tokens=reserved_tokens)
 
-        # 1. 加载并初步解析原始历史记录 (通过工具类进行协议转换)
-        raw_history = await message_crud.get_history(
+        current_msg_tokens = estimate_tokens(current_message)
+
+        # 1. 按消息编号从新到旧分页读取；达到预算后仅在完整轮次起点停止。
+        raw_history = await cls._load_history_backward_by_id(
             db,
             session_id=session_id,
             uid=uid,
-            limit=5000,
             before_id=before_id,
             after_id=after_id,
+            limit_tokens=limit_tokens,
+            current_msg_tokens=current_msg_tokens,
+            context_window_k=context_window_k,
         )
         parsed_history = parse_db_messages_to_internal(raw_history)
 
         # 2. 策略分发
-        current_msg_tokens = estimate_tokens(current_message)
-
         final_msgs, log_data = cls._strategy_atomic_truncate(
             uid=uid,
             session_id=session_id,
@@ -333,6 +402,7 @@ class ContextManager:
         current_msg_tokens: int,
         context_window_k: int,
         tool_result_limit_tokens: int | None = None,
+        emit_logs: bool = True,
     ) -> tuple[list[InternalMessage], dict]:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
@@ -345,8 +415,8 @@ class ContextManager:
         tool_truncation_stats: dict[int, int] = {}
         final_token_cache: dict[int, int] = {}
 
-        # 反向装载（从新到旧）：窗口已满后继续累计被丢弃消息的原始 Token，
-        # 以便压缩日志的 before 反映数据库中的完整历史规模，而非仅窗口内保留部分。
+        # 反向装载（从新到旧）：窗口已满后继续累计本次有限扫描范围内
+        # 被丢弃消息的原始 Token，供压缩日志展示本次裁剪前后的规模。
         for msg in parsed_history:
             if is_hard_truncated:
                 msg_str = cls._message_token_text(msg)
@@ -391,7 +461,12 @@ class ContextManager:
             if id(m) not in added_ids:
                 aligned_msgs.append(m)
 
-        audited_msgs = cls.audit_tool_chain(aligned_msgs, uid=uid, session_id=session_id)
+        audited_msgs = cls.audit_tool_chain(
+            aligned_msgs,
+            uid=uid,
+            session_id=session_id,
+            emit_logs=emit_logs,
+        )
 
         final_truncated_tool_result_chars = 0
         final_truncated_tool_results = 0
@@ -401,7 +476,7 @@ class ContextManager:
                 final_truncated_tool_results += 1
                 final_truncated_tool_result_chars += removed_chars
 
-        if final_truncated_tool_results:
+        if emit_logs and final_truncated_tool_results:
             logger.bind(uid=uid, session_id=session_id).info(
                 t(
                     "LOG_CONTEXT_TOOL_RESULTS_TRUNCATED_SCANNED",
@@ -429,7 +504,13 @@ class ContextManager:
         }
 
     @classmethod
-    def audit_tool_chain(cls, messages: list[InternalMessage], uid: str, session_id: str) -> list[InternalMessage]:
+    def audit_tool_chain(
+        cls,
+        messages: list[InternalMessage],
+        uid: str,
+        session_id: str,
+        emit_logs: bool = True,
+    ) -> list[InternalMessage]:
         audited_msgs = []
         consumed_msg_ids = set()
 
@@ -465,13 +546,14 @@ class ContextManager:
                     consumed_msg_ids.add(id(matched_tool))
 
                 if len(found_tool_call_ids) < len(required_ids):
-                    logger.bind(uid=uid, session_id=session_id).warning(
-                        t(
-                            "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE",
-                            required_ids=required_ids,
-                            found_ids=list(found_tool_call_ids),
+                    if emit_logs:
+                        logger.bind(uid=uid, session_id=session_id).warning(
+                            t(
+                                "LOG_CONTEXT_TOOL_CHAIN_INCOMPLETE",
+                                required_ids=required_ids,
+                                found_ids=list(found_tool_call_ids),
+                            )
                         )
-                    )
                     for tool_call_id in required_ids:
                         if tool_call_id not in found_tool_call_ids:
                             virtual_tool_msg = InternalMessage(
@@ -485,7 +567,8 @@ class ContextManager:
                 if _is_background_tool_result_message(msg):
                     i += 1
                     continue
-                logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
+                if emit_logs:
+                    logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
                 i += 1
             else:
                 audited_msgs.append(msg)
