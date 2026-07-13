@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from app.core import context_summary as summary_module
 from app.core.context import ContextManager
-from app.core.context_summary import ContextSummaryState, _select_summary_segment, _serialize_message
+from app.core.context_summary import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS, ContextSummaryState, _select_recent_rounds, _select_summary_segment, _serialize_message
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 from app.models.profile import ProfileConfig
@@ -47,6 +47,23 @@ def test_select_summary_segment_does_not_split_tool_chain():
 
     assert [message.id for message in segment] == [1, 2, 3]
     assert segment[-1].role == MessageRole.TOOL
+
+
+
+
+def test_select_recent_rounds_returns_last_two_user_led_rounds():
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="first question"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="first answer"),
+        InternalMessage(id=3, role=MessageRole.USER, content="second question"),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="second answer"),
+        InternalMessage(id=5, role=MessageRole.USER, content="third question"),
+        InternalMessage(id=6, role=MessageRole.ASSISTANT, content="third answer"),
+    ]
+
+    recent = _select_recent_rounds(messages, 2)
+
+    assert [message.id for message in recent] == [3, 4, 5, 6]
 
 
 def test_select_summary_segment_requires_a_complete_old_turn():
@@ -181,7 +198,7 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
 
     monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
     monkeypatch.setattr(summary_module.message_crud, "get_history", get_history)
-    monkeypatch.setattr(summary_module, "parse_db_messages_to_internal", lambda _raw: _summary_history())
+    monkeypatch.setattr(summary_module, "parse_db_messages_to_internal", lambda _raw: list(reversed(_summary_history())))
     monkeypatch.setattr(summary_module, "select_channel", select_channel)
     monkeypatch.setattr(
         summary_module,
@@ -207,18 +224,28 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         def debug(self, message, **kwargs):
             debug_calls.append((message, kwargs))
 
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        if "compressed history" in content:
+            return 40
+        return 40
+
     monkeypatch.setattr(summary_module, "logger", CapturingLogger())
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
 
     state = await summary_module.ensure_context_summary(
         object(),
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(),
+        cfg=_summary_cfg(50),
         before_id=10,
         current_message="current",
         context_window_k=1,
-        max_tokens=500,
+        max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
     )
@@ -235,16 +262,16 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         }
     ]
     assert len(generated_calls) == 1
+    assert generated_calls[0]["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
     assert debug_calls[0][0].startswith("Context summary check:")
-    assert debug_calls[-1] == (
-        "Context summary generated:\n{summary}",
-        {"summary": "compressed history"},
-    )
+    assert any(call[0].startswith("Context summary generated:") for call in debug_calls)
+    assert any(call[0].startswith("Context summary recheck:") for call in debug_calls)
     assert bound_fields["uid"] == "user-1"
     assert bound_fields["session_id"] == "session-1"
     assert bound_fields["summarized_through_message_id"] == 4
-    assert bound_fields["summarized_message_count"] == 2
+    assert bound_fields["summarized_message_count"] == 4
     assert bound_fields["summary_tokens"] > 0
+    assert bound_fields["compression_goal_tokens"] == bound_fields["summary_trigger_tokens"] // 2
 
 
 @pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])
@@ -312,7 +339,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         safety_margin_tokens=0,
     )
 
-    assert at_fifty_state == ContextSummaryState(content="compressed history", message_id=2)
+    assert at_fifty_state == ContextSummaryState(content="compressed history", message_id=4)
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
@@ -346,7 +373,7 @@ async def test_context_summary_threshold_includes_tool_definition_tokens(monkeyp
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(content="compressed history", message_id=2)
+    assert state == ContextSummaryState(content="compressed history", message_id=4)
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
@@ -359,16 +386,25 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
         generation_error=RuntimeError("provider unavailable"),
     )
 
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 40
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
     state = await summary_module.ensure_context_summary(
         object(),
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(),
+        cfg=_summary_cfg(50),
         before_id=None,
         current_message="current",
         context_window_k=1,
-        max_tokens=500,
+        max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
     )
@@ -395,18 +431,26 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     async def get_state(_db, *, session_id, uid):
         return next(states)
 
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 40
+
     monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
 
     state = await summary_module.ensure_context_summary(
         object(),
         session_id="session-1",
         uid="user-1",
         profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(),
+        cfg=_summary_cfg(50),
         before_id=None,
         current_message="current",
         context_window_k=1,
-        max_tokens=500,
+        max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
     )
@@ -492,7 +536,153 @@ async def test_context_summary_trigger_includes_reserved_and_current_message_tok
     )
 
     assert state == ContextSummaryState(content="compressed history", message_id=4)
-    assert len(selected_calls) == 1
+    assert len(selected_calls) >= 1
+
+
+
+
+@pytest.mark.asyncio
+async def test_first_summary_prompt_includes_recent_two_rounds(monkeypatch):
+    _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        if "Recent dialogue for task context only" in content:
+            return 50
+        if "Further compress the summary below" in content:
+            return 50
+        return 100
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state.content == "compressed history"
+    prompt = generated_calls[0]["messages"][0].content
+    assert "Recent dialogue for task context only" in prompt
+    assert '"content":"u2u2' in prompt or '"content":"recent"' in prompt
+    assert "## Goal" in prompt
+
+
+@pytest.mark.asyncio
+async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    summaries = iter(
+        [
+            "long summary " * 40,
+            "medium summary " * 10,
+            "short summary",
+        ]
+    )
+
+    async def generate(**kwargs):
+        generated_calls.append(kwargs)
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content=next(summaries)),
+            model="summary-model",
+        )
+
+    monkeypatch.setattr(summary_module.LLMClient, "generate", generate)
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        if "long summary" in content:
+            return 450
+        if "medium summary" in content:
+            return 400
+        if "short summary" in content:
+            return 20
+        if content.startswith("<conversation_summary>"):
+            if "long summary" in content:
+                return 450
+            if "medium summary" in content:
+                return 400
+            if "short summary" in content:
+                return 20
+            return 100
+        return 50
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+
+    state = await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state.content == "short summary"
+    assert state.message_id == 4
+    assert len(generated_calls) == 3
+    assert len(update_calls) == 3
+    assert "Further compress the summary below" in generated_calls[1]["messages"][0].content
+    assert "Further compress the summary below" in generated_calls[2]["messages"][0].content
+    assert "Conversation segment to compress" not in generated_calls[1]["messages"][0].content
+    assert len(selected_calls) >= 1
+
+
+
+
+@pytest.mark.asyncio
+async def test_context_summary_uses_dedicated_timeout_not_chat_timeout(monkeypatch):
+    _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 40
+
+    monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
+    monkeypatch.setattr(
+        summary_module,
+        "resolve_chat_params",
+        lambda *_args: {"context_window_k": 4, "chat_timeout": 1, "max_tokens": 256},
+    )
+
+    await summary_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert generated_calls
+    assert generated_calls[0]["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
+    assert generated_calls[0]["timeout"] != 1
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -346,6 +347,8 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         uid="user-1",
         session_id="session-1",
         profile_id=3,
+        dedupe_key="foreground-message:session-1:11",
+        created_at=datetime(2026, 7, 13, 21, 0, 0),
         execution_state={
             "stream_requested": True,
             "expose_tool_call_content": False,

@@ -1,5 +1,7 @@
+import hashlib
 import json
 import time
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import update
@@ -26,8 +28,55 @@ from app.providers.database import AsyncSessionLocal
 SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX = "session-reply-work"
 
 
-def _result_message_dedupe_key(work_id: int) -> str:
+def _work_identity(work: SessionReplyWorkItem) -> str:
+    created_at = work.created_at.replace(tzinfo=None).isoformat(timespec="microseconds") if isinstance(work.created_at, datetime) else str(work.created_at)
+    payload = json.dumps(
+        {
+            "dedupe_key": work.dedupe_key,
+            "created_at": created_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _result_message_dedupe_key(work: SessionReplyWorkItem) -> str:
+    return f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{_work_identity(work)}:result"
+
+
+def _error_message_dedupe_key(work: SessionReplyWorkItem) -> str:
+    return f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{_work_identity(work)}:error"
+
+
+def _legacy_result_message_dedupe_key(work_id: int) -> str:
     return f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{work_id}:result"
+
+
+def _message_belongs_to_work(message: Message, work: SessionReplyWorkItem) -> bool:
+    if message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id:
+        return False
+    if not isinstance(message.created_at, datetime) or not isinstance(work.created_at, datetime):
+        return False
+    return message.created_at.replace(tzinfo=None) >= work.created_at.replace(tzinfo=None)
+
+
+async def _get_persisted_result(db, work: SessionReplyWorkItem) -> Message | None:
+    persisted_result = await db.get(Message, work.result_message_id) if work.result_message_id else None
+    if persisted_result is not None and _message_belongs_to_work(persisted_result, work):
+        return persisted_result
+
+    persisted_result = await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
+    if persisted_result is not None and _message_belongs_to_work(persisted_result, work):
+        return persisted_result
+
+    if work.id is None:
+        return None
+    legacy_result = await message_crud.get_by_dedupe_key(db, _legacy_result_message_dedupe_key(work.id))
+    if legacy_result is not None and _message_belongs_to_work(legacy_result, work):
+        return legacy_result
+    return None
 
 
 def _response_from_persisted_message(work: SessionReplyWorkItem, message: Message) -> dict[str, Any]:
@@ -72,7 +121,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: "scheduled_task",
     }[work.work_type]
     event = {
-        "event_id": f"session-reply-work:{work.id}:{'error' if error else 'event'}",
+        "event_id": f"session-reply-work:{_work_identity(work)}:{'error' if error else 'event'}",
         "type": "proactive_reply_error" if error else "proactive_reply",
         "source": source,
         "session_id": work.session_id,
@@ -155,7 +204,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         session_source="queue",
         persisted_initial_message=initial_message,
         history_before_id=message_ids[0],
-        final_message_dedupe_key=_result_message_dedupe_key(work.id),
+        final_message_dedupe_key=_result_message_dedupe_key(work),
         persisted_profile_id=work.profile_id,
         stream_event_callback=publish_stream_event if stream_requested else None,
         additional_user_messages_fetcher=fetch_additional_user_messages,
@@ -212,7 +261,7 @@ async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         extra_messages=_build_background_result_messages(task) if submission_context is not None else None,
         submission_context=submission_context,
         reply_source="background_task",
-        final_message_dedupe_key=_result_message_dedupe_key(work.id),
+        final_message_dedupe_key=_result_message_dedupe_key(work),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {
@@ -235,7 +284,7 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         allow_tools=True,
         restrict_tools_to_background_allowlist=False,
         reply_source="scheduled_task",
-        final_message_dedupe_key=_result_message_dedupe_key(work.id),
+        final_message_dedupe_key=_result_message_dedupe_key(work),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {
@@ -251,7 +300,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
 
-        persisted_result = await db.get(Message, work.result_message_id) if work.result_message_id else await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work_id))
+        persisted_result = await _get_persisted_result(db, work)
         if persisted_result is not None:
             response = (work.execution_state or {}).get("response") or _response_from_persisted_message(work, persisted_result)
         elif work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
@@ -261,7 +310,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         else:
             response = await _execute_scheduled(db, work)
 
-        result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work_id))
+        result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
         if result_message is None:
             raise RuntimeError("Final assistant message was not persisted")
 
@@ -321,7 +370,7 @@ async def fail_session_reply_work(
             InternalMessage(role=MessageRole.ERR, content=error_content),
             work.profile_id,
             is_processed=True,
-            dedupe_key=f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{work.id}:error",
+            dedupe_key=_error_message_dedupe_key(work),
         )
 
     await send_session_event(work.uid, work.session_id, _event_for_work(work, {"content": error_content}, error=True))
