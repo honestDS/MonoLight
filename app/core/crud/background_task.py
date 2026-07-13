@@ -225,15 +225,8 @@ class CRUDBackgroundTask(CRUDBase[BackgroundTask, BackgroundTaskCreate, Backgrou
             .returning(BackgroundTask.session_id)
             .execution_options(synchronize_session=False)
         )
-        retained_count = sum(
-            returned_session_id != session_id
-            for returned_session_id in cancelled_result.scalars().all()
-        )
-        delete_result = await db.execute(
-            delete(BackgroundTask)
-            .where(*conditions)
-            .execution_options(synchronize_session=False)
-        )
+        retained_count = sum(returned_session_id != session_id for returned_session_id in cancelled_result.scalars().all())
+        delete_result = await db.execute(delete(BackgroundTask).where(*conditions).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         return retained_count + (delete_result.rowcount or 0)

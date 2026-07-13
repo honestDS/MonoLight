@@ -43,8 +43,7 @@ CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
 ]
 
 # 可由模型通过 run_in_background 参数选择后台执行的工具名称
-BACKGROUND_CAPABLE_TOOL_NAMES = {
-}
+BACKGROUND_CAPABLE_TOOL_NAMES = {}
 
 # 无需模型传参且始终通过后台任务执行的工具名称
 ALWAYS_BACKGROUND_TOOL_NAMES = {

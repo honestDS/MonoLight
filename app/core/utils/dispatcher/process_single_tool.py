@@ -122,11 +122,7 @@ async def process_single_tool(
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
-    unsupported_arguments = sorted(
-        argument_name
-        for argument_name in args
-        if not tool_schema_has_parameter(tool_name, argument_name)
-    )
+    unsupported_arguments = sorted(argument_name for argument_name in args if not tool_schema_has_parameter(tool_name, argument_name))
     background_requested = bool(args.pop("run_in_background", False))
     background_required = tool_runs_in_background(tool_name)
     run_in_background = background_required or background_requested

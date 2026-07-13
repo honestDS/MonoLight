@@ -7,8 +7,9 @@ from pydantic import ValidationError
 from app.core import context_summary as summary_module
 from app.core.context import ContextManager
 from app.core.context_summary import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS, ContextSummaryState, _select_recent_rounds, _select_summary_segment, _serialize_message
+from app.core.context_summary_selection import ContextSummaryModelSnapshot
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
-from app.models.message import ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
+from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
 from app.models.profile import ProfileConfig
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
@@ -178,20 +179,36 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
     async def get_history(*_args, **_kwargs):
         return [object()]
 
-    async def select_channel(*_args, **kwargs):
+    async def select_model(*_args, **kwargs):
         selected_calls.append(kwargs)
         if kwargs.get("excluded_priorities"):
             return None
-        return _SummaryChannel(), {"model_id": "summary-model"}, SimpleNamespace(priority=1)
+        return ContextSummaryModelSnapshot(
+            channel_id=1,
+            channel_name="summary-channel",
+            model_id="summary-model",
+            protocol="openai",
+            base_url="https://example.invalid",
+            api_key="secret",
+            priority=1,
+            context_window_tokens=4096,
+            max_output_tokens=256,
+            safety_margin_tokens=0,
+            input_budget_tokens=3840,
+        )
 
-    async def generate(**kwargs):
-        generated_calls.append(kwargs)
+    async def call_model(*, model, prompt):
+        generated_calls.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "messages": [InternalMessage(role=MessageRole.USER, content=prompt)],
+                "timeout": CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
+            }
+        )
         if generation_error is not None:
             raise generation_error
-        return InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, content="compressed history"),
-            model="summary-model",
-        )
+        return "compressed history"
 
     async def update_summary(*_args, **kwargs):
         update_calls.append(kwargs)
@@ -200,13 +217,8 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
     monkeypatch.setattr(summary_module, "get_context_summary_state", get_state)
     monkeypatch.setattr(summary_module.message_crud, "get_history", get_history)
     monkeypatch.setattr(summary_module, "parse_db_messages_to_internal", lambda _raw: list(reversed(_summary_history())))
-    monkeypatch.setattr(summary_module, "select_channel", select_channel)
-    monkeypatch.setattr(
-        summary_module,
-        "resolve_chat_params",
-        lambda *_args: {"context_window_k": 4, "chat_timeout": 30},
-    )
-    monkeypatch.setattr(summary_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
+    monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
     monkeypatch.setattr(summary_module.session_crud, "update_context_summary", update_summary)
     return selected_calls, update_calls, generated_calls
 
@@ -252,7 +264,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     )
 
     assert state == ContextSummaryState(content="compressed history", message_id=4)
-    assert selected_calls[0]["cursor_key"] == "9:CHAT:CONTEXT_SUMMARY"
+    assert selected_calls[0]["profile_id"] == 9
     assert update_calls == [
         {
             "session_id": "session-1",
@@ -458,7 +470,7 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
 
     assert state == ContextSummaryState(content="newer concurrent summary", message_id=12)
     assert update_calls[0]["expected_message_id"] == 8
-    assert selected_calls[0]["cursor_key"] == "9:CHAT:CONTEXT_SUMMARY"
+    assert selected_calls[0]["profile_id"] == 9
 
 
 @pytest.mark.asyncio
@@ -589,14 +601,18 @@ async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
         ]
     )
 
-    async def generate(**kwargs):
-        generated_calls.append(kwargs)
-        return InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, content=next(summaries)),
-            model="summary-model",
+    async def call_model(*, model, prompt):
+        generated_calls.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "messages": [InternalMessage(role=MessageRole.USER, content=prompt)],
+                "timeout": CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
+            }
         )
+        return next(summaries)
 
-    monkeypatch.setattr(summary_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
 
     def estimate_tokens(content):
         if content == "current":
@@ -657,12 +673,6 @@ async def test_context_summary_uses_dedicated_timeout_not_chat_timeout(monkeypat
         return 40
 
     monkeypatch.setattr(summary_module, "estimate_tokens", estimate_tokens)
-    monkeypatch.setattr(
-        summary_module,
-        "resolve_chat_params",
-        lambda *_args: {"context_window_k": 4, "chat_timeout": 1, "max_tokens": 256},
-    )
-
     await summary_module.ensure_context_summary(
         object(),
         session_id="session-1",

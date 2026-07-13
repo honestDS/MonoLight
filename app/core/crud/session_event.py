@@ -60,11 +60,7 @@ class CRUDSessionEvent(CRUDBase[SessionEvent, SessionEvent, SessionEvent]):
         conditions = [SessionEvent.session_id == session_id]
         if not is_admin:
             conditions.append(SessionEvent.uid == uid)
-        result = await db.execute(
-            delete(SessionEvent)
-            .where(*conditions)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(delete(SessionEvent).where(*conditions).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         return result.rowcount or 0

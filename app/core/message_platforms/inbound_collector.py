@@ -132,5 +132,3 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
         self._dispatch_tasks.discard(task)
         if not task.cancelled():
             task.exception()
-
-

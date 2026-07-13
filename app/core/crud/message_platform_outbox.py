@@ -134,11 +134,7 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
         conditions = [MessagePlatformOutbox.session_id == session_id]
         if not is_admin:
             conditions.append(MessagePlatformOutbox.uid == uid)
-        result = await db.execute(
-            delete(MessagePlatformOutbox)
-            .where(*conditions)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(delete(MessagePlatformOutbox).where(*conditions).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         return result.rowcount or 0

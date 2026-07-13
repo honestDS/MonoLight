@@ -73,4 +73,3 @@ async def test_background_summary_uses_submission_context_and_task_result(monkey
     assert captured["extra_messages"][0].tool_call_id == "call-1"
     assert json.loads(captured["extra_messages"][0].content)["output"] == "snapshot result"
     assert captured["extra_messages"][1].role == MessageRole.USER
-

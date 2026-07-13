@@ -78,18 +78,12 @@ async def test_context_summary_generation_selects_independent_summary_channel(mo
     chat_channel = object()
     summary_channel = object()
     selected_channel_configs = []
-    resolved_channel_configs = []
 
-    async def select_channel(_db, channel_config, *_args, **_kwargs):
+    async def select_model(_db, *, channel_config, **_kwargs):
         selected_channel_configs.append(channel_config)
         return None
 
-    def resolve_chat_params(_model_entry, channel_config):
-        resolved_channel_configs.append(channel_config)
-        return {}
-
-    monkeypatch.setattr(summary_module, "select_channel", select_channel)
-    monkeypatch.setattr(summary_module, "resolve_chat_params", resolve_chat_params)
+    monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
 
     result = await summary_module._generate_summary_text(
         object(),
@@ -108,7 +102,6 @@ async def test_context_summary_generation_selects_independent_summary_channel(mo
 
     assert result is None
     assert selected_channel_configs == [summary_channel]
-    assert resolved_channel_configs == []
 
 
 @pytest.mark.asyncio

@@ -119,11 +119,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         conditions = [ScheduledTask.session_id == session_id]
         if not is_admin:
             conditions.append(ScheduledTask.uid == uid)
-        result = await db.execute(
-            delete(ScheduledTask)
-            .where(*conditions)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(delete(ScheduledTask).where(*conditions).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         return result.rowcount or 0

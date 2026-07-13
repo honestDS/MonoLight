@@ -128,4 +128,3 @@ async def test_collector_close_flushes_pending_messages():
     await collector.close()
 
     assert dispatched == [CollectedMessage(session_id="session-1", texts=["pending"])]
-

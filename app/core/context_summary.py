@@ -3,28 +3,28 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
+from app.core.context_summary_call import (
+    CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS as CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
+)
+from app.core.context_summary_call import call_context_summary_model
+from app.core.context_summary_selection import select_context_summary_model
 from app.core.crud.message import message_crud
 from app.core.crud.session import session_crud
 from app.core.i18n import t
-from app.core.log import channel_log_extra, get_logger
+from app.core.log import get_logger
 from app.core.prompts import (
     CONTEXT_SUMMARY_COMPRESS_PROMPT,
     CONTEXT_SUMMARY_PROMPT,
     CONTEXT_SUMMARY_WRAPPER,
 )
-from app.core.utils.dispatcher.helpers import format_exception_message, resolve_chat_params
+from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
-from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
-
-# 总结压缩专用超时，不读取前端/配置里的 chat_timeout。
-CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -211,64 +211,43 @@ async def _generate_summary_text(
     session_id: str,
 ) -> str | None:
     summary_channel = cfg.channel.context_summary_channel
-    cursor_key = f"{profile.id}:CHAT:CONTEXT_SUMMARY"
     excluded_priorities: set[int] = set()
-    selection = await select_channel(
-        db,
-        summary_channel,
-        "CHAT",
-        call_context="context_summary",
-        cursor_key=cursor_key,
-    )
+    call_context = "context_summary"
+    prompt_tokens = estimate_tokens(prompt)
 
-    while selection:
-        channel, model_entry, rule = selection
-        chat_params = resolve_chat_params(model_entry, summary_channel)
-        summary_max_tokens = min(1024, max(256, chat_params["context_window_k"] * 64))
-        summary_input_tokens = estimate_tokens(prompt)
-        summary_input_budget = max(
-            1,
-            chat_params["context_window_k"] * 1024 - summary_max_tokens - safety_margin_tokens,
+    while True:
+        model = await select_context_summary_model(
+            db,
+            profile_id=profile.id,
+            channel_config=summary_channel,
+            safety_margin_tokens=safety_margin_tokens,
+            excluded_priorities=excluded_priorities,
+            call_context=call_context,
         )
-        if summary_input_tokens > summary_input_budget:
-            excluded_priorities.add(rule.priority)
-            selection = await select_channel(
-                db,
-                summary_channel,
-                "CHAT",
-                call_context="context_summary_retry",
-                excluded_priorities=excluded_priorities,
-                cursor_key=cursor_key,
-            )
-            continue
+        if model is None:
+            await _release_db_session(db)
+            return None
 
-        api_key = channel.get_decrypted_api_key()
-        base_url = channel.base_url
-        protocol = getattr(channel, "protocol", "openai")
-        model_id = model_entry["model_id"]
+        if not model.accepts_prompt_tokens(prompt_tokens):
+            excluded_priorities.add(model.priority)
+            call_context = "context_summary_retry"
+            continue
 
         # 调模型前释放调用方事务，避免长请求期间占着写锁。
         await _release_db_session(db)
 
         try:
-            response = await LLMClient.generate(
-                api_key=api_key,
-                base_url=base_url,
-                model_id=model_id,
-                messages=[InternalMessage(role=MessageRole.USER, content=prompt)],
-                temperature=0.2,
-                max_tokens=summary_max_tokens,
-                protocol=protocol,
-                timeout=CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
-            )
-            summary = (response.message.content or "").strip()
-            return summary or None
+            return await call_context_summary_model(model=model, prompt=prompt)
         except Exception as exc:
-            excluded_priorities.add(rule.priority)
+            excluded_priorities.add(model.priority)
+            call_context = "context_summary_retry"
             logger.bind(
                 uid=uid,
                 session_id=session_id,
-                **channel_log_extra(channel, model_entry),
+                channel_id=model.channel_id,
+                channel_name=model.channel_name,
+                model_id=model.model_id,
+                model_name=model.model_id,
             ).warning(
                 t(
                     "LOG_CONTEXT_SUMMARY_CHANNEL_FAILED",
@@ -276,17 +255,6 @@ async def _generate_summary_text(
                     error=format_exception_message(exc),
                 )
             )
-            selection = await select_channel(
-                db,
-                summary_channel,
-                "CHAT",
-                call_context="context_summary_retry",
-                excluded_priorities=excluded_priorities,
-                cursor_key=cursor_key,
-            )
-
-    await _release_db_session(db)
-    return None
 
 
 async def ensure_context_summary(
