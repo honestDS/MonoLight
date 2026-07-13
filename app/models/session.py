@@ -27,6 +27,7 @@ class ChatSession(SQLModel, table=True):
     enable_markdown: bool = Field(default=False)
     context_summary: str | None = Field(default=None)
     context_summary_message_id: int | None = Field(default=None, index=True)
+    context_summary_revision: int = Field(default=0, ge=0)
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

@@ -74,6 +74,66 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt)
         return result.scalars().all()
 
+    async def get_history_forward_by_id(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        after_id: int | None = None,
+        before_id: int | None = None,
+        page_after_id: int | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """
+        按消息编号从旧到新读取固定开区间内的一页历史。
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+
+        lower_bound = after_id
+        if page_after_id is not None:
+            lower_bound = page_after_id if lower_bound is None else max(lower_bound, page_after_id)
+
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
+        if lower_bound is not None:
+            stmt = stmt.where(Message.id > lower_bound)
+        if before_id is not None:
+            stmt = stmt.where(Message.id < before_id)
+
+        result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit))
+        return result.scalars().all()
+
+    async def get_history_backward_by_id(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        after_id: int | None = None,
+        before_id: int | None = None,
+        page_before_id: int | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """
+        按消息编号从新到旧读取固定开区间内的一页历史。
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+
+        upper_bound = before_id
+        if page_before_id is not None:
+            upper_bound = page_before_id if upper_bound is None else min(upper_bound, page_before_id)
+
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
+        if after_id is not None:
+            stmt = stmt.where(Message.id > after_id)
+        if upper_bound is not None:
+            stmt = stmt.where(Message.id < upper_bound)
+
+        result = await db.execute(stmt.order_by(Message.id.desc()).limit(limit))
+        return result.scalars().all()
+
     async def get_unprocessed_messages(self, db: AsyncSession, *, session_id: str, uid: str) -> list[Message]:
         """
         获取未处理的新消息（通常用于动态追加用户新输入的指令）
