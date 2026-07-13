@@ -310,7 +310,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert bound_fields["summarized_through_message_id"] == 4
     assert bound_fields["summarized_message_count"] == 4
     assert bound_fields["summary_tokens"] > 0
-    assert bound_fields["compression_goal_tokens"] == bound_fields["summary_trigger_tokens"] // 2
+    assert bound_fields["compression_goal_tokens"] == bound_fields["summary_trigger_tokens"]
 
 
 @pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])
@@ -450,8 +450,8 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
 
     assert state == ContextSummaryState(content=None, message_id=None)
     assert update_calls == []
-    assert len(selected_calls) == 2
-    assert selected_calls[1]["excluded_priorities"] == {1}
+    assert len(selected_calls) == 1
+    assert selected_calls[0]["excluded_priorities"] == set()
 
 
 @pytest.mark.asyncio
@@ -619,7 +619,7 @@ async def test_first_summary_prompt_excludes_recent_protected_rounds(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
+async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
     summaries = iter(
         [
@@ -646,7 +646,7 @@ async def test_summary_recompresses_until_half_threshold_goal(monkeypatch):
         if content == "current":
             return 10
         if content.startswith('{"role":'):
-            return 100
+            return 200
         if "long summary" in content:
             return 450
         if "medium summary" in content:

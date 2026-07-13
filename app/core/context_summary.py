@@ -1,5 +1,7 @@
+import hashlib
 import json
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,11 +9,25 @@ from app.core.context_summary_call import (
     CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS as CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
 )
 from app.core.context_summary_call import call_context_summary_model
-from app.core.context_summary_selection import select_context_summary_model
+from app.core.context_summary_pipeline import (
+    SummaryFragmentInput,
+    SummaryFragmentResult,
+    balanced_fragment_target_tokens,
+    run_bounded_fragment_pipeline,
+)
+from app.core.context_summary_selection import (
+    ContextSummaryModelSnapshot,
+    select_context_summary_model,
+)
 from app.core.context_summary_snapshot import (
     ContextSummarySnapshot,
     build_context_summary_snapshot,
     iter_persistent_summary_rounds,
+)
+from app.core.crud.context_summary_stage import (
+    build_context_summary_fragment_dedupe_key,
+    context_summary_fragment_crud,
+    context_summary_stage_crud,
 )
 from app.core.crud.session import session_crud
 from app.core.i18n import t
@@ -23,6 +39,11 @@ from app.core.prompts import (
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.tokenizer import estimate_tokens
+from app.models.context_summary_stage import (
+    ContextSummaryFragment,
+    ContextSummaryStage,
+    ContextSummaryStageStatus,
+)
 from app.models.message import InternalMessage, MessageRole
 from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
@@ -34,6 +55,7 @@ logger = get_logger(__name__)
 class ContextSummaryState:
     content: str | None
     message_id: int | None
+    revision: int = field(default=0, compare=False, repr=False)
 
     def as_message(self) -> InternalMessage | None:
         if not self.content:
@@ -120,7 +142,7 @@ def _calc_token_usage(
     current_message_tokens = estimate_tokens(current_message)
     required_tokens = reserved_tokens + summary_tokens + history_tokens + current_message_tokens + tools_tokens
     summary_trigger_tokens = max(1, input_budget * threshold_percent // 100)
-    compression_goal_tokens = max(1, summary_trigger_tokens // 2)
+    compression_goal_tokens = summary_trigger_tokens
     return {
         "summary_tokens": summary_tokens,
         "history_tokens": history_tokens,
@@ -202,6 +224,7 @@ async def get_context_summary_state(
     return ContextSummaryState(
         content=session.context_summary,
         message_id=session.context_summary_message_id,
+        revision=session.context_summary_revision,
     )
 
 
@@ -282,6 +305,213 @@ async def _measure_snapshot_history(
     return history_tokens, history_message_count
 
 
+def _fragment_prompt(
+    fragment: SummaryFragmentInput,
+) -> str:
+    return CONTEXT_SUMMARY_PROMPT.format(
+        existing_summary=fragment.existing_summary or "(none)",
+        recent_dialogue="(none)",
+        conversation=fragment.content,
+    )
+
+
+async def _measure_persistent_history(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    snapshot: ContextSummarySnapshot,
+) -> tuple[int, int]:
+    total_tokens = 0
+    message_count = 0
+    async for round_messages in iter_persistent_summary_rounds(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+    ):
+        total_tokens += sum(estimate_tokens(_serialize_message(message)) for message in round_messages)
+        message_count += len(round_messages)
+    return total_tokens, message_count
+
+
+async def _count_summary_fragments(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    snapshot: ContextSummarySnapshot,
+    fragment_target_tokens: int,
+    max_fragment_tokens: int,
+) -> int:
+    fragment_count = 0
+    pending_tokens = 0
+    async for round_messages in iter_persistent_summary_rounds(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+    ):
+        round_tokens = sum(estimate_tokens(_serialize_message(message)) for message in round_messages)
+        if round_tokens > max_fragment_tokens:
+            return 0
+        if pending_tokens and pending_tokens + round_tokens > fragment_target_tokens:
+            fragment_count += 1
+            pending_tokens = 0
+        pending_tokens += round_tokens
+    if pending_tokens:
+        fragment_count += 1
+    return fragment_count
+
+
+async def _iter_summary_fragments(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    snapshot: ContextSummarySnapshot,
+    existing_summary: str | None,
+    fragment_target_tokens: int,
+    first_fragment_index: int = 0,
+) -> AsyncIterator[SummaryFragmentInput]:
+    fragment_index = 0
+    pending_messages: list[InternalMessage] = []
+    pending_tokens = 0
+
+    def build_fragment() -> SummaryFragmentInput:
+        start_id = pending_messages[0].id
+        end_id = pending_messages[-1].id
+        if start_id is None or end_id is None:
+            raise RuntimeError(
+                "Context summary fragment messages must have database IDs",
+            )
+        return SummaryFragmentInput(
+            fragment_index=fragment_index,
+            message_start_id=start_id,
+            message_end_id=end_id,
+            token_count=pending_tokens,
+            content=_join_messages(pending_messages),
+            existing_summary=existing_summary if fragment_index == 0 else None,
+        )
+
+    async for round_messages in iter_persistent_summary_rounds(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+    ):
+        round_tokens = sum(estimate_tokens(_serialize_message(message)) for message in round_messages)
+        if pending_messages and pending_tokens + round_tokens > fragment_target_tokens:
+            if fragment_index >= first_fragment_index:
+                yield build_fragment()
+            fragment_index += 1
+            pending_messages = []
+            pending_tokens = 0
+        pending_messages.extend(round_messages)
+        pending_tokens += round_tokens
+
+    if pending_messages and fragment_index >= first_fragment_index:
+        yield build_fragment()
+
+
+def _build_stage_identity(
+    *,
+    session_id: str,
+    uid: str,
+    snapshot: ContextSummarySnapshot,
+    revision: int,
+    model: ContextSummaryModelSnapshot,
+    expected_fragment_count: int,
+) -> tuple[int, str, str, str, str]:
+    snapshot_payload = json.dumps(
+        {
+            "uid": uid,
+            "session_id": session_id,
+            "expected_summary_message_id": snapshot.expected_summary_message_id,
+            "revision": revision,
+            "snapshot_max_message_id": snapshot.snapshot_max_message_id,
+            "persistent_summary_target_id": snapshot.persistent_summary_target_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    snapshot_key = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
+    work_dedupe_key = f"context-summary:{snapshot_key}"
+    work_id = int(snapshot_key[:15], 16) or 1
+    model_payload = json.dumps(
+        {
+            "channel_id": model.channel_id,
+            "model_id": model.model_id,
+            "context_window_tokens": model.context_window_tokens,
+            "max_output_tokens": model.max_output_tokens,
+            "safety_margin_tokens": model.safety_margin_tokens,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    model_key = hashlib.sha256(model_payload.encode("utf-8")).hexdigest()
+    stage_payload = f"{snapshot_key}:{model_key}:raw:{expected_fragment_count}"
+    stage_key = hashlib.sha256(stage_payload.encode("utf-8")).hexdigest()
+    return work_id, work_dedupe_key, snapshot_key, stage_key, model_key
+
+
+async def _write_summary_fragment(
+    *,
+    stage: ContextSummaryStage,
+    result: SummaryFragmentResult,
+) -> None:
+    fragment = ContextSummaryFragment(
+        dedupe_key=build_context_summary_fragment_dedupe_key(
+            work_dedupe_key=stage.work_dedupe_key,
+            stage_key=stage.stage_key,
+            model_key=stage.model_key,
+            fragment_index=result.fragment_index,
+        ),
+        uid=stage.uid,
+        session_id=stage.session_id,
+        work_id=stage.work_id,
+        work_dedupe_key=stage.work_dedupe_key,
+        snapshot_key=stage.snapshot_key,
+        stage_key=stage.stage_key,
+        model_key=stage.model_key,
+        fragment_index=result.fragment_index,
+        message_start_id=result.message_start_id,
+        message_end_id=result.message_end_id,
+        channel_id=stage.channel_id,
+        model_id=stage.model_id,
+        token_count=result.token_count,
+        content=result.content,
+    )
+    async with AsyncSessionLocal() as fragment_db:
+        persisted, created = await context_summary_fragment_crud.write_ordered(
+            fragment_db,
+            fragment=fragment,
+        )
+    if persisted is None:
+        raise RuntimeError(
+            "Context summary fragment could not be written in order",
+        )
+    if not created and (persisted.message_start_id != result.message_start_id or persisted.message_end_id != result.message_end_id or persisted.content != result.content):
+        raise RuntimeError(
+            "Context summary fragment conflicts with an existing result",
+        )
+
+
+async def _mark_summary_stage_failed(
+    *,
+    stage: ContextSummaryStage,
+    error: str,
+) -> None:
+    async with AsyncSessionLocal() as stage_db:
+        await context_summary_stage_crud.mark_failed(
+            stage_db,
+            work_dedupe_key=stage.work_dedupe_key,
+            stage_key=stage.stage_key,
+            model_key=stage.model_key,
+            error=error,
+        )
+
+
 async def _generate_snapshot_summary(
     db: AsyncSession,
     *,
@@ -291,77 +521,232 @@ async def _generate_snapshot_summary(
     cfg: ProfileConfig,
     snapshot: ContextSummarySnapshot,
     existing_summary: str | None,
-    segment_target_tokens: int,
+    existing_summary_revision: int,
     safety_margin_tokens: int,
 ) -> tuple[str | None, int]:
-    candidate_summary = existing_summary
-    pending_messages: list[InternalMessage] = []
-    pending_tokens = 0
-    summarized_message_count = 0
-    summarized_through_message_id = snapshot.expected_summary_message_id or 0
-
-    async def flush_pending() -> bool:
-        nonlocal candidate_summary, pending_messages, pending_tokens
-        if not pending_messages:
-            return True
-        prompt = CONTEXT_SUMMARY_PROMPT.format(
-            existing_summary=candidate_summary or "(none)",
-            recent_dialogue="(none)",
-            conversation=_join_messages(pending_messages),
-        )
-        generated = await _generate_summary_text(
-            db,
-            profile=profile,
-            cfg=cfg,
-            prompt=prompt,
-            safety_margin_tokens=safety_margin_tokens,
-            uid=uid,
-            session_id=session_id,
-        )
-        if not generated:
-            return False
-        candidate_summary = generated
-        pending_messages = []
-        pending_tokens = 0
-        return True
-
-    async for round_messages in iter_persistent_summary_rounds(
+    total_tokens, summarized_message_count = await _measure_persistent_history(
         db,
         session_id=session_id,
         uid=uid,
         snapshot=snapshot,
-    ):
-        round_tokens = sum(estimate_tokens(_serialize_message(message)) for message in round_messages)
-        if pending_messages and pending_tokens + round_tokens > segment_target_tokens:
-            if not await flush_pending():
-                return None, summarized_message_count
-        if round_tokens > segment_target_tokens:
+    )
+    if total_tokens <= 0:
+        return None, summarized_message_count
+
+    model = await select_context_summary_model(
+        db,
+        profile_id=profile.id,
+        channel_config=cfg.channel.context_summary_channel,
+        safety_margin_tokens=safety_margin_tokens,
+        excluded_priorities=set(),
+        call_context="context_summary",
+    )
+    if model is None:
+        await _release_db_session(db)
+        return None, summarized_message_count
+
+    empty_prompt = CONTEXT_SUMMARY_PROMPT.format(
+        existing_summary=existing_summary or "(none)",
+        recent_dialogue="(none)",
+        conversation="(none)",
+    )
+    prompt_overhead_tokens = estimate_tokens(empty_prompt)
+    max_fragment_tokens = model.input_budget_tokens - prompt_overhead_tokens - 32
+    if max_fragment_tokens <= 0:
+        await _release_db_session(db)
+        return None, summarized_message_count
+
+    fragment_target_tokens = balanced_fragment_target_tokens(
+        total_tokens,
+        max_fragment_tokens,
+    )
+    expected_fragment_count = await _count_summary_fragments(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        fragment_target_tokens=fragment_target_tokens,
+        max_fragment_tokens=max_fragment_tokens,
+    )
+    if expected_fragment_count <= 0:
+        await _release_db_session(db)
+        return None, summarized_message_count
+
+    fragments = _iter_summary_fragments(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        existing_summary=existing_summary,
+        fragment_target_tokens=fragment_target_tokens,
+    )
+    if expected_fragment_count == 1:
+        fragment = await anext(fragments, None)
+        if fragment is None:
+            await _release_db_session(db)
+            return None, summarized_message_count
+        prompt = _fragment_prompt(fragment)
+        if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
+            await _release_db_session(db)
+            return None, summarized_message_count
+        await _release_db_session(db)
+        try:
+            generated = await call_context_summary_model(
+                model=model,
+                prompt=prompt,
+            )
+        except Exception as exc:
             logger.bind(
                 uid=uid,
                 session_id=session_id,
-                round_start_message_id=round_messages[0].id,
-                round_end_message_id=round_messages[-1].id,
-                round_tokens=round_tokens,
-                segment_target_tokens=segment_target_tokens,
-            ).debug(
-                "Context summary stopped: one historical round exceeds the current segment target, round_start={round_start_message_id}, round_end={round_end_message_id}, round_tokens={round_tokens}, target={segment_target_tokens}",
-                round_start_message_id=round_messages[0].id,
-                round_end_message_id=round_messages[-1].id,
-                round_tokens=round_tokens,
-                segment_target_tokens=segment_target_tokens,
+                channel_id=model.channel_id,
+                channel_name=model.channel_name,
+                model_id=model.model_id,
+            ).warning(
+                t(
+                    "LOG_CONTEXT_SUMMARY_CHANNEL_FAILED",
+                    default="Context summary channel failed: {error}",
+                    error=format_exception_message(exc),
+                )
             )
             return None, summarized_message_count
-        pending_messages.extend(round_messages)
-        pending_tokens += round_tokens
-        summarized_message_count += len(round_messages)
-        if round_messages[-1].id is not None:
-            summarized_through_message_id = round_messages[-1].id
+        if not generated or estimate_tokens(generated) >= total_tokens:
+            return None, summarized_message_count
+        return generated, summarized_message_count
 
-    if not await flush_pending():
+    snapshot_max_message_id = snapshot.snapshot_max_message_id
+    persistent_summary_target_id = snapshot.persistent_summary_target_id
+    if snapshot_max_message_id is None or persistent_summary_target_id is None:
+        await _release_db_session(db)
         return None, summarized_message_count
-    if summarized_through_message_id != snapshot.persistent_summary_target_id:
+
+    (
+        work_id,
+        work_dedupe_key,
+        snapshot_key,
+        stage_key,
+        model_key,
+    ) = _build_stage_identity(
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        revision=existing_summary_revision,
+        model=model,
+        expected_fragment_count=expected_fragment_count,
+    )
+    stage = ContextSummaryStage(
+        uid=uid,
+        session_id=session_id,
+        work_id=work_id,
+        work_dedupe_key=work_dedupe_key,
+        snapshot_key=snapshot_key,
+        stage_key=stage_key,
+        lower_stage_key=None,
+        model_key=model_key,
+        channel_id=model.channel_id,
+        model_id=model.model_id,
+        context_window_k=max(1, model.context_window_tokens // 1024),
+        max_output_tokens=model.max_output_tokens,
+        safety_margin_tokens=model.safety_margin_tokens,
+        expected_summary_message_id=snapshot.expected_summary_message_id,
+        expected_summary_revision=existing_summary_revision,
+        snapshot_max_message_id=snapshot_max_message_id,
+        persistent_summary_target_id=persistent_summary_target_id,
+        expected_fragment_count=expected_fragment_count,
+    )
+    await _release_db_session(db)
+    async with AsyncSessionLocal() as stage_db:
+        persisted_stage, _ = await context_summary_stage_crud.create_stage(
+            stage_db,
+            stage=stage,
+        )
+    if persisted_stage.model_key != model_key or persisted_stage.expected_fragment_count != expected_fragment_count or persisted_stage.status != ContextSummaryStageStatus.RUNNING or persisted_stage.succeeded_fragment_count > expected_fragment_count:
         return None, summarized_message_count
-    return candidate_summary, summarized_message_count
+
+    first_fragment_index = persisted_stage.succeeded_fragment_count
+    if first_fragment_index == expected_fragment_count:
+        return None, summarized_message_count
+
+    fragments = _iter_summary_fragments(
+        db,
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        existing_summary=existing_summary,
+        fragment_target_tokens=fragment_target_tokens,
+        first_fragment_index=first_fragment_index,
+    )
+
+    async def process_fragment(
+        fragment: SummaryFragmentInput,
+    ) -> SummaryFragmentResult:
+        prompt = _fragment_prompt(fragment)
+        if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
+            raise RuntimeError(
+                "Context summary fragment exceeds the selected model window",
+            )
+        generated = await call_context_summary_model(
+            model=model,
+            prompt=prompt,
+        )
+        if not generated:
+            raise RuntimeError(
+                "Context summary fragment returned an empty result",
+            )
+        output_tokens = estimate_tokens(generated)
+        if output_tokens >= fragment.token_count:
+            raise RuntimeError(
+                "Context summary fragment did not reduce its input",
+            )
+        return SummaryFragmentResult(
+            fragment_index=fragment.fragment_index,
+            message_start_id=fragment.message_start_id,
+            message_end_id=fragment.message_end_id,
+            content=generated,
+            token_count=output_tokens,
+        )
+
+    try:
+        stats = await run_bounded_fragment_pipeline(
+            fragments=fragments,
+            expected_fragment_count=expected_fragment_count,
+            process_fragment=process_fragment,
+            first_fragment_index=first_fragment_index,
+            persist_fragment=lambda result: _write_summary_fragment(
+                stage=persisted_stage,
+                result=result,
+            ),
+        )
+    except Exception as exc:
+        await _mark_summary_stage_failed(
+            stage=persisted_stage,
+            error=format_exception_message(exc),
+        )
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            stage_key=stage_key,
+            model_key=model_key,
+        ).warning(
+            "Context summary fragment stage failed: {error}",
+            error=format_exception_message(exc),
+        )
+        return None, summarized_message_count
+
+    logger.bind(
+        uid=uid,
+        session_id=session_id,
+        stage_key=stage_key,
+        model_key=model_key,
+        expected_fragment_count=expected_fragment_count,
+        max_active_tasks=stats.max_active_tasks,
+        max_input_queue_size=stats.max_input_queue_size,
+        max_result_queue_size=stats.max_result_queue_size,
+        max_reorder_size=stats.max_reorder_size,
+    ).debug(
+        "Context summary fragments were written to the staging table",
+    )
+    return None, summarized_message_count
 
 
 async def ensure_context_summary(
@@ -464,11 +849,6 @@ async def ensure_context_summary(
     candidate_summary = state.content
     summarized_message_count = 0
     if snapshot.has_persistent_history:
-        available_history_tokens = max(
-            1,
-            usage["input_budget"] - reserved_tokens - usage["summary_tokens"] - usage["current_message_tokens"] - usage["tools_tokens"],
-        )
-        segment_target_tokens = max(1, available_history_tokens // 2)
         candidate_summary, summarized_message_count = await _generate_snapshot_summary(
             db,
             session_id=session_id,
@@ -477,7 +857,7 @@ async def ensure_context_summary(
             cfg=cfg,
             snapshot=snapshot,
             existing_summary=state.content,
-            segment_target_tokens=segment_target_tokens,
+            existing_summary_revision=state.revision,
             safety_margin_tokens=safety_margin_tokens,
         )
         if not candidate_summary:
@@ -543,4 +923,8 @@ async def ensure_context_summary(
     )
     if not updated:
         return await get_context_summary_state(db, session_id=session_id, uid=uid)
-    return ContextSummaryState(content=candidate_summary, message_id=target_message_id)
+    return ContextSummaryState(
+        content=candidate_summary,
+        message_id=target_message_id,
+        revision=state.revision,
+    )
