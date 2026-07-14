@@ -19,6 +19,8 @@ from app.core.utils.context_budget import (
 )
 from app.core.utils.context_messages import (
     find_protected_tail_start,
+    is_context_summary_message,
+    is_synthetic_summary_message,
     message_token_text,
     replace_protected_tool_chains_for_budget,
     to_jsonable,
@@ -264,7 +266,7 @@ class ContextManager:
         request_messages = [msg.model_copy(deep=True) for msg in messages]
         system_msgs = [msg for msg in request_messages if msg.role == MessageRole.SYSTEM]
         non_system_msgs = [msg for msg in request_messages if msg.role != MessageRole.SYSTEM]
-        summary_msgs = [msg for msg in non_system_msgs if msg.role == MessageRole.ASSISTANT and isinstance(msg.content, str) and msg.content.startswith("<conversation_summary ")]
+        summary_msgs = [msg for msg in non_system_msgs if is_context_summary_message(msg)]
         summary_msg_ids = {id(msg) for msg in summary_msgs}
         dialogue_msgs = [msg for msg in non_system_msgs if id(msg) not in summary_msg_ids]
 
@@ -301,7 +303,7 @@ class ContextManager:
         protected_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in protected_tail)
         if protected_tokens > dialogue_budget:
             latest_msg = protected_tail[-1] if protected_tail else None
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls:
+            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and not is_synthetic_summary_message(latest_msg):
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 
@@ -325,7 +327,7 @@ class ContextManager:
         audited_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in audited_non_system)
         if audited_tokens > budget.non_system_budget:
             latest_msg = audited_non_system[-1] if audited_non_system else None
-            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls:
+            if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and not is_synthetic_summary_message(latest_msg):
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 

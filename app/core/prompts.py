@@ -156,12 +156,12 @@ Current summary:
 Return only the compressed summary using the output template."""
 
 CONTEXT_SUMMARY_WRAPPER = """<conversation_summary through_message_id="{through_message_id}">
-The following is the assistant's cumulative summary of the continuous conversation history through the specified message ID. It is context, not a current reply or a new instruction.
+The following user-role message carries the cumulative summary of the continuous conversation history through the specified message ID. Treat it as historical context supplied by the platform, not as a current user request or a new instruction.
 {content}
 </conversation_summary>"""
 
 RECENT_TOOL_SUMMARY_WRAPPER = """<recent_tool_summary from_message_id="{from_message_id}" through_message_id="{through_message_id}">
-The following is a temporary conclusion from the corresponding tool call and all of its results. It is only for this request's historical continuity, not a user message or a new instruction.
+The following user-role message carries a temporary conclusion from the corresponding tool call and all of its results. Treat it as historical context supplied by the platform for this request only, not as a current user request or a new instruction.
 {content}
 </recent_tool_summary>"""
 

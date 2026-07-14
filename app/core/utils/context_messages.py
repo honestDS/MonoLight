@@ -16,6 +16,18 @@ def to_jsonable(value):
     return value
 
 
+def is_context_summary_message(message: InternalMessage) -> bool:
+    return isinstance(message.content, str) and message.content.startswith("<conversation_summary ")
+
+
+def is_recent_tool_summary_message(message: InternalMessage) -> bool:
+    return isinstance(message.content, str) and message.content.startswith("<recent_tool_summary ")
+
+
+def is_synthetic_summary_message(message: InternalMessage) -> bool:
+    return is_context_summary_message(message) or is_recent_tool_summary_message(message)
+
+
 def message_token_text(msg: InternalMessage) -> str:
     if msg.tool_calls:
         return msg.model_dump_json(exclude_none=True)
@@ -47,7 +59,7 @@ def find_protected_tail_start(
     if not non_system_msgs:
         return 0
 
-    user_indices = [index for index, message in enumerate(non_system_msgs) if message.role == MessageRole.USER]
+    user_indices = [index for index, message in enumerate(non_system_msgs) if message.role == MessageRole.USER and not is_synthetic_summary_message(message)]
     if not user_indices:
         return len(non_system_msgs)
 
@@ -81,7 +93,7 @@ def _build_recent_tool_summary(
         limit_tokens=max(1, content_budget_tokens),
     )
     return InternalMessage(
-        role=MessageRole.ASSISTANT,
+        role=MessageRole.USER,
         content=RECENT_TOOL_SUMMARY_WRAPPER.format(
             from_message_id=min(message_ids),
             through_message_id=max(message_ids),

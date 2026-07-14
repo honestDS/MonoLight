@@ -38,7 +38,7 @@ class ContextSummaryState:
         if not self.content or self.message_id is None:
             return None
         return InternalMessage(
-            role=MessageRole.ASSISTANT,
+            role=MessageRole.USER,
             content=CONTEXT_SUMMARY_WRAPPER.format(
                 through_message_id=self.message_id,
                 content=self.content,

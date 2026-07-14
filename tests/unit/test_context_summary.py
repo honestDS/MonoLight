@@ -8,6 +8,7 @@ from app.core.prompts import (
     CONTEXT_SUMMARY_WRAPPER,
     RECENT_TOOL_SUMMARY_WRAPPER,
 )
+from app.core.utils.context_messages import find_protected_tail_start
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
 )
@@ -124,27 +125,27 @@ def test_serialize_message_supports_multimodal_content():
     assert "created_at" not in serialized
 
 
-def test_summary_state_builds_bounded_assistant_message():
+def test_summary_state_builds_bounded_user_message():
     state = ContextSummaryState(content="The user selected option A.", message_id=12)
 
     message = state.as_message()
 
     assert message is not None
-    assert message.role == MessageRole.ASSISTANT
+    assert message.role == MessageRole.USER
     assert message.content == CONTEXT_SUMMARY_WRAPPER.format(
         through_message_id=12,
         content=state.content,
     )
 
 
-def test_summary_survives_request_sliding_window_as_bounded_assistant_message():
+def test_summary_survives_request_sliding_window_as_bounded_user_message():
     summary_content = CONTEXT_SUMMARY_WRAPPER.format(
         through_message_id=20,
         content="compressed old turns",
     )
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
-        InternalMessage(role=MessageRole.ASSISTANT, content=summary_content),
+        InternalMessage(role=MessageRole.USER, content=summary_content),
         InternalMessage(id=21, role=MessageRole.USER, content="old recent question " * 40),
         InternalMessage(id=22, role=MessageRole.ASSISTANT, content="old recent answer " * 40),
         InternalMessage(id=23, role=MessageRole.USER, content="latest question"),
@@ -161,7 +162,7 @@ def test_summary_survives_request_sliding_window_as_bounded_assistant_message():
     )
 
     assert request[0].role == MessageRole.SYSTEM
-    assert request[1].role == MessageRole.ASSISTANT
+    assert request[1].role == MessageRole.USER
     assert request[1].content == summary_content
     assert request[-1].id == 23
     assert request[-1].content == "latest question"
@@ -190,6 +191,27 @@ def test_request_sliding_window_preserves_two_historical_rounds_and_current_inpu
     )
 
     assert [message.id for message in request if message.id is not None] == [3, 4, 5, 6, 7]
+
+
+def test_user_role_tool_summary_does_not_count_as_a_user_round():
+    temporary_summary = InternalMessage(
+        role=MessageRole.USER,
+        content=RECENT_TOOL_SUMMARY_WRAPPER.format(
+            from_message_id=2,
+            through_message_id=3,
+            content="lookup completed",
+        ),
+    )
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="first question"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="first answer"),
+        temporary_summary,
+        InternalMessage(id=4, role=MessageRole.USER, content="second question"),
+        InternalMessage(id=5, role=MessageRole.ASSISTANT, content="second answer"),
+        InternalMessage(id=6, role=MessageRole.USER, content="current input"),
+    ]
+
+    assert find_protected_tail_start(messages) == 0
 
 
 def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_tight():
@@ -233,7 +255,7 @@ def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_t
     assert non_system[1].content == "I will check."
     assert non_system[1].tool_calls is None
     temporary_summary = non_system[2]
-    assert temporary_summary.role == MessageRole.ASSISTANT
+    assert temporary_summary.role == MessageRole.USER
     assert temporary_summary.content.startswith(
         RECENT_TOOL_SUMMARY_WRAPPER.format(
             from_message_id=2,

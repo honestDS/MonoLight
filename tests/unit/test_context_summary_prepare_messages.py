@@ -105,7 +105,7 @@ async def test_prepare_messages_combines_summary_with_history_after_boundary(mon
     assert get_messages_calls[0]["after_id"] == 20
     assert messages[0].role == MessageRole.SYSTEM
     assert messages[0].content == "stable system prompt"
-    assert messages[1].role == MessageRole.ASSISTANT
+    assert messages[1].role == MessageRole.USER
     assert messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
         through_message_id=20,
         content="compressed old turns",
