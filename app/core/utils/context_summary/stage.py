@@ -105,15 +105,13 @@ def fragment_prompt(fragment: SummaryFragmentInput) -> str:
     )
 
 
-def build_stage_identity(
+def build_summary_work_identity(
     *,
     session_id: str,
     uid: str,
     snapshot: ContextSummarySnapshot,
     revision: int,
-    model: ContextSummaryModelSnapshot,
-    expected_fragment_count: int,
-) -> tuple[int, str, str, str, str]:
+) -> tuple[int, str, str]:
     snapshot_payload = json.dumps(
         {
             "uid": uid,
@@ -127,8 +125,28 @@ def build_stage_identity(
         separators=(",", ":"),
     )
     snapshot_key = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
-    work_dedupe_key = f"context-summary:{snapshot_key}"
-    work_id = int(snapshot_key[:15], 16) or 1
+    return (
+        int(snapshot_key[:15], 16) or 1,
+        f"context-summary:{snapshot_key}",
+        snapshot_key,
+    )
+
+
+def build_stage_identity(
+    *,
+    session_id: str,
+    uid: str,
+    snapshot: ContextSummarySnapshot,
+    revision: int,
+    model: ContextSummaryModelSnapshot,
+    expected_fragment_count: int,
+) -> tuple[int, str, str, str, str]:
+    work_id, work_dedupe_key, snapshot_key = build_summary_work_identity(
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        revision=revision,
+    )
     model_payload = json.dumps(
         {
             "channel_id": model.channel_id,
@@ -415,9 +433,7 @@ async def generate_snapshot_summary_with_model(
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError(
-                "Context summary work became invalid during fragment execution"
-            ) from exc
+            raise ContextSummaryWorkInvalidError("Context summary work became invalid during fragment execution") from exc
         raise ContextSummaryLayerError("Context summary fragment layer failed") from exc
 
     logger.bind(

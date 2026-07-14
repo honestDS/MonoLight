@@ -30,10 +30,11 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         session_id: str,
         uid: str,
         expected_message_id: int | None,
+        expected_revision: int,
         summary: str,
         message_id: int,
     ) -> bool:
-        stmt = update(ChatSession).where(ChatSession.session_id == session_id).where(ChatSession.uid == uid)
+        stmt = update(ChatSession).where(ChatSession.session_id == session_id).where(ChatSession.uid == uid).where(ChatSession.context_summary_revision == expected_revision)
         if expected_message_id is None:
             stmt = stmt.where(ChatSession.context_summary_message_id.is_(None))
         else:
@@ -43,6 +44,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             stmt.values(
                 context_summary=summary,
                 context_summary_message_id=message_id,
+                context_summary_revision=ChatSession.context_summary_revision + 1,
             )
         )
         await db.flush()

@@ -77,6 +77,14 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         assert claims == {7: "worker-1"}
         return {(7, "worker-1")}
 
+    async def get_session(db, session_id):
+        assert isinstance(db, EventDb)
+        assert session_id == "session-1"
+        return SimpleNamespace(
+            uid="user-1",
+            profile_id=1,
+        )
+
     async def update_claimed(db, **kwargs):
         checkpoint_updates.append(kwargs)
         return True
@@ -89,6 +97,11 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         executor_module.session_reply_work_item_crud,
         "get_active_claims",
         get_active_claims,
+    )
+    monkeypatch.setattr(
+        executor_module.session_crud,
+        "get_by_session_id",
+        get_session,
     )
     monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 

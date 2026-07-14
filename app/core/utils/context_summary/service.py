@@ -1,9 +1,14 @@
+from dataclasses import dataclass
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
+from app.core.utils.context_summary.cleanup import (
+    cleanup_context_summary_work_safely,
+)
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
     ContextSummaryWorkInvalidError,
@@ -17,6 +22,7 @@ from app.core.utils.context_summary.history import measure_snapshot_history
 from app.core.utils.context_summary.selection import select_context_summary_model
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
 from app.core.utils.context_summary.stage import (
+    build_summary_work_identity,
     call_fixed_summary_model,
     generate_snapshot_summary_result,
     release_db_session,
@@ -31,11 +37,17 @@ logger = get_logger(__name__)
 CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS = 2
 
 
+@dataclass
+class ContextSummaryLifecycle:
+    work_dedupe_key: str | None = None
+
+
 async def persist_context_summary(
     *,
     session_id: str,
     uid: str,
     expected_message_id: int | None,
+    expected_revision: int,
     summary: str,
     message_id: int,
 ) -> bool:
@@ -46,6 +58,7 @@ async def persist_context_summary(
             session_id=session_id,
             uid=uid,
             expected_message_id=expected_message_id,
+            expected_revision=expected_revision,
             summary=summary,
             message_id=message_id,
         )
@@ -118,9 +131,7 @@ async def generate_summary_text(
             return generated
         except Exception as exc:
             if contains_context_summary_work_invalid(exc):
-                raise ContextSummaryWorkInvalidError(
-                    "Context summary work became invalid during model execution"
-                ) from exc
+                raise ContextSummaryWorkInvalidError("Context summary work became invalid during model execution") from exc
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -139,7 +150,7 @@ async def generate_summary_text(
             )
 
 
-async def ensure_context_summary(
+async def _ensure_context_summary(
     db: AsyncSession,
     *,
     session_id: str,
@@ -155,6 +166,7 @@ async def ensure_context_summary(
     safety_margin_tokens: int = 256,
     frozen_user_message_ids: list[int] | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
+    lifecycle: ContextSummaryLifecycle,
 ) -> ContextSummaryState:
     await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
@@ -243,6 +255,12 @@ async def ensure_context_summary(
     summarized_message_count = 0
     completed_stage = None
     if snapshot.has_persistent_history:
+        _, lifecycle.work_dedupe_key, _ = build_summary_work_identity(
+            session_id=session_id,
+            uid=uid,
+            snapshot=snapshot,
+            revision=state.revision,
+        )
         generated = await generate_snapshot_summary_result(
             db,
             session_id=session_id,
@@ -311,9 +329,7 @@ async def ensure_context_summary(
                 )
             except Exception as exc:
                 if contains_context_summary_work_invalid(exc):
-                    raise ContextSummaryWorkInvalidError(
-                        "Context summary work became invalid during refinement"
-                    ) from exc
+                    raise ContextSummaryWorkInvalidError("Context summary work became invalid during refinement") from exc
                 logger.bind(
                     uid=uid,
                     session_id=session_id,
@@ -363,6 +379,7 @@ async def ensure_context_summary(
         session_id=session_id,
         uid=uid,
         expected_message_id=state.message_id,
+        expected_revision=state.revision,
         summary=candidate_summary,
         message_id=target_message_id,
     )
@@ -371,5 +388,48 @@ async def ensure_context_summary(
     return ContextSummaryState(
         content=candidate_summary,
         message_id=target_message_id,
-        revision=state.revision,
+        revision=state.revision + 1,
     )
+
+
+async def ensure_context_summary(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    profile: Profile,
+    cfg: ProfileConfig,
+    before_id: int | None,
+    current_message: str,
+    context_window_k: int,
+    max_tokens: int,
+    reserved_tokens: int,
+    tools: list[dict] | None = None,
+    safety_margin_tokens: int = 256,
+    frozen_user_message_ids: list[int] | None = None,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
+) -> ContextSummaryState:
+    lifecycle = ContextSummaryLifecycle()
+    try:
+        return await _ensure_context_summary(
+            db,
+            session_id=session_id,
+            uid=uid,
+            profile=profile,
+            cfg=cfg,
+            before_id=before_id,
+            current_message=current_message,
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            reserved_tokens=reserved_tokens,
+            tools=tools,
+            safety_margin_tokens=safety_margin_tokens,
+            frozen_user_message_ids=frozen_user_message_ids,
+            work_validity_checker=work_validity_checker,
+            lifecycle=lifecycle,
+        )
+    finally:
+        if lifecycle.work_dedupe_key is not None:
+            await cleanup_context_summary_work_safely(
+                lifecycle.work_dedupe_key,
+            )

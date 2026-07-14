@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.core.crud.message import message_crud
+from app.core.crud.session import session_crud
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
@@ -32,6 +33,50 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
     async with session_factory() as session:
         yield session
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_context_summary_update_compares_boundary_and_revision_atomically(
+    db_session: AsyncSession,
+):
+    session = ChatSession(
+        session_id="session-1",
+        uid="user-1",
+        context_summary="old summary",
+        context_summary_message_id=8,
+        context_summary_revision=3,
+    )
+    db_session.add(session)
+    await db_session.commit()
+
+    first_updated = await session_crud.update_context_summary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_message_id=8,
+        expected_revision=3,
+        summary="first candidate",
+        message_id=12,
+    )
+    await db_session.commit()
+
+    stale_same_boundary_updated = await session_crud.update_context_summary(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_message_id=12,
+        expected_revision=3,
+        summary="stale candidate",
+        message_id=12,
+    )
+    await db_session.rollback()
+
+    await db_session.refresh(session)
+    assert first_updated is True
+    assert stale_same_boundary_updated is False
+    assert session.context_summary == "first candidate"
+    assert session.context_summary_message_id == 12
+    assert session.context_summary_revision == 4
 
 
 async def _seed_messages(db: AsyncSession) -> None:

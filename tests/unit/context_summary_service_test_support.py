@@ -176,6 +176,7 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
         lower_stage,
         safety_margin_tokens,
         refinement_index,
+        work_validity_checker=None,
     ):
         generated = await generate_with_input_tokens(
             db,
@@ -205,6 +206,9 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
         update_calls.append(kwargs)
         return update_result
 
+    async def cleanup_work(_work_dedupe_key):
+        return None
+
     monkeypatch.setattr(service_module, "get_context_summary_state", get_state)
     monkeypatch.setattr(service_module, "build_context_summary_snapshot", build_snapshot)
     monkeypatch.setattr(history_module, "iter_persistent_summary_rounds", iter_rounds)
@@ -222,4 +226,9 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
         refine_completed_summary_stage,
     )
     monkeypatch.setattr(service_module, "persist_context_summary", update_summary)
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_context_summary_work_safely",
+        cleanup_work,
+    )
     return selected_calls, update_calls, generated_calls

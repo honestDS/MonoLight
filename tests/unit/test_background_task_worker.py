@@ -44,6 +44,11 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     monkeypatch.setattr(worker.background_task_manager, "stop", stop_manager)
     monkeypatch.setattr(worker, "background_log_cleaner", lambda days: cleaner("log-cleaner"))
     monkeypatch.setattr(worker, "background_temp_cleaner", lambda: cleaner("temp-cleaner"))
+    monkeypatch.setattr(
+        worker,
+        "background_context_summary_cleaner",
+        lambda: cleaner("context-summary-cleaner"),
+    )
 
     task = asyncio.create_task(worker.run_background_task_worker())
     await asyncio.sleep(0)
@@ -60,7 +65,9 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
         "manager-start",
         "log-cleaner-start",
         "temp-cleaner-start",
+        "context-summary-cleaner-start",
         "manager-stop",
         "log-cleaner-stop",
         "temp-cleaner-stop",
+        "context-summary-cleaner-stop",
     ]

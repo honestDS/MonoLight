@@ -10,6 +10,7 @@ from app.core import constants
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
+from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
@@ -180,7 +181,11 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
                 validity_db,
                 {work.id: worker_id},
             )
-        return (work.id, worker_id) in active_claims
+            session = await session_crud.get_by_session_id(
+                validity_db,
+                work.session_id,
+            )
+        return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
 
     async def save_execution_checkpoint(checkpoint: dict[str, Any]) -> None:
         state = {

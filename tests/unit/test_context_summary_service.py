@@ -19,8 +19,12 @@ from tests.unit.context_summary_service_test_support import (
 @pytest.mark.asyncio
 async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolated_cursor(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    cleanup_calls = []
     bound_fields = {}
     debug_calls = []
+
+    async def cleanup_work(work_dedupe_key):
+        cleanup_calls.append(work_dedupe_key)
 
     class CapturingLogger:
         def bind(self, **kwargs):
@@ -40,6 +44,11 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         return 40
 
     monkeypatch.setattr(service_module, "logger", CapturingLogger())
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_context_summary_work_safely",
+        cleanup_work,
+    )
     _patch_token_counter(monkeypatch, estimate_tokens)
 
     state = await service_module.ensure_context_summary(
@@ -56,13 +65,18 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(content="compressed history", message_id=4)
+    assert state == ContextSummaryState(
+        content="compressed history",
+        message_id=4,
+        revision=1,
+    )
     assert selected_calls[0]["profile_id"] == 9
     assert update_calls == [
         {
             "session_id": "session-1",
             "uid": "user-1",
             "expected_message_id": None,
+            "expected_revision": 0,
             "summary": "compressed history",
             "message_id": 4,
         }
@@ -77,6 +91,8 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert bound_fields["summarized_message_count"] == 4
     assert bound_fields["summary_tokens"] > 0
     assert bound_fields["compression_goal_tokens"] == bound_fields["summary_trigger_tokens"]
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0].startswith("context-summary:")
 
 
 @pytest.mark.asyncio
@@ -125,7 +141,11 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         safety_margin_tokens=0,
     )
 
-    assert at_fifty_state == ContextSummaryState(content="compressed history", message_id=4)
+    assert at_fifty_state == ContextSummaryState(
+        content="compressed history",
+        message_id=4,
+        revision=1,
+    )
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
@@ -159,7 +179,11 @@ async def test_context_summary_threshold_includes_tool_definition_tokens(monkeyp
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(content="compressed history", message_id=4)
+    assert state == ContextSummaryState(
+        content="compressed history",
+        message_id=4,
+        revision=1,
+    )
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
@@ -171,6 +195,10 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
         monkeypatch,
         generation_error=RuntimeError("provider unavailable"),
     )
+    cleanup_calls = []
+
+    async def cleanup_work(work_dedupe_key):
+        cleanup_calls.append(work_dedupe_key)
 
     def estimate_tokens(content):
         if content == "current":
@@ -179,6 +207,11 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
             return 100
         return 40
 
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_context_summary_work_safely",
+        cleanup_work,
+    )
     _patch_token_counter(monkeypatch, estimate_tokens)
 
     state = await service_module.ensure_context_summary(
@@ -201,6 +234,8 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
     assert len(selected_calls) == 2
     assert selected_calls[0]["excluded_priorities"] == set()
     assert selected_calls[1]["excluded_priorities"] == {1}
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0].startswith("context-summary:")
 
 
 @pytest.mark.asyncio
@@ -211,8 +246,12 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     )
     states = iter(
         [
-            ContextSummaryState(content="old summary", message_id=8),
-            ContextSummaryState(content="newer concurrent summary", message_id=12),
+            ContextSummaryState(content="old summary", message_id=8, revision=3),
+            ContextSummaryState(
+                content="newer concurrent summary",
+                message_id=12,
+                revision=4,
+            ),
         ]
     )
 
@@ -243,8 +282,13 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(content="newer concurrent summary", message_id=12)
+    assert state == ContextSummaryState(
+        content="newer concurrent summary",
+        message_id=12,
+        revision=4,
+    )
     assert update_calls[0]["expected_message_id"] == 8
+    assert update_calls[0]["expected_revision"] == 3
     assert selected_calls[0]["profile_id"] == 9
 
 
@@ -252,10 +296,12 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
 async def test_context_summary_work_invalid_before_persist_discards_candidate(
     monkeypatch,
 ):
-    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(
-        monkeypatch
-    )
+    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    cleanup_calls = []
     validity_checks = 0
+
+    async def cleanup_work(work_dedupe_key):
+        cleanup_calls.append(work_dedupe_key)
 
     async def check_work_validity():
         nonlocal validity_checks
@@ -271,6 +317,11 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
             return 40
         return 40
 
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_context_summary_work_safely",
+        cleanup_work,
+    )
     _patch_token_counter(monkeypatch, estimate_tokens)
 
     with pytest.raises(
@@ -295,6 +346,8 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
     assert validity_checks == 3
     assert len(generated_calls) == 1
     assert update_calls == []
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0].startswith("context-summary:")
 
 
 @pytest.mark.asyncio
@@ -324,5 +377,9 @@ async def test_context_summary_trigger_includes_reserved_and_current_message_tok
         safety_margin_tokens=0,
     )
 
-    assert state == ContextSummaryState(content="compressed history", message_id=4)
+    assert state == ContextSummaryState(
+        content="compressed history",
+        message_id=4,
+        revision=1,
+    )
     assert len(selected_calls) >= 1
