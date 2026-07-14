@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.context import ContextManager
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.prompts import CONTEXT_SUMMARY_WRAPPER, RECENT_TOOL_SUMMARY_WRAPPER
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
 )
@@ -107,22 +107,29 @@ def test_serialize_message_supports_multimodal_content():
     assert "created_at" not in serialized
 
 
-def test_summary_state_builds_stable_system_message():
+def test_summary_state_builds_bounded_assistant_message():
     state = ContextSummaryState(content="The user selected option A.", message_id=12)
 
     message = state.as_message()
 
     assert message is not None
-    assert message.role == MessageRole.SYSTEM
-    assert message.content == CONTEXT_SUMMARY_WRAPPER.format(content=state.content)
+    assert message.role == MessageRole.ASSISTANT
+    assert message.content == CONTEXT_SUMMARY_WRAPPER.format(
+        through_message_id=12,
+        content=state.content,
+    )
 
 
-def test_summary_survives_request_sliding_window_with_recent_original_messages():
-    summary_content = CONTEXT_SUMMARY_WRAPPER.format(content="compressed old turns")
+def test_summary_survives_request_sliding_window_as_bounded_assistant_message():
+    summary_content = CONTEXT_SUMMARY_WRAPPER.format(
+        through_message_id=20,
+        content="compressed old turns",
+    )
     messages = [
-        InternalMessage(role=MessageRole.SYSTEM, content=f"stable prompt\n\n{summary_content}"),
-        InternalMessage(id=21, role=MessageRole.USER, content="old recent question " * 120),
-        InternalMessage(id=22, role=MessageRole.ASSISTANT, content="old recent answer " * 120),
+        InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
+        InternalMessage(role=MessageRole.ASSISTANT, content=summary_content),
+        InternalMessage(id=21, role=MessageRole.USER, content="old recent question " * 40),
+        InternalMessage(id=22, role=MessageRole.ASSISTANT, content="old recent answer " * 40),
         InternalMessage(id=23, role=MessageRole.USER, content="latest question"),
     ]
 
@@ -137,9 +144,88 @@ def test_summary_survives_request_sliding_window_with_recent_original_messages()
     )
 
     assert request[0].role == MessageRole.SYSTEM
-    assert summary_content in request[0].content
+    assert request[1].role == MessageRole.ASSISTANT
+    assert request[1].content == summary_content
     assert request[-1].id == 23
     assert request[-1].content == "latest question"
+
+
+def test_request_sliding_window_preserves_two_historical_rounds_and_current_input():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
+        InternalMessage(id=1, role=MessageRole.USER, content="discardable old question " * 200),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="discardable old answer " * 200),
+        InternalMessage(id=3, role=MessageRole.USER, content="protected second-last question"),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="protected second-last answer"),
+        InternalMessage(id=5, role=MessageRole.USER, content="protected last question"),
+        InternalMessage(id=6, role=MessageRole.ASSISTANT, content="protected last answer"),
+        InternalMessage(id=7, role=MessageRole.USER, content="current input"),
+    ]
+
+    request = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=256,
+        tools=None,
+        safety_margin_tokens=64,
+    )
+
+    assert [message.id for message in request if message.id is not None] == [3, 4, 5, 6, 7]
+
+
+def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_tight():
+    messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
+        InternalMessage(id=1, role=MessageRole.USER, content="run the lookup"),
+        InternalMessage(
+            id=2,
+            role=MessageRole.ASSISTANT,
+            content="I will check.",
+            tool_calls=[
+                InternalToolCall(
+                    id="call-1",
+                    name="lookup",
+                    arguments={"query": "tool argument " * 3000},
+                )
+            ],
+        ),
+        InternalMessage(
+            id=3,
+            role=MessageRole.TOOL,
+            tool_call_id="call-1",
+            content="important result " * 1000,
+        ),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="The lookup completed."),
+        InternalMessage(id=5, role=MessageRole.USER, content="continue"),
+    ]
+
+    request = ContextManager.trim_messages_for_model_request(
+        messages=messages,
+        uid="user-1",
+        session_id="session-1",
+        context_window_k=1,
+        max_tokens=256,
+        tools=None,
+        safety_margin_tokens=64,
+    )
+
+    non_system = [message for message in request if message.role != MessageRole.SYSTEM]
+    assert [message.id for message in non_system if message.id is not None] == [1, 2, 4, 5]
+    assert non_system[1].content == "I will check."
+    assert non_system[1].tool_calls is None
+    temporary_summary = non_system[2]
+    assert temporary_summary.role == MessageRole.ASSISTANT
+    assert temporary_summary.content.startswith(
+        RECENT_TOOL_SUMMARY_WRAPPER.format(
+            from_message_id=2,
+            through_message_id=3,
+            content="",
+        ).split("\n", 1)[0]
+    )
+    assert not any(message.role == MessageRole.TOOL for message in request)
+    assert not any(message.tool_calls for message in request)
 
 
 @pytest.mark.parametrize("threshold_percent", [50, 60, 70, 80, 90])

@@ -20,6 +20,7 @@ from app.core.utils.context_budget import (
 from app.core.utils.context_messages import (
     find_protected_tail_start,
     message_token_text,
+    replace_protected_tool_chains_for_budget,
     to_jsonable,
     trim_protected_tail_tools,
 )
@@ -75,6 +76,7 @@ class ContextManager:
         page_before_id = before_id
         estimated_scan_tokens = current_msg_tokens
         max_scanned_messages = max(1, limit_tokens - current_msg_tokens)
+        scanned_user_messages = 0
 
         while True:
             page = await message_crud.get_history_backward_by_id(
@@ -93,8 +95,10 @@ class ContextManager:
             for raw_message in page:
                 raw_history.append(raw_message)
                 estimated_scan_tokens += max(1, estimate_tokens(raw_message.content or ""))
+                if raw_message.role == MessageRole.USER:
+                    scanned_user_messages += 1
 
-                if raw_message.role != MessageRole.USER or estimated_scan_tokens < limit_tokens:
+                if raw_message.role != MessageRole.USER or estimated_scan_tokens < limit_tokens or scanned_user_messages < 2:
                     continue
 
                 parsed_candidate = parse_db_messages_to_internal(raw_history)
@@ -155,16 +159,30 @@ class ContextManager:
             current_msg_tokens=current_msg_tokens,
             context_window_k=context_window_k,
         )
-        parsed_history = parse_db_messages_to_internal(raw_history)
+        parsed_history_desc = parse_db_messages_to_internal(raw_history)
+        parsed_history = list(reversed(parsed_history_desc))
+        protected_start_idx = find_protected_tail_start(
+            parsed_history,
+            historical_round_count=1,
+        )
+        older_history = parsed_history[:protected_start_idx]
+        protected_history = parsed_history[protected_start_idx:]
+        protected_history_tokens = sum(estimate_tokens(cls._message_token_text(item)) for item in protected_history)
 
-        # 2. 策略分发
-        final_msgs, log_data = cls._strategy_atomic_truncate(
+        # 2. 最近两个历史轮次先作为保护区保留；更早历史使用剩余预算裁剪。
+        older_budget = max(1, limit_tokens - protected_history_tokens)
+        trimmed_older, log_data = cls._strategy_atomic_truncate(
             uid=uid,
             session_id=session_id,
-            parsed_history=parsed_history,
-            limit_tokens=limit_tokens,
+            parsed_history=list(reversed(older_history)),
+            limit_tokens=older_budget,
             current_msg_tokens=current_msg_tokens,
             context_window_k=context_window_k,
+        )
+        final_msgs = cls.audit_tool_chain(
+            [*trimmed_older, *protected_history],
+            uid=uid,
+            session_id=session_id,
         )
 
         # 3. 压缩日志记录：仅当确实发生压缩（Token 真正减少）时才记录，避免误导性日志
@@ -246,6 +264,9 @@ class ContextManager:
         request_messages = [msg.model_copy(deep=True) for msg in messages]
         system_msgs = [msg for msg in request_messages if msg.role == MessageRole.SYSTEM]
         non_system_msgs = [msg for msg in request_messages if msg.role != MessageRole.SYSTEM]
+        summary_msgs = [msg for msg in non_system_msgs if msg.role == MessageRole.ASSISTANT and isinstance(msg.content, str) and msg.content.startswith("<conversation_summary ")]
+        summary_msg_ids = {id(msg) for msg in summary_msgs}
+        dialogue_msgs = [msg for msg in non_system_msgs if id(msg) not in summary_msg_ids]
 
         system_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in system_msgs)
         budget = cls.build_request_budget(
@@ -257,25 +278,34 @@ class ContextManager:
         )
         cls.ensure_request_budget_available(budget)
 
-        protected_start_idx = cls._find_protected_tail_start(non_system_msgs)
-        history_msgs = non_system_msgs[:protected_start_idx]
-        protected_tail = non_system_msgs[protected_start_idx:]
+        summary_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in summary_msgs)
+        dialogue_budget = budget.non_system_budget - summary_tokens
+        if dialogue_budget <= 0:
+            raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
+
+        protected_start_idx = cls._find_protected_tail_start(dialogue_msgs)
+        history_msgs = dialogue_msgs[:protected_start_idx]
+        protected_tail = dialogue_msgs[protected_start_idx:]
 
         protected_tail = cls._trim_protected_tail_tools(
             protected_tail,
             uid=uid,
             session_id=session_id,
             context_window_k=context_window_k,
-            non_system_budget=budget.non_system_budget,
+            non_system_budget=dialogue_budget,
+        )
+        protected_tail = replace_protected_tool_chains_for_budget(
+            protected_tail,
+            non_system_budget=dialogue_budget,
         )
         protected_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in protected_tail)
-        if protected_tokens > budget.non_system_budget:
+        if protected_tokens > dialogue_budget:
             latest_msg = protected_tail[-1] if protected_tail else None
             if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls:
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 
-        history_budget = budget.non_system_budget - protected_tokens
+        history_budget = dialogue_budget - protected_tokens
 
         if history_msgs and history_budget > 0:
             trimmed_history, _log_data = cls._strategy_atomic_truncate(
@@ -290,7 +320,8 @@ class ContextManager:
         else:
             trimmed_history = []
 
-        audited_non_system = cls.audit_tool_chain([*trimmed_history, *protected_tail], uid=uid, session_id=session_id)
+        audited_dialogue = cls.audit_tool_chain([*trimmed_history, *protected_tail], uid=uid, session_id=session_id)
+        audited_non_system = [*summary_msgs, *audited_dialogue]
         audited_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in audited_non_system)
         if audited_tokens > budget.non_system_budget:
             latest_msg = audited_non_system[-1] if audited_non_system else None

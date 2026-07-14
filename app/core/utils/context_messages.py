@@ -1,6 +1,7 @@
 import json
 
-from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
+from app.core.prompts import RECENT_TOOL_SUMMARY_WRAPPER
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget, truncate_tool_result_with_stats
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
@@ -38,32 +39,115 @@ def message_token_text(msg: InternalMessage) -> str:
     return json.dumps(to_jsonable(msg.content), ensure_ascii=False)
 
 
-def find_protected_tail_start(non_system_msgs: list[InternalMessage]) -> int:
+def find_protected_tail_start(
+    non_system_msgs: list[InternalMessage],
+    *,
+    historical_round_count: int = 2,
+) -> int:
     if not non_system_msgs:
         return 0
 
-    last_idx = len(non_system_msgs) - 1
-    if non_system_msgs[last_idx].role == MessageRole.TOOL:
-        tool_call_ids = set()
-        scan_idx = last_idx
-        while scan_idx >= 0 and non_system_msgs[scan_idx].role == MessageRole.TOOL:
-            if non_system_msgs[scan_idx].tool_call_id:
-                tool_call_ids.add(non_system_msgs[scan_idx].tool_call_id)
-            scan_idx -= 1
+    user_indices = [index for index, message in enumerate(non_system_msgs) if message.role == MessageRole.USER]
+    if not user_indices:
+        return len(non_system_msgs)
 
-        if scan_idx >= 0:
-            candidate = non_system_msgs[scan_idx]
-            if candidate.role == MessageRole.ASSISTANT and candidate.tool_calls:
-                required_ids = {tool_call.id for tool_call in candidate.tool_calls}
-                if tool_call_ids and tool_call_ids.issubset(required_ids):
-                    user_idx = scan_idx - 1
-                    while user_idx >= 0:
-                        if non_system_msgs[user_idx].role == MessageRole.USER:
-                            return user_idx
-                        user_idx -= 1
-                    return scan_idx
+    current_round_count = 1
+    protected_round_count = historical_round_count + current_round_count
+    return user_indices[-min(protected_round_count, len(user_indices))]
 
-    return last_idx
+
+def _build_recent_tool_summary(
+    call_message: InternalMessage,
+    tool_messages: list[InternalMessage],
+    *,
+    content_budget_tokens: int,
+) -> InternalMessage | None:
+    message_ids = [message.id for message in (call_message, *tool_messages) if message.id is not None]
+    if not message_ids:
+        return None
+
+    tool_names = ", ".join(tool_call.name for tool_call in call_message.tool_calls or [])
+    result_lines = [f"- {tool_message.tool_call_id}: {message_token_text(tool_message)}" for tool_message in tool_messages]
+    conclusion = "\n".join(
+        [
+            f"Tools: {tool_names or '(unknown)'}",
+            "Results:",
+            *(result_lines or ["- No persisted tool result was available."]),
+        ]
+    )
+    truncated = truncate_tool_result_with_stats(
+        conclusion,
+        context_window_k=1,
+        limit_tokens=max(1, content_budget_tokens),
+    )
+    return InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content=RECENT_TOOL_SUMMARY_WRAPPER.format(
+            from_message_id=min(message_ids),
+            through_message_id=max(message_ids),
+            content=truncated.content,
+        ),
+    )
+
+
+def replace_protected_tool_chains_for_budget(
+    protected_tail: list[InternalMessage],
+    *,
+    non_system_budget: int,
+) -> list[InternalMessage]:
+    messages = [message.model_copy(deep=True) for message in protected_tail]
+
+    while sum(estimate_tokens(message_token_text(message)) for message in messages) > non_system_budget:
+        best_replacement: tuple[int, set[int], list[InternalMessage], int] | None = None
+
+        for call_index, call_message in enumerate(messages):
+            if call_message.role != MessageRole.ASSISTANT or not call_message.tool_calls:
+                continue
+
+            required_ids = {tool_call.id for tool_call in call_message.tool_calls}
+            tool_indices = {index for index in range(call_index + 1, len(messages)) if messages[index].role == MessageRole.TOOL and messages[index].tool_call_id in required_ids}
+            tool_messages = [messages[index] for index in sorted(tool_indices)]
+            summary_message = _build_recent_tool_summary(
+                call_message,
+                tool_messages,
+                content_budget_tokens=128,
+            )
+            if summary_message is None:
+                continue
+
+            replacement: list[InternalMessage] = []
+            if call_message.content:
+                replacement.append(
+                    call_message.model_copy(
+                        update={"tool_calls": None},
+                        deep=True,
+                    )
+                )
+            replacement.append(summary_message)
+
+            original_tokens = estimate_tokens(message_token_text(call_message))
+            original_tokens += sum(estimate_tokens(message_token_text(messages[index])) for index in tool_indices)
+            replacement_tokens = sum(estimate_tokens(message_token_text(message)) for message in replacement)
+            saved_tokens = original_tokens - replacement_tokens
+            if saved_tokens <= 0:
+                continue
+            if best_replacement is None or saved_tokens > best_replacement[3]:
+                best_replacement = (
+                    call_index,
+                    tool_indices,
+                    replacement,
+                    saved_tokens,
+                )
+
+        if best_replacement is None:
+            break
+
+        call_index, tool_indices, replacement, _saved_tokens = best_replacement
+        messages = [message for index, message in enumerate(messages) if index != call_index and index not in tool_indices]
+        insertion_index = min(call_index, len(messages))
+        messages[insertion_index:insertion_index] = replacement
+
+    return messages
 
 
 def trim_protected_tail_tools(

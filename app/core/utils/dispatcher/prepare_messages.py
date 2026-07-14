@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import (
 from app.core.context import (
     ContextManager,
 )
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary import ensure_context_summary
 from app.core.utils.context_summary.common import (
     ContextSummaryWorkValidityChecker,
@@ -42,8 +41,7 @@ async def prepare_messages(
     tools: list[dict] | None = None,
     history_before_id: int | None = None,
     frozen_user_message_ids: list[int] | None = None,
-    context_summary_work_validity_checker: ContextSummaryWorkValidityChecker
-    | None = None,
+    context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
@@ -67,14 +65,10 @@ async def prepare_messages(
         frozen_user_message_ids=summary_frozen_user_message_ids,
         work_validity_checker=context_summary_work_validity_checker,
     )
-    if summary_state.content:
-        system_prompt = "\n\n".join(
-            [
-                system_prompt,
-                CONTEXT_SUMMARY_WRAPPER.format(content=summary_state.content),
-            ]
-        )
+    summary_message = summary_state.as_message()
     reserved_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions)
+    if summary_message is not None:
+        reserved_tokens += estimate_tokens(str(summary_message.content or ""))
 
     # 获取上下文
     # 第一轮必须锚定在当前消息，确保上下文一致性
@@ -90,6 +84,8 @@ async def prepare_messages(
         context_window_k=context_window_k,
         reserved_tokens=reserved_tokens,
     )
+    if summary_message is not None:
+        messages.insert(0, summary_message)
     if is_first_iter:
         current_msg = initial_msg.model_copy(deep=True)
         append_user_runtime_instruction_text(current_msg, user_runtime_instructions)

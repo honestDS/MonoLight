@@ -67,8 +67,7 @@ class NonStreamDispatcherMixin:
         additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        context_summary_work_validity_checker: ContextSummaryWorkValidityChecker
-        | None = None,
+        context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
     ):
         try:

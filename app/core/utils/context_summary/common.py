@@ -17,19 +17,14 @@ async def ensure_context_summary_work_valid(
     checker: ContextSummaryWorkValidityChecker | None,
 ) -> None:
     if checker is not None and not await checker():
-        raise ContextSummaryWorkInvalidError(
-            "Context summary work is no longer valid"
-        )
+        raise ContextSummaryWorkInvalidError("Context summary work is no longer valid")
 
 
 def contains_context_summary_work_invalid(exc: BaseException) -> bool:
     if isinstance(exc, ContextSummaryWorkInvalidError):
         return True
     if isinstance(exc, BaseExceptionGroup):
-        return any(
-            contains_context_summary_work_invalid(nested)
-            for nested in exc.exceptions
-        )
+        return any(contains_context_summary_work_invalid(nested) for nested in exc.exceptions)
     return False
 
 
@@ -40,11 +35,14 @@ class ContextSummaryState:
     revision: int = field(default=0, compare=False, repr=False)
 
     def as_message(self) -> InternalMessage | None:
-        if not self.content:
+        if not self.content or self.message_id is None:
             return None
         return InternalMessage(
-            role=MessageRole.SYSTEM,
-            content=CONTEXT_SUMMARY_WRAPPER.format(content=self.content),
+            role=MessageRole.ASSISTANT,
+            content=CONTEXT_SUMMARY_WRAPPER.format(
+                through_message_id=self.message_id,
+                content=self.content,
+            ),
         )
 
 
@@ -66,7 +64,12 @@ def join_messages(messages: list[InternalMessage]) -> str:
 def estimate_summary_tokens(content: str | None) -> int:
     if not content:
         return 0
-    return estimate_tokens(CONTEXT_SUMMARY_WRAPPER.format(content=content))
+    return estimate_tokens(
+        CONTEXT_SUMMARY_WRAPPER.format(
+            through_message_id=0,
+            content=content,
+        )
+    )
 
 
 def select_summary_segment(

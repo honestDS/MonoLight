@@ -278,9 +278,7 @@ async def execute_reduction_stage(
         )
         await invalidate_summary_stage(stage=stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError(
-                "Context summary work became invalid during reduction"
-            ) from exc
+            raise ContextSummaryWorkInvalidError("Context summary work became invalid during reduction") from exc
         raise
 
     return stage
@@ -409,9 +407,7 @@ async def execute_refinement_stage(
         )
         await invalidate_summary_stage(stage=stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError(
-                "Context summary work became invalid during refinement"
-            ) from exc
+            raise ContextSummaryWorkInvalidError("Context summary work became invalid during refinement") from exc
         raise
 
     return stage

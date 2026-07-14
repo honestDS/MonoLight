@@ -104,9 +104,13 @@ async def test_prepare_messages_combines_summary_with_history_after_boundary(mon
 
     assert get_messages_calls[0]["after_id"] == 20
     assert messages[0].role == MessageRole.SYSTEM
-    assert "stable system prompt" in messages[0].content
-    assert CONTEXT_SUMMARY_WRAPPER.format(content="compressed old turns") in messages[0].content
-    assert [message.id for message in messages[1:]] == [21, 22]
+    assert messages[0].content == "stable system prompt"
+    assert messages[1].role == MessageRole.ASSISTANT
+    assert messages[1].content == CONTEXT_SUMMARY_WRAPPER.format(
+        through_message_id=20,
+        content="compressed old turns",
+    )
+    assert [message.id for message in messages[2:]] == [21, 22]
 
 
 @pytest.mark.asyncio
