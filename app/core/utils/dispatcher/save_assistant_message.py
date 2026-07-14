@@ -37,4 +37,6 @@ async def save_assistant_message(
         is_processed=True,
         dedupe_key=dedupe_key,
     )
+    ai_msg.id = saved_msg.id
+    ai_msg.created_at = saved_msg.created_at
     return saved_msg

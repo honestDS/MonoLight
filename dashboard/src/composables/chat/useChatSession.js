@@ -5,7 +5,7 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
-import { formatTimestamp, isToolCall, isToolResult, getToolName, getToolArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
+import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
@@ -625,8 +625,9 @@ export function useChatSession() {
     formatTimestamp,
     isToolCall,
     isToolResult,
-    getToolName,
-    getToolArguments,
+    getToolCalls,
+    getToolCallName,
+    getToolCallArguments,
     getToolCallContent,
     getToolResultName,
     getToolResultContent,

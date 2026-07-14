@@ -5,6 +5,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.utils.context_summary.history import iter_persistent_summary_source_units
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot, iter_persistent_summary_rounds
 from app.models.message import Message, MessageRole, MessageType
 
@@ -204,6 +205,48 @@ async def test_frozen_user_ids_restore_snapshot_boundary_when_before_id_is_absen
     assert snapshot.frozen_user_message_ids == (7, 8)
     assert all(message.id < 7 for message in snapshot.recent_messages)
     assert snapshot.persistent_summary_target_id == 2
+
+
+@pytest.mark.asyncio
+async def test_model_excluded_user_message_extends_source_coverage_without_exposing_content(db_session: AsyncSession):
+    covered_user_content = "必须逐字保留且不得交给总结模型的用户原文"
+    db_session.add_all(
+        [
+            _message(1, MessageRole.USER, content=covered_user_content),
+            _message(2, MessageRole.ASSISTANT, content="并行工具调用"),
+            _message(3, MessageRole.TOOL, content="工具结果一"),
+            _message(4, MessageRole.TOOL, content="工具结果二"),
+        ]
+    )
+    await db_session.commit()
+
+    snapshot = await build_context_summary_snapshot(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        expected_summary_message_id=None,
+        before_id=None,
+        target_message_id=4,
+        model_excluded_message_ids=[1],
+    )
+    units = [
+        unit
+        async for unit in iter_persistent_summary_source_units(
+            db_session,
+            session_id="session-1",
+            uid="user-1",
+            snapshot=snapshot,
+            max_unit_tokens=10_000,
+        )
+    ]
+
+    assert len(units) == 1
+    assert units[0].message_start_id == 1
+    assert units[0].message_end_id == 4
+    assert covered_user_content not in units[0].content
+    assert "并行工具调用" in units[0].content
+    assert "工具结果一" in units[0].content
+    assert "工具结果二" in units[0].content
 
 
 @pytest.mark.asyncio

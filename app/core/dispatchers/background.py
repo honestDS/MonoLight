@@ -29,7 +29,9 @@ from app.core.prompts import (
 )
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
+from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.helpers import (
     BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES,
     dump_background_proactive_history,
@@ -104,6 +106,8 @@ class BackgroundDispatcherMixin:
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
         submission_context: list[InternalMessage] | None = None,
+        initial_trigger_mode: ContextSummaryTriggerMode | None = None,
+        initial_fixed_upper_message_id: int | None = None,
         restrict_tools_to_background_allowlist: bool = True,
         reply_source: str = "background_task",
         final_message_dedupe_key: str | None = None,
@@ -151,6 +155,20 @@ class BackgroundDispatcherMixin:
                 )
             if extra_messages:
                 messages.extend(message.model_copy(deep=True) for message in extra_messages)
+            if initial_trigger_mode is not None and initial_fixed_upper_message_id is not None:
+                messages = await apply_context_summary_checkpoint(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                    profile=profile,
+                    cfg=cfg,
+                    messages=messages,
+                    trigger_mode=initial_trigger_mode,
+                    fixed_upper_message_id=initial_fixed_upper_message_id,
+                    context_window_k=chat_params["context_window_k"],
+                    max_tokens=chat_params["max_tokens"],
+                    tools=tools,
+                )
             return ContextManager.trim_messages_for_model_request(
                 messages=messages,
                 uid=uid,
@@ -293,10 +311,28 @@ class BackgroundDispatcherMixin:
         )
 
         files_to_user = extract_files_to_user(tool_responses)
+        persisted_tool_result_ids: list[int] = []
         for tool_response in tool_responses:
-            await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
+            stored_tool_response = await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
+            if stored_tool_response is not None and stored_tool_response.id is not None:
+                persisted_tool_result_ids.append(stored_tool_response.id)
 
-        def build_final_request(final_chat_params):
+        async def build_final_request(final_chat_params):
+            nonlocal messages
+            if persisted_tool_result_ids:
+                messages = await apply_context_summary_checkpoint(
+                    db,
+                    session_id=session_id,
+                    uid=uid,
+                    profile=profile,
+                    cfg=cfg,
+                    messages=messages,
+                    trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+                    fixed_upper_message_id=max(persisted_tool_result_ids),
+                    context_window_k=final_chat_params["context_window_k"],
+                    max_tokens=final_chat_params["max_tokens"],
+                    tools=None,
+                )
             return ContextManager.trim_messages_for_model_request(
                 messages=messages,
                 uid=uid,

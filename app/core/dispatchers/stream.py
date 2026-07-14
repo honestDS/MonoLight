@@ -17,7 +17,9 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.send_file_to_user import sanitize_files_to_user_result
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
+from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
@@ -71,6 +73,8 @@ class StreamDispatcherMixin:
             files_to_user: list[dict[str, Any]] = []
             final_response_id: str | None = None
             is_first_iter = True
+            checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+            checkpoint_upper_id = initial_msg.id
 
             while True:
                 try:
@@ -128,6 +132,13 @@ class StreamDispatcherMixin:
                         if new_user_msgs:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                            latest_user_id = max(
+                                (item.id for item in new_user_msgs if item.id is not None),
+                                default=None,
+                            )
+                            if latest_user_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_upper_id = latest_user_id
 
                         current_turn += 1
 
@@ -149,6 +160,20 @@ class StreamDispatcherMixin:
                         while True:
                             emitted_chunk = False
                             try:
+                                if checkpoint_upper_id is not None:
+                                    messages = await apply_context_summary_checkpoint(
+                                        db,
+                                        session_id=session_id,
+                                        uid=uid,
+                                        profile=profile,
+                                        cfg=cfg,
+                                        messages=messages,
+                                        trigger_mode=checkpoint_mode,
+                                        fixed_upper_message_id=checkpoint_upper_id,
+                                        context_window_k=chat_params["context_window_k"],
+                                        max_tokens=chat_params["max_tokens"],
+                                        tools=current_tools,
+                                    )
                                 request_messages = ContextManager.trim_messages_for_model_request(
                                     messages=messages,
                                     uid=uid,
@@ -227,20 +252,7 @@ class StreamDispatcherMixin:
                                 chat_channel_obj, model_entry, _channel_rule = selection
                                 img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                                 chat_params = resolve_chat_params(model_entry, chat_channel)
-                                # 降级换渠道后，上下文必须按新模型的 context_window_k 重新构造并压缩
-                                messages = await prepare_messages(
-                                    db,
-                                    session_id,
-                                    uid,
-                                    profile,
-                                    cfg,
-                                    initial_msg,
-                                    message,
-                                    is_first_iter,
-                                    context_window_k=chat_params["context_window_k"],
-                                    max_tokens=chat_params["max_tokens"],
-                                    tools=tools,
-                                )
+                                # 保留固定快照内的完整工具链，下一次请求前按新模型窗口重新检查。
                                 reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
                                 current_tool_calls_map = {}
                                 current_content_chunks = []
@@ -293,11 +305,21 @@ class StreamDispatcherMixin:
                                 break
 
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                            latest_user_id = max(
+                                (item.id for item in new_user_msgs if item.id is not None),
+                                default=None,
+                            )
+                            if latest_user_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_upper_id = latest_user_id
                             current_turn = 0
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
+                            latest_tool_result_id = await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
+                            if latest_tool_result_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_upper_id = latest_tool_result_id
                             continue
 
                         for tc in ai_msg.tool_calls:
@@ -343,8 +365,11 @@ class StreamDispatcherMixin:
                         tool_responses = await asyncio.gather(*tasks)
 
                         files_to_user.extend(extract_files_to_user(tool_responses))
+                        persisted_tool_result_ids: list[int] = []
                         for tool_res in tool_responses:
-                            await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                            stored_tool_res = await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                            if stored_tool_res.id is not None:
+                                persisted_tool_result_ids.append(stored_tool_res.id)
                             tool_call = next((tc for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), None)
                             tool_name = tool_call.name if tool_call else "unknown"
                             yield {
@@ -356,6 +381,9 @@ class StreamDispatcherMixin:
                                 "request_id": request_id,
                                 "session_id": session_id,
                             }
+                        if persisted_tool_result_ids:
+                            checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                            checkpoint_upper_id = max(persisted_tool_result_ids)
 
                 finally:
                     is_first_iter = False
@@ -363,6 +391,13 @@ class StreamDispatcherMixin:
                 new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
                 if not new_user_msgs:
                     break
+                latest_user_id = max(
+                    (item.id for item in new_user_msgs if item.id is not None),
+                    default=None,
+                )
+                if latest_user_id is not None:
+                    checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                    checkpoint_upper_id = latest_user_id
 
             yield {"type": "done", "session_id": session_id, "history": dump_output_history(turn_messages), "files": files_to_user or None, "response_id": final_response_id, "request_id": request_id}
 

@@ -28,7 +28,7 @@ async def handle_parallel_tool_limit(
     ai_msg: InternalMessage,
     messages: list[InternalMessage],
     turn_messages: list[InternalMessage],
-):
+) -> int | None:
     error_msg = json.dumps(
         {
             "error": "parallel_limit_exceeded",
@@ -36,8 +36,13 @@ async def handle_parallel_tool_limit(
         },
         ensure_ascii=False,
     )
+    last_message_id: int | None = None
     for tool_call in ai_msg.tool_calls:
         tool_res = InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=error_msg)
+        saved_msg = await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+        tool_res.id = saved_msg.id
+        tool_res.created_at = saved_msg.created_at
         messages.append(tool_res)
         turn_messages.append(tool_res)
-        await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, tool_res, profile.id)
+        last_message_id = saved_msg.id
+    return last_message_id

@@ -19,6 +19,7 @@ from app.core.message_platforms.notifier import send_session_event
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.assistant_files import parse_assistant_files_content
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
@@ -241,6 +242,15 @@ def _load_background_submission_context(task: BackgroundTask) -> list[InternalMe
     return [InternalMessage.model_validate(message) for message in raw_context if isinstance(message, dict)]
 
 
+def _last_frozen_user_message_id(messages: list[InternalMessage] | None) -> int | None:
+    if not messages:
+        return None
+    return max(
+        (message.id for message in messages if message.role == MessageRole.USER and message.id is not None),
+        default=None,
+    )
+
+
 def _build_background_result_messages(task: BackgroundTask) -> list[InternalMessage]:
     task_result = task.result or {
         "status": task.status,
@@ -277,6 +287,8 @@ async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         allow_tools=True,
         extra_messages=_build_background_result_messages(task) if submission_context is not None else None,
         submission_context=submission_context,
+        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        initial_fixed_upper_message_id=_last_frozen_user_message_id(submission_context),
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
     )
@@ -299,6 +311,8 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         profile=profile,
         call_context="session_reply_scheduled_summary",
         allow_tools=True,
+        initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        initial_fixed_upper_message_id=int(work.source_id),
         restrict_tools_to_background_allowlist=False,
         reply_source="scheduled_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),

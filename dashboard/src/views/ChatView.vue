@@ -99,12 +99,20 @@
                 </template>
               </div>
               <el-collapse v-model="activeCollapse">
-                <el-collapse-item :name="msg.id">
+                <el-collapse-item
+                  v-for="(toolCall, toolIndex) in getToolCalls(msg)"
+                  :key="toolCall.id || toolCall.function?.id || `${msg.id}_${toolIndex}`"
+                  :name="`${msg.id}_${toolCall.id || toolCall.function?.id || toolIndex}`"
+                >
                   <template #title>
-                    <span class="tool-call-title">{{ $t('chat.tool_call', { name: getToolName(msg) }) }}</span>
+                    <span class="tool-call-title">{{ $t('chat.tool_call', { name: getToolCallName(toolCall) }) }}</span>
                   </template>
                   <div class="tool-call-content">
-                    <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolArguments(msg)" :max-height="300" />
+                    <VirtualizedCode
+                      :ref="el => setCodeRef(`${msg.id}_${toolCall.id || toolCall.function?.id || toolIndex}`, el)"
+                      :content="getToolCallArguments(toolCall)"
+                      :max-height="300"
+                    />
                   </div>
                 </el-collapse-item>
               </el-collapse>
@@ -538,8 +546,9 @@ const {
   formatTimestamp,
   isToolCall,
   isToolResult,
-  getToolName,
-  getToolArguments,
+  getToolCalls,
+  getToolCallName,
+  getToolCallArguments,
   getToolCallContent,
   getToolResultName,
   getToolResultContent,

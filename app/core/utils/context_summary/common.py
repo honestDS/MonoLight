@@ -46,12 +46,33 @@ class ContextSummaryState:
         )
 
 
+def _sanitize_summary_tool_content(content: object) -> object:
+    if not isinstance(content, str):
+        return content
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if not isinstance(payload, dict) or payload.get("error") != "confirmation_required":
+        return content
+    return json.dumps(
+        {
+            "error": "security_confirmation_not_retained",
+            "reason": "The tool did not run because operation-specific confirmation was required.",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def serialize_message(message: InternalMessage) -> str:
     payload = message.model_dump(
         mode="json",
         exclude={"id", "attachments", "created_at"},
         exclude_none=True,
     )
+    if message.role == MessageRole.TOOL and "content" in payload:
+        payload["content"] = _sanitize_summary_tool_content(payload["content"])
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 

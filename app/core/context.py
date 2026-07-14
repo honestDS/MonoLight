@@ -16,6 +16,7 @@ from app.core.utils.context_budget import (
     ContextRequestBudget,
     build_context_request_budget,
     ensure_context_request_budget_available,
+    measure_context_request_usage,
 )
 from app.core.utils.context_messages import (
     find_protected_tail_start,
@@ -270,14 +271,14 @@ class ContextManager:
         summary_msg_ids = {id(msg) for msg in summary_msgs}
         dialogue_msgs = [msg for msg in non_system_msgs if id(msg) not in summary_msg_ids]
 
-        system_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in system_msgs)
-        budget = cls.build_request_budget(
+        usage = measure_context_request_usage(
+            messages=request_messages,
             context_window_k=context_window_k,
             max_tokens=max_tokens,
-            system_tokens=system_tokens,
             tools=tools,
             safety_margin_tokens=safety_margin_tokens,
         )
+        budget = usage.budget
         cls.ensure_request_budget_available(budget)
 
         summary_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in summary_msgs)
@@ -324,8 +325,14 @@ class ContextManager:
 
         audited_dialogue = cls.audit_tool_chain([*trimmed_history, *protected_tail], uid=uid, session_id=session_id)
         audited_non_system = [*summary_msgs, *audited_dialogue]
-        audited_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in audited_non_system)
-        if audited_tokens > budget.non_system_budget:
+        final_usage = measure_context_request_usage(
+            messages=[*system_msgs, *audited_non_system],
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            tools=tools,
+            safety_margin_tokens=safety_margin_tokens,
+        )
+        if final_usage.exceeds_hard_window:
             latest_msg = audited_non_system[-1] if audited_non_system else None
             if latest_msg and latest_msg.role == MessageRole.USER and not latest_msg.tool_calls and not is_synthetic_summary_message(latest_msg):
                 raise ParameterException(message=ERR_CHAT_INPUT_TOO_LONG)

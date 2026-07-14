@@ -19,10 +19,22 @@ async def save_tool_response(
     tool_res: InternalMessage,
     messages: list[InternalMessage],
     turn_messages: list[InternalMessage],
-):
+) -> InternalMessage:
     stored_tool_res = tool_res.model_copy()
     stored_tool_res.content = sanitize_files_to_user_result(stored_tool_res.content)
 
+    saved_msg = await save_message(
+        db,
+        session_id,
+        uid,
+        MessageRole.TOOL,
+        MessageType.TOOL_RESULT,
+        stored_tool_res,
+        profile_id,
+        is_processed=True,
+    )
+    stored_tool_res.id = saved_msg.id
+    stored_tool_res.created_at = saved_msg.created_at
     messages.append(stored_tool_res)
     turn_messages.append(stored_tool_res)
-    await save_message(db, session_id, uid, MessageRole.TOOL, MessageType.TOOL_RESULT, stored_tool_res, profile_id, is_processed=True)
+    return stored_tool_res

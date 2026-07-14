@@ -14,6 +14,10 @@ class _Dispatcher(non_stream_module.NonStreamDispatcherMixin):
         return None
 
 
+async def _passthrough_context_summary_checkpoint(db, **kwargs):
+    return kwargs["messages"]
+
+
 class _Channel:
     id = 1
     name = "test-channel"
@@ -78,6 +82,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     }
     model_requests = []
     prepare_calls = []
+    checkpoint_calls = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -100,6 +105,10 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     async def prepare_messages(*args, **kwargs):
         prepare_calls.append((args, kwargs))
         return [InternalMessage(role=MessageRole.USER, content="unexpected replay")]
+
+    async def apply_checkpoint(db, **kwargs):
+        checkpoint_calls.append(kwargs)
+        return kwargs["messages"]
 
     async def generate(**kwargs):
         model_requests.append(kwargs["messages"])
@@ -138,6 +147,11 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     )
     monkeypatch.setattr(non_stream_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
+        non_stream_module,
+        "apply_context_summary_checkpoint",
+        apply_checkpoint,
+    )
+    monkeypatch.setattr(
         non_stream_module.ContextManager,
         "trim_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
@@ -151,10 +165,11 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
         uid="user-1",
         session_id="session-1",
         persisted_initial_message=InternalMessage(
-            id=1,
+            id=2,
             role=MessageRole.USER,
             content="original request",
         ),
+        frozen_user_message_ids=[1, 2],
         persisted_profile_id=1,
         additional_user_messages_fetcher=fetch_additional,
         execution_resume_state=resume_state,
@@ -162,6 +177,8 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
 
     assert prepare_calls == []
     assert len(model_requests) == 2
+    assert len(checkpoint_calls) == len(model_requests)
+    assert [call["fixed_upper_message_id"] for call in checkpoint_calls] == [1, 1]
     for request_messages in model_requests:
         assert [message.role for message in request_messages] == [
             MessageRole.USER,
@@ -252,6 +269,11 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
             "chat_timeout": 60,
             "context_window_k": 4,
         },
+    )
+    monkeypatch.setattr(
+        non_stream_module,
+        "apply_context_summary_checkpoint",
+        _passthrough_context_summary_checkpoint,
     )
     monkeypatch.setattr(
         non_stream_module.ContextManager,

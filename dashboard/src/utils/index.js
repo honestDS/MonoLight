@@ -96,41 +96,37 @@ export const getToolCallContent = (msg) => {
   }
 }
 
-// 获取工具调用名称
-export const getToolName = (msg) => {
+// 获取消息中的全部工具调用
+export const getToolCalls = (msg) => {
   try {
-    const content = msg.content
-    if (typeof content === 'object' && content !== null) {
-      const tc = content.tool_calls?.[0]
-      return tc?.name || tc?.function?.name || t('common.unknown_tool')
-    }
-    const parsed = JSON.parse(content)
-    const tc = parsed.tool_calls?.[0]
-    return tc?.name || tc?.function?.name || t('common.unknown_tool')
+    const content = normalizeMessageContent(msg?.content)
+    const toolCalls = content?.tool_calls || msg?.tool_calls
+    return Array.isArray(toolCalls) ? toolCalls : []
   } catch {
-    return t('common.unknown_tool')
+    return []
   }
 }
 
-// 获取工具调用参数
-export const getToolArguments = (msg) => {
-  try {
-    const content = msg.content
-    let tc = null
-    if (typeof content === 'object' && content !== null) {
-      tc = content.tool_calls?.[0]
-    } else {
-      const parsed = JSON.parse(content)
-      tc = parsed.tool_calls?.[0]
-    }
-    const args = tc?.arguments || tc?.function?.arguments
-    if (typeof args === 'string') {
-      return args
-    }
-    return JSON.stringify(args, null, 2)
-  } catch {
-    return msg.content
+export const getToolCallName = (toolCall) => {
+  return toolCall?.name || toolCall?.function?.name || t('common.unknown_tool')
+}
+
+export const getToolCallArguments = (toolCall) => {
+  const args = toolCall?.arguments ?? toolCall?.function?.arguments
+  if (typeof args === 'string') {
+    return args
   }
+  return JSON.stringify(args ?? {}, null, 2)
+}
+
+// 保留单调用方法，兼容现有使用方
+export const getToolName = (msg) => {
+  return getToolCallName(getToolCalls(msg)[0])
+}
+
+export const getToolArguments = (msg) => {
+  const toolCall = getToolCalls(msg)[0]
+  return toolCall ? getToolCallArguments(toolCall) : msg?.content
 }
 
 // 判断是否为工具返回结果

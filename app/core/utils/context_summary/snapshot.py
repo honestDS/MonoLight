@@ -20,6 +20,7 @@ class ContextSummarySnapshot:
     recent_round_start_ids: tuple[int, ...]
     frozen_user_message_ids: tuple[int, ...]
     recent_messages: tuple[InternalMessage, ...]
+    model_excluded_message_ids: tuple[int, ...] = ()
 
     @property
     def has_persistent_history(self) -> bool:
@@ -35,11 +36,17 @@ async def build_context_summary_snapshot(
     expected_summary_message_id: int | None,
     before_id: int | None,
     frozen_user_message_ids: list[int] | tuple[int, ...] | None = None,
+    target_message_id: int | None = None,
+    model_excluded_message_ids: list[int] | tuple[int, ...] | None = None,
     page_size: int = CONTEXT_SUMMARY_SCAN_PAGE_SIZE,
 ) -> ContextSummarySnapshot:
     normalized_frozen_ids = tuple(frozen_user_message_ids or ())
+    normalized_excluded_ids = tuple(model_excluded_message_ids or ())
     boundary_candidates = [value for value in (before_id, min(normalized_frozen_ids) if normalized_frozen_ids else None) if value is not None]
     snapshot_before_id = min(boundary_candidates) if boundary_candidates else None
+    if target_message_id is not None:
+        explicit_before_id = target_message_id + 1
+        snapshot_before_id = explicit_before_id if snapshot_before_id is None else min(snapshot_before_id, explicit_before_id)
     page_before_id = snapshot_before_id
     snapshot_max_message_id: int | None = None
     recent_raw_desc: list[Message] = []
@@ -64,6 +71,10 @@ async def build_context_summary_snapshot(
 
         reached_persistent_history = False
         for message in page:
+            if target_message_id is not None:
+                persistent_summary_target_id = target_message_id
+                reached_persistent_history = True
+                break
             if len(recent_user_ids_desc) >= RECENT_PROTECTED_ROUND_COUNT:
                 persistent_summary_target_id = message.id
                 reached_persistent_history = True
@@ -90,6 +101,7 @@ async def build_context_summary_snapshot(
         recent_round_start_ids=tuple(reversed(recent_user_ids_desc)),
         frozen_user_message_ids=normalized_frozen_ids,
         recent_messages=recent_messages,
+        model_excluded_message_ids=normalized_excluded_ids,
     )
 
 
@@ -106,7 +118,6 @@ async def iter_persistent_summary_rounds(
 
     page_after_id = snapshot.expected_summary_message_id
     current_round: list[Message] = []
-    started_with_user = False
     target_id = snapshot.persistent_summary_target_id
     if target_id is None:
         return
@@ -126,15 +137,10 @@ async def iter_persistent_summary_rounds(
             break
 
         for message in page:
-            if not current_round:
-                if message.role != MessageRole.USER:
-                    return
-                started_with_user = True
-            elif message.role == MessageRole.USER:
-                parsed_round = parse_db_messages_to_internal(current_round)
-                if not parsed_round or parsed_round[0].role != MessageRole.USER:
-                    return
-                yield parsed_round
+            if current_round and message.role == MessageRole.USER:
+                parsed_round = parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids])
+                if parsed_round:
+                    yield parsed_round
                 current_round = []
             current_round.append(message)
 
@@ -146,7 +152,7 @@ async def iter_persistent_summary_rounds(
             break
         page_after_id = last_id
 
-    if current_round and started_with_user:
-        parsed_round = parse_db_messages_to_internal(current_round)
-        if parsed_round and parsed_round[0].role == MessageRole.USER:
+    if current_round:
+        parsed_round = parse_db_messages_to_internal([item for item in current_round if item.id not in snapshot.model_excluded_message_ids])
+        if parsed_round:
             yield parsed_round

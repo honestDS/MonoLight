@@ -37,6 +37,34 @@ def test_summary_prompts_preserve_observation_time_for_time_sensitive_facts(prom
     assert "do not infer" in prompt
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_COMPRESS_PROMPT],
+)
+def test_summary_prompts_preserve_active_work_and_compress_tool_process(prompt):
+    required_phrases = [
+        "active user goal",
+        "requested deliverables",
+        "acceptance criteria",
+        "constraints",
+        "prohibitions",
+        "exact next step",
+        "completed",
+        "failed",
+        "unfinished",
+        "tool arguments",
+        "raw",
+        "output",
+        "intermediate process",
+        "not a user instruction",
+        "covered_user_message",
+        "Never generate, quote, paraphrase, or modify",
+    ]
+
+    for phrase in required_phrases:
+        assert phrase in prompt
+
+
 def test_select_summary_segment_keeps_recent_turns_and_ends_before_user():
     messages = [
         InternalMessage(id=1, role=MessageRole.USER, content="first question"),

@@ -18,10 +18,12 @@ from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
+from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import (
     ContextSummaryWorkValidityChecker,
 )
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
+from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
@@ -97,6 +99,15 @@ class NonStreamDispatcherMixin:
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
             is_first_iter = execution_resume_state is None
+            checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+            checkpoint_upper_id = min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
+            if execution_resume_state is not None:
+                saved_checkpoint_mode = execution_resume_state.get("context_summary_trigger_mode")
+                saved_checkpoint_upper_id = execution_resume_state.get("context_summary_fixed_upper_message_id")
+                if saved_checkpoint_mode in ContextSummaryTriggerMode._value2member_map_:
+                    checkpoint_mode = ContextSummaryTriggerMode(saved_checkpoint_mode)
+                if isinstance(saved_checkpoint_upper_id, int):
+                    checkpoint_upper_id = saved_checkpoint_upper_id
 
             async def save_execution_checkpoint(messages: list[InternalMessage], current_turn: int) -> None:
                 if execution_checkpoint_callback is None:
@@ -107,6 +118,8 @@ class NonStreamDispatcherMixin:
                         "turn_messages": [item.model_dump(mode="json") for item in turn_messages],
                         "files_to_user": files_to_user,
                         "current_turn": current_turn,
+                        "context_summary_trigger_mode": checkpoint_mode.value,
+                        "context_summary_fixed_upper_message_id": checkpoint_upper_id,
                     }
                 )
 
@@ -147,9 +160,6 @@ class NonStreamDispatcherMixin:
                             max_tokens=chat_params["max_tokens"],
                             tools=tools,
                             history_before_id=history_before_id,
-                            frozen_user_message_ids=frozen_user_message_ids,
-                            context_summary_work_validity_checker=context_summary_work_validity_checker,
-                            context_summary_lifecycle_callback=context_summary_lifecycle_callback,
                         )
                         current_turn = 0
 
@@ -172,6 +182,13 @@ class NonStreamDispatcherMixin:
                         if new_user_msgs:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                            fixed_user_upper_id = max(
+                                (item.id for item in new_user_msgs if item.id is not None),
+                                default=None,
+                            )
+                            if fixed_user_upper_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_upper_id = fixed_user_upper_id
 
                         current_turn += 1
 
@@ -189,6 +206,22 @@ class NonStreamDispatcherMixin:
                             emitted_stream_content = False
                             buffered_content_chunks: list[str] = []
                             try:
+                                if checkpoint_upper_id is not None:
+                                    messages = await apply_context_summary_checkpoint(
+                                        db,
+                                        session_id=session_id,
+                                        uid=uid,
+                                        profile=profile,
+                                        cfg=cfg,
+                                        messages=messages,
+                                        trigger_mode=checkpoint_mode,
+                                        fixed_upper_message_id=checkpoint_upper_id,
+                                        context_window_k=chat_params["context_window_k"],
+                                        max_tokens=chat_params["max_tokens"],
+                                        tools=current_tools,
+                                        work_validity_checker=context_summary_work_validity_checker,
+                                        lifecycle_event_callback=context_summary_lifecycle_callback,
+                                    )
                                 request_messages = ContextManager.trim_messages_for_model_request(
                                     messages=messages,
                                     uid=uid,
@@ -307,13 +340,23 @@ class NonStreamDispatcherMixin:
 
                             logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_RESPONSE_CONTINUE"))
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                            fixed_user_upper_id = max(
+                                (item.id for item in new_user_msgs if item.id is not None),
+                                default=None,
+                            )
+                            if fixed_user_upper_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_upper_id = fixed_user_upper_id
 
                             current_turn = 0
                             await save_execution_checkpoint(messages, current_turn)
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
+                            fixed_tool_upper_id = await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
+                            if fixed_tool_upper_id is not None:
+                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_upper_id = fixed_tool_upper_id
                             await save_execution_checkpoint(messages, current_turn)
                             continue
 
@@ -362,11 +405,14 @@ class NonStreamDispatcherMixin:
                                         active_tasks.discard(task)
 
                         tasks = [asyncio.create_task(wrapped_tool_call(tc)) for tc in ai_msg.tool_calls]
+                        persisted_tool_result_ids: list[int] = []
                         try:
                             for completed_task in asyncio.as_completed(tasks):
                                 tool_res = await completed_task
                                 files_to_user.extend(extract_files_to_user([tool_res]))
-                                await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                                stored_tool_res = await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
+                                if stored_tool_res.id is not None:
+                                    persisted_tool_result_ids.append(stored_tool_res.id)
                                 await save_execution_checkpoint(messages, current_turn)
                                 if stream_event_callback is not None:
                                     tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
@@ -384,6 +430,11 @@ class NonStreamDispatcherMixin:
                                 if not task.done():
                                     task.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
+
+                        if persisted_tool_result_ids:
+                            checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                            checkpoint_upper_id = max(persisted_tool_result_ids)
+                            await save_execution_checkpoint(messages, current_turn)
 
                 finally:
                     is_first_iter = False

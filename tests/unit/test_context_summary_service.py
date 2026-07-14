@@ -4,6 +4,10 @@ import pytest
 
 from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
+from app.core.utils.context_summary.boundary import (
+    ContextSummaryBoundary,
+    ContextSummaryTriggerMode,
+)
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
     ContextSummaryWorkInvalidError,
@@ -14,6 +18,79 @@ from tests.unit.context_summary_service_test_support import (
     _patch_token_counter,
     _summary_cfg,
 )
+
+
+@pytest.mark.asyncio
+async def test_complete_candidate_including_covered_user_block_must_reduce_replacement_input(
+    monkeypatch,
+):
+    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    snapshot_calls = []
+    original_build_snapshot = service_module.build_context_summary_snapshot
+
+    async def resolve_boundary(*_args, **_kwargs):
+        return ContextSummaryBoundary(
+            trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+            fixed_upper_message_id=4,
+            target_message_id=4,
+            covered_user_message_id=1,
+            covered_user_message_content="必须逐字保留的当前目标与验收约束",
+        )
+
+    async def build_snapshot(*args, **kwargs):
+        snapshot_calls.append(kwargs)
+        return await original_build_snapshot(*args, **kwargs)
+
+    async def measure_replacement(*_args, **_kwargs):
+        return 50
+
+    def estimate_tokens(content):
+        if "<covered_user_message " in content:
+            return 60
+        if "compressed history" in content:
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        return 100
+
+    monkeypatch.setattr(
+        service_module,
+        "resolve_context_summary_boundary",
+        resolve_boundary,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "build_context_summary_snapshot",
+        build_snapshot,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "measure_complete_replacement_input",
+        measure_replacement,
+    )
+    _patch_token_counter(monkeypatch, estimate_tokens)
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=5,
+        current_message="",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+        trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
+        fixed_upper_message_id=4,
+    )
+
+    assert state == ContextSummaryState(content=None, message_id=None)
+    assert generated_calls
+    assert update_calls == []
+    assert snapshot_calls[0]["target_message_id"] == 4
+    assert snapshot_calls[0]["model_excluded_message_ids"] == [1]
 
 
 @pytest.mark.asyncio
