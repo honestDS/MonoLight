@@ -282,6 +282,42 @@ async def test_completed_initial_stage_is_reused_without_recompletion(
     assert [event[0] for event in events] == ["reduce"]
 
 
+def test_fragment_replacement_tokens_include_existing_persistent_summary(
+    monkeypatch,
+):
+    fragment = stage_module.SummaryFragmentInput(
+        fragment_index=0,
+        message_start_id=52,
+        message_end_id=52,
+        token_count=40,
+        content="newly eligible history",
+        existing_summary="existing persistent summary",
+    )
+    monkeypatch.setattr(
+        stage_module,
+        "estimate_tokens",
+        lambda content: 920 if content == fragment.existing_summary else 0,
+    )
+
+    assert stage_module.fragment_replacement_input_tokens(fragment) == 960
+
+
+def test_context_summary_exception_detail_expands_task_group_and_cause():
+    provider_error = TimeoutError("upstream response timed out")
+    retry_error = RuntimeError("Context summary model failed after fixed-model retries")
+    retry_error.__cause__ = provider_error
+    task_group_error = ExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [retry_error],
+    )
+
+    detail = stage_module.format_context_summary_exception(task_group_error)
+
+    assert "RuntimeError: Context summary model failed after fixed-model retries" in detail
+    assert "TimeoutError: upstream response timed out" in detail
+    assert "ExceptionGroup" not in detail
+
+
 def _completed_lower_stage() -> ContextSummaryStage:
     return ContextSummaryStage(
         uid="user-1",

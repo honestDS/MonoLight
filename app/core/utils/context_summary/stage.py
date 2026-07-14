@@ -34,7 +34,6 @@ from app.core.utils.context_summary.selection import (
     select_context_summary_model,
 )
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
-from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.context_summary_stage import (
     ContextSummaryFragment,
@@ -60,6 +59,35 @@ class ContextSummaryLayerError(RuntimeError):
     pass
 
 
+def format_context_summary_exception(exc: BaseException) -> str:
+    details: list[str] = []
+    seen: set[int] = set()
+
+    def collect(current: BaseException) -> None:
+        current_id = id(current)
+        if current_id in seen:
+            return
+        seen.add(current_id)
+
+        if isinstance(current, BaseExceptionGroup):
+            for nested in current.exceptions:
+                collect(nested)
+            return
+
+        detail = f"{type(current).__name__}: {current}"
+        if detail not in details:
+            details.append(detail)
+
+        cause = current.__cause__
+        if cause is not None:
+            collect(cause)
+        elif current.__context__ is not None and not current.__suppress_context__:
+            collect(current.__context__)
+
+    collect(exc)
+    return " | ".join(details) or f"{type(exc).__name__}: {exc}"
+
+
 async def release_db_session(db: AsyncSession) -> None:
     """结束当前事务，避免长耗时外部调用期间占用 SQLite 写锁。"""
     in_transaction = getattr(db, "in_transaction", None)
@@ -83,18 +111,35 @@ async def call_fixed_summary_model(
     input_tokens: int,
 ) -> str:
     last_error: Exception | None = None
-    for _attempt in range(CONTEXT_SUMMARY_MODEL_ATTEMPTS):
+    prompt_tokens = estimate_tokens(prompt)
+    for attempt in range(1, CONTEXT_SUMMARY_MODEL_ATTEMPTS + 1):
+        output_tokens: int | None = None
         try:
             generated = await call_context_summary_model(model=model, prompt=prompt)
             if not generated:
                 raise RuntimeError("Context summary model returned an empty result")
-            if estimate_tokens(generated) >= input_tokens:
-                raise RuntimeError("Context summary model did not reduce its input")
+            output_tokens = estimate_tokens(generated)
+            if output_tokens >= input_tokens:
+                raise RuntimeError(f"Context summary model did not reduce its input: output_tokens={output_tokens}, replacement_input_tokens={input_tokens}")
             return generated
         except Exception as exc:
             last_error = exc
+            logger.bind(
+                channel_id=model.channel_id,
+                channel_name=model.channel_name,
+                model_id=model.model_id,
+                model_priority=model.priority,
+                attempt=attempt,
+                max_attempts=CONTEXT_SUMMARY_MODEL_ATTEMPTS,
+                prompt_tokens=prompt_tokens,
+                replacement_input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                exception_type=type(exc).__name__,
+                exception_detail=format_context_summary_exception(exc),
+            ).warning("Context summary fixed-model attempt failed")
 
-    raise RuntimeError("Context summary model failed after fixed-model retries") from last_error
+    detail = format_context_summary_exception(last_error) if last_error is not None else "unknown error"
+    raise RuntimeError(f"Context summary model failed after fixed-model retries: {detail}") from last_error
 
 
 def fragment_prompt(fragment: SummaryFragmentInput) -> str:
@@ -103,6 +148,10 @@ def fragment_prompt(fragment: SummaryFragmentInput) -> str:
         recent_dialogue="(none)",
         conversation=fragment.content,
     )
+
+
+def fragment_replacement_input_tokens(fragment: SummaryFragmentInput) -> int:
+    return fragment.token_count + estimate_tokens(fragment.existing_summary or "")
 
 
 def build_summary_work_identity(
@@ -401,10 +450,11 @@ async def generate_snapshot_summary_with_model(
         prompt = fragment_prompt(fragment)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
             raise RuntimeError("Context summary fragment exceeds the selected model window")
+        replacement_input_tokens = fragment_replacement_input_tokens(fragment)
         generated = await call_fixed_summary_model(
             model=model,
             prompt=prompt,
-            input_tokens=fragment.token_count,
+            input_tokens=replacement_input_tokens,
         )
         return SummaryFragmentResult(
             fragment_index=fragment.fragment_index,
@@ -429,12 +479,25 @@ async def generate_snapshot_summary_with_model(
         if not await mark_summary_stage_completed(stage=persisted_stage):
             raise RuntimeError("Context summary fragment stage failed completion validation")
     except Exception as exc:
-        error = format_exception_message(exc)
+        error = format_context_summary_exception(exc)
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            stage_key=stage_key,
+            model_key=model_key,
+            channel_id=model.channel_id,
+            channel_name=model.channel_name,
+            model_id=model.model_id,
+            expected_fragment_count=expected_fragment_count,
+            first_fragment_index=first_fragment_index,
+            exception_type=type(exc).__name__,
+            exception_detail=error,
+        ).opt(exception=exc).error("Context summary fragment stage failed")
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
         if contains_context_summary_work_invalid(exc):
             raise ContextSummaryWorkInvalidError("Context summary work became invalid during fragment execution") from exc
-        raise ContextSummaryLayerError("Context summary fragment layer failed") from exc
+        raise ContextSummaryLayerError(f"Context summary fragment layer failed: {error}") from exc
 
     logger.bind(
         uid=uid,
@@ -534,7 +597,7 @@ async def generate_snapshot_summary_result(
                 stage_priority=model.priority,
             ).warning(
                 "Context summary layer invalidated before model fallback: {error}",
-                error=format_exception_message(exc),
+                error=str(exc),
             )
 
 
