@@ -4,508 +4,491 @@
 
 ```text
 Monoligh/
-├── .agents/                # Agent 相关本地配置目录
-├── .clinerules/            # 项目级 Cline 规则
-├── app/                    # 后端 FastAPI 应用主体
-├── dashboard/              # 前端 Vue 管理与聊天控制台
-├── data/                   # 运行期持久化数据目录
-├── scripts/                # 一次性迁移、维护脚本
-├── temp/                   # 用户临时文件与工具执行工作目录
+├── .agents/                # Agent 本地配置
+├── .clinerules/            # 项目规则
+├── app/                    # FastAPI 后端源码
+├── dashboard/              # Vue 管理与聊天前端
+├── data/                   # 运行期持久化数据
+├── scripts/                # 数据迁移与维护脚本
+├── temp/                   # 临时文件与工具工作目录
 ├── tests/                  # 后端自动化测试
 ├── .env                    # 本地环境变量
 ├── .gitattributes          # Git 属性配置
 ├── .gitignore              # Git 忽略配置
-├── ARCHITECTURE.md         # 当前架构说明
-├── DEVELOPMENT_GUIDE.md    # 开发说明
+├── ARCHITECTURE.md         # 项目架构说明
+├── DEVELOPMENT_GUIDE.md    # 开发规范
 ├── LICENSE                 # 项目许可证
 ├── README.md               # 项目说明
 ├── logo.jpg                # 项目 Logo
-├── main.py                 # 后端应用入口
-├── start.py                # 跨平台进程启动器
+├── main.py                 # FastAPI 应用入口
+├── start.py                # 多进程启动器
 ├── pytest.ini              # Pytest 配置
-├── requirements.txt        # 后端 Python 依赖
-└── ruff.toml               # Ruff 检查配置
+├── requirements.txt        # 后端依赖
+└── ruff.toml               # Ruff 配置
 ```
 
-本说明仅描述项目源码、配置、运行期数据与维护脚本。`.git/`、`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/`、`node_modules/` 等版本控制、虚拟环境、依赖缓存或工具缓存目录不作为源码架构的一部分展开。
+`.git/`、`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/` 和 `node_modules/` 等版本控制、虚拟环境及缓存目录不在本文展开。
 
 ## 后端目录：`app/`
 
 ```text
 app/
-├── adapters/               # 对话入口与消息平台适配层
-├── api/                    # HTTP 与 WebSocket API 路由
-├── core/                   # 核心业务编排、调度、工具与基础能力
-├── models/                 # SQLModel/Pydantic 领域模型
-├── providers/              # 外部基础设施与模型能力提供方封装
-├── schemas/                # API 请求/响应结构
-├── transformers/           # 模型协议转换器
-├── workers/                # 独立后台进程入口
+├── adapters/               # 对话入口与消息平台适配
+├── api/                    # HTTP 与 WebSocket 接口
+├── core/                   # 核心业务与通用能力
+├── models/                 # 数据库与业务数据模型
+├── providers/              # 数据库和模型服务封装
+├── schemas/                # 接口数据结构
+├── transformers/           # 模型协议转换
+├── workers/                # 独立后台进程
 ├── __init__.py             # 后端包标识
-├── handler.py              # 中间件、异常处理器与基础路由注册
-├── tasks.py                # 后台周期清理任务
+├── handler.py              # 中间件、路由与异常处理注册
+├── tasks.py                # 周期清理任务
 └── warning_filters.py      # 运行时告警过滤
 ```
 
-### 应用入口层
+### 应用入口与后台进程
 
-- `start.py`：跨平台统一启动器；读取 `.env` 中的 `APP_PORT`、`APP_HOST` 和 `APP_WORKERS`，在父进程中完成一次数据库与系统数据初始化，再按操作系统创建并托管 Uvicorn Web 进程、唯一消息平台 Worker、唯一后台任务 Worker 与唯一会话回复 Worker。
-- `main.py`：创建 FastAPI 应用，注册中间件、异常处理器和 API 路由；每个 Web Worker 只启动数据库会话事件订阅，不执行后台任务、定时任务、周期清理或消息平台长轮询。
-- `app/workers/message_platform.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担定时任务调度、消息平台长轮询和 Outbox 投递。
-- `app/workers/background_task.py`：独立后台进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，统一承担后台工具任务恢复、认领、按 Profile 并发调度以及日志和临时目录清理。
-- `app/workers/session_reply.py`：独立会话最终回复进程入口；通过数据库租约保证同一数据库范围内只有一个有效实例，恢复过期工作并按全局设置并发调度不同会话。
-- `app/workers/lease.py`：管理独立 Worker 的数据库租约获取、续租、失效停止和释放。
-- `app/workers/signals.py`：为独立 Worker 统一注册 POSIX 信号和 Windows `SIGBREAK` 关闭处理。
-- `app/handler.py`：注册 CORS、语言环境中间件、根路径、favicon 路由，以及数据库、校验、业务异常、LLM 异常和兜底异常处理器。
-- `app/tasks.py`：提供系统日志清理、临时目录清理等周期任务。
-- `app/warning_filters.py`：集中处理第三方库或运行环境的告警过滤。
+```text
+main.py                     # 创建 FastAPI 应用
+start.py                    # 启动 Web 与独立后台进程
 
-## API 层：`app/api/v1/`
+app/workers/
+├── __init__.py             # Worker 包标识
+├── background_task.py      # 后台工具任务进程
+├── lease.py                # Worker 数据库租约管理
+├── message_platform.py     # 消息平台、定时任务与发件箱进程
+├── session_reply.py        # 会话最终回复进程
+└── signals.py              # Worker 退出信号处理
+```
+
+## 接口层：`app/api/v1/`
 
 ```text
 app/api/v1/
-├── auth.py                 # 登录、JWT、管理员重置
-├── channels.py             # 模型渠道与模型条目管理
-├── chat.py                 # 对话、会话、消息、后台任务查询
-├── files.py                # 文件上传与下载
-├── knowledge_base.py       # 知识库、文档、检索测试接口
-├── message_platforms.py    # 消息平台管理与微信 OpenClaw 登录接口
-├── profile.py              # Profile 配置管理
-├── prompts.py              # Prompt 资产管理
-├── scheduled_tasks.py      # 定时任务管理
-├── system.py               # 系统设置、日志、语言列表接口
-└── users.py                # 管理员用户管理
+├── auth.py                 # 登录、令牌与管理员重置接口
+├── channels.py             # 模型渠道与模型条目接口
+├── chat.py                 # 对话、会话、消息与任务接口
+├── files.py                # 文件上传与下载接口
+├── knowledge_base.py       # 知识库、文档与检索接口
+├── message_platforms.py    # 消息平台与微信登录接口
+├── profile.py              # Profile 配置接口
+├── prompts.py              # Prompt 管理接口
+├── scheduled_tasks.py      # 定时任务接口
+├── system.py               # 系统设置、日志与语言接口
+└── users.py                # 用户管理接口
 ```
-
-API 层负责接收外部请求、执行鉴权依赖、组装请求参数、调用下层服务或 CRUD，并通过统一响应结构返回结果。聊天和日志相关接口同时包含 WebSocket 入口；消息平台接口负责平台配置、启停、微信 OpenClaw 扫码登录与登录状态轮询。
 
 ## 对话适配层：`app/adapters/`
 
 ```text
 app/adapters/
-├── base.py                 # 对话适配器抽象基类
-├── chat_web.py             # HTTP Chat Completions 适配
-├── chat_ws.py              # WebSocket 流式聊天适配
-└── weixin_openclaw/        # 微信 OpenClaw 消息平台适配包
-    ├── __init__.py
-    ├── adapter.py          # OpenClaw 对话适配入口
-    ├── client.py           # OpenClaw HTTP 客户端
-    ├── config.py           # OpenClaw 配置解析与默认值
-    ├── constants.py        # OpenClaw 常量
-    ├── crypto.py           # OpenClaw 敏感配置加解密
-    ├── media.py            # OpenClaw 媒体与文件处理
-    ├── message.py          # OpenClaw 消息解析与组装
-    ├── response.py         # OpenClaw 响应结构处理
-    └── schemas.py          # OpenClaw 内部数据结构
+├── base.py                 # 对话适配器基类
+├── chat_web.py             # HTTP 对话适配
+├── chat_ws.py              # WebSocket 对话适配
+└── weixin_openclaw/
+    ├── __init__.py         # 微信 OpenClaw 适配包标识
+    ├── adapter.py          # 微信对话适配入口
+    ├── client.py           # OpenClaw 请求客户端
+    ├── config.py           # 平台配置解析
+    ├── constants.py        # 平台常量
+    ├── crypto.py           # 敏感配置加解密
+    ├── media.py            # 媒体与文件处理
+    ├── message.py          # 入站消息解析
+    ├── response.py         # 出站响应处理
+    └── schemas.py          # 平台内部数据结构
 ```
-
-适配层负责把不同传输协议或消息平台的输入转换为统一的内部对话请求。HTTP、WebSocket 与微信 OpenClaw 的前台消息均通过同一入口保存并创建会话回复工作；微信收信处理只负责入队，不在长轮询协程内等待最终回复。最终结果由会话事件或消息平台 Outbox 投递，业务异常和未知异常会被转换为本地化错误回复。
 
 ## 核心层：`app/core/`
 
 ```text
 app/core/
-├── background_tasks/       # 后台任务与定时任务运行系统
-├── crud/                   # 数据访问对象
-├── dispatchers/            # 对话分发器实现
-├── embedding/              # 知识库向量化编排
-├── i18n/                   # 后端国际化
-├── message_platforms/      # 消息平台后台轮询与通知管理
-├── middleware/             # 工具安全审计中间件
-├── rerank/                 # 知识库重排编排
-├── retrieval/              # 混合检索、稀疏检索、融合策略
-├── session_reply_queue/    # 按会话顺序执行最终回复工作
-├── tools/                  # LLM 可调用工具实现
-├── utils/                  # 通用工具函数与调度辅助函数
-├── channel_router.py       # 模型渠道选择与加权轮询
+├── background_tasks/       # 后台任务与定时任务
+├── crud/                   # 数据访问
+├── dispatchers/            # 对话分发实现
+├── embedding/              # 知识库向量化
+├── i18n/                   # 后端多语言
+├── message_platforms/      # 消息平台运行管理
+├── middleware/             # 工具调用审计
+├── rerank/                 # 知识库重排
+├── retrieval/              # 知识库检索
+├── session_reply_queue/    # 会话最终回复队列
+├── tools/                  # 模型可调用工具
+├── utils/                  # 通用与调度辅助函数
+├── channel_router.py       # 模型渠道选择
 ├── constants.py            # 常量与消息键
-├── context.py              # 对话上下文管理
-├── crypto.py               # API Key 加密、解密与脱敏
-├── dispatch_context.py     # 工具执行运行时上下文
-├── dispatcher.py           # 对话调度总入口
-├── exceptions.py           # 业务异常定义
-├── log.py                  # 日志系统
+├── context.py              # 对话上下文构建
+├── crypto.py               # API Key 加解密与脱敏
+├── dispatch_context.py     # 工具执行上下文
+├── dispatcher.py           # 对话分发入口
+├── exceptions.py           # 业务异常
+├── log.py                  # 日志记录
 ├── log_broadcaster.py      # 实时日志广播
-├── paths.py                # 数据、日志、临时目录路径
-├── prompts.py              # 系统提示词与内置提示模板
-├── security.py             # 认证与安全辅助函数
+├── paths.py                # 数据与临时目录路径
+├── prompts.py              # 内置提示内容
+├── security.py             # 认证与安全辅助
+├── session_cleanup.py      # 会话关联数据清理
 └── session_notifier.py     # 会话事件通知
 ```
-
-核心层承载后端主要业务编排。对话请求进入 `dispatcher.py` 后，由 `dispatchers/` 和 `utils/dispatcher/` 完成上下文准备、渠道调用、工具调用、消息保存、Markdown 指令处理、后台任务处理和结果截断。
 
 ### 后台任务：`app/core/background_tasks/`
 
 ```text
 app/core/background_tasks/
-├── __init__.py
-├── manager.py              # 后台任务提交、状态维护、并发控制
-├── recovery.py             # 启动时恢复未完成任务
-├── reply_trigger.py        # 后台任务回复触发逻辑
-├── runner.py               # 后台任务执行器
-├── scheduler.py            # 定时任务调度器
-└── schemas.py              # 后台任务内部结构
+├── __init__.py             # 后台任务包标识
+├── manager.py              # 任务提交与状态管理
+├── recovery.py             # 未完成任务恢复
+├── reply_trigger.py        # 任务完成后的总结回复触发
+├── runner.py               # 后台工具任务执行
+├── scheduler.py            # 定时任务调度
+└── schemas.py              # 后台任务内部数据结构
 ```
-
-该目录管理由工具调用或定时配置触发的异步任务，包括任务入库、恢复、运行、取消和状态更新。Web Worker 只写入后台任务记录，唯一后台任务 Worker 负责恢复、认领和按 Profile 并发执行工具；工具完成后，`reply_trigger.py` 在同一事务中保存结果消息并创建后台总结工作。定时任务调度器只在唯一消息平台 Worker 中启动，原子推进单次触发并在同一事务中保存触发消息与创建计划任务总结工作，不直接调用 LLM。
 
 ### 会话最终回复队列：`app/core/session_reply_queue/`
 
 ```text
 app/core/session_reply_queue/
-├── __init__.py             # 队列管理器与消费者导出
-├── consumer.py             # 原子认领、动态并发调度与租约续期
-├── executor.py             # 前台、后台工具与计划任务最终回复执行
-└── manager.py              # 原子入队、输入冻结合并与结果等待
+├── __init__.py             # 队列能力导出
+├── consumer.py             # 工作认领、并发执行与恢复
+├── executor.py             # 前台及任务总结回复执行
+└── manager.py              # 工作入队、消息合并与结果读取
 ```
-
-队列使用 `session_reply_sequence` 为同一会话的三类工作分配统一顺序号，并使用 `session_reply_work_item` 持久化来源、输入边界、状态、租约、重试和结果。消费者只认领每个会话最早的非终态工作，不会越过等待中的较早工作；不同会话可并行。进程总并发由全局设置 `session_reply_max_concurrency` 控制，默认值为 4、范围为 1 到 100，设置变更在后续调度中动态生效。连续前台工作可在首次执行前合并，但不会跨过后台工具总结或计划任务总结。
 
 ### 消息平台：`app/core/message_platforms/`
 
 ```text
 app/core/message_platforms/
-├── __init__.py
-├── base.py                 # 消息平台处理器抽象接口
-├── manager.py              # 平台轮询任务与 Outbox 消费管理
-├── notifier.py             # Web 通知或外部平台 Outbox 入队
-└── weixin_openclaw.py      # 微信 OpenClaw 轮询、消息合并与会话事件处理
+├── __init__.py             # 消息平台包标识
+├── base.py                 # 平台处理器基类
+├── inbound_collector.py    # 入站消息收集与合并
+├── manager.py              # 平台轮询与发件箱投递管理
+├── notifier.py             # 会话事件和平台消息入队
+└── weixin_openclaw.py      # 微信 OpenClaw 平台处理器
 ```
-
-消息平台管理器只由持有 `message_platform` 数据库租约的独立进程启动，通过平台处理器注册表加载可轮询平台，并为每个平台维护独立任务。Web Worker 只负责修改数据库中的平台配置；独立进程定期刷新配置并启动或停止对应任务。租约会定期续期，进程崩溃或失去数据库连接后可由其他实例在租约过期后接管，因此互斥范围可跨主机生效。新增消息平台时实现 `MessagePlatformHandler` 并注册到管理器，无需把平台专属逻辑写入通用管理器。
-
-外部平台主动事件采用持久化 Outbox：后台任务或计划任务生成事件后，`notifier.py` 将事件写入 `message_platform_outbox`；唯一后台进程原子认领事件并投递，失败时指数退避重试，进程异常退出后可通过认领租约恢复未完成事件。单次投递由管理器限制在 300 秒内，认领租约为 330 秒，保证正常投递不会因租约提前到期而被重复认领。相同事件使用确定性摘要键去重，投递语义为至少一次；如果外部平台不支持幂等，进程在“远端已接收但本地尚未标记成功”的极小窗口崩溃时仍可能重复发送。
-
-WebSocket 主动事件采用数据库广播：事件写入 `session_event` 后，每个 Web Worker 使用独立递增游标读取并投递到本进程的 WebSocket 队列，因此连接所在进程都能观察到事件。新 Worker 从启动时的最新事件 ID 开始消费，避免重放历史消息；事件保留 24 小时并由通知轮询器定期清理。
-
-微信 OpenClaw 处理器复用适配层的 `sync_buf` 状态，按平台配置的长轮询超时与轮询间隔拉取消息；收到消息后完成平台侧消息合并、上下文 token 保存和前台工作入队。会话回复 Worker 生成最终结果后通过持久化 Outbox 交由适配器发送回 OpenClaw 会话。运行时状态、同步游标和错误信息通过消息平台 CRUD 写回数据库。
 
 ### 数据访问：`app/core/crud/`
 
 ```text
 app/core/crud/
-├── background_task.py      # 后台任务访问
-├── base.py                 # 通用 CRUD 基类
-├── channel.py              # 模型渠道访问
+├── background_task.py      # 后台任务数据访问
+├── base.py                 # 通用数据访问基类
+├── channel.py              # 渠道与模型数据访问
 ├── channel_cursor.py       # 渠道路由游标访问
+├── context_summary_fragment.py # 上下文总结片段访问
+├── context_summary_stage.py # 上下文总结阶段访问
 ├── log.py                  # 系统日志访问
 ├── message.py              # 消息访问
 ├── message_platform.py     # 消息平台访问
-├── message_platform_outbox.py # 消息平台发件箱访问与原子认领
+├── message_platform_outbox.py # 消息平台发件箱访问
 ├── profile.py              # Profile 访问
 ├── prompt.py               # Prompt 访问
 ├── scheduled_task.py       # 定时任务访问
 ├── session.py              # 会话访问
-├── session_event.py        # WebSocket 跨进程广播事件访问
-├── session_reply_work_item.py # 会话回复顺序、入队、认领与恢复
+├── session_event.py        # 会话通知事件访问
+├── session_reply_stream_event.py # 回复流事件访问
+├── session_reply_work_item.py # 回复工作与顺序访问
 ├── system_setting.py       # 系统设置访问
 ├── user.py                 # 用户访问
-└── worker_lease.py         # 独立 Worker 数据库租约访问
+└── worker_lease.py         # Worker 租约访问
 ```
 
-CRUD 层封装数据库读写细节，供 API 层、调度层、后台任务和系统初始化流程调用。
-
-### 对话分发器：`app/core/dispatchers/`
+### 对话分发：`app/core/dispatchers/`
 
 ```text
 app/core/dispatchers/
-├── __init__.py             # ChatDispatcher 导出
+├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
 ├── non_stream.py           # 非流式对话分发
-├── shared.py               # 分发器共享上下文与逻辑
+├── shared.py               # 分发器共用逻辑
 └── stream.py               # 流式对话分发
 ```
-
-分发器按运行形态拆分为流式、非流式、后台任务三类，共享逻辑集中在 `shared.py`。
 
 ### 调度辅助：`app/core/utils/dispatcher/`
 
 ```text
 app/core/utils/dispatcher/
 ├── __init__.py
-├── append_new_user_messages.py       # 追加新用户消息
-├── audit_tool_call.py                # 工具调用审计入口
-├── channel_call.py                   # 模型渠道调用封装
-├── fetch_and_merge_new_user_messages.py # 拉取并合并新增用户消息
-├── handle_parallel_tool_limit.py     # 并行工具调用限制
-├── helpers.py                        # 调度通用辅助函数
-├── inject_system_prompt.py           # 系统提示词注入
-├── mark_initial_message_processed.py # 初始消息处理标记
+├── append_new_user_messages.py       # 追加用户消息
+├── audit_tool_call.py                # 工具调用审计
+├── channel_call.py                   # 模型渠道调用
+├── fetch_and_merge_new_user_messages.py # 获取并合并新消息
+├── handle_parallel_tool_limit.py     # 并行工具数量限制
+├── helpers.py                        # 调度共用函数
+├── inject_system_prompt.py           # 系统提示注入
+├── mark_initial_message_processed.py # 初始消息状态更新
 ├── markdown_instruction.py           # Markdown 输出指令
 ├── prepare_messages.py               # 模型消息准备
 ├── process_markdown_response.py      # Markdown 响应处理
-├── process_single_tool.py            # 单个工具调用执行
-├── save_assistant_message.py         # 保存助手消息
-├── save_initial_message.py           # 保存初始消息
-├── save_message.py                   # 保存通用消息
-├── save_tool_response.py             # 保存工具响应
+├── process_single_tool.py            # 单个工具调用处理
+├── save_assistant_message.py         # 助手消息保存
+├── save_initial_message.py           # 初始消息保存
+├── save_message.py                   # 通用消息保存
+├── save_tool_response.py             # 工具响应保存
 ├── truncate_tool_result.py           # 工具结果截断
 └── validate_profile_and_cfg.py       # Profile 与配置校验
 ```
 
-该目录把对话调度过程中的细分步骤拆成独立模块，供不同分发器复用。
+### 上下文总结：`app/core/utils/context_summary/`
+
+```text
+app/core/utils/context_summary/
+├── __init__.py             # 上下文总结能力导出
+├── cleanup.py              # 过期总结任务与阶段清理
+├── common.py               # 共用状态与令牌计算
+├── history.py              # 历史消息测量与分页
+├── merge.py                # 已完成总结片段归并
+├── model_call.py           # 总结模型调用
+├── pipeline.py             # 总结片段处理管线
+├── reduction.py            # 多层总结归约与精炼
+├── selection.py            # 总结模型选择
+├── service.py              # 总结生成与保存入口
+├── snapshot.py             # 消息快照构建
+├── split.py                # 总结来源单元拆分
+└── stage.py                # 总结阶段执行与状态更新
+```
+
+### 其他通用函数：`app/core/utils/`
+
+```text
+app/core/utils/
+├── assistant_files.py      # 助手文件信息提取
+├── background_task_result.py # 后台任务结果整理
+├── channel_profile_sync.py # 渠道与 Profile 配置同步
+├── config.py               # 配置读取
+├── context_budget.py       # 上下文令牌预算
+├── context_messages.py     # 上下文消息处理
+├── message_assembler.py    # 消息组装
+├── message_parser.py       # 消息解析
+├── session.py              # 会话辅助函数
+├── system.py               # 系统信息
+├── text_splitter.py        # 文本切分
+├── time.py                 # 时间处理
+└── tokenizer.py            # 令牌计算
+```
 
 ### 工具系统：`app/core/tools/`
 
 ```text
 app/core/tools/
-├── __init__.py             # 工具注册表与 Profile 工具过滤
-├── base.py                 # 工具执行器基类
-├── cancel_background_task.py # 后台任务取消工具
-├── file_writer.py          # 文件写入工具
-├── firecrawl_scrape.py     # Firecrawl 抓取工具
-├── firecrawl_search.py     # Firecrawl 搜索工具
-├── image_generation.py     # 图像生成工具
-├── knowledge_base_query.py # 知识库查询工具
-├── list_background_tasks.py # 后台任务列表工具
-├── send_file_to_user.py    # 文件发送给用户工具
-└── shell.py                # Shell 命令工具
+├── __init__.py             # 工具注册与过滤
+├── base.py                 # 工具基类
+├── cancel_background_task.py # 取消后台任务
+├── file_writer.py          # 写入文件
+├── firecrawl_scrape.py     # Firecrawl 网页抓取
+├── firecrawl_search.py     # Firecrawl 搜索
+├── image_generation.py     # 图像生成
+├── knowledge_base_query.py # 知识库查询
+├── list_background_tasks.py # 查询后台任务
+├── send_file_to_user.py    # 向用户发送文件
+└── shell.py                # Shell 命令执行
 ```
 
-工具系统向模型暴露可调用函数，并在执行时接入运行时上下文、安全审计、后台任务能力和统一结果格式。
-
-### 知识库与检索：`app/core/embedding/`、`app/core/rerank/`、`app/core/retrieval/`
+### 知识库能力
 
 ```text
 app/core/embedding/
 ├── __init__.py
-└── knowledge_base.py       # 文档向量化与写入编排
+└── knowledge_base.py       # 文档向量化与写入
 
 app/core/rerank/
 ├── __init__.py
-├── knowledge_base.py       # 知识库重排调用编排
+├── knowledge_base.py       # 检索结果重排
 └── schemas.py              # 重排数据结构
 
 app/core/retrieval/
 ├── __init__.py
 ├── fusion.py               # 检索结果融合
-├── hybrid.py               # 混合检索流程
+├── hybrid.py               # 混合检索
 ├── schemas.py              # 检索数据结构
 ├── sparse.py               # 稀疏检索
 └── tokenizer.py            # 检索分词
 ```
 
-这些目录组成知识库查询链路，覆盖文档切分后的向量写入、稀疏检索、向量检索、混合召回、结果融合与重排。
-
-### 国际化：`app/core/i18n/`
+### 多语言与审计
 
 ```text
 app/core/i18n/
 ├── __init__.py
-├── context.py              # 当前请求语言上下文
-├── locale.py               # 语言解析与中间件辅助
-├── translator.py           # 翻译函数
-└── locales/                # 多语言消息键目录
+├── context.py              # 当前语言上下文
+├── locale.py               # 语言解析
+├── translator.py           # 文本翻译入口
+└── locales/                # 多语言消息
+
+app/core/middleware/
+└── auditor.py              # 工具调用安全审计
 ```
-
-后端国际化覆盖 API 响应、日志、安全审计、校验和业务错误消息。
-
-### 通用工具：`app/core/utils/`
-
-```text
-app/core/utils/
-├── context_summary/        # 上下文总结压缩实现
-│   ├── __init__.py         # 总结服务公开入口
-│   ├── common.py           # 总结状态、序列化与预算计算
-│   ├── history.py          # 持久化历史测量与分片迭代
-│   ├── merge.py            # 已完成层分页读取与归并分组
-│   ├── model_call.py       # 总结模型单次调用
-│   ├── pipeline.py         # 有界并发分片管线
-│   ├── selection.py        # 总结模型选择与能力快照
-│   ├── service.py          # 总结触发、精炼与持久化编排
-│   ├── snapshot.py         # 固定消息快照与轮次分页
-│   └── stage.py            # 分片层执行、验收与降级
-├── dispatcher/             # 对话调度辅助模块
-├── channel_profile_sync.py # 渠道与 Profile 配置同步
-├── config.py               # 配置读取辅助
-├── context_budget.py       # 上下文预算计算
-├── context_messages.py     # 上下文消息处理
-├── message_assembler.py    # 消息组装
-├── message_parser.py       # 消息解析
-├── session.py              # 会话辅助函数
-├── system.py               # 系统上下文信息
-├── text_splitter.py        # 文本切分
-├── time.py                 # 时区与时间函数
-└── tokenizer.py            # 通用分词/token 计算
-```
-
-该目录放置不属于单一业务模块的通用函数，并包含调度器拆分出的可复用步骤。上下文总结压缩实现全部集中在 `app/core/utils/context_summary/`，`app/core/` 顶层不保留同名转发模块。
 
 ## 数据模型层：`app/models/`
 
 ```text
 app/models/
-├── __init__.py             # 模型包导出
+├── __init__.py             # 模型导出
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由游标模型
-├── knowledge_base.py       # 知识库、文档、分块模型
-├── message.py              # 内部消息、消息记录模型
-├── message_platform.py     # 消息平台模型、状态与响应结构
-├── message_platform_outbox.py # 消息平台持久化发件箱模型
+├── context_summary_stage.py # 上下文总结阶段与片段模型
+├── knowledge_base.py       # 知识库、文档与分块模型
+├── message.py              # 消息模型
+├── message_platform.py     # 消息平台模型
+├── message_platform_outbox.py # 消息平台发件箱模型
 ├── profile.py              # Profile 配置模型
 ├── prompt.py               # Prompt 模型
 ├── scheduled_task.py       # 定时任务模型
 ├── session.py              # 会话模型
-├── session_event.py        # WebSocket 跨进程广播事件模型
-├── session_reply_work_item.py # 会话回复工作与顺序计数模型
+├── session_event.py        # 会话通知事件模型
+├── session_reply_stream_event.py # 回复流事件模型
+├── session_reply_work_item.py # 回复工作与顺序模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型
 ├── user.py                 # 用户模型
-└── worker_lease.py         # 独立 Worker 数据库租约模型
+└── worker_lease.py         # Worker 租约模型
 ```
 
-模型层定义数据库表结构、领域枚举、配置结构和 API 可复用的 Pydantic/SQLModel 数据结构。消息平台模型使用 `config` 保存平台私有配置、`state` 保存运行时状态；`token`、`bot_token` 等敏感配置入库前加密，API 响应会过滤这些敏感字段。`message_platform_outbox` 保存待投递事件、处理状态、认领所有者、租约、重试次数和错误信息；`session_event` 保存供所有 Web Worker 读取的短期主动会话事件；`session_reply_work_item` 保存统一最终回复队列；`session_reply_sequence` 原子分配会话内顺序号；`worker_lease` 保存独立 Worker 的当前所有者和租约有效期。
-
-## Provider 层：`app/providers/`
+## 外部能力封装：`app/providers/`
 
 ```text
 app/providers/
 ├── __init__.py
 ├── database/
 │   ├── __init__.py
-│   ├── bootstrap.py        # 数据库建表与系统初始化数据
-│   └── client.py           # 异步数据库引擎、Session 与依赖
+│   ├── bootstrap.py        # 数据表与初始数据创建
+│   ├── client.py           # 异步数据库连接与会话
+│   └── time.py             # 数据库时间读取
 ├── embedding/
 │   ├── __init__.py
-│   └── client.py           # Embedding 模型调用客户端
+│   └── client.py           # 向量模型客户端
 ├── image_generation/
 │   ├── __init__.py
-│   └── client.py           # 图像生成模型调用客户端
+│   └── client.py           # 图像生成客户端
 ├── llm/
 │   ├── __init__.py
-│   └── client.py           # LLM 调用客户端
+│   └── client.py           # 大模型客户端
 ├── rerank/
 │   ├── __init__.py
-│   └── client.py           # Rerank 模型调用客户端
+│   └── client.py           # 重排模型客户端
 └── vector/
     ├── __init__.py
-    └── chroma.py           # Chroma 向量库访问封装
+    └── chroma.py           # Chroma 向量库访问
 ```
 
-Provider 层负责把数据库、模型服务、向量库等外部能力封装为后端内部可调用接口。
-
-## Schema 与协议转换层
+## 接口结构与协议转换
 
 ```text
 app/schemas/
-├── auth.py                 # 认证请求/响应结构
-├── response.py             # 标准响应与分页结构
-└── scheduled_task.py       # 定时任务请求结构
+├── auth.py                 # 认证接口数据结构
+├── background_task.py      # 后台任务数据结构
+├── response.py             # 通用响应与分页结构
+└── scheduled_task.py       # 定时任务接口数据结构
 
 app/transformers/
-├── base.py                 # 协议转换器基类
-└── openai.py               # OpenAI 风格消息协议转换
+├── base.py                 # 协议转换基类
+└── openai.py               # OpenAI 风格协议转换
 ```
-
-`schemas/` 存放 API 层请求与响应结构，`transformers/` 负责模型消息协议和内部消息结构之间的转换。
 
 ## 前端目录：`dashboard/`
 
 ```text
 dashboard/
 ├── dist/                   # 前端构建产物
-├── node_modules/           # 前端本地依赖安装目录
-├── public/                 # 静态 HTML 模板
+├── public/                 # 静态页面模板
 ├── src/                    # Vue 源码
-├── package-lock.json       # 前端依赖锁定文件
-└── package.json            # 前端依赖与脚本
+├── package-lock.json       # 依赖锁定文件
+└── package.json            # 前端依赖与命令
 ```
-
-`node_modules/` 为本地安装依赖目录，不承载项目源码；源码主要集中在 `dashboard/src/`。
 
 ### 前端源码：`dashboard/src/`
 
 ```text
 dashboard/src/
-├── api/                    # Axios API 与 WebSocket 封装
-├── assets/                 # 样式与静态图标
-├── components/             # 通用 Vue 组件
-├── composables/            # Vue 组合式逻辑
+├── api/                    # HTTP 与 WebSocket 请求封装
+├── assets/                 # 样式与图标
+├── components/             # 通用组件
+├── composables/            # 页面共用逻辑
 ├── constants/              # 前端常量
-├── i18n/                   # 前端国际化
-├── router/                 # Vue Router 路由与登录守卫
-├── utils/                  # 前端通用工具函数
-├── views/                  # 页面级组件
+├── i18n/                   # 前端多语言
+├── router/                 # 页面路由与登录检查
+├── utils/                  # 前端通用函数
+├── views/                  # 页面组件
 ├── App.vue                 # 根组件
 └── main.js                 # 前端入口
 ```
 
-### 前端页面：`dashboard/src/views/`
+### 页面：`dashboard/src/views/`
 
 ```text
 dashboard/src/views/
-├── ChannelsView.vue        # 渠道管理页
-├── ChatView.vue            # 聊天页
-├── HistoryLogs.vue         # 历史日志页
-├── KnowledgeBase.vue       # 知识库管理页
-├── LoginView.vue           # 登录页
-├── MessagePlatformsView.vue # 消息平台管理页
-├── ProfilesView.vue        # Profile 管理页
-├── PromptsView.vue         # Prompt 管理页
-├── RealTimeLogs.vue        # 实时日志页
-├── ScheduledTasksView.vue  # 定时任务管理页
-└── UsersView.vue           # 用户管理页
+├── ChannelsView.vue        # 渠道管理
+├── ChatView.vue            # 聊天
+├── HistoryLogs.vue         # 历史日志
+├── KnowledgeBase.vue       # 知识库管理
+├── LoginView.vue           # 登录
+├── MessagePlatformsView.vue # 消息平台管理
+├── ProfilesView.vue        # Profile 管理
+├── PromptsView.vue         # Prompt 管理
+├── RealTimeLogs.vue        # 实时日志
+├── ScheduledTasksView.vue  # 定时任务管理
+└── UsersView.vue           # 用户管理
 ```
 
-### 前端组件与组合式逻辑
+### 通用组件与组合逻辑
 
 ```text
 dashboard/src/components/
 ├── BaseDataTable.vue       # 通用数据表格
 ├── ChannelEditor.vue       # 渠道编辑器
 ├── LanguageSwitcher.vue    # 语言切换器
-├── MessagePlatformFormDialog.vue # 消息平台创建与编辑弹窗
-├── ProfileFormDialog.vue   # Profile 创建与编辑弹窗
+├── MessagePlatformFormDialog.vue # 消息平台表单
+├── ProfileFormDialog.vue   # Profile 表单
 ├── StatusTag.vue           # 状态标签
-├── VirtualizedCode.vue     # 虚拟化代码展示
-└── weixin_oc/
-    └── WeixinOcLoginDialog.vue # 微信 OpenClaw 登录弹窗
+├── VirtualizedCode.vue     # 大段代码展示
+└── weixin_oc/              # 微信 OpenClaw 登录组件
 
 dashboard/src/composables/
-├── chat/                   # 聊天页状态、传输、消息处理、会话管理
-├── useDeleteConfirm.js     # 删除确认逻辑
-├── useResizeObserver.js    # 尺寸监听逻辑
-├── useToolParser.js        # 工具调用展示解析
-└── useWebSocket.js         # WebSocket 通用封装
+├── chat/                   # 聊天状态、传输与会话逻辑
+├── useDeleteConfirm.js     # 删除确认
+├── useResizeObserver.js    # 尺寸监听
+├── useToolParser.js        # 工具调用内容解析
+└── useWebSocket.js         # WebSocket 连接管理
 ```
 
-前端采用 Vue 3、Vue Router、Element Plus、Axios 和 vue-i18n。`api/index.js` 集中封装后端 REST API 与 WebSocket 地址，`router/index.js` 定义页面路由和登录态守卫。配置管理页的全局设置弹窗可配置日志语言、临时目录上限和会话回复总并发数。消息平台页面提供平台列表、状态展示、启停、删除、配置编辑、创建后扫码登录，以及微信 OpenClaw 二维码状态刷新。
-
-## 测试与脚本
+## 测试目录：`tests/`
 
 ```text
 tests/
 └── unit/
-    ├── test_background_virtual_tool_feedback.py # 后台虚拟工具反馈测试
-    ├── test_message_platform_manager.py     # 消息平台处理器注册与事件路由测试
-    ├── test_message_platform_outbox.py      # Outbox 去重、认领、恢复与重试测试
-    ├── test_models_no_foreign_keys.py       # 模型外键约束约定测试
-    ├── test_session_notifier.py             # 数据库会话事件广播与清理测试
-    ├── test_session_reply_queue.py           # 会话回复顺序、认领与合并测试
-    ├── test_start.py                        # 跨平台启动器配置与命令测试
-    ├── test_shell_tool.py                   # Shell 工具测试
-    └── test_worker_lease.py                 # 独立 Worker 数据库租约测试
-
-scripts/
-├── migration_20260629_add_scheduled_task_profile_id.py # 定时任务字段迁移脚本
-├── migration_20260703_add_message_platform.py          # 消息平台表迁移脚本
-├── migration_20260709_add_chat_session_reply_target_source.py # 会话回复目标来源迁移脚本
-├── migration_20260709_add_chat_session_source.py       # 会话来源字段迁移脚本
-├── migration_20260710_add_message_platform_outbox.py   # 消息平台 Outbox 表迁移
-├── migration_20260710_add_session_event.py             # WebSocket 会话事件广播表迁移
-├── migration_20260711_add_worker_lease.py              # 独立 Worker 数据库租约表迁移
-├── migration_20260712_add_session_reply_queue.py       # 会话最终回复队列表迁移
-└── migration_20260712_drop_active_session.py           # 删除旧会话互斥表
+    ├── context_summary_*_support.py  # 上下文总结测试辅助
+    ├── session_reply_queue_*_support.py # 回复队列测试辅助
+    ├── test_background_*.py          # 后台任务测试
+    ├── test_context_*.py             # 上下文与总结测试
+    ├── test_message_*.py             # 消息与消息平台测试
+    ├── test_session_*.py             # 会话、通知与回复队列测试
+    ├── test_worker_*.py              # 独立进程与租约测试
+    └── test_*.py                     # 其他后端单元测试
 ```
 
-测试目录覆盖当前关键约定、工具行为和消息平台管理器；新增单元测试按规范放置在 `tests/unit/`。脚本目录保存项目维护和数据迁移相关脚本。
+## 数据迁移脚本：`scripts/`
+
+```text
+scripts/
+├── migration_20260629_add_scheduled_task_profile_id.py # 定时任务 Profile 字段
+├── migration_20260703_add_message_platform.py          # 消息平台表
+├── migration_20260709_add_chat_session_reply_target_source.py # 会话回复目标来源字段
+├── migration_20260709_add_chat_session_source.py       # 会话来源字段
+├── migration_20260710_add_message_platform_outbox.py   # 消息平台发件箱表
+├── migration_20260710_add_session_event.py             # 会话事件表
+├── migration_20260711_add_message_dedupe_key.py        # 消息去重键
+├── migration_20260711_add_session_event_dedupe_key.py  # 会话事件去重键
+├── migration_20260711_add_worker_lease.py              # Worker 租约表
+├── migration_20260712_add_chat_session_context_summary.py # 会话上下文总结字段
+├── migration_20260712_add_session_reply_queue.py       # 会话回复队列表
+├── migration_20260712_add_session_reply_stream_event.py # 会话回复流事件表
+├── migration_20260712_drop_active_session.py           # 删除旧活跃会话表
+└── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
+```
 
 ## 运行期目录
 
 ```text
-data/                       # SQLite、Chroma、日志等持久化运行数据
-temp/                       # 用户临时目录、上传文件、工具执行临时文件
+data/                       # SQLite、Chroma 与日志数据
+temp/                       # 上传文件、工具结果与其他临时文件
 ```
-
-这两个目录属于运行期数据区域，不承载源码模块。路径定义集中在 `app/core/paths.py`。独立 Worker 的互斥状态存储在业务数据库的 `worker_lease` 表中，不依赖运行主机上的锁文件。
