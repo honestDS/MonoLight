@@ -11,6 +11,9 @@ from app.core.context import (
 )
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary import ensure_context_summary
+from app.core.utils.context_summary.common import (
+    ContextSummaryWorkValidityChecker,
+)
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instruction_text, build_user_runtime_instructions
 from app.core.utils.message_assembler import MessageAssembler
@@ -39,6 +42,8 @@ async def prepare_messages(
     tools: list[dict] | None = None,
     history_before_id: int | None = None,
     frozen_user_message_ids: list[int] | None = None,
+    context_summary_work_validity_checker: ContextSummaryWorkValidityChecker
+    | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为压缩预算的预留量，
     # 确保系统消息被纳入上下文窗口计算，避免压缩后叠加系统词导致实际请求超限。
@@ -60,6 +65,7 @@ async def prepare_messages(
         reserved_tokens=estimate_tokens(system_prompt) + estimate_tokens(user_runtime_instructions),
         tools=tools,
         frozen_user_message_ids=summary_frozen_user_message_ids,
+        work_validity_checker=context_summary_work_validity_checker,
     )
     if summary_state.content:
         system_prompt = "\n\n".join(

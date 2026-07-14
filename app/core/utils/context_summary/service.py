@@ -6,7 +6,11 @@ from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
+    ContextSummaryWorkInvalidError,
+    ContextSummaryWorkValidityChecker,
     calc_token_usage,
+    contains_context_summary_work_invalid,
+    ensure_context_summary_work_valid,
     estimate_summary_tokens,
 )
 from app.core.utils.context_summary.history import measure_snapshot_history
@@ -77,12 +81,14 @@ async def generate_summary_text(
     safety_margin_tokens: int,
     uid: str,
     session_id: str,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> str | None:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
     prompt_tokens = estimate_tokens(prompt)
 
     while True:
+        await ensure_context_summary_work_valid(work_validity_checker)
         model = await select_context_summary_model(
             db,
             profile_id=profile.id,
@@ -101,13 +107,20 @@ async def generate_summary_text(
             continue
 
         await release_db_session(db)
+        await ensure_context_summary_work_valid(work_validity_checker)
         try:
-            return await call_fixed_summary_model(
+            generated = await call_fixed_summary_model(
                 model=model,
                 prompt=prompt,
                 input_tokens=prompt_tokens,
             )
+            await ensure_context_summary_work_valid(work_validity_checker)
+            return generated
         except Exception as exc:
+            if contains_context_summary_work_invalid(exc):
+                raise ContextSummaryWorkInvalidError(
+                    "Context summary work became invalid during model execution"
+                ) from exc
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -141,7 +154,9 @@ async def ensure_context_summary(
     tools: list[dict] | None = None,
     safety_margin_tokens: int = 256,
     frozen_user_message_ids: list[int] | None = None,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> ContextSummaryState:
+    await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
     snapshot = await build_context_summary_snapshot(
         db,
@@ -157,6 +172,7 @@ async def ensure_context_summary(
         uid=uid,
         snapshot=snapshot,
     )
+    await ensure_context_summary_work_valid(work_validity_checker)
     threshold_percent = cfg.other.context_summary_threshold_percent
     usage = calc_token_usage(
         messages=[],
@@ -237,6 +253,7 @@ async def ensure_context_summary(
             existing_summary=state.content,
             existing_summary_revision=state.revision,
             safety_margin_tokens=safety_margin_tokens,
+            work_validity_checker=work_validity_checker,
         )
         candidate_summary = generated.content
         summarized_message_count = generated.message_count
@@ -275,6 +292,7 @@ async def ensure_context_summary(
             break
 
         refinement_attempts += 1
+        await ensure_context_summary_work_valid(work_validity_checker)
         previous_summary_tokens = final_usage["summary_tokens"]
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
@@ -289,8 +307,13 @@ async def ensure_context_summary(
                     lower_stage=completed_stage,
                     safety_margin_tokens=safety_margin_tokens,
                     refinement_index=refinement_attempts,
+                    work_validity_checker=work_validity_checker,
                 )
             except Exception as exc:
+                if contains_context_summary_work_invalid(exc):
+                    raise ContextSummaryWorkInvalidError(
+                        "Context summary work became invalid during refinement"
+                    ) from exc
                 logger.bind(
                     uid=uid,
                     session_id=session_id,
@@ -312,6 +335,7 @@ async def ensure_context_summary(
                 safety_margin_tokens=safety_margin_tokens,
                 uid=uid,
                 session_id=session_id,
+                work_validity_checker=work_validity_checker,
             )
             if not compressed:
                 await release_db_session(db)
@@ -334,6 +358,7 @@ async def ensure_context_summary(
         summary_tokens=estimate_tokens(candidate_summary),
     ).debug("Context summary generated:\n{summary}", summary=candidate_summary)
 
+    await ensure_context_summary_work_valid(work_validity_checker)
     updated = await persist_context_summary(
         session_id=session_id,
         uid=uid,

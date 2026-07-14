@@ -4,7 +4,10 @@ import pytest
 
 from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
-from app.core.utils.context_summary.common import ContextSummaryState
+from app.core.utils.context_summary.common import (
+    ContextSummaryState,
+    ContextSummaryWorkInvalidError,
+)
 from app.core.utils.context_summary.model_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
 from tests.unit.context_summary_service_test_support import (
     _patch_summary_dependencies,
@@ -243,6 +246,55 @@ async def test_ensure_context_summary_concurrent_update_returns_winning_state(mo
     assert state == ContextSummaryState(content="newer concurrent summary", message_id=12)
     assert update_calls[0]["expected_message_id"] == 8
     assert selected_calls[0]["profile_id"] == 9
+
+
+@pytest.mark.asyncio
+async def test_context_summary_work_invalid_before_persist_discards_candidate(
+    monkeypatch,
+):
+    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(
+        monkeypatch
+    )
+    validity_checks = 0
+
+    async def check_work_validity():
+        nonlocal validity_checks
+        validity_checks += 1
+        return validity_checks < 3
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 10
+        if content.startswith('{"role":'):
+            return 100
+        if "compressed history" in content:
+            return 40
+        return 40
+
+    _patch_token_counter(monkeypatch, estimate_tokens)
+
+    with pytest.raises(
+        ContextSummaryWorkInvalidError,
+        match="no longer valid",
+    ):
+        await service_module.ensure_context_summary(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(50),
+            before_id=10,
+            current_message="current",
+            context_window_k=1,
+            max_tokens=24,
+            reserved_tokens=0,
+            safety_margin_tokens=0,
+            work_validity_checker=check_work_validity,
+        )
+
+    assert validity_checks == 3
+    assert len(generated_calls) == 1
+    assert update_calls == []
 
 
 @pytest.mark.asyncio

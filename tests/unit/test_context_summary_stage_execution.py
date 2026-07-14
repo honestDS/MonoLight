@@ -4,6 +4,7 @@ import pytest
 
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as stage_module
+from app.core.utils.context_summary.common import ContextSummaryWorkInvalidError
 from app.core.utils.context_summary.merge import CompletedSummaryFragment
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
@@ -183,6 +184,58 @@ async def test_multifragment_stage_requires_completion_barrier_after_ordered_wri
     assert [event[1] for event in events[:2]] == [0, 1]
     assert any(event[0] == "fail" for event in events) is expects_failure
     assert any(event[0] == "reduce" for event in events) is not expects_failure
+
+
+@pytest.mark.asyncio
+async def test_multifragment_stage_invalidates_when_work_lease_is_lost(
+    monkeypatch,
+):
+    events = _patch_multifragment_completion_barrier(
+        monkeypatch,
+        completion_succeeds=True,
+    )
+    validity_checks = 0
+
+    async def check_work_validity():
+        nonlocal validity_checks
+        validity_checks += 1
+        return validity_checks <= 3
+
+    snapshot = ContextSummarySnapshot(
+        expected_summary_message_id=None,
+        snapshot_before_id=6,
+        snapshot_max_message_id=5,
+        persistent_summary_target_id=4,
+        recent_round_start_ids=(5,),
+        frozen_user_message_ids=(),
+        recent_messages=(
+            InternalMessage(
+                id=5,
+                role=MessageRole.USER,
+                content="recent",
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        ContextSummaryWorkInvalidError,
+        match="became invalid during fragment execution",
+    ):
+        await stage_module.generate_snapshot_summary_result(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=SimpleNamespace(id=9),
+            cfg=_summary_cfg(),
+            snapshot=snapshot,
+            existing_summary=None,
+            existing_summary_revision=0,
+            safety_margin_tokens=0,
+            work_validity_checker=check_work_validity,
+        )
+
+    assert validity_checks >= 4
+    assert [event[0] for event in events] == ["fail", "invalidate"]
 
 
 @pytest.mark.asyncio

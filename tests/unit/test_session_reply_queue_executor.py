@@ -68,8 +68,14 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
     async def dispatch(**kwargs):
         dispatch_kwargs.update(kwargs)
+        assert await kwargs["context_summary_work_validity_checker"]() is True
         await kwargs["execution_checkpoint_callback"]({"messages": [{"role": "user", "content": "updated"}]})
         return {"choices": []}
+
+    async def get_active_claims(db, claims):
+        assert isinstance(db, EventDb)
+        assert claims == {7: "worker-1"}
+        return {(7, "worker-1")}
 
     async def update_claimed(db, **kwargs):
         checkpoint_updates.append(kwargs)
@@ -79,6 +85,11 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
     monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
     monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(
+        executor_module.session_reply_work_item_crud,
+        "get_active_claims",
+        get_active_claims,
+    )
     monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 
     response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")

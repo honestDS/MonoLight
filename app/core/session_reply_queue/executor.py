@@ -174,6 +174,14 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             worker_id=worker_id,
         )
 
+    async def check_work_validity() -> bool:
+        async with AsyncSessionLocal() as validity_db:
+            active_claims = await session_reply_work_item_crud.get_active_claims(
+                validity_db,
+                {work.id: worker_id},
+            )
+        return (work.id, worker_id) in active_claims
+
     async def save_execution_checkpoint(checkpoint: dict[str, Any]) -> None:
         state = {
             **(work.execution_state or {}),
@@ -211,6 +219,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         additional_user_messages_fetcher=fetch_additional_user_messages,
         execution_resume_state=resume_state,
         execution_checkpoint_callback=save_execution_checkpoint,
+        context_summary_work_validity_checker=check_work_validity,
         expose_tool_call_content=expose_tool_call_content,
     )
 

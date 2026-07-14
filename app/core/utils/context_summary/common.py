@@ -1,9 +1,36 @@
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
+
+ContextSummaryWorkValidityChecker = Callable[[], Awaitable[bool]]
+
+
+class ContextSummaryWorkInvalidError(RuntimeError):
+    pass
+
+
+async def ensure_context_summary_work_valid(
+    checker: ContextSummaryWorkValidityChecker | None,
+) -> None:
+    if checker is not None and not await checker():
+        raise ContextSummaryWorkInvalidError(
+            "Context summary work is no longer valid"
+        )
+
+
+def contains_context_summary_work_invalid(exc: BaseException) -> bool:
+    if isinstance(exc, ContextSummaryWorkInvalidError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(
+            contains_context_summary_work_invalid(nested)
+            for nested in exc.exceptions
+        )
+    return False
 
 
 @dataclass(frozen=True)

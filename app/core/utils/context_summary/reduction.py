@@ -8,6 +8,12 @@ from sqlmodel import select
 
 from app.core.crud.context_summary_stage import context_summary_stage_crud
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
+from app.core.utils.context_summary.common import (
+    ContextSummaryWorkInvalidError,
+    ContextSummaryWorkValidityChecker,
+    contains_context_summary_work_invalid,
+    ensure_context_summary_work_valid,
+)
 from app.core.utils.context_summary.merge import (
     count_lower_stage_merge_groups,
     iter_completed_lower_stage_fragments,
@@ -178,6 +184,7 @@ async def execute_reduction_stage(
     lower_stage: ContextSummaryStage,
     model: ContextSummaryModelSnapshot,
     refinement_index: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> ContextSummaryStage:
     from app.core.utils.context_summary.stage import (
         call_fixed_summary_model,
@@ -187,6 +194,7 @@ async def execute_reduction_stage(
         write_summary_fragment,
     )
 
+    await ensure_context_summary_work_valid(work_validity_checker)
     empty_prompt = merge_fragment_prompt(
         SummaryFragmentInput(
             fragment_index=0,
@@ -208,6 +216,7 @@ async def execute_reduction_stage(
     if expected_fragment_count <= 0:
         raise RuntimeError("Context summary reduction stage has no input groups")
 
+    await ensure_context_summary_work_valid(work_validity_checker)
     stage = await create_reduction_stage(
         lower_stage=lower_stage,
         model=model,
@@ -226,6 +235,7 @@ async def execute_reduction_stage(
     )
 
     async def process_group(group: SummaryFragmentInput) -> SummaryFragmentResult:
+        await ensure_context_summary_work_valid(work_validity_checker)
         prompt = merge_fragment_prompt(group)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
             raise RuntimeError("Context summary reduction group exceeds the selected model window")
@@ -254,6 +264,7 @@ async def execute_reduction_stage(
                     result=result,
                 ),
             )
+        await ensure_context_summary_work_valid(work_validity_checker)
         lower_tokens = await measure_completed_stage_tokens(lower_stage)
         output_tokens = await measure_running_stage_tokens(stage)
         if output_tokens >= lower_tokens:
@@ -266,6 +277,10 @@ async def execute_reduction_stage(
             error=format_exception_message(exc),
         )
         await invalidate_summary_stage(stage=stage)
+        if contains_context_summary_work_invalid(exc):
+            raise ContextSummaryWorkInvalidError(
+                "Context summary work became invalid during reduction"
+            ) from exc
         raise
 
     return stage
@@ -278,11 +293,13 @@ async def reduce_completed_summary_stage_result(
     cfg: ProfileConfig,
     initial_stage: ContextSummaryStage,
     safety_margin_tokens: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> CompletedSummaryResult:
     lower_stage = initial_stage
     refinement_index = 0
 
     while True:
+        await ensure_context_summary_work_valid(work_validity_checker)
         if lower_stage.expected_fragment_count == 1:
             return CompletedSummaryResult(
                 content=await read_single_completed_summary(lower_stage),
@@ -291,6 +308,7 @@ async def reduce_completed_summary_stage_result(
 
         excluded_priorities: set[int] = set()
         while True:
+            await ensure_context_summary_work_valid(work_validity_checker)
             model = await select_context_summary_model(
                 db,
                 profile_id=profile.id,
@@ -306,8 +324,11 @@ async def reduce_completed_summary_stage_result(
                     lower_stage=lower_stage,
                     model=model,
                     refinement_index=refinement_index,
+                    work_validity_checker=work_validity_checker,
                 )
                 break
+            except ContextSummaryWorkInvalidError:
+                raise
             except Exception:
                 excluded_priorities.add(model.priority)
 
@@ -320,6 +341,7 @@ async def execute_refinement_stage(
     lower_stage: ContextSummaryStage,
     model: ContextSummaryModelSnapshot,
     refinement_index: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> ContextSummaryStage:
     from app.core.utils.context_summary.stage import (
         call_fixed_summary_model,
@@ -329,6 +351,7 @@ async def execute_refinement_stage(
         write_summary_fragment,
     )
 
+    await ensure_context_summary_work_valid(work_validity_checker)
     lower_fragments = iter_completed_lower_stage_fragments(
         work_dedupe_key=lower_stage.work_dedupe_key,
         lower_stage_key=lower_stage.stage_key,
@@ -344,6 +367,7 @@ async def execute_refinement_stage(
     if not model.accepts_prompt_tokens(prompt_tokens):
         raise RuntimeError("Context summary refinement input exceeds the selected model window")
 
+    await ensure_context_summary_work_valid(work_validity_checker)
     stage = await create_reduction_stage(
         lower_stage=lower_stage,
         model=model,
@@ -355,6 +379,7 @@ async def execute_refinement_stage(
 
     try:
         if stage.succeeded_fragment_count == 0:
+            await ensure_context_summary_work_valid(work_validity_checker)
             generated = await call_fixed_summary_model(
                 model=model,
                 prompt=prompt,
@@ -370,6 +395,7 @@ async def execute_refinement_stage(
                     token_count=max(1, estimate_tokens(generated)),
                 ),
             )
+        await ensure_context_summary_work_valid(work_validity_checker)
         output_tokens = await measure_running_stage_tokens(stage)
         lower_tokens = max(1, estimate_tokens(lower_fragment.content))
         if output_tokens >= lower_tokens:
@@ -382,6 +408,10 @@ async def execute_refinement_stage(
             error=format_exception_message(exc),
         )
         await invalidate_summary_stage(stage=stage)
+        if contains_context_summary_work_invalid(exc):
+            raise ContextSummaryWorkInvalidError(
+                "Context summary work became invalid during refinement"
+            ) from exc
         raise
 
     return stage
@@ -395,9 +425,11 @@ async def refine_completed_summary_stage(
     lower_stage: ContextSummaryStage,
     safety_margin_tokens: int,
     refinement_index: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> CompletedSummaryResult:
     excluded_priorities: set[int] = set()
     while True:
+        await ensure_context_summary_work_valid(work_validity_checker)
         model = await select_context_summary_model(
             db,
             profile_id=profile.id,
@@ -413,11 +445,14 @@ async def refine_completed_summary_stage(
                 lower_stage=lower_stage,
                 model=model,
                 refinement_index=refinement_index,
+                work_validity_checker=work_validity_checker,
             )
             return CompletedSummaryResult(
                 content=await read_single_completed_summary(stage),
                 stage=stage,
             )
+        except ContextSummaryWorkInvalidError:
+            raise
         except Exception:
             excluded_priorities.add(model.priority)
 
@@ -429,6 +464,7 @@ async def reduce_completed_summary_stage(
     cfg: ProfileConfig,
     initial_stage: ContextSummaryStage,
     safety_margin_tokens: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> str:
     result = await reduce_completed_summary_stage_result(
         db,
@@ -436,5 +472,6 @@ async def reduce_completed_summary_stage(
         cfg=cfg,
         initial_stage=initial_stage,
         safety_margin_tokens=safety_margin_tokens,
+        work_validity_checker=work_validity_checker,
     )
     return result.content

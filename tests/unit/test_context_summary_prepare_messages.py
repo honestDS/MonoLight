@@ -40,6 +40,9 @@ async def test_prepare_messages_counts_system_prompt_runtime_instruction_and_cur
         }.get(content, 0),
     )
 
+    async def check_work_validity():
+        return True
+
     current_message = "current user input"
     await prepare_module.prepare_messages(
         object(),
@@ -52,11 +55,13 @@ async def test_prepare_messages_counts_system_prompt_runtime_instruction_and_cur
         True,
         context_window_k=4,
         max_tokens=512,
+        context_summary_work_validity_checker=check_work_validity,
     )
 
     assert ensure_summary_calls[0]["current_message"] == current_message
     assert ensure_summary_calls[0]["reserved_tokens"] == 150
     assert ensure_summary_calls[0]["frozen_user_message_ids"] == [7]
+    assert ensure_summary_calls[0]["work_validity_checker"] is check_work_validity
 
 
 @pytest.mark.asyncio

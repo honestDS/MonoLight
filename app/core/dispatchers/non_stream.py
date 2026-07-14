@@ -18,6 +18,9 @@ from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
+from app.core.utils.context_summary.common import (
+    ContextSummaryWorkValidityChecker,
+)
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
@@ -64,6 +67,8 @@ class NonStreamDispatcherMixin:
         additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        context_summary_work_validity_checker: ContextSummaryWorkValidityChecker
+        | None = None,
         expose_tool_call_content: bool = True,
     ):
         try:
@@ -143,6 +148,7 @@ class NonStreamDispatcherMixin:
                             tools=tools,
                             history_before_id=history_before_id,
                             frozen_user_message_ids=frozen_user_message_ids,
+                            context_summary_work_validity_checker=context_summary_work_validity_checker,
                         )
                         current_turn = 0
 

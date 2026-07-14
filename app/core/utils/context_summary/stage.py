@@ -11,6 +11,12 @@ from app.core.crud.context_summary_fragment import (
 from app.core.crud.context_summary_stage import context_summary_stage_crud
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT
+from app.core.utils.context_summary.common import (
+    ContextSummaryWorkInvalidError,
+    ContextSummaryWorkValidityChecker,
+    contains_context_summary_work_invalid,
+    ensure_context_summary_work_valid,
+)
 from app.core.utils.context_summary.history import (
     count_summary_fragments,
     iter_summary_fragments,
@@ -226,7 +232,9 @@ async def generate_snapshot_summary_with_model(
     existing_summary_revision: int,
     safety_margin_tokens: int,
     model: ContextSummaryModelSnapshot,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> GeneratedSummaryResult:
+    await ensure_context_summary_work_valid(work_validity_checker)
     total_tokens, summarized_message_count = await measure_persistent_history(
         db,
         session_id=session_id,
@@ -298,6 +306,7 @@ async def generate_snapshot_summary_with_model(
         expected_fragment_count=expected_fragment_count,
     )
     await release_db_session(db)
+    await ensure_context_summary_work_valid(work_validity_checker)
     async with AsyncSessionLocal() as stage_db:
         persisted_stage, _ = await context_summary_stage_crud.create_stage(stage_db, stage=stage)
     if (
@@ -325,6 +334,7 @@ async def generate_snapshot_summary_with_model(
             cfg=cfg,
             initial_stage=persisted_stage,
             safety_margin_tokens=safety_margin_tokens,
+            work_validity_checker=work_validity_checker,
         )
         return GeneratedSummaryResult(
             content=reduced.content,
@@ -333,6 +343,7 @@ async def generate_snapshot_summary_with_model(
         )
 
     if first_fragment_index == expected_fragment_count:
+        await ensure_context_summary_work_valid(work_validity_checker)
         if await mark_summary_stage_completed(stage=persisted_stage):
             from app.core.utils.context_summary.reduction import (
                 reduce_completed_summary_stage_result,
@@ -344,6 +355,7 @@ async def generate_snapshot_summary_with_model(
                 cfg=cfg,
                 initial_stage=persisted_stage,
                 safety_margin_tokens=safety_margin_tokens,
+                work_validity_checker=work_validity_checker,
             )
             return GeneratedSummaryResult(
                 content=reduced.content,
@@ -367,6 +379,7 @@ async def generate_snapshot_summary_with_model(
     )
 
     async def process_fragment(fragment: SummaryFragmentInput) -> SummaryFragmentResult:
+        await ensure_context_summary_work_valid(work_validity_checker)
         prompt = fragment_prompt(fragment)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
             raise RuntimeError("Context summary fragment exceeds the selected model window")
@@ -394,12 +407,17 @@ async def generate_snapshot_summary_with_model(
                 result=result,
             ),
         )
+        await ensure_context_summary_work_valid(work_validity_checker)
         if not await mark_summary_stage_completed(stage=persisted_stage):
             raise RuntimeError("Context summary fragment stage failed completion validation")
     except Exception as exc:
         error = format_exception_message(exc)
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
+        if contains_context_summary_work_invalid(exc):
+            raise ContextSummaryWorkInvalidError(
+                "Context summary work became invalid during fragment execution"
+            ) from exc
         raise ContextSummaryLayerError("Context summary fragment layer failed") from exc
 
     logger.bind(
@@ -424,6 +442,7 @@ async def generate_snapshot_summary_with_model(
         cfg=cfg,
         initial_stage=persisted_stage,
         safety_margin_tokens=safety_margin_tokens,
+        work_validity_checker=work_validity_checker,
     )
     return GeneratedSummaryResult(
         content=reduced.content,
@@ -443,11 +462,13 @@ async def generate_snapshot_summary_result(
     existing_summary: str | None,
     existing_summary_revision: int,
     safety_margin_tokens: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> GeneratedSummaryResult:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
 
     while True:
+        await ensure_context_summary_work_valid(work_validity_checker)
         model = await select_context_summary_model(
             db,
             profile_id=profile.id,
@@ -481,7 +502,10 @@ async def generate_snapshot_summary_result(
                 existing_summary_revision=existing_summary_revision,
                 safety_margin_tokens=safety_margin_tokens,
                 model=model,
+                work_validity_checker=work_validity_checker,
             )
+        except ContextSummaryWorkInvalidError:
+            raise
         except ContextSummaryLayerError as exc:
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
@@ -509,6 +533,7 @@ async def generate_snapshot_summary(
     existing_summary: str | None,
     existing_summary_revision: int,
     safety_margin_tokens: int,
+    work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
 ) -> tuple[str | None, int]:
     result = await generate_snapshot_summary_result(
         db,
@@ -520,5 +545,6 @@ async def generate_snapshot_summary(
         existing_summary=existing_summary,
         existing_summary_revision=existing_summary_revision,
         safety_margin_tokens=safety_margin_tokens,
+        work_validity_checker=work_validity_checker,
     )
     return result.content, result.message_count
