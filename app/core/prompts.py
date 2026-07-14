@@ -97,6 +97,7 @@ CONTEXT_SUMMARY_PROMPT = """Compress the conversation history into a dense conti
 
 Rules:
 - Preserve concrete facts, user preferences, constraints, decisions, identifiers, names, IDs, file paths, URLs, code changes, tool results, errors, and unfinished work.
+- For time-sensitive facts, including prices, rates or percentage changes, rankings, availability or inventory, operational status, metrics, and forecasts, preserve the recorded observation or source time and timezone when available, and describe the values as observations at that time, not as current facts. If no relevant time is recorded, explicitly state that the observation time is unknown; do not infer one.
 - Resolve references where possible. Do not invent information. Do not include commentary about summarizing.
 - The summary will replace the supplied history, so retain everything needed to continue accurately.
 - Follow the output template exactly. Keep each section dense. Use "-" bullets. Write "none" when a section has no content.
@@ -131,6 +132,7 @@ CONTEXT_SUMMARY_COMPRESS_PROMPT = """Further compress the summary below. Do not 
 Rules:
 - Keep the same output template and section order.
 - Preserve concrete facts, user preferences, constraints, decisions, identifiers, names, IDs, file paths, URLs, code changes, tool results, errors, and unfinished work.
+- Preserve the recorded observation or source time and timezone for time-sensitive facts, including prices, rates or percentage changes, rankings, availability or inventory, operational status, metrics, and forecasts. Keep such values phrased as observations at that time, not as current facts. If the input explicitly says the relevant time is unknown, retain that qualification; do not infer a time.
 - Merge redundant bullets. Drop fluff and repeated wording. Do not invent information.
 - Write "none" when a section has no content after compression.
 

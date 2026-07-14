@@ -2,7 +2,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.context import ContextManager
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER, RECENT_TOOL_SUMMARY_WRAPPER
+from app.core.prompts import (
+    CONTEXT_SUMMARY_COMPRESS_PROMPT,
+    CONTEXT_SUMMARY_PROMPT,
+    CONTEXT_SUMMARY_WRAPPER,
+    RECENT_TOOL_SUMMARY_WRAPPER,
+)
 from app.core.utils.context_summary.common import (
     ContextSummaryState,
 )
@@ -17,6 +22,18 @@ from app.core.utils.context_summary.common import (
 )
 from app.models.message import ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
 from app.models.profile import ProfileConfig
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_COMPRESS_PROMPT],
+)
+def test_summary_prompts_preserve_observation_time_for_time_sensitive_facts(prompt):
+    assert "time-sensitive facts" in prompt
+    assert "prices" in prompt
+    assert "observation or source time and timezone" in prompt
+    assert "not as current facts" in prompt
+    assert "do not infer" in prompt
 
 
 def test_select_summary_segment_keeps_recent_turns_and_ends_before_user():
