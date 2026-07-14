@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.core.context_summary_pipeline import (
+from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
     SummaryFragmentResult,
     balanced_fragment_target_tokens,

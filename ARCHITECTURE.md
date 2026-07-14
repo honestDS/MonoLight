@@ -304,8 +304,22 @@ app/core/i18n/
 
 ```text
 app/core/utils/
+├── context_summary/        # 上下文总结压缩实现
+│   ├── __init__.py         # 总结服务公开入口
+│   ├── common.py           # 总结状态、序列化与预算计算
+│   ├── history.py          # 持久化历史测量与分片迭代
+│   ├── merge.py            # 已完成层分页读取与归并分组
+│   ├── model_call.py       # 总结模型单次调用
+│   ├── pipeline.py         # 有界并发分片管线
+│   ├── selection.py        # 总结模型选择与能力快照
+│   ├── service.py          # 总结触发、精炼与持久化编排
+│   ├── snapshot.py         # 固定消息快照与轮次分页
+│   └── stage.py            # 分片层执行、验收与降级
 ├── dispatcher/             # 对话调度辅助模块
+├── channel_profile_sync.py # 渠道与 Profile 配置同步
 ├── config.py               # 配置读取辅助
+├── context_budget.py       # 上下文预算计算
+├── context_messages.py     # 上下文消息处理
 ├── message_assembler.py    # 消息组装
 ├── message_parser.py       # 消息解析
 ├── session.py              # 会话辅助函数
@@ -315,7 +329,7 @@ app/core/utils/
 └── tokenizer.py            # 通用分词/token 计算
 ```
 
-该目录放置不属于单一业务模块的通用函数，并包含调度器拆分出的可复用步骤。
+该目录放置不属于单一业务模块的通用函数，并包含调度器拆分出的可复用步骤。上下文总结压缩实现全部集中在 `app/core/utils/context_summary/`，`app/core/` 顶层不保留同名转发模块。
 
 ## 数据模型层：`app/models/`
 
@@ -442,6 +456,7 @@ dashboard/src/components/
 ├── ChannelEditor.vue       # 渠道编辑器
 ├── LanguageSwitcher.vue    # 语言切换器
 ├── MessagePlatformFormDialog.vue # 消息平台创建与编辑弹窗
+├── ProfileFormDialog.vue   # Profile 创建与编辑弹窗
 ├── StatusTag.vue           # 状态标签
 ├── VirtualizedCode.vue     # 虚拟化代码展示
 └── weixin_oc/

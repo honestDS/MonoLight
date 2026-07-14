@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.api.v1 import channels as channels_api
 from app.api.v1 import profile as profile_api
 from app.core import constants
-from app.core import context_summary as summary_module
 from app.core.exceptions import ParameterException
+from app.core.utils import channel_profile_sync as channel_profile_sync_module
+from app.core.utils.context_summary import service as summary_service_module
 from app.models.channel import ModelUsage
 from app.models.profile import ProfileConfig
 
@@ -83,9 +83,9 @@ async def test_context_summary_generation_selects_independent_summary_channel(mo
         selected_channel_configs.append(channel_config)
         return None
 
-    monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
+    monkeypatch.setattr(summary_service_module, "select_context_summary_model", select_model)
 
-    result = await summary_module._generate_summary_text(
+    result = await summary_service_module.generate_summary_text(
         object(),
         profile=SimpleNamespace(id=9),
         cfg=SimpleNamespace(
@@ -176,7 +176,7 @@ def test_channel_model_cleanup_includes_context_summary_rules():
         }
     }
 
-    removed_count = channels_api._clean_channel_rules_from_configs(
+    removed_count = channel_profile_sync_module._clean_channel_rules_from_configs(
         configs,
         channel_id=7,
         model_ids=[
@@ -201,8 +201,8 @@ def test_channel_model_rename_includes_context_summary_rules():
         }
     }
 
-    referenced = channels_api._collect_channel_rule_model_ids(configs, channel_id=7)
-    updated_count = channels_api._apply_model_id_renames_to_configs(
+    referenced = channel_profile_sync_module._collect_channel_rule_model_ids(configs, channel_id=7)
+    updated_count = channel_profile_sync_module._apply_model_id_renames_to_configs(
         configs,
         channel_id=7,
         renames={

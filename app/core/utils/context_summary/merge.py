@@ -1,11 +1,11 @@
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
-from app.core.context_summary_pipeline import SummaryFragmentInput
 from app.core.crud.context_summary_stage import (
     CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
     context_summary_stage_crud,
 )
+from app.core.utils.context_summary.pipeline import SummaryFragmentInput
 from app.core.utils.tokenizer import estimate_tokens
 from app.providers.database import AsyncSessionLocal
 
@@ -46,9 +46,7 @@ async def iter_completed_lower_stage_fragments(
                 limit=page_size,
             )
             if page is None:
-                raise RuntimeError(
-                    "Context summary direct lower stage is not completed",
-                )
+                raise RuntimeError("Context summary direct lower stage is not completed")
 
             current_stage_identity = (
                 page.stage.uid,
@@ -72,9 +70,7 @@ async def iter_completed_lower_stage_fragments(
                 expected_summary_message_id = page.stage.expected_summary_message_id
                 persistent_summary_target_id = page.stage.persistent_summary_target_id
             elif current_stage_identity != stage_identity:
-                raise RuntimeError(
-                    "Context summary direct lower stage changed during pagination",
-                )
+                raise RuntimeError("Context summary direct lower stage changed during pagination")
 
             fragments = tuple(
                 CompletedSummaryFragment(
@@ -92,13 +88,9 @@ async def iter_completed_lower_stage_fragments(
 
         for fragment in fragments:
             if fragment.fragment_index != expected_fragment_index:
-                raise RuntimeError(
-                    "Context summary direct lower stage fragments are not continuous",
-                )
+                raise RuntimeError("Context summary direct lower stage fragments are not continuous")
             if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id):
-                raise RuntimeError(
-                    "Context summary direct lower stage fragment range is invalid",
-                )
+                raise RuntimeError("Context summary direct lower stage fragment range is invalid")
             yield fragment
             expected_fragment_index += 1
             previous_message_end_id = fragment.message_end_id
@@ -107,9 +99,7 @@ async def iter_completed_lower_stage_fragments(
         fragments = ()
 
     if expected_fragment_count is None or expected_fragment_index != expected_fragment_count or previous_message_end_id != persistent_summary_target_id:
-        raise RuntimeError(
-            "Context summary direct lower stage fragment set is incomplete",
-        )
+        raise RuntimeError("Context summary direct lower stage fragment set is incomplete")
 
 
 async def group_completed_summary_fragments(
@@ -146,28 +136,18 @@ async def group_completed_summary_fragments(
 
     async for fragment in fragments:
         if previous_fragment_index is not None and fragment.fragment_index != previous_fragment_index + 1:
-            raise RuntimeError(
-                "Context summary direct lower stage fragments are not continuous",
-            )
+            raise RuntimeError("Context summary direct lower stage fragments are not continuous")
         if previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id:
-            raise RuntimeError(
-                "Context summary direct lower stage fragment ranges overlap",
-            )
+            raise RuntimeError("Context summary direct lower stage fragment ranges overlap")
 
         part = _format_completed_fragment(fragment)
         part_token_floor = max(1, token_counter(part))
         if part_token_floor > max_group_tokens:
-            raise RuntimeError(
-                "Context summary direct lower stage fragment exceeds the merge budget",
-            )
+            raise RuntimeError("Context summary direct lower stage fragment exceeds the merge budget")
 
-        candidate_parts = [*group_parts, part]
-        candidate_content = "\n".join(candidate_parts)
+        candidate_content = "\n".join([*group_parts, part])
         candidate_token_floor = group_token_floor + part_token_floor
-        candidate_tokens = max(
-            candidate_token_floor,
-            max(1, token_counter(candidate_content)),
-        )
+        candidate_tokens = max(candidate_token_floor, max(1, token_counter(candidate_content)))
         if group_parts and candidate_tokens > max_group_tokens:
             if group_index >= first_group_index:
                 yield build_group()

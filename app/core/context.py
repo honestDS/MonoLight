@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +12,18 @@ from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import PROMPT_TOOL_INTERRUPTED
-from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget, truncate_tool_result_with_stats
+from app.core.utils.context_budget import (
+    ContextRequestBudget,
+    build_context_request_budget,
+    ensure_context_request_budget_available,
+)
+from app.core.utils.context_messages import (
+    find_protected_tail_start,
+    message_token_text,
+    to_jsonable,
+    trim_protected_tail_tools,
+)
+from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_result_with_stats
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import (
@@ -41,18 +51,12 @@ def _is_background_tool_result_message(msg: InternalMessage) -> bool:
     return isinstance(payload, dict) and payload.get("type") == "background_tool_result"
 
 
-@dataclass(frozen=True)
-class ContextRequestBudget:
-    context_window_tokens: int
-    output_tokens: int
-    tools_tokens: int
-    safety_margin_tokens: int
-    system_tokens: int
-    total_input_budget: int
-    non_system_budget: int
-
-
 class ContextManager:
+    _to_jsonable = staticmethod(to_jsonable)
+    _message_token_text = staticmethod(message_token_text)
+    _find_protected_tail_start = staticmethod(find_protected_tail_start)
+    _trim_protected_tail_tools = staticmethod(trim_protected_tail_tools)
+
     @classmethod
     async def _load_history_backward_by_id(
         cls,
@@ -189,27 +193,17 @@ class ContextManager:
         tools: list[dict] | None = None,
         safety_margin_tokens: int = 256,
     ) -> ContextRequestBudget:
-        context_window_tokens = max(1, context_window_k * 1024)
-        output_tokens = max(max_tokens, 0)
-        tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
-        safety_tokens = max(safety_margin_tokens, 0)
-        normalized_system_tokens = max(system_tokens, 0)
-        total_input_budget = context_window_tokens - output_tokens - tools_tokens - safety_tokens
-        non_system_budget = total_input_budget - normalized_system_tokens
-        return ContextRequestBudget(
-            context_window_tokens=context_window_tokens,
-            output_tokens=output_tokens,
-            tools_tokens=tools_tokens,
-            safety_margin_tokens=safety_tokens,
-            system_tokens=normalized_system_tokens,
-            total_input_budget=total_input_budget,
-            non_system_budget=non_system_budget,
+        return build_context_request_budget(
+            context_window_k=context_window_k,
+            max_tokens=max_tokens,
+            system_tokens=system_tokens,
+            tools=tools,
+            safety_margin_tokens=safety_margin_tokens,
         )
 
     @classmethod
     def ensure_request_budget_available(cls, budget: ContextRequestBudget) -> None:
-        if budget.total_input_budget <= 0 or budget.non_system_budget <= 0:
-            raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
+        ensure_context_request_budget_available(budget)
 
     @classmethod
     def validate_latest_user_message_budget(
@@ -305,92 +299,6 @@ class ContextManager:
             raise ParameterException(message=ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED)
 
         return [*system_msgs, *audited_non_system]
-
-    @staticmethod
-    def _to_jsonable(value):
-        if hasattr(value, "model_dump"):
-            return value.model_dump(mode="json")
-        if isinstance(value, list):
-            return [ContextManager._to_jsonable(item) for item in value]
-        if isinstance(value, dict):
-            return {key: ContextManager._to_jsonable(item) for key, item in value.items()}
-        return value
-
-    @staticmethod
-    def _message_token_text(msg: InternalMessage) -> str:
-        if msg.tool_calls:
-            return msg.model_dump_json(exclude_none=True)
-        if isinstance(msg.content, str):
-            return msg.content
-        if msg.content is None:
-            return ""
-        if isinstance(msg.content, list):
-            text_parts: list[str] = []
-            for part in msg.content:
-                part_type = getattr(part, "type", "")
-                if part_type == "text":
-                    text_parts.append(str(getattr(part, "text", "") or ""))
-                elif part_type == "image_url":
-                    text_parts.append("[图片]")
-                elif part_type == "file":
-                    text_parts.append(f"[文件:{getattr(part, 'path', '') or ''}]")
-                else:
-                    text_parts.append(json.dumps(ContextManager._to_jsonable(part), ensure_ascii=False))
-            return "\n".join(item for item in text_parts if item)
-        return json.dumps(ContextManager._to_jsonable(msg.content), ensure_ascii=False)
-
-    @staticmethod
-    def _find_protected_tail_start(non_system_msgs: list[InternalMessage]) -> int:
-        if not non_system_msgs:
-            return 0
-
-        last_idx = len(non_system_msgs) - 1
-        if non_system_msgs[last_idx].role == MessageRole.TOOL:
-            tool_call_ids = set()
-            scan_idx = last_idx
-            while scan_idx >= 0 and non_system_msgs[scan_idx].role == MessageRole.TOOL:
-                if non_system_msgs[scan_idx].tool_call_id:
-                    tool_call_ids.add(non_system_msgs[scan_idx].tool_call_id)
-                scan_idx -= 1
-
-            if scan_idx >= 0:
-                candidate = non_system_msgs[scan_idx]
-                if candidate.role == MessageRole.ASSISTANT and candidate.tool_calls:
-                    required_ids = {tool_call.id for tool_call in candidate.tool_calls}
-                    if tool_call_ids and tool_call_ids.issubset(required_ids):
-                        user_idx = scan_idx - 1
-                        while user_idx >= 0:
-                            if non_system_msgs[user_idx].role == MessageRole.USER:
-                                return user_idx
-                            user_idx -= 1
-                        return scan_idx
-
-        return last_idx
-
-    @classmethod
-    def _trim_protected_tail_tools(
-        cls,
-        protected_tail: list[InternalMessage],
-        uid: str,
-        session_id: str,
-        context_window_k: int,
-        non_system_budget: int,
-    ) -> list[InternalMessage]:
-        tool_msgs = [msg for msg in protected_tail if msg.role == MessageRole.TOOL]
-        if not tool_msgs:
-            return protected_tail
-
-        non_tool_tokens = sum(estimate_tokens(cls._message_token_text(msg)) for msg in protected_tail if msg.role != MessageRole.TOOL)
-        tool_budget = max(1, non_system_budget - non_tool_tokens)
-        truncate_tool_messages_for_budget(
-            tool_msgs=tool_msgs,
-            context_window_k=context_window_k,
-            budget_tokens=tool_budget,
-            uid=uid,
-            session_id=session_id,
-        )
-
-        return protected_tail
 
     @classmethod
     def _strategy_atomic_truncate(

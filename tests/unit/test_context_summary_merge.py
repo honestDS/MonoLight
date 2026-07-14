@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import context_summary_merge as merge_module
-from app.core.context_summary_merge import (
+from app.core.utils.context_summary import merge as merge_module
+from app.core.utils.context_summary.merge import (
     CompletedSummaryFragment,
     count_lower_stage_merge_groups,
     group_completed_summary_fragments,

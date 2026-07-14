@@ -1,4 +1,4 @@
-from app.core.context_summary_selection import ContextSummaryModelSnapshot
+from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient
 

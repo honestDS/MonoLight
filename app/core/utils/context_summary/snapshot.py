@@ -81,11 +81,7 @@ async def build_context_summary_snapshot(
             break
         page_before_id = last_id
 
-    recent_messages = tuple(
-        parse_db_messages_to_internal(
-            list(reversed(recent_raw_desc)),
-        )
-    )
+    recent_messages = tuple(parse_db_messages_to_internal(list(reversed(recent_raw_desc))))
     return ContextSummarySnapshot(
         expected_summary_message_id=expected_summary_message_id,
         snapshot_before_id=snapshot_before_id,

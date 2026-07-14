@@ -5,7 +5,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.context_summary_snapshot import build_context_summary_snapshot, iter_persistent_summary_rounds
+from app.core.utils.context_summary.snapshot import build_context_summary_snapshot, iter_persistent_summary_rounds
 from app.models.message import Message, MessageRole, MessageType
 
 

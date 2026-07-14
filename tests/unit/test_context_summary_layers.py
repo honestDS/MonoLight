@@ -3,10 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import context_summary_call as call_module
-from app.core import context_summary_selection as selection_module
-from app.core.context_summary_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
-from app.core.context_summary_selection import ContextSummaryModelSnapshot
+from app.core.utils.context_summary import model_call as call_module
+from app.core.utils.context_summary import selection as selection_module
+from app.core.utils.context_summary.model_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
+from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.models.channel import ChannelConfig
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 

@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import (
 from app.core.context import (
     ContextManager,
 )
-from app.core.context_summary import ensure_context_summary
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.utils.context_summary import ensure_context_summary
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instruction_text, build_user_runtime_instructions
 from app.core.utils.message_assembler import MessageAssembler

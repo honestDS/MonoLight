@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import context_summary as summary_module
-from app.core.context_summary_selection import ContextSummaryModelSnapshot
+from app.core.utils.context_summary import stage as summary_module
+from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.models.message import InternalMessage, MessageRole
 
 
@@ -99,16 +99,16 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-    monkeypatch.setattr(summary_module, "_measure_persistent_history", measure_history)
+    monkeypatch.setattr(summary_module, "measure_persistent_history", measure_history)
     monkeypatch.setattr(summary_module, "select_context_summary_model", select_model)
-    monkeypatch.setattr(summary_module, "_count_summary_fragments", count_fragments)
-    monkeypatch.setattr(summary_module, "_iter_summary_fragments", iter_fragments)
+    monkeypatch.setattr(summary_module, "count_summary_fragments", count_fragments)
+    monkeypatch.setattr(summary_module, "iter_summary_fragments", iter_fragments)
     monkeypatch.setattr(summary_module, "call_context_summary_model", call_model)
     monkeypatch.setattr(summary_module.context_summary_stage_crud, "create_stage", create_stage)
-    monkeypatch.setattr(summary_module, "_write_summary_fragment", write_fragment)
-    monkeypatch.setattr(summary_module, "_mark_summary_stage_completed", mark_completed)
-    monkeypatch.setattr(summary_module, "_mark_summary_stage_failed", mark_failed)
-    monkeypatch.setattr(summary_module, "_invalidate_summary_stage", invalidate_stage)
+    monkeypatch.setattr(summary_module, "write_summary_fragment", write_fragment)
+    monkeypatch.setattr(summary_module, "mark_summary_stage_completed", mark_completed)
+    monkeypatch.setattr(summary_module, "mark_summary_stage_failed", mark_failed)
+    monkeypatch.setattr(summary_module, "invalidate_summary_stage", invalidate_stage)
     monkeypatch.setattr(summary_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
         summary_module,
@@ -132,7 +132,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
         ),
     )
 
-    result, message_count = await summary_module._generate_snapshot_summary(
+    result, message_count = await summary_module.generate_snapshot_summary(
         object(),
         session_id="session-1",
         uid="user-1",
