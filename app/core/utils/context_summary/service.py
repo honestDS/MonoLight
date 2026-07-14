@@ -14,7 +14,7 @@ from app.core.utils.context_summary.selection import select_context_summary_mode
 from app.core.utils.context_summary.snapshot import build_context_summary_snapshot
 from app.core.utils.context_summary.stage import (
     call_fixed_summary_model,
-    generate_snapshot_summary,
+    generate_snapshot_summary_result,
     release_db_session,
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
@@ -23,6 +23,8 @@ from app.models.profile import Profile, ProfileConfig
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
+
+CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS = 2
 
 
 async def persist_context_summary(
@@ -223,8 +225,9 @@ async def ensure_context_summary(
 
     candidate_summary = state.content
     summarized_message_count = 0
+    completed_stage = None
     if snapshot.has_persistent_history:
-        candidate_summary, summarized_message_count = await generate_snapshot_summary(
+        generated = await generate_snapshot_summary_result(
             db,
             session_id=session_id,
             uid=uid,
@@ -235,7 +238,10 @@ async def ensure_context_summary(
             existing_summary_revision=state.revision,
             safety_margin_tokens=safety_margin_tokens,
         )
-        if not candidate_summary:
+        candidate_summary = generated.content
+        summarized_message_count = generated.message_count
+        completed_stage = generated.completed_stage
+        if not candidate_summary or completed_stage is None:
             await release_db_session(db)
             return state
     elif not candidate_summary or state.message_id is None:
@@ -243,6 +249,7 @@ async def ensure_context_summary(
         return state
 
     recent_messages = list(snapshot.recent_messages)
+    refinement_attempts = 0
     while True:
         final_usage = calc_token_usage(
             messages=recent_messages,
@@ -257,20 +264,58 @@ async def ensure_context_summary(
         )
         if final_usage["required_tokens"] <= final_usage["compression_goal_tokens"]:
             break
+        if refinement_attempts >= CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS:
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                refinement_attempts=refinement_attempts,
+                required_tokens=final_usage["required_tokens"],
+                compression_goal_tokens=final_usage["compression_goal_tokens"],
+            ).warning("Context summary refinement limit reached before compression goal")
+            break
 
+        refinement_attempts += 1
         previous_summary_tokens = final_usage["summary_tokens"]
-        compressed = await generate_summary_text(
-            db,
-            profile=profile,
-            cfg=cfg,
-            prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(summary=candidate_summary),
-            safety_margin_tokens=safety_margin_tokens,
-            uid=uid,
-            session_id=session_id,
-        )
-        if not compressed:
-            await release_db_session(db)
-            return state
+        if completed_stage is not None:
+            from app.core.utils.context_summary.reduction import (
+                refine_completed_summary_stage,
+            )
+
+            try:
+                refined = await refine_completed_summary_stage(
+                    db,
+                    profile=profile,
+                    cfg=cfg,
+                    lower_stage=completed_stage,
+                    safety_margin_tokens=safety_margin_tokens,
+                    refinement_index=refinement_attempts,
+                )
+            except Exception as exc:
+                logger.bind(
+                    uid=uid,
+                    session_id=session_id,
+                    refinement_attempts=refinement_attempts,
+                ).warning(
+                    "Context summary refinement stage failed: {error}",
+                    error=format_exception_message(exc),
+                )
+                await release_db_session(db)
+                return state
+            compressed = refined.content
+            completed_stage = refined.stage
+        else:
+            compressed = await generate_summary_text(
+                db,
+                profile=profile,
+                cfg=cfg,
+                prompt=CONTEXT_SUMMARY_COMPRESS_PROMPT.format(summary=candidate_summary),
+                safety_margin_tokens=safety_margin_tokens,
+                uid=uid,
+                session_id=session_id,
+            )
+            if not compressed:
+                await release_db_session(db)
+                return state
         compressed_tokens = estimate_summary_tokens(compressed)
         if compressed_tokens >= previous_summary_tokens:
             break

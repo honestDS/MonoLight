@@ -64,7 +64,7 @@ async def _iterate(items):
 
 
 @pytest.mark.asyncio
-async def test_completed_lower_stage_iterator_pages_by_message_id_and_releases_each_session(
+async def test_completed_lower_stage_iterator_pages_by_fragment_index_and_releases_each_session(
     monkeypatch,
 ):
     page_calls = []
@@ -86,7 +86,7 @@ async def test_completed_lower_stage_iterator_pages_by_message_id_and_releases_e
         *,
         work_dedupe_key,
         lower_stage_key,
-        page_after_message_id,
+        page_after_fragment_index,
         limit,
     ):
         page_calls.append(
@@ -94,18 +94,18 @@ async def test_completed_lower_stage_iterator_pages_by_message_id_and_releases_e
                 db,
                 work_dedupe_key,
                 lower_stage_key,
-                page_after_message_id,
+                page_after_fragment_index,
                 limit,
             )
         )
         pages = {
             None: (_fragment(0), _fragment(1)),
-            20: (_fragment(2), _fragment(3)),
-            40: (),
+            1: (_fragment(2), _fragment(3)),
+            3: (),
         }
         return SimpleNamespace(
             stage=_stage(),
-            fragments=pages[page_after_message_id],
+            fragments=pages[page_after_fragment_index],
         )
 
     monkeypatch.setattr(merge_module, "AsyncSessionLocal", SessionContext)
@@ -127,7 +127,7 @@ async def test_completed_lower_stage_iterator_pages_by_message_id_and_releases_e
     remaining = [fragment async for fragment in iterator]
 
     assert [fragment.fragment_index for fragment in remaining] == [1, 2, 3]
-    assert [call[3] for call in page_calls] == [None, 20, 40]
+    assert [call[3] for call in page_calls] == [None, 1, 3]
     assert all(call[1:3] == ("work-key", "lower-stage") for call in page_calls)
     assert all(call[4] == 2 for call in page_calls)
     assert len(exited_sessions) == 3
@@ -177,10 +177,10 @@ async def test_completed_lower_stage_iterator_rejects_identity_change_between_pa
     async def get_page(
         _db,
         *,
-        page_after_message_id,
+        page_after_fragment_index,
         **_kwargs,
     ):
-        if page_after_message_id is None:
+        if page_after_fragment_index is None:
             return SimpleNamespace(
                 stage=_stage(),
                 fragments=(_fragment(0), _fragment(1)),
@@ -222,10 +222,10 @@ async def test_completed_lower_stage_iterator_rejects_incomplete_fragment_sequen
     async def get_page(
         _db,
         *,
-        page_after_message_id,
+        page_after_fragment_index,
         **_kwargs,
     ):
-        fragments = (_fragment(0), _fragment(2)) if page_after_message_id is None else ()
+        fragments = (_fragment(0), _fragment(2)) if page_after_fragment_index is None else ()
         return SimpleNamespace(
             stage=_stage(expected_fragment_count=3),
             fragments=fragments,
@@ -331,8 +331,33 @@ async def test_merge_group_count_reuses_paginated_group_stream(
 
 
 @pytest.mark.asyncio
-async def test_merge_groups_reject_fragment_larger_than_budget():
-    with pytest.raises(RuntimeError, match="exceeds the merge budget"):
+async def test_merge_groups_split_oversized_fragment_into_same_range_parts():
+    fragment = CompletedSummaryFragment(
+        fragment_index=0,
+        message_start_id=1,
+        message_end_id=10,
+        content="summary-content-" * 40,
+    )
+
+    groups = [
+        group
+        async for group in group_completed_summary_fragments(
+            _iterate([fragment]),
+            max_group_tokens=180,
+            token_counter=len,
+        )
+    ]
+
+    assert len(groups) > 1
+    assert [group.fragment_index for group in groups] == list(range(len(groups)))
+    assert all((group.message_start_id, group.message_end_id) == (1, 10) for group in groups)
+    assert all(group.token_count <= 180 for group in groups)
+    assert [int(group.content.split(' part="', 1)[1].split('"', 1)[0]) for group in groups] == list(range(len(groups)))
+
+
+@pytest.mark.asyncio
+async def test_merge_groups_reject_fragment_metadata_larger_than_budget():
+    with pytest.raises(RuntimeError, match="metadata exceeds the merge budget"):
         _ = [
             group
             async for group in group_completed_summary_fragments(

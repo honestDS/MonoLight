@@ -18,8 +18,57 @@ class CompletedSummaryFragment:
     content: str
 
 
-def _format_completed_fragment(fragment: CompletedSummaryFragment) -> str:
-    return f'<summary_fragment index="{fragment.fragment_index}" from_message_id="{fragment.message_start_id}" through_message_id="{fragment.message_end_id}">\n{fragment.content}\n</summary_fragment>'
+def _format_completed_fragment(
+    fragment: CompletedSummaryFragment,
+    *,
+    part_index: int | None = None,
+    content: str | None = None,
+) -> str:
+    part_attribute = f' part="{part_index}"' if part_index is not None else ""
+    return f'<summary_fragment index="{fragment.fragment_index}" from_message_id="{fragment.message_start_id}" through_message_id="{fragment.message_end_id}"{part_attribute}>\n{fragment.content if content is None else content}\n</summary_fragment>'
+
+
+def _split_completed_fragment(
+    fragment: CompletedSummaryFragment,
+    *,
+    max_group_tokens: int,
+    token_counter: Callable[[str], int],
+) -> list[str]:
+    whole = _format_completed_fragment(fragment)
+    if token_counter(whole) <= max_group_tokens:
+        return [whole]
+
+    parts: list[str] = []
+    remaining = fragment.content
+    part_index = 0
+    while remaining:
+        low = 1
+        high = len(remaining)
+        best = 0
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = _format_completed_fragment(
+                fragment,
+                part_index=part_index,
+                content=remaining[:middle],
+            )
+            if token_counter(candidate) <= max_group_tokens:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best <= 0:
+            raise RuntimeError("Context summary merge fragment metadata exceeds the merge budget")
+        parts.append(
+            _format_completed_fragment(
+                fragment,
+                part_index=part_index,
+                content=remaining[:best],
+            )
+        )
+        remaining = remaining[best:]
+        part_index += 1
+    return parts
 
 
 async def iter_completed_lower_stage_fragments(
@@ -28,11 +77,12 @@ async def iter_completed_lower_stage_fragments(
     lower_stage_key: str,
     page_size: int = CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
 ) -> AsyncIterator[CompletedSummaryFragment]:
-    page_after_message_id: int | None = None
+    page_after_fragment_index: int | None = None
     expected_fragment_index = 0
     expected_fragment_count: int | None = None
     expected_summary_message_id: int | None = None
     persistent_summary_target_id: int | None = None
+    previous_message_start_id: int | None = None
     previous_message_end_id: int | None = None
     stage_identity: tuple[object, ...] | None = None
 
@@ -42,7 +92,7 @@ async def iter_completed_lower_stage_fragments(
                 page_db,
                 work_dedupe_key=work_dedupe_key,
                 lower_stage_key=lower_stage_key,
-                page_after_message_id=page_after_message_id,
+                page_after_fragment_index=page_after_fragment_index,
                 limit=page_size,
             )
             if page is None:
@@ -89,13 +139,15 @@ async def iter_completed_lower_stage_fragments(
         for fragment in fragments:
             if fragment.fragment_index != expected_fragment_index:
                 raise RuntimeError("Context summary direct lower stage fragments are not continuous")
-            if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id):
+            repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
+            if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range):
                 raise RuntimeError("Context summary direct lower stage fragment range is invalid")
             yield fragment
             expected_fragment_index += 1
+            previous_message_start_id = fragment.message_start_id
             previous_message_end_id = fragment.message_end_id
 
-        page_after_message_id = fragments[-1].message_end_id
+        page_after_fragment_index = fragments[-1].fragment_index
         fragments = ()
 
     if expected_fragment_count is None or expected_fragment_index != expected_fragment_count or previous_message_end_id != persistent_summary_target_id:
@@ -120,6 +172,7 @@ async def group_completed_summary_fragments(
     group_start_id: int | None = None
     group_end_id: int | None = None
     previous_fragment_index: int | None = None
+    previous_message_start_id: int | None = None
     previous_message_end_id: int | None = None
 
     def build_group() -> SummaryFragmentInput:
@@ -137,31 +190,38 @@ async def group_completed_summary_fragments(
     async for fragment in fragments:
         if previous_fragment_index is not None and fragment.fragment_index != previous_fragment_index + 1:
             raise RuntimeError("Context summary direct lower stage fragments are not continuous")
-        if previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id:
+        repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
+        if previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range:
             raise RuntimeError("Context summary direct lower stage fragment ranges overlap")
 
-        part = _format_completed_fragment(fragment)
-        part_token_floor = max(1, token_counter(part))
-        if part_token_floor > max_group_tokens:
-            raise RuntimeError("Context summary direct lower stage fragment exceeds the merge budget")
+        parts = _split_completed_fragment(
+            fragment,
+            max_group_tokens=max_group_tokens,
+            token_counter=token_counter,
+        )
+        for part in parts:
+            part_token_floor = max(1, token_counter(part))
+            candidate_content = "\n".join([*group_parts, part])
+            candidate_token_floor = group_token_floor + part_token_floor
+            candidate_tokens = max(
+                candidate_token_floor,
+                max(1, token_counter(candidate_content)),
+            )
+            if group_parts and candidate_tokens > max_group_tokens:
+                if group_index >= first_group_index:
+                    yield build_group()
+                group_index += 1
+                group_parts = []
+                group_token_floor = 0
+                group_start_id = None
 
-        candidate_content = "\n".join([*group_parts, part])
-        candidate_token_floor = group_token_floor + part_token_floor
-        candidate_tokens = max(candidate_token_floor, max(1, token_counter(candidate_content)))
-        if group_parts and candidate_tokens > max_group_tokens:
-            if group_index >= first_group_index:
-                yield build_group()
-            group_index += 1
-            group_parts = []
-            group_token_floor = 0
-            group_start_id = None
-
-        if not group_parts:
-            group_start_id = fragment.message_start_id
-        group_parts.append(part)
-        group_token_floor += part_token_floor
-        group_end_id = fragment.message_end_id
+            if not group_parts:
+                group_start_id = fragment.message_start_id
+            group_parts.append(part)
+            group_token_floor += part_token_floor
+            group_end_id = fragment.message_end_id
         previous_fragment_index = fragment.fragment_index
+        previous_message_start_id = fragment.message_start_id
         previous_message_end_id = fragment.message_end_id
 
     if group_parts and group_index >= first_group_index:

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as summary_module
 from app.core.utils.context_summary.selection import ContextSummaryModelSnapshot
 from app.models.message import InternalMessage, MessageRole
@@ -92,6 +93,13 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
         invalidated_stage_keys.append(stage.stage_key)
         return True
 
+    async def reduce_stage(_db, *, initial_stage, **_kwargs):
+        assert initial_stage.stage_key == created_stages[-1].stage_key
+        return reduction_module.CompletedSummaryResult(
+            content="final summary",
+            stage=initial_stage,
+        )
+
     class SessionContext:
         async def __aenter__(self):
             return object()
@@ -109,6 +117,11 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
     monkeypatch.setattr(summary_module, "mark_summary_stage_completed", mark_completed)
     monkeypatch.setattr(summary_module, "mark_summary_stage_failed", mark_failed)
     monkeypatch.setattr(summary_module, "invalidate_summary_stage", invalidate_stage)
+    monkeypatch.setattr(
+        reduction_module,
+        "reduce_completed_summary_stage_result",
+        reduce_stage,
+    )
     monkeypatch.setattr(summary_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
         summary_module,
@@ -146,7 +159,7 @@ async def test_failed_layer_is_invalidated_and_resplit_for_fallback_model(monkey
         safety_margin_tokens=0,
     )
 
-    assert result is None
+    assert result == "final summary"
     assert message_count == 8
     assert selection_calls == [set(), {1}]
     assert count_calls == [(568, 500), (268, 250)]

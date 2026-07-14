@@ -125,6 +125,69 @@ async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_summary_refinement_stops_after_two_attempts(monkeypatch):
+    _selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    summaries = iter(
+        [
+            "initial summary",
+            "refined summary one",
+            "refined summary two",
+        ]
+    )
+
+    async def call_model(*, model, prompt):
+        generated_calls.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "messages": [InternalMessage(role=MessageRole.USER, content=prompt)],
+                "timeout": CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
+            }
+        )
+        return next(summaries)
+
+    monkeypatch.setattr(stage_module, "call_context_summary_model", call_model)
+
+    token_counts = {
+        "initial summary": 400,
+        "refined summary one": 300,
+        "refined summary two": 200,
+    }
+
+    def estimate_tokens(content):
+        if content == "current":
+            return 400
+        if content.startswith('{"role":'):
+            return 200
+        for summary, token_count in token_counts.items():
+            if summary in content:
+                return token_count
+        return 50
+
+    _patch_token_counter(monkeypatch, estimate_tokens)
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="current",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+    assert state.content == "refined summary two"
+    assert len(generated_calls) == 3
+    assert len(update_calls) == 1
+    assert update_calls[0]["summary"] == "refined summary two"
+    assert all("Further compress the summary below" in generated_calls[index]["messages"][0].content for index in (1, 2))
+
+
+@pytest.mark.asyncio
 async def test_context_summary_uses_dedicated_timeout_not_chat_timeout(monkeypatch):
     _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
 

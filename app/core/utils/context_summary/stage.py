@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +41,13 @@ from app.providers.database import AsyncSessionLocal
 logger = get_logger(__name__)
 
 CONTEXT_SUMMARY_MODEL_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class GeneratedSummaryResult:
+    content: str | None
+    message_count: int
+    completed_stage: ContextSummaryStage | None = None
 
 
 class ContextSummaryLayerError(RuntimeError):
@@ -211,11 +219,14 @@ async def generate_snapshot_summary_with_model(
     *,
     session_id: str,
     uid: str,
+    profile: Profile,
+    cfg: ProfileConfig,
     snapshot: ContextSummarySnapshot,
     existing_summary: str | None,
     existing_summary_revision: int,
+    safety_margin_tokens: int,
     model: ContextSummaryModelSnapshot,
-) -> tuple[str | None, int]:
+) -> GeneratedSummaryResult:
     total_tokens, summarized_message_count = await measure_persistent_history(
         db,
         session_id=session_id,
@@ -223,7 +234,10 @@ async def generate_snapshot_summary_with_model(
         snapshot=snapshot,
     )
     if total_tokens <= 0:
-        return None, summarized_message_count
+        return GeneratedSummaryResult(
+            content=None,
+            message_count=summarized_message_count,
+        )
 
     empty_prompt = CONTEXT_SUMMARY_PROMPT.format(
         existing_summary=existing_summary or "(none)",
@@ -249,32 +263,6 @@ async def generate_snapshot_summary_with_model(
     )
     if expected_fragment_count <= 0:
         raise ContextSummaryLayerError("Context summary layer cannot be split for the selected model")
-
-    fragments = iter_summary_fragments(
-        db,
-        session_id=session_id,
-        uid=uid,
-        snapshot=snapshot,
-        existing_summary=existing_summary,
-        fragment_target_tokens=fragment_target_tokens,
-    )
-    if expected_fragment_count == 1:
-        fragment = await anext(fragments, None)
-        if fragment is None:
-            raise ContextSummaryLayerError("Context summary layer did not produce its planned fragment")
-        prompt = fragment_prompt(fragment)
-        if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
-            raise ContextSummaryLayerError("Context summary fragment exceeds the selected model window")
-        await release_db_session(db)
-        try:
-            generated = await call_fixed_summary_model(
-                model=model,
-                prompt=prompt,
-                input_tokens=fragment.token_count,
-            )
-        except Exception as exc:
-            raise ContextSummaryLayerError("Context summary single-fragment layer failed") from exc
-        return generated, summarized_message_count
 
     snapshot_max_message_id = snapshot.snapshot_max_message_id
     persistent_summary_target_id = snapshot.persistent_summary_target_id
@@ -312,13 +300,56 @@ async def generate_snapshot_summary_with_model(
     await release_db_session(db)
     async with AsyncSessionLocal() as stage_db:
         persisted_stage, _ = await context_summary_stage_crud.create_stage(stage_db, stage=stage)
-    if persisted_stage.model_key != model_key or persisted_stage.expected_fragment_count != expected_fragment_count or persisted_stage.status != ContextSummaryStageStatus.RUNNING or persisted_stage.succeeded_fragment_count > expected_fragment_count:
+    if (
+        persisted_stage.model_key != model_key
+        or persisted_stage.expected_fragment_count != expected_fragment_count
+        or persisted_stage.status
+        not in {
+            ContextSummaryStageStatus.RUNNING,
+            ContextSummaryStageStatus.COMPLETED,
+        }
+        or persisted_stage.succeeded_fragment_count > expected_fragment_count
+        or (persisted_stage.status == ContextSummaryStageStatus.COMPLETED and persisted_stage.succeeded_fragment_count != expected_fragment_count)
+    ):
         raise ContextSummaryLayerError("Context summary layer conflicts with an existing stage")
 
     first_fragment_index = persisted_stage.succeeded_fragment_count
+    if persisted_stage.status == ContextSummaryStageStatus.COMPLETED:
+        from app.core.utils.context_summary.reduction import (
+            reduce_completed_summary_stage_result,
+        )
+
+        reduced = await reduce_completed_summary_stage_result(
+            db,
+            profile=profile,
+            cfg=cfg,
+            initial_stage=persisted_stage,
+            safety_margin_tokens=safety_margin_tokens,
+        )
+        return GeneratedSummaryResult(
+            content=reduced.content,
+            message_count=summarized_message_count,
+            completed_stage=reduced.stage,
+        )
+
     if first_fragment_index == expected_fragment_count:
         if await mark_summary_stage_completed(stage=persisted_stage):
-            return None, summarized_message_count
+            from app.core.utils.context_summary.reduction import (
+                reduce_completed_summary_stage_result,
+            )
+
+            reduced = await reduce_completed_summary_stage_result(
+                db,
+                profile=profile,
+                cfg=cfg,
+                initial_stage=persisted_stage,
+                safety_margin_tokens=safety_margin_tokens,
+            )
+            return GeneratedSummaryResult(
+                content=reduced.content,
+                message_count=summarized_message_count,
+                completed_stage=reduced.stage,
+            )
         error = "Context summary fragment stage failed completion validation"
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
@@ -331,6 +362,7 @@ async def generate_snapshot_summary_with_model(
         snapshot=snapshot,
         existing_summary=existing_summary,
         fragment_target_tokens=fragment_target_tokens,
+        max_fragment_tokens=max_fragment_tokens,
         first_fragment_index=first_fragment_index,
     )
 
@@ -381,10 +413,26 @@ async def generate_snapshot_summary_with_model(
         max_result_queue_size=stats.max_result_queue_size,
         max_reorder_size=stats.max_reorder_size,
     ).debug("Context summary fragment stage passed validation and was completed")
-    return None, summarized_message_count
+
+    from app.core.utils.context_summary.reduction import (
+        reduce_completed_summary_stage_result,
+    )
+
+    reduced = await reduce_completed_summary_stage_result(
+        db,
+        profile=profile,
+        cfg=cfg,
+        initial_stage=persisted_stage,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+    return GeneratedSummaryResult(
+        content=reduced.content,
+        message_count=summarized_message_count,
+        completed_stage=reduced.stage,
+    )
 
 
-async def generate_snapshot_summary(
+async def generate_snapshot_summary_result(
     db: AsyncSession,
     *,
     session_id: str,
@@ -395,7 +443,7 @@ async def generate_snapshot_summary(
     existing_summary: str | None,
     existing_summary_revision: int,
     safety_margin_tokens: int,
-) -> tuple[str | None, int]:
+) -> GeneratedSummaryResult:
     excluded_priorities: set[int] = set()
     call_context = "context_summary"
 
@@ -416,16 +464,22 @@ async def generate_snapshot_summary(
                 snapshot=snapshot,
             )
             await release_db_session(db)
-            return None, summarized_message_count
+            return GeneratedSummaryResult(
+                content=None,
+                message_count=summarized_message_count,
+            )
 
         try:
             return await generate_snapshot_summary_with_model(
                 db,
                 session_id=session_id,
                 uid=uid,
+                profile=profile,
+                cfg=cfg,
                 snapshot=snapshot,
                 existing_summary=existing_summary,
                 existing_summary_revision=existing_summary_revision,
+                safety_margin_tokens=safety_margin_tokens,
                 model=model,
             )
         except ContextSummaryLayerError as exc:
@@ -442,3 +496,29 @@ async def generate_snapshot_summary(
                 "Context summary layer invalidated before model fallback: {error}",
                 error=format_exception_message(exc),
             )
+
+
+async def generate_snapshot_summary(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    uid: str,
+    profile: Profile,
+    cfg: ProfileConfig,
+    snapshot: ContextSummarySnapshot,
+    existing_summary: str | None,
+    existing_summary_revision: int,
+    safety_margin_tokens: int,
+) -> tuple[str | None, int]:
+    result = await generate_snapshot_summary_result(
+        db,
+        session_id=session_id,
+        uid=uid,
+        profile=profile,
+        cfg=cfg,
+        snapshot=snapshot,
+        existing_summary=existing_summary,
+        existing_summary_revision=existing_summary_revision,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+    return result.content, result.message_count

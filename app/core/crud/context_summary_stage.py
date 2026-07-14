@@ -62,6 +62,7 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
         work_dedupe_key: str,
         lower_stage_key: str,
         page_after_message_id: int | None = None,
+        page_after_fragment_index: int | None = None,
         limit: int = CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
     ) -> CompletedContextSummaryFragmentPage | None:
         if not 1 <= limit <= CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE:
@@ -70,6 +71,8 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             )
         if page_after_message_id is not None and page_after_message_id < 1:
             raise ValueError("page_after_message_id must be positive")
+        if page_after_fragment_index is not None and page_after_fragment_index < 0:
+            raise ValueError("page_after_fragment_index must be non-negative")
 
         stage_result = await db.execute(
             select(ContextSummaryStage).where(
@@ -95,17 +98,16 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             ContextSummaryFragment.model_id == stage.model_id,
             ContextSummaryFragment.status == ContextSummaryFragmentStatus.COMPLETED,
         )
-        if page_after_message_id is not None:
+        if page_after_fragment_index is not None:
+            fragment_query = fragment_query.where(
+                ContextSummaryFragment.fragment_index > page_after_fragment_index,
+            )
+        elif page_after_message_id is not None:
             fragment_query = fragment_query.where(
                 ContextSummaryFragment.message_start_id > page_after_message_id,
             )
 
-        fragment_result = await db.execute(
-            fragment_query.order_by(
-                ContextSummaryFragment.message_start_id,
-                ContextSummaryFragment.fragment_index,
-            ).limit(limit)
-        )
+        fragment_result = await db.execute(fragment_query.order_by(ContextSummaryFragment.fragment_index).limit(limit))
         return CompletedContextSummaryFragmentPage(
             stage=stage,
             fragments=tuple(fragment_result.scalars().all()),
@@ -165,6 +167,7 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
             .order_by(ContextSummaryFragment.fragment_index)
         )
         fragment_count = 0
+        previous_message_start_id: int | None = None
         previous_message_end_id: int | None = None
         async for fragment in fragment_result:
             if (
@@ -178,13 +181,14 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
                 or fragment.model_id != stage.model_id
                 or fragment.status != ContextSummaryFragmentStatus.COMPLETED
                 or fragment.message_start_id > fragment.message_end_id
-                or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id)
+                or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not (fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id))
             ):
                 await db.rollback()
                 return False
             if fragment_count == 0 and fragment.message_start_id <= (stage.expected_summary_message_id or 0):
                 await db.rollback()
                 return False
+            previous_message_start_id = fragment.message_start_id
             previous_message_end_id = fragment.message_end_id
             fragment_count += 1
 
