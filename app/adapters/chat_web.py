@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from collections.abc import MutableSet
+from collections.abc import AsyncGenerator, MutableSet
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,56 @@ def _response_has_background_tasks(llm_response: dict[str, Any]) -> bool:
 class WebChatAdapter(BaseChatAdapter):
     async def send_session_event(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
         logger.bind(uid=uid, session_id=session_id, event_type=event.get("type")).debug("Web adapter session event persisted for polling")
+
+    async def chat_stream(
+        self,
+        db: AsyncSession,
+        message: str | list[dict[str, Any]],
+        uid: str,
+        session_id: str,
+        attachments: list[str] | None = None,
+    ) -> AsyncGenerator[dict[str, Any]]:
+        if not session_id:
+            raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
+        try:
+            await ensure_web_session_writable(
+                db,
+                session_id=session_id,
+                uid=uid,
+            )
+            profile = await profile_crud.get_active(db, uid=uid)
+            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+            _initial_message, work = await session_reply_queue_manager.enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=attachments,
+                source="http",
+                stream_requested=False,
+                context_summary_events_requested=True,
+            )
+            async for event in session_reply_queue_manager.wait_for_stream(work.id):
+                if event.get("type") == "done":
+                    response = event.get("response")
+                    if isinstance(response, dict) and _response_has_background_tasks(response):
+                        response["has_background_tasks"] = True
+                        response["background_task_poll_interval"] = 2
+                yield event
+        except BaseBusinessException as e:
+            yield {
+                "type": "error",
+                "message": t(e.message, default=e.message, **e.kwargs),
+                "session_id": session_id,
+            }
+        except Exception as e:
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_ADAPTER_WEB_UNEXPECTED_ERROR", error=str(e)), exc_info=True)
+            yield {
+                "type": "error",
+                "message": t(ERR_LLM_UNEXPECTED_ERROR),
+                "session_id": session_id,
+            }
 
     async def chat(
         self,

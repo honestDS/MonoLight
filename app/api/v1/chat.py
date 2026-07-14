@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 import weakref
@@ -12,6 +13,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
@@ -89,6 +91,24 @@ async def chat_completions(
             ],
             history=[],
         ).model_dump()
+
+    if request.stream:
+
+        async def event_stream():
+            async for event in web_chat_adapter.chat_stream(
+                db=db,
+                message=request.message,
+                uid=uid,
+                session_id=request.session_id,
+                attachments=request.attachments,
+            ):
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # 使用适配器处理对话请求
     return await web_chat_adapter.chat(

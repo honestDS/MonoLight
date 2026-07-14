@@ -149,6 +149,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     )
     await db.refresh(work)
     stream_requested = bool((work.execution_state or {}).get("stream_requested"))
+    context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
         next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
 
@@ -221,6 +222,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         final_message_dedupe_key=_result_message_dedupe_key(work),
         persisted_profile_id=work.profile_id,
         stream_event_callback=publish_stream_event if stream_requested else None,
+        context_summary_lifecycle_callback=publish_stream_event if context_summary_events_requested else None,
         additional_user_messages_fetcher=fetch_additional_user_messages,
         execution_resume_state=resume_state,
         execution_checkpoint_callback=save_execution_checkpoint,

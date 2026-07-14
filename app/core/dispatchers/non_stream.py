@@ -64,6 +64,7 @@ class NonStreamDispatcherMixin:
         final_message_dedupe_key: str | None = None,
         persisted_profile_id: int | None = None,
         stream_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        context_summary_lifecycle_callback: Callable[[dict[str, object]], Awaitable[None]] | None = None,
         additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
@@ -148,6 +149,7 @@ class NonStreamDispatcherMixin:
                             history_before_id=history_before_id,
                             frozen_user_message_ids=frozen_user_message_ids,
                             context_summary_work_validity_checker=context_summary_work_validity_checker,
+                            context_summary_lifecycle_callback=context_summary_lifecycle_callback,
                         )
                         current_turn = 0
 

@@ -80,6 +80,69 @@ export const chatApi = {
 
   // 聊天 completions 接口
   completions: (data) => request.post('/chat/completions', data),
+  completionsStream: async (data, onEvent) => {
+    const token = localStorage.getItem('token')
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/x-ndjson',
+      'Accept-Language': getCurrentLocale()
+    }
+    if (token) headers.Authorization = `Bearer ${token}`
+
+    const response = await fetch(`${API_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...data, stream: true })
+    })
+    if (!response.ok) {
+      let errorData = null
+      try {
+        errorData = await response.json()
+      } catch (_) {
+        errorData = null
+      }
+      if (response.status === 401) {
+        localStorage.removeItem('token')
+        if (window.location.hash !== '#/login') window.location.hash = '/login'
+      }
+      throw new Error(errorData?.message || errorData?.detail || t('common.network_request_failed'))
+    }
+    if (!response.body) {
+      throw new Error(t('common.network_request_failed'))
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let finalResponse = null
+
+    const processLine = (line) => {
+      if (!line.trim()) return
+      const event = JSON.parse(line)
+      if (onEvent) onEvent(event)
+      if (event.type === 'error') {
+        throw new Error(event.message || t('chat.send_failed'))
+      }
+      if (event.type === 'done') {
+        finalResponse = event.response || null
+      }
+    }
+
+    while (true) {
+      const { value, done } = await reader.read()
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) processLine(line)
+      if (done) break
+    }
+    processLine(buffer)
+
+    if (!finalResponse) {
+      throw new Error(t('common.network_request_failed'))
+    }
+    return finalResponse
+  },
   // 获取会话列表
   sessionsList: () => request.get('/chat/sessions/list'),
   // 删除会话

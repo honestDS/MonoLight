@@ -58,6 +58,12 @@
 
     <!-- 右侧聊天区域 -->
     <div class="chat-main">
+      <Transition name="context-summary-notice">
+        <div v-if="isContextSummarizing" class="context-summary-notice" role="status" aria-live="polite">
+          <span class="context-summary-notice-spinner"></span>
+          <span>{{ $t('chat.context_summarizing') }}</span>
+        </div>
+      </Transition>
       <div class="message-list" ref="messageList">
         <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
           <p>{{ $t('chat.empty_chat_tip') }}</p>
@@ -494,7 +500,8 @@ const {
   wsConnected,
   sessionCreating,
   attachments,
-  isCurrentSessionReadOnly
+  isCurrentSessionReadOnly,
+  isContextSummarizing
 } = chat
 
 // 用于管理 VirtualizedCode 的引用

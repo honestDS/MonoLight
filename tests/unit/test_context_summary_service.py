@@ -20,8 +20,12 @@ from tests.unit.context_summary_service_test_support import (
 async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolated_cursor(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
     cleanup_calls = []
+    lifecycle_events = []
     bound_fields = {}
     debug_calls = []
+
+    async def lifecycle_event_callback(event):
+        lifecycle_events.append(event)
 
     async def cleanup_work(work_dedupe_key):
         cleanup_calls.append(work_dedupe_key)
@@ -63,6 +67,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        lifecycle_event_callback=lifecycle_event_callback,
     )
 
     assert state == ContextSummaryState(
@@ -93,11 +98,19 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
     assert bound_fields["compression_goal_tokens"] == bound_fields["summary_trigger_tokens"]
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0].startswith("context-summary:")
+    assert lifecycle_events == [
+        {"type": "context_summary_start"},
+        {"type": "context_summary_end"},
+    ]
 
 
 @pytest.mark.asyncio
 async def test_context_summary_triggers_only_after_configured_threshold(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    lifecycle_events = []
+
+    async def lifecycle_event_callback(event):
+        lifecycle_events.append(event)
 
     def estimate_tokens(content):
         if content == "current":
@@ -120,9 +133,11 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        lifecycle_event_callback=lifecycle_event_callback,
     )
 
     assert below_ninety_state == ContextSummaryState(content=None, message_id=None)
+    assert lifecycle_events == []
     assert selected_calls == []
     assert update_calls == []
     assert generated_calls == []
@@ -139,6 +154,7 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        lifecycle_event_callback=lifecycle_event_callback,
     )
 
     assert at_fifty_state == ContextSummaryState(
@@ -149,6 +165,10 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
     assert len(selected_calls) == 1
     assert len(update_calls) == 1
     assert len(generated_calls) == 1
+    assert lifecycle_events == [
+        {"type": "context_summary_start"},
+        {"type": "context_summary_end"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -196,6 +216,10 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
         generation_error=RuntimeError("provider unavailable"),
     )
     cleanup_calls = []
+    lifecycle_events = []
+
+    async def lifecycle_event_callback(event):
+        lifecycle_events.append(event)
 
     async def cleanup_work(work_dedupe_key):
         cleanup_calls.append(work_dedupe_key)
@@ -226,6 +250,7 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
         max_tokens=24,
         reserved_tokens=0,
         safety_margin_tokens=0,
+        lifecycle_event_callback=lifecycle_event_callback,
     )
 
     assert state == ContextSummaryState(content=None, message_id=None)
@@ -236,6 +261,10 @@ async def test_ensure_context_summary_failure_returns_previous_state(monkeypatch
     assert selected_calls[1]["excluded_priorities"] == {1}
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0].startswith("context-summary:")
+    assert lifecycle_events == [
+        {"type": "context_summary_start"},
+        {"type": "context_summary_end"},
+    ]
 
 
 @pytest.mark.asyncio

@@ -33,12 +33,16 @@ export function useChatSession() {
   
   // 新增附件状态
   const attachments = ref([])
+  const contextSummarySessionId = ref(null)
   
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
+  const isContextSummarizing = computed(
+    () => Boolean(sessionManager.currentSessionId.value) && contextSummarySessionId.value === sessionManager.currentSessionId.value
+  )
   
   // 3. 通信层
   const transport = useChatTransport()
@@ -209,7 +213,19 @@ export function useChatSession() {
       const response = await transport.httpSend({
         message: text,
         sessionId: requestSessionId,
-        attachments: attachmentsToSent
+        attachments: attachmentsToSent,
+        callbacks: {
+          onContextSummaryStart: () => {
+            if (requestSessionId === sessionManager.currentSessionId.value) {
+              contextSummarySessionId.value = requestSessionId
+            }
+          },
+          onContextSummaryEnd: () => {
+            if (contextSummarySessionId.value === requestSessionId) {
+              contextSummarySessionId.value = null
+            }
+          }
+        }
       })
 
       // 处理后端生成的 UUID (新建会话模式)
@@ -260,6 +276,9 @@ export function useChatSession() {
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       ElMessage.error(err.message || t('chat.send_failed'))
     } finally {
+      if (contextSummarySessionId.value === requestSessionId) {
+        contextSummarySessionId.value = null
+      }
       if (requestSessionId === sessionManager.currentSessionId.value) {
         // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
         const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
@@ -328,6 +347,16 @@ export function useChatSession() {
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
       thinkingId,
+      onContextSummaryStart: () => {
+        if (isCurrentRequestSession()) {
+          contextSummarySessionId.value = requestSessionId
+        }
+      },
+      onContextSummaryEnd: () => {
+        if (contextSummarySessionId.value === requestSessionId) {
+          contextSummarySessionId.value = null
+        }
+      },
       onTaskStart: () => {
         if (!isCurrentRequestSession()) return
         // 调度器明确发来了合并/开始信号，说明它正在处理最新的队列消息了，清除队列视觉状态
@@ -350,6 +379,9 @@ export function useChatSession() {
         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam) => {
+        if (contextSummarySessionId.value === requestSessionId) {
+          contextSummarySessionId.value = null
+        }
         if (!isCurrentRequestSession()) return
         messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
         // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败：
@@ -393,6 +425,9 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newSessionId, text)
       },
       onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
+        if (eventType !== 'turn_end' && contextSummarySessionId.value === requestSessionId) {
+          contextSummarySessionId.value = null
+        }
         if (!isCurrentRequestSession()) return
         if (data.session_id && data.session_id !== requestSessionId) return
         chatState.messages.value.forEach(m => {
@@ -470,6 +505,9 @@ export function useChatSession() {
       })
     } catch (e) {
       console.error('WebSocket发送失败:', e)
+      if (contextSummarySessionId.value === requestSessionId) {
+        contextSummarySessionId.value = null
+      }
       if (!isCurrentRequestSession()) return
       ElMessage.error(t('chat.ws_send_failed'))
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
@@ -482,6 +520,7 @@ export function useChatSession() {
   
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
+    contextSummarySessionId.value = null
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
@@ -493,6 +532,7 @@ export function useChatSession() {
    * 新建会话
    */
   const createNewSession = () => {    
+    contextSummarySessionId.value = null
     transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
@@ -545,6 +585,7 @@ export function useChatSession() {
     inputMsg: chatState.inputMsg,
     loading: chatState.loading,
     messageList: chatState.messageList,
+    isContextSummarizing,
     
     // 新增附件状态导出
     attachments,

@@ -184,17 +184,18 @@ def test_dump_output_history_can_hide_tool_call_content_without_mutating_message
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source", "stream_requested", "expose_tool_call_content"),
+    ("source", "stream_requested", "context_summary_events_requested", "expose_tool_call_content"),
     [
-        ("http", False, True),
-        ("ws", True, True),
-        ("weixin-openclaw", False, False),
+        ("http", False, False, True),
+        ("ws", True, True, True),
+        ("weixin-openclaw", False, False, False),
     ],
 )
 async def test_enqueue_foreground_controls_tool_call_content_by_source(
     monkeypatch,
     source,
     stream_requested,
+    context_summary_events_requested,
     expose_tool_call_content,
 ):
     manager = SessionReplyQueueManager()
@@ -250,8 +251,65 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
     )
 
     assert queued_work.execution_state["stream_requested"] is stream_requested
+    assert queued_work.execution_state["context_summary_events_requested"] is context_summary_events_requested
     assert queued_work.execution_state["expose_tool_call_content"] is expose_tool_call_content
     assert enqueue_calls[0]["dedupe_key"] == build_foreground_message_dedupe_key("session-1", 11)
+
+
+@pytest.mark.asyncio
+async def test_http_foreground_can_request_summary_events_without_content_stream(monkeypatch):
+    manager = SessionReplyQueueManager()
+    work = SimpleNamespace(execution_state={}, id=7)
+
+    class FakeDb:
+        def __init__(self):
+            self.pending = None
+
+        def add(self, instance):
+            self.pending = instance
+
+        async def flush(self):
+            if getattr(self.pending, "id", None) is None:
+                self.pending.id = 11
+
+        async def commit(self):
+            return None
+
+        async def refresh(self, instance):
+            if getattr(instance, "created_at", None) is None:
+                instance.created_at = SimpleNamespace(timestamp=lambda: 1.0)
+            if getattr(instance, "id", None) is None:
+                instance.id = 11
+
+    async def upsert_profile(*args, **kwargs):
+        return None
+
+    async def enqueue(*args, **kwargs):
+        return work, True
+
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_crud.upsert_profile",
+        upsert_profile,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_work_item_crud.enqueue",
+        enqueue,
+    )
+
+    _message, queued_work = await manager.enqueue_foreground_message(
+        FakeDb(),
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=3),
+        message="测试",
+        attachments=None,
+        source="http",
+        stream_requested=False,
+        context_summary_events_requested=True,
+    )
+
+    assert queued_work.execution_state["stream_requested"] is False
+    assert queued_work.execution_state["context_summary_events_requested"] is True
 
 
 @pytest.mark.asyncio

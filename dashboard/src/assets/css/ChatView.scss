@@ -17,3 +17,57 @@
   color: #909399;
   font-size: 12px;
 }
+
+.chat-main {
+  position: relative;
+}
+
+.context-summary-notice {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  padding: 8px 14px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #dcdfe6;
+  border-radius: 18px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  transform: translateX(-50%);
+  backdrop-filter: blur(6px);
+}
+
+.context-summary-notice-spinner {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 2px solid #c6e2ff;
+  border-top-color: #409eff;
+  border-radius: 50%;
+  animation: context-summary-spin 0.8s linear infinite;
+}
+
+.context-summary-notice-enter-active,
+.context-summary-notice-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.context-summary-notice-enter-from,
+.context-summary-notice-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -6px);
+}
+
+@keyframes context-summary-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

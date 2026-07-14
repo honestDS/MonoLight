@@ -1,5 +1,6 @@
 export default {
   sessions_title: 'Sessions',
+  context_summarizing: 'Compressing conversation context…',
   session_prefix: 'Session: {id}',
   session_created_at: 'Created',
   session_last_active: 'Active',

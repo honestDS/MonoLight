@@ -1,5 +1,6 @@
 export default {
   sessions_title: '会话列表',
+  context_summarizing: '正在压缩上下文…',
   session_prefix: '会话: {id}',
   session_created_at: '创建',
   session_last_active: '活跃',

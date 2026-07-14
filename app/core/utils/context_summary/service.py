@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,9 +38,33 @@ logger = get_logger(__name__)
 CONTEXT_SUMMARY_MAX_REFINEMENT_ATTEMPTS = 2
 
 
+ContextSummaryLifecycleCallback = Callable[[dict[str, object]], Awaitable[None]]
+
+
 @dataclass
 class ContextSummaryLifecycle:
     work_dedupe_key: str | None = None
+    event_callback: ContextSummaryLifecycleCallback | None = None
+    event_started: bool = False
+
+
+async def emit_context_summary_lifecycle_event(
+    lifecycle: ContextSummaryLifecycle,
+    *,
+    event_type: str,
+) -> bool:
+    if lifecycle.event_callback is None:
+        return False
+    try:
+        await lifecycle.event_callback({"type": event_type})
+        return True
+    except Exception:
+        logger.warning(
+            "Failed to publish context summary lifecycle event: {event_type}",
+            event_type=event_type,
+            exc_info=True,
+        )
+        return False
 
 
 async def persist_context_summary(
@@ -251,6 +276,15 @@ async def _ensure_context_summary(
         await release_db_session(db)
         return state
 
+    if not snapshot.has_persistent_history and (not state.content or state.message_id is None):
+        await release_db_session(db)
+        return state
+
+    lifecycle.event_started = await emit_context_summary_lifecycle_event(
+        lifecycle,
+        event_type="context_summary_start",
+    )
+
     candidate_summary = state.content
     summarized_message_count = 0
     completed_stage = None
@@ -408,8 +442,9 @@ async def ensure_context_summary(
     safety_margin_tokens: int = 256,
     frozen_user_message_ids: list[int] | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
+    lifecycle_event_callback: ContextSummaryLifecycleCallback | None = None,
 ) -> ContextSummaryState:
-    lifecycle = ContextSummaryLifecycle()
+    lifecycle = ContextSummaryLifecycle(event_callback=lifecycle_event_callback)
     try:
         return await _ensure_context_summary(
             db,
@@ -429,6 +464,11 @@ async def ensure_context_summary(
             lifecycle=lifecycle,
         )
     finally:
+        if lifecycle.event_started:
+            await emit_context_summary_lifecycle_event(
+                lifecycle,
+                event_type="context_summary_end",
+            )
         if lifecycle.work_dedupe_key is not None:
             await cleanup_context_summary_work_safely(
                 lifecycle.work_dedupe_key,

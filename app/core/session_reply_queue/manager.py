@@ -64,6 +64,8 @@ class SessionReplyQueueManager:
         message: str | list[dict[str, Any]],
         attachments: list[str] | None,
         source: str,
+        stream_requested: bool | None = None,
+        context_summary_events_requested: bool | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -101,7 +103,8 @@ class SessionReplyQueueManager:
         if created:
             work.execution_state = {
                 **(work.execution_state or {}),
-                "stream_requested": source == "ws",
+                "stream_requested": source == "ws" if stream_requested is None else stream_requested,
+                "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
                 # 微信 OpenClaw 对发送频率有限制，工具调用阶段的正文只保留在
                 # 数据库和日志中，不作为额外的用户可见消息发送到微信。
                 "expose_tool_call_content": source != "weixin-openclaw",
@@ -214,6 +217,7 @@ class SessionReplyQueueManager:
                 )
             )
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
+        context_summary_events_requested = any(bool((item.execution_state or {}).get("context_summary_events_requested")) for item in contiguous)
         expose_tool_call_content = all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in contiguous)
         updated = await session_reply_work_item_crud.update_claimed(
             db,
@@ -224,6 +228,7 @@ class SessionReplyQueueManager:
                 "execution_state": {
                     **(work.execution_state or {}),
                     "stream_requested": stream_requested,
+                    "context_summary_events_requested": context_summary_events_requested,
                     "expose_tool_call_content": expose_tool_call_content,
                 },
             },
@@ -393,6 +398,7 @@ class SessionReplyQueueManager:
                         "response_id": f"session-reply-work:{target_work_id}",
                         "history": response.get("history", []),
                         "files": response.get("files"),
+                        "response": response,
                     }
                     return
                 if work.status == SessionReplyWorkStatus.FAILED:

@@ -30,8 +30,14 @@ export function useChatTransport() {
     if (callbacks) {
       if (data.session_id && callbacks.sessionId && data.session_id !== callbacks.sessionId) return
       handleWsMessage(data, callbacks)
-    } else if (data.type === 'proactive_reply' || data.type === 'proactive_reply_error') {
+    } else if (
+      data.type === 'proactive_reply' ||
+      data.type === 'proactive_reply_error' ||
+      data.type === 'context_summary_start' ||
+      data.type === 'context_summary_end'
+    ) {
       if (sessionEventCallbacks) {
+        if (data.session_id && sessionEventCallbacks.sessionId && data.session_id !== sessionEventCallbacks.sessionId) return
         handleWsMessage(data, sessionEventCallbacks)
       }
     }
@@ -50,6 +56,8 @@ export function useChatTransport() {
       onSessionId,
       onProactiveReply,
       onProactiveReplyError,
+      onContextSummaryStart,
+      onContextSummaryEnd,
       scrollToBottom,
       setLoading,
       thinkingId,
@@ -61,6 +69,16 @@ export function useChatTransport() {
 
     const type = data.type
     const requestId = data.request_id || currentRequestId
+
+    if (type === 'context_summary_start') {
+      if (onContextSummaryStart) onContextSummaryStart(data)
+      return
+    }
+
+    if (type === 'context_summary_end') {
+      if (onContextSummaryEnd) onContextSummaryEnd(data)
+      return
+    }
 
     // 1. 处理增量文本推送
     if (type === 'content') {
@@ -222,14 +240,17 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments }) => {
-    const res = await chatApi.completions({
+  const httpSend = async ({ message, sessionId, attachments, callbacks = {} }) => {
+    const payload = {
       message,
       session_id: sessionId || null,
-      attachments: attachments || null,
-      stream: false
-    })
-    return res.data
+      attachments: attachments || null
+    }
+    if (!sessionId) {
+      const res = await chatApi.completions({ ...payload, stream: false })
+      return res.data
+    }
+    return chatApi.completionsStream(payload, event => handleWsMessage(event, callbacks))
   }
 
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
