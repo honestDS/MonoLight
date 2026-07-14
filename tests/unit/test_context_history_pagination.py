@@ -6,6 +6,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core import context as context_module
 from app.core.context import ContextManager
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import Message, MessageRole, MessageType
@@ -49,6 +50,20 @@ def _message(
 
 def _profile() -> Profile:
     return Profile(id=1, uid="user-1", name="test-profile", configs={})
+
+
+class CapturingLogger:
+    def __init__(self):
+        self.warning_messages: list[str] = []
+
+    def bind(self, **_kwargs):
+        return self
+
+    def warning(self, message):
+        self.warning_messages.append(str(message))
+
+    def info(self, _message):
+        return None
 
 
 @pytest.mark.asyncio
@@ -185,6 +200,93 @@ async def test_context_history_keeps_tool_chain_complete_across_backward_pages(
     assert messages[1].tool_calls[0].id == "call-1"
     assert messages[2].tool_call_id == "call-1"
     assert log_data["is_hard_truncated"] is False
+
+
+def test_atomic_truncate_does_not_report_tool_result_orphaned_only_by_budget(
+    monkeypatch,
+):
+    log = CapturingLogger()
+    monkeypatch.setattr(context_module, "logger", log)
+    messages = parse_db_messages_to_internal(
+        [
+            _message(
+                2,
+                MessageRole.ASSISTANT,
+                content=json.dumps(
+                    {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "name": "firecrawl_scrape",
+                                "arguments": {},
+                            }
+                        ],
+                    }
+                ),
+                message_type=MessageType.TOOL_CALL,
+            ),
+            _message(
+                3,
+                MessageRole.TOOL,
+                content=json.dumps(
+                    {
+                        "tool_call_id": "call-1",
+                        "content": "small result",
+                    }
+                ),
+                message_type=MessageType.TOOL_RESULT,
+            ),
+        ]
+    )
+
+    retained, log_data = ContextManager._strategy_atomic_truncate(
+        uid="user-1",
+        session_id="session-1",
+        parsed_history=list(reversed(messages)),
+        limit_tokens=10,
+        current_msg_tokens=0,
+        context_window_k=1,
+    )
+
+    assert retained == []
+    assert log_data["is_hard_truncated"] is True
+    assert log.warning_messages == []
+
+
+def test_atomic_truncate_still_reports_genuine_orphan_tool_result(
+    monkeypatch,
+):
+    log = CapturingLogger()
+    monkeypatch.setattr(context_module, "logger", log)
+    orphan_result = parse_db_messages_to_internal(
+        [
+            _message(
+                3,
+                MessageRole.TOOL,
+                content=json.dumps(
+                    {
+                        "tool_call_id": "missing-call",
+                        "content": "orphan result",
+                    }
+                ),
+                message_type=MessageType.TOOL_RESULT,
+            )
+        ]
+    )
+
+    retained, _log_data = ContextManager._strategy_atomic_truncate(
+        uid="user-1",
+        session_id="session-1",
+        parsed_history=orphan_result,
+        limit_tokens=1024,
+        current_msg_tokens=0,
+        context_window_k=1,
+    )
+
+    assert retained == []
+    assert len(log.warning_messages) == 1
+    assert "missing-call" in log.warning_messages[0]
 
 
 @pytest.mark.asyncio

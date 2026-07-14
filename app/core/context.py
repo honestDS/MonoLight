@@ -355,6 +355,11 @@ class ContextManager:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
         """
+        known_tool_call_ids = {
+            tool_call.id
+            for message in parsed_history
+            for tool_call in (message.tool_calls or [])
+        }
         temp_msgs = []
         current_total = current_msg_tokens
         raw_history_tokens = 0
@@ -414,6 +419,7 @@ class ContextManager:
             uid=uid,
             session_id=session_id,
             emit_logs=emit_logs,
+            known_tool_call_ids=known_tool_call_ids,
         )
 
         final_truncated_tool_result_chars = 0
@@ -458,6 +464,7 @@ class ContextManager:
         uid: str,
         session_id: str,
         emit_logs: bool = True,
+        known_tool_call_ids: set[str] | None = None,
     ) -> list[InternalMessage]:
         audited_msgs = []
         consumed_msg_ids = set()
@@ -515,7 +522,7 @@ class ContextManager:
                 if _is_background_tool_result_message(msg):
                     i += 1
                     continue
-                if emit_logs:
+                if emit_logs and msg.tool_call_id not in (known_tool_call_ids or set()):
                     logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
                 i += 1
             else:
