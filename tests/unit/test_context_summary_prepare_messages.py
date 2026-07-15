@@ -5,20 +5,36 @@ import pytest
 
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary.common import ContextSummaryState
+from app.core.utils.dispatcher.markdown_instruction import append_text_instruction, build_max_output_tokens_instruction
 from app.models.message import InternalMessage, MessageRole
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
+
+
+def test_max_output_tokens_instruction_is_appended_as_platform_notice():
+    message = InternalMessage(role=MessageRole.USER, content="current user input")
+    instruction = build_max_output_tokens_instruction(200)
+
+    append_text_instruction(message, instruction)
+
+    assert message.content == f"current user input{instruction}"
+    assert instruction.startswith("\n\n[系统提示,此处不是用户说的话]")
+    assert "最大输出 Token 数为 200" in instruction
+    assert instruction.endswith("[系统提示结束]")
+    assert build_max_output_tokens_instruction(0) == ""
 
 
 @pytest.mark.asyncio
 async def test_prepare_messages_only_reads_existing_summary_state(monkeypatch):
     summary_state_calls = []
     get_messages_calls = []
+    runtime_instruction_calls = []
 
     async def build_system_prompt(_db, _profile):
         return "system prompt"
 
-    async def build_runtime_instructions(_db, _session_id):
+    async def build_runtime_instructions(_db, _session_id, max_tokens):
+        runtime_instruction_calls.append(max_tokens)
         return "runtime instruction"
 
     async def get_summary_state(*_args, **kwargs):
@@ -70,6 +86,7 @@ async def test_prepare_messages_only_reads_existing_summary_state(monkeypatch):
             "uid": "user-1",
         }
     ]
+    assert runtime_instruction_calls == [512]
     assert get_messages_calls[0]["reserved_tokens"] == 150
 
 
@@ -80,7 +97,7 @@ async def test_prepare_messages_combines_summary_with_history_after_boundary(mon
     async def build_system_prompt(_db, _profile):
         return "stable system prompt"
 
-    async def build_runtime_instructions(_db, _session_id):
+    async def build_runtime_instructions(_db, _session_id, _max_tokens):
         return ""
 
     async def get_summary_state(*_args, **_kwargs):
@@ -144,7 +161,7 @@ async def test_prepare_messages_keeps_provider_prefix_stable_across_unsummarized
     async def build_system_prompt(_db, _profile):
         return "stable system prompt"
 
-    async def build_runtime_instructions(_db, _session_id):
+    async def build_runtime_instructions(_db, _session_id, _max_tokens):
         return ""
 
     async def get_summary_state(*_args, **_kwargs):

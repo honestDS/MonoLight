@@ -50,7 +50,7 @@ class DispatcherValidationMixin:
         tools, _allowed_knowledge_base_ids = await get_profile_tools(db, profile)
 
         validation_msg = InternalMessage(role=MessageRole.USER, content=copy.deepcopy(message), attachments=copy.deepcopy(attachments))
-        user_runtime_instructions = await build_runtime_instructions(db, session_id)
+        user_runtime_instructions = await build_runtime_instructions(db, session_id, chat_params["max_tokens"])
         if validation_msg.attachments or isinstance(validation_msg.content, list):
             validation_msg = MessageAssembler.assemble(
                 validation_msg,

@@ -16,6 +16,7 @@ async def fetch_and_merge_new_user_messages(
     db: AsyncSession,
     session_id: str,
     uid: str,
+    max_tokens: int = 0,
 ) -> list[InternalMessage]:
     """
     检索并合并未处理的新产生用户消息
@@ -57,5 +58,5 @@ async def fetch_and_merge_new_user_messages(
         content="\n".join(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
-    await append_user_runtime_instructions(db, session_id, combined_message)
+    await append_user_runtime_instructions(db, session_id, combined_message, max_tokens)
     return [combined_message]

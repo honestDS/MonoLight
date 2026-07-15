@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.session import session_crud
-from app.core.prompts import MARKDOWN_FORMAT_INSTRUCTION_PROMPT, SYSTEM_CONTEXT_WRAPPER
+from app.core.prompts import MARKDOWN_FORMAT_INSTRUCTION_PROMPT, MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT, SYSTEM_CONTEXT_WRAPPER
 from app.core.utils.system import get_full_system_context
 from app.models.message import InternalMessage, TextPart
 
@@ -32,19 +32,25 @@ def append_text_instruction(message: InternalMessage, instruction: str) -> Inter
     return message
 
 
+def build_max_output_tokens_instruction(max_tokens: int) -> str:
+    if max_tokens <= 0:
+        return ""
+    return "\n\n" + MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT.format(max_tokens=max_tokens)
+
+
 def build_runtime_environment_instruction() -> str:
     return "\n\n" + SYSTEM_CONTEXT_WRAPPER.format(context=get_full_system_context())
 
 
-async def build_user_runtime_instructions(db: AsyncSession, session_id: str) -> str:
+async def build_user_runtime_instructions(db: AsyncSession, session_id: str, max_tokens: int = 0) -> str:
     session = await session_crud.get_by_session_id(db, session_id)
     enable_markdown = session.enable_markdown if session else False
-    return build_markdown_instruction(enable_markdown) + build_runtime_environment_instruction()
+    return build_markdown_instruction(enable_markdown) + build_max_output_tokens_instruction(max_tokens) + build_runtime_environment_instruction()
 
 
 def append_user_runtime_instruction_text(message: InternalMessage, instruction: str) -> InternalMessage:
     return append_text_instruction(message, instruction)
 
 
-async def append_user_runtime_instructions(db: AsyncSession, session_id: str, message: InternalMessage) -> InternalMessage:
-    return append_user_runtime_instruction_text(message, await build_user_runtime_instructions(db, session_id))
+async def append_user_runtime_instructions(db: AsyncSession, session_id: str, message: InternalMessage, max_tokens: int = 0) -> InternalMessage:
+    return append_user_runtime_instruction_text(message, await build_user_runtime_instructions(db, session_id, max_tokens))

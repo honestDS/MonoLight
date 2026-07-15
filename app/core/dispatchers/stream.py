@@ -128,7 +128,7 @@ class StreamDispatcherMixin:
 
                     while current_turn <= max_turns:
                         # 检查新指令并合并
-                        new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                        new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
                         if new_user_msgs:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
@@ -300,7 +300,7 @@ class StreamDispatcherMixin:
                             }
 
                         if not ai_msg.tool_calls:
-                            new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                            new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
                             if not new_user_msgs:
                                 break
 
@@ -388,7 +388,7 @@ class StreamDispatcherMixin:
                 finally:
                     is_first_iter = False
 
-                new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
                 if not new_user_msgs:
                     break
                 latest_user_id = max(

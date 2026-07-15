@@ -36,6 +36,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
+from app.core.utils.dispatcher.markdown_instruction import append_text_instruction, build_max_output_tokens_instruction
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
@@ -88,12 +89,17 @@ class NonStreamDispatcherMixin:
 
             queue_managed = persisted_initial_message is not None
 
-            async def fetch_additional_user_messages() -> list[InternalMessage]:
+            async def fetch_additional_user_messages(max_tokens: int) -> list[InternalMessage]:
                 if additional_user_messages_fetcher is not None:
-                    return await additional_user_messages_fetcher()
-                if queue_managed:
+                    new_messages = await additional_user_messages_fetcher()
+                elif queue_managed:
                     return []
-                return await fetch_and_merge_new_user_messages(db, session_id, uid)
+                else:
+                    new_messages = await fetch_and_merge_new_user_messages(db, session_id, uid)
+                max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
+                for new_message in new_messages:
+                    append_text_instruction(new_message, max_tokens_instruction)
+                return new_messages
 
             final_ai_content = ""
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
@@ -178,7 +184,7 @@ class NonStreamDispatcherMixin:
                     max_turns = cfg.tool.max_turns
 
                     while current_turn <= max_turns:
-                        new_user_msgs = await fetch_additional_user_messages()
+                        new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
                         if new_user_msgs:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
@@ -312,7 +318,7 @@ class NonStreamDispatcherMixin:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        new_user_msgs = await fetch_additional_user_messages() if not ai_msg.tool_calls else []
+                        new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"]) if not ai_msg.tool_calls else []
                         saved_msg = await save_assistant_message(
                             db,
                             session_id,
@@ -441,7 +447,7 @@ class NonStreamDispatcherMixin:
 
                 if queue_managed:
                     break
-                new_user_msgs = await fetch_additional_user_messages()
+                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
                 if not new_user_msgs:
                     break
 
