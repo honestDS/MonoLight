@@ -32,6 +32,7 @@ export default {
   load_sessions_failed: '获取会话列表失败',
   load_history_failed: '获取历史记录失败',
   loading_history: '正在加载更早的消息…',
+  new_messages: '查看新消息',
   not_logged_in: '未登录',
   ws_connect_failed: 'WebSocket 连接失败，将使用 HTTP 模式',
   ws_message_send_failed: 'WebSocket 消息发送失败'

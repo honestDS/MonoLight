@@ -32,6 +32,7 @@ export default {
   load_sessions_failed: 'Failed to load session list',
   load_history_failed: 'Failed to load history',
   loading_history: 'Loading earlier messages…',
+  new_messages: 'View new messages',
   not_logged_in: 'Not logged in',
   ws_connect_failed: 'Failed to connect WebSocket, falling back to HTTP mode',
   ws_message_send_failed: 'Failed to send WebSocket message'

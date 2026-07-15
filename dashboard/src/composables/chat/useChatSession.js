@@ -113,8 +113,6 @@ export function useChatSession() {
     }
     if (newMessages.length) {
       chatState.messages.value.push(...newMessages)
-      await nextTick()
-      chatState.scrollToBottom()
     }
   }
 
@@ -273,15 +271,13 @@ export function useChatSession() {
         delete userMsg.status
       }
 
-      messageProcessor.processAiResponse(chatState.messages, response, thinkingId, chatState.scrollToBottom)
+      messageProcessor.processAiResponse(chatState.messages, response, thinkingId)
 
       if (response.has_background_tasks) {
         void pollBackgroundTasksUntilSettled(requestSessionId, response.background_task_poll_interval || 2).catch(err => {
           console.error('Background task polling failed:', err)
         })
       }
-
-      nextTick(() => chatState.scrollToBottom())
     } catch (err) {
       if (requestSessionId !== sessionManager.currentSessionId.value) return
       // 出错时也应清除排队标记，以便重新发送或其他操作
@@ -452,25 +448,34 @@ export function useChatSession() {
           }
         })
         
-        // 如果是基于 response_id 变更（新轮次结束）触发的精准替换
+        // 每个 response_id 只保留一条正文；工具轮次的正文归入工具消息
         if (eventType === 'turn_end' && data.response_id && data.content) {
-          const newMessages = [...chatState.messages.value]
-          const targetIdx = newMessages.findIndex(m => m.response_id === data.response_id && m.role === 'assistant')
-          if (targetIdx !== -1) {
-            const targetMessage = newMessages[targetIdx]
-            if (isToolCall(targetMessage)) {
-              const toolCallContent = normalizeMessageContent(targetMessage.content)
-              newMessages[targetIdx] = {
-                ...targetMessage,
-                content: JSON.stringify({
-                  ...toolCallContent,
-                  content: data.content
-                })
-              }
-            } else {
-              newMessages[targetIdx] = { ...targetMessage, content: data.content }
-            }
-            chatState.messages.value = newMessages
+          const matchingIndexes = chatState.messages.value
+            .map((message, index) => ({ message, index }))
+            .filter(item => item.message.response_id === data.response_id && item.message.role === 'assistant')
+          const toolItem = matchingIndexes.find(item => isToolCall(item.message))
+          const plainItems = matchingIndexes.filter(item => !isToolCall(item.message))
+          const targetItem = toolItem || plainItems[0]
+
+          if (targetItem) {
+            const targetMessage = targetItem.message
+            const updatedMessage = toolItem
+              ? {
+                  ...targetMessage,
+                  content: JSON.stringify({
+                    ...normalizeMessageContent(targetMessage.content),
+                    content: data.content
+                  })
+                }
+              : { ...targetMessage, content: data.content }
+            const duplicatePlainIndexes = new Set(
+              plainItems
+                .filter(item => item.index !== targetItem.index)
+                .map(item => item.index)
+            )
+            chatState.messages.value = chatState.messages.value
+              .map((message, index) => index === targetItem.index ? updatedMessage : message)
+              .filter((_, index) => !duplicatePlainIndexes.has(index))
           }
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
@@ -495,16 +500,13 @@ export function useChatSession() {
             newMessages[targetIdx] = { ...newMessages[targetIdx], files: data.files }
             chatState.messages.value = newMessages
           } else {
-            messageProcessor.processAiResponse(chatState.messages, data, thinkingId, chatState.scrollToBottom)
+            messageProcessor.processAiResponse(chatState.messages, data, thinkingId)
             return
           }
         }
 
         // 流式正文和工具消息已经按事件逐条渲染，结束事件只负责清理占位符。
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
-      },
-      scrollToBottom: () => {
-        if (isCurrentRequestSession()) nextTick(() => chatState.scrollToBottom())
       },
       setLoading: (val) => {
         if (isCurrentRequestSession()) chatState.loading.value = val

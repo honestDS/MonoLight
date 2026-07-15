@@ -10,7 +10,7 @@
       @scroll="handleVirtualScroll"
     >
       <template #default="{ item: msg }">
-        <div class="message-list-item" :key="msg.id">
+        <div class="message-list-item" :key="getDisplayKey(msg)" :data-message-key="getDisplayKey(msg)">
           <div
             :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
           >
@@ -179,6 +179,18 @@
     <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
       <p>{{ $t('chat.empty_chat_tip') }}</p>
     </div>
+    <Transition name="new-message-indicator">
+      <button
+        v-if="unreadMessageKeys.length > 0"
+        type="button"
+        class="new-message-indicator"
+        :aria-label="$t('chat.new_messages')"
+        :title="$t('chat.new_messages')"
+        @click="handleNewMessageClick"
+      >
+        <img src="@/assets/svg/new_msg.svg" alt="" />
+      </button>
+    </Transition>
     <Transition name="history-loading">
       <div v-if="historyLoading" class="history-loading-indicator" role="status" aria-live="polite">
         <span class="history-loading-spinner"></span>
@@ -195,7 +207,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import MarkdownIt from 'markdown-it'
@@ -287,16 +299,62 @@ const getToolResultCallId = (message) => {
   }
 }
 
-const displayMessages = computed(() => {
-  const output = []
+const fallbackDisplayKeys = new WeakMap()
+let fallbackDisplayKeyIndex = 0
+const getMessageKey = (message, index) => String(message?.id ?? `${message?.role || 'message'}_${index}`)
+const getDisplayKey = (message) => {
+  if (!message || typeof message !== 'object') return String(message)
+  if (message._displayKey) return message._displayKey
+  if (message?.id !== undefined && message?.id !== null) return String(message.id)
+  if (!fallbackDisplayKeys.has(message)) fallbackDisplayKeys.set(message, `message_${fallbackDisplayKeyIndex++}`)
+  return fallbackDisplayKeys.get(message)
+}
+const analyzeMessage = (message) => ({
+  isToolCall: isToolCall(message),
+  isToolResult: isToolResult(message)
+})
+
+let cachedSources = []
+let cachedDisplayMessages = []
+let cachedOutputCounts = []
+let lastDisplayChangeWasPrepend = false
+
+const buildDisplayMessages = (messages) => {
+  const prependCount = messages.length - cachedSources.length
+  lastDisplayChangeWasPrepend = cachedSources.length > 0 && prependCount > 0 && cachedSources.every((message, index) => messages[index + prependCount] === message)
+
+  let firstChanged = 0
+  const sharedLength = Math.min(messages.length, cachedSources.length)
+  while (firstChanged < sharedLength && messages[firstChanged] === cachedSources[firstChanged]) firstChanged += 1
+  if (firstChanged === messages.length && firstChanged === cachedSources.length) return cachedDisplayMessages
+
+  let rebuildStart = firstChanged
+  const changedCurrent = messages[rebuildStart]
+  const changedPrevious = cachedSources[rebuildStart]
+  if ((changedCurrent && (isToolCall(changedCurrent) || isToolResult(changedCurrent))) || (changedPrevious && (isToolCall(changedPrevious) || isToolResult(changedPrevious)))) {
+    while (rebuildStart > 0) {
+      const previousMessage = messages[rebuildStart - 1]
+      if (!isToolCall(previousMessage) && !isToolResult(previousMessage)) break
+      rebuildStart -= 1
+    }
+  }
+
+  const prefixLength = rebuildStart > 0 ? cachedOutputCounts[rebuildStart - 1] : 0
+  const output = cachedDisplayMessages.slice(0, prefixLength)
+  const outputCounts = cachedOutputCounts.slice(0, rebuildStart)
   let activeToolGroup = null
 
-  props.messages.forEach((message) => {
-    if (isToolCall(message)) {
+  for (let index = rebuildStart; index < messages.length; index += 1) {
+    const message = messages[index]
+    const messageKey = getMessageKey(message, index)
+    const analysis = analyzeMessage(message)
+
+    if (analysis.isToolCall) {
       const responseId = message.response_id || null
       if (!activeToolGroup || !responseId || activeToolGroup.response_id !== responseId) {
         activeToolGroup = {
-          id: `tool_group_${responseId || message.id}`,
+          id: `tool_group_${responseId || messageKey}`,
+          _displayKey: `tool_group_${responseId || messageKey}`,
           type: 'tool_group',
           role: 'assistant',
           response_id: responseId,
@@ -311,8 +369,8 @@ const displayMessages = computed(() => {
 
       const toolContent = getToolCallContent(message).trim()
       if (toolContent) activeToolGroup.content = activeToolGroup.content ? `${activeToolGroup.content}\n${toolContent}` : toolContent
-      getToolCalls(message).forEach((toolCall, index) => {
-        const toolCallId = getToolCallId(toolCall, `${message.id}_${index}`)
+      getToolCalls(message).forEach((toolCall, toolIndex) => {
+        const toolCallId = getToolCallId(toolCall, `${messageKey}_${toolIndex}`)
         let pair = activeToolGroup.pairs.find(item => item.id === toolCallId)
         if (!pair) {
           pair = { id: toolCallId, toolCall, resultMessage: null }
@@ -322,10 +380,11 @@ const displayMessages = computed(() => {
         }
         activeToolGroup.latestEvent = { type: 'call', pair }
       })
-      return
+      outputCounts[index] = output.length
+      continue
     }
 
-    if (isToolResult(message)) {
+    if (analysis.isToolResult) {
       const toolCallId = getToolResultCallId(message)
       let targetGroup = activeToolGroup
       let pair = targetGroup?.pairs.find(item => item.id === toolCallId)
@@ -335,7 +394,8 @@ const displayMessages = computed(() => {
       }
       if (!targetGroup) {
         targetGroup = {
-          id: `tool_group_${message.response_id || message.id}`,
+          id: `tool_group_${message.response_id || messageKey}`,
+          _displayKey: `tool_group_${message.response_id || messageKey}`,
           type: 'tool_group',
           role: 'assistant',
           response_id: message.response_id || null,
@@ -348,20 +408,121 @@ const displayMessages = computed(() => {
         output.push(targetGroup)
       }
       if (!pair) {
-        pair = { id: toolCallId || message.id, toolCall: null, resultMessage: null }
+        pair = { id: toolCallId || messageKey, toolCall: null, resultMessage: null }
         targetGroup.pairs.push(pair)
       }
       pair.resultMessage = message
       targetGroup.latestEvent = { type: 'result', pair }
       activeToolGroup = targetGroup
-      return
+      outputCounts[index] = output.length
+      continue
     }
 
     activeToolGroup = null
     output.push(message)
-  })
+    outputCounts[index] = output.length
+  }
+
+  cachedSources = [...messages]
+  cachedDisplayMessages = output
+  cachedOutputCounts = outputCounts
   return output
-})
+}
+
+const displayMessages = computed(() => buildDisplayMessages(props.messages))
+const unreadMessageKeys = ref([])
+let unreadTrackingReady = false
+let unreadTrackingGeneration = 0
+let visibilityFrameId = null
+
+const isIncomingMessage = message => message.type === 'tool_group' || !['user', 'thinking'].includes(message.role)
+const isLlmOutputMessage = message => message.type === 'tool_group' || ['assistant', 'tool'].includes(message.role)
+const MESSAGE_LIST_BOTTOM_THRESHOLD = 200
+let isMessageListNearBottom = true
+const updateMessageListBottomState = (offset = virtualList.value?.scrollOffset || 0) => {
+  const list = virtualList.value
+  if (!list) return
+  const currentOffset = Number.isFinite(offset) ? offset : list.scrollOffset
+  isMessageListNearBottom = list.scrollSize - list.viewportSize - currentOffset <= MESSAGE_LIST_BOTTOM_THRESHOLD
+  if (isMessageListNearBottom && unreadMessageKeys.value.length > 0) {
+    unreadMessageKeys.value = []
+  }
+}
+const scheduleUnreadVisibilityCheck = () => {
+  if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
+  visibilityFrameId = requestAnimationFrame(() => {
+    visibilityFrameId = null
+    const listElement = virtualList.value?.$el
+    if (!listElement || unreadMessageKeys.value.length === 0) return
+
+    const viewportRect = listElement.getBoundingClientRect()
+    const visibleKeys = new Set()
+    listElement.querySelectorAll('[data-message-key]').forEach((element) => {
+      const key = element.dataset.messageKey
+      if (!unreadMessageKeys.value.includes(key)) return
+      const itemRect = element.getBoundingClientRect()
+      const fullyVisible = itemRect.top >= viewportRect.top && itemRect.bottom <= viewportRect.bottom
+      const oversizedRead = itemRect.height > viewportRect.height && itemRect.bottom > viewportRect.top && itemRect.bottom <= viewportRect.bottom
+      if (fullyVisible || oversizedRead) visibleKeys.add(key)
+    })
+    if (visibleKeys.size > 0) {
+      unreadMessageKeys.value = unreadMessageKeys.value.filter(key => !visibleKeys.has(key))
+    }
+  })
+}
+
+const getChangedIncomingMessages = (messages, previousMessages = []) => {
+  let firstChanged = 0
+  const sharedLength = Math.min(messages.length, previousMessages.length)
+  while (firstChanged < sharedLength && messages[firstChanged] === previousMessages[firstChanged]) firstChanged += 1
+
+  const previousByKey = new Map(previousMessages.slice(firstChanged).map(message => [getDisplayKey(message), message]))
+  return messages
+    .slice(firstChanged)
+    .filter(message => isIncomingMessage(message) && previousByKey.get(getDisplayKey(message)) !== message)
+}
+
+const handleChangedIncomingMessages = async (changedMessages, replaceUnread = false) => {
+  if (changedMessages.length === 0) return
+  const shouldFollowOutput = isMessageListNearBottom && changedMessages.some(isLlmOutputMessage)
+  const changedKeys = changedMessages.map(getDisplayKey)
+  unreadMessageKeys.value = replaceUnread
+    ? [...new Set(changedKeys)]
+    : [...new Set([...unreadMessageKeys.value, ...changedKeys])]
+
+  await nextTick()
+  if (shouldFollowOutput) {
+    await scrollToBottom('auto')
+    updateMessageListBottomState()
+  }
+  scheduleUnreadVisibilityCheck()
+}
+
+watch(
+  () => [props.currentSessionId, props.initialHistoryLoaded],
+  async ([, historyLoaded]) => {
+    const generation = ++unreadTrackingGeneration
+    unreadTrackingReady = false
+    unreadMessageKeys.value = []
+    if (!historyLoaded) return
+    const baselineMessages = displayMessages.value
+    await nextTick()
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    if (generation !== unreadTrackingGeneration || !props.initialHistoryLoaded) return
+
+    unreadTrackingReady = true
+    const changedMessages = getChangedIncomingMessages(displayMessages.value, baselineMessages)
+    await handleChangedIncomingMessages(changedMessages, true)
+  },
+  { immediate: true, flush: 'post' }
+)
+
+watch(displayMessages, async (messages, previousMessages = []) => {
+  if (!unreadTrackingReady || lastDisplayChangeWasPrepend) return
+
+  const changedMessages = getChangedIncomingMessages(messages, previousMessages)
+  await handleChangedIncomingMessages(changedMessages)
+}, { flush: 'pre' })
 
 let layoutGeneration = 0
 watch(() => props.currentSessionId, () => {
@@ -384,7 +545,9 @@ watch(() => props.initialHistoryLoaded, async (historyLoaded) => {
 }, { immediate: true, flush: 'post' })
 
 const handleVirtualScroll = (offset) => {
+  updateMessageListBottomState(offset)
   scrollListeners.forEach(listener => listener(offset))
+  scheduleUnreadVisibilityCheck()
 }
 const captureScrollAnchor = () => {
   if (!virtualList.value) return null
@@ -497,11 +660,18 @@ const formatFileSize = (size) => {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 const getMessageClass = role => ({ user: 'user', thinking: 'thinking', background_system: 'background-system', err: 'error' })[role] || 'ai'
-const handleImageLoad = () => {
-  const list = virtualList.value
-  if (!list || list.scrollSize - list.viewportSize - list.scrollOffset > 200) return
-  scrollToBottom('smooth')
+const handleNewMessageClick = async () => {
+  isMessageListNearBottom = true
+  await scrollToBottom('smooth')
+  updateMessageListBottomState()
+  scheduleUnreadVisibilityCheck()
 }
+const handleImageLoad = () => {
+  scheduleUnreadVisibilityCheck()
+}
+onUnmounted(() => {
+  if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
+})
 
 defineExpose({
   captureScrollAnchor,

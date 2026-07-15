@@ -1,5 +1,4 @@
 // 消息处理 composable：AI 响应解析与工具调用处理
-import { nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
@@ -38,20 +37,29 @@ export function useMessageProcessor() {
       return
     }
 
-    // 1. 优先寻找已绑定 responseId 的消息进行增量追加
+    // 1. 优先复用当前轮次已有的正文消息，避免同一 response_id 被工具消息抢占后重复创建正文
     let targetIdx = -1
     if (responseId) {
-      targetIdx = messagesRef.value.findIndex(m => m.response_id === responseId && m.role === 'assistant')
+      targetIdx = messagesRef.value.findIndex(message =>
+        message.response_id === responseId &&
+        message.role === 'assistant' &&
+        !isToolCall(message)
+      )
+    }
+    if (targetIdx === -1 && requestId) {
+      targetIdx = messagesRef.value.findLastIndex(message =>
+        message.request_id === requestId &&
+        message.role === 'assistant' &&
+        !isToolCall(message) &&
+        (turn === undefined || turn === null || message.turn === turn)
+      )
     }
 
     if (targetIdx !== -1) {
       const targetMsg = messagesRef.value[targetIdx]
-      // 只有在非工具调用且 role 是 assistant 时才追加文字
-      if (targetMsg.role === 'assistant' && !isToolCall(targetMsg)) {
-        targetMsg.content = (targetMsg.content || '') + text
-        messagesRef.value[targetIdx] = { ...targetMsg }
-        return
-      }
+      targetMsg.content = (targetMsg.content || '') + text
+      messagesRef.value[targetIdx] = { ...targetMsg, response_id: targetMsg.response_id || responseId, request_id: targetMsg.request_id || requestId, turn: targetMsg.turn ?? turn }
+      return
     }
 
     // 2. 索取机制：若未绑定，寻找与当前请求绑定的 Thinking 占位符进行转换
@@ -341,7 +349,7 @@ export function useMessageProcessor() {
   }
   
   // 处理完整的 AI 响应消息，WS 和 HTTP 共用
-  const processAiResponse = (messagesRef, response, thinkingId, scrollToBottom) => {
+  const processAiResponse = (messagesRef, response, thinkingId) => {
     const workId = response.work_id
     if (workId && messagesRef.value.some(message => message.work_id === workId)) {
       removeThinkingMessage(messagesRef, thinkingId)
@@ -409,22 +417,15 @@ export function useMessageProcessor() {
 
     aiMessagesToInsert.push(finalAiMsg)
     _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId)
-    
-    if (scrollToBottom) {
-      nextTick(() => scrollToBottom())
-    }
   }
 
   // 处理工具调用消息
-  const handleToolCallMessage = (messagesRef, toolCall, scrollToBottom) => {
+  const handleToolCallMessage = (messagesRef, toolCall) => {
     const lastMsg = messagesRef.value[messagesRef.value.length - 1]
     if (lastMsg && lastMsg.role === 'tool_call') {
       lastMsg.content = { ...lastMsg.content, ...toolCall }
     } else {
       messagesRef.value.push({ id: Date.now(), role: 'tool_call', content: toolCall })
-    }
-    if (scrollToBottom) {
-      nextTick(() => scrollToBottom())
     }
   }
 
