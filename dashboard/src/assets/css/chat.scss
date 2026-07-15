@@ -178,23 +178,13 @@
     position: relative;
     flex: 1;
     min-height: 0;
-
-    .vue-recycle-scroller__item-wrapper {
-      opacity: 1;
-      transition: opacity 0.5s ease-out;
-    }
-
-    &.is-fast-scrolling .vue-recycle-scroller__item-wrapper {
-      opacity: 0;
-      transition: none;
-    }
   }
 
-      .message-list {
-        height: 100%;
-        box-sizing: border-box;
-        overflow-y: auto;
-        padding: 20px;
+  .message-list {
+    height: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
+    padding: 20px;
         
         .message-attachments {
           display: flex;

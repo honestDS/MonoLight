@@ -1,28 +1,16 @@
 <template>
-  <div :class="['message-list-wrapper', { 'is-fast-scrolling': isMessageRecycling }]">
-    <DynamicScroller
-      ref="messageListElement"
-      class="message-list"
-      :items="displayMessages"
-      :min-item-size="64"
-      :buffer="800"
-      key-field="id"
-      :emit-update="true"
-      @update="handleVisibleRange"
-      @wheel.passive="handleWheelInput"
-      @scroll.passive="handleVirtualScroll"
-    >
-      <template #default="{ item: msg, index, active }">
-        <DynamicScrollerItem
-          :item="msg"
-          :active="active && !isFastScrolling"
-          :data-index="index"
-          :size-dependencies="[getMessageSizeKey(msg), currentSessionEnableMarkdown, collapseSizeKey]"
+  <div class="message-list-wrapper">
+    <div ref="messageListElement" class="message-list">
+      <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
+        <p>{{ $t('chat.empty_chat_tip') }}</p>
+      </div>
+
+      <template v-else>
+        <div
+          v-for="msg in displayMessages"
+          :key="msg.id"
+          :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
         >
-          <div
-            :data-message-id="msg.id"
-            :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
-          >
         <template v-if="msg.type === 'tool_group'">
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -181,15 +169,9 @@
             </div>
           </div>
         </template>
-          </div>
-        </DynamicScrollerItem>
-      </template>
-      <template #empty>
-        <div v-if="!currentSessionId" class="empty-chat">
-          <p>{{ $t('chat.empty_chat_tip') }}</p>
         </div>
       </template>
-    </DynamicScroller>
+    </div>
     <Transition name="history-loading">
       <div v-if="historyLoading" class="history-loading-indicator" role="status" aria-live="polite">
         <span class="history-loading-spinner"></span>
@@ -206,9 +188,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
-import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
@@ -240,15 +220,7 @@ const props = defineProps({
 const emit = defineEmits(['update:activeCollapse'])
 const { t } = useI18n()
 const messageListElement = ref(null)
-const visibleStartIndex = ref(0)
-const isFastScrolling = ref(false)
-const isMessageRecycling = ref(false)
 const codeRefs = new Map()
-let scrollSettleTimer = null
-let isSettlingFastScroll = false
-let lastScrollTop = 0
-let lastScrollTime = 0
-let wheelGuardUntil = 0
 const collapseModel = computed({
   get: () => props.activeCollapse,
   set: value => emit('update:activeCollapse', value)
@@ -379,134 +351,25 @@ const displayMessages = computed(() => {
   return output
 })
 
-const collapseSizeKey = computed(() => props.activeCollapse.join('|'))
-const getMessageSizeKey = (message) => {
-  const contentLength = typeof message.content === 'string' ? message.content.length : JSON.stringify(message.content || '').length
-  const pairCount = message.pairs?.length || 0
-  const attachmentCount = (message.attachments?.length || 0) + (message.files?.length || 0)
-  return `${contentLength}:${pairCount}:${attachmentCount}:${message.status || ''}`
-}
-const getScrollerElement = () => messageListElement.value?.$el || null
-const handleVisibleRange = (startIndex, endIndex, visibleStartIndexValue) => {
-  visibleStartIndex.value = visibleStartIndexValue ?? startIndex ?? 0
-}
-const handleWheelInput = () => {
-  wheelGuardUntil = performance.now() + 350
-  isFastScrolling.value = false
-  isMessageRecycling.value = false
-}
-const handleVirtualScroll = (event) => {
-  const scrollerElement = event.currentTarget || getScrollerElement()
-  const currentTime = performance.now()
-  const currentScrollTop = scrollerElement?.scrollTop || 0
-  if (isSettlingFastScroll) {
-    lastScrollTop = currentScrollTop
-    lastScrollTime = currentTime
-    return
-  }
-
-  if (lastScrollTime > 0 && scrollerElement) {
-    const elapsed = Math.max(1, currentTime - lastScrollTime)
-    const distance = Math.abs(currentScrollTop - lastScrollTop)
-    const velocity = distance / elapsed
-    if (currentTime > wheelGuardUntil && (distance >= scrollerElement.clientHeight * 0.75 || velocity >= 2.5)) {
-      isFastScrolling.value = true
-      isMessageRecycling.value = true
-    }
-  }
-  lastScrollTop = currentScrollTop
-  lastScrollTime = currentTime
-
-  if (scrollSettleTimer !== null) clearTimeout(scrollSettleTimer)
-  scrollSettleTimer = setTimeout(async () => {
-    scrollSettleTimer = null
-    if (!isFastScrolling.value) {
-      messageListElement.value?.forceUpdate()
-      return
-    }
-
-    const anchor = captureScrollAnchor()
-    isSettlingFastScroll = true
-    isFastScrolling.value = false
-    try {
-      await nextTick()
-      messageListElement.value?.forceUpdate()
-      await restoreScrollAnchor(anchor)
-    } finally {
-      const currentElement = getScrollerElement()
-      lastScrollTop = currentElement?.scrollTop || 0
-      lastScrollTime = performance.now()
-      isSettlingFastScroll = false
-      isMessageRecycling.value = false
-    }
-  }, 80)
-}
-const getRenderedMessageElement = (messageId) => {
-  const element = getScrollerElement()
-  if (!element) return null
-  return [...element.querySelectorAll('[data-message-id]')]
-    .find(item => String(item.dataset.messageId) === String(messageId)) || null
-}
 const captureScrollAnchor = () => {
-  const scrollerElement = getScrollerElement()
-  if (!scrollerElement) return null
-
-  const message = displayMessages.value[visibleStartIndex.value]
-  const messageElement = message ? getRenderedMessageElement(message.id) : null
+  const element = messageListElement.value
+  if (!element) return null
   return {
-    id: message?.id ?? null,
-    scrollTop: scrollerElement.scrollTop,
-    scrollHeight: scrollerElement.scrollHeight,
-    offset: messageElement
-      ? messageElement.getBoundingClientRect().top - scrollerElement.getBoundingClientRect().top
-      : 0
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight
   }
 }
-const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve))
 const restoreScrollAnchor = async (anchor) => {
   if (!anchor) return
-  const index = anchor.id === null
-    ? -1
-    : displayMessages.value.findIndex(message => String(message.id) === String(anchor.id))
-
-  messageListElement.value?.forceUpdate()
   await nextTick()
-  await nextFrame()
-
-  const scrollerElement = getScrollerElement()
-  if (!scrollerElement) return
-  const fallbackScrollTop = anchor.scrollTop + Math.max(0, scrollerElement.scrollHeight - anchor.scrollHeight)
-  scrollerElement.scrollTop = fallbackScrollTop
-  if (index < 0) return
-
-  messageListElement.value?.scrollToItem(index)
-
-  let anchorRestored = false
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await nextFrame()
-    const messageElement = getRenderedMessageElement(anchor.id)
-    if (!messageElement) continue
-    const currentOffset = messageElement.getBoundingClientRect().top - scrollerElement.getBoundingClientRect().top
-    scrollerElement.scrollTop += currentOffset - anchor.offset
-    anchorRestored = true
-  }
-  if (!anchorRestored) scrollerElement.scrollTop = fallbackScrollTop
+  const element = messageListElement.value
+  if (!element) return
+  element.scrollTop = anchor.scrollTop + Math.max(0, element.scrollHeight - anchor.scrollHeight)
 }
-const scrollToBottom = () => messageListElement.value?.scrollToBottom()
-
-watch(() => props.currentSessionId, () => {
-  visibleStartIndex.value = 0
-  isFastScrolling.value = false
-  isMessageRecycling.value = false
-  isSettlingFastScroll = false
-  lastScrollTop = 0
-  lastScrollTime = 0
-  wheelGuardUntil = 0
-})
-
-onUnmounted(() => {
-  if (scrollSettleTimer !== null) clearTimeout(scrollSettleTimer)
-})
+const scrollToBottom = (behavior = 'auto') => {
+  const element = messageListElement.value
+  element?.scrollTo({ top: element.scrollHeight, behavior })
+}
 
 const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
 const getToolPairTitle = pair => t('chat.tool', { name: getToolPairName(pair) })
@@ -573,25 +436,20 @@ const formatFileSize = (size) => {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 const getMessageClass = role => ({ user: 'user', thinking: 'thinking', background_system: 'background-system', err: 'error' })[role] || 'ai'
-const handleImageLoad = () => {
-  const element = getScrollerElement()
-  messageListElement.value?.forceUpdate()
-  if (!element || element.scrollHeight - element.scrollTop - element.clientHeight > 160) return
-  nextTick(scrollToBottom)
-}
+const handleImageLoad = () => scrollToBottom('smooth')
 
 defineExpose({
   captureScrollAnchor,
   restoreScrollAnchor,
   scrollToBottom,
-  scrollTo: options => getScrollerElement()?.scrollTo(options),
-  addEventListener: (...args) => getScrollerElement()?.addEventListener(...args),
-  removeEventListener: (...args) => getScrollerElement()?.removeEventListener(...args),
+  scrollTo: options => messageListElement.value?.scrollTo(options),
+  addEventListener: (...args) => messageListElement.value?.addEventListener(...args),
+  removeEventListener: (...args) => messageListElement.value?.removeEventListener(...args),
   get scrollHeight() {
-    return getScrollerElement()?.scrollHeight || 0
+    return messageListElement.value?.scrollHeight || 0
   },
   get scrollTop() {
-    return getScrollerElement()?.scrollTop || 0
+    return messageListElement.value?.scrollTop || 0
   }
 })
 </script>
