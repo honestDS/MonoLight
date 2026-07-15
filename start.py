@@ -1,7 +1,7 @@
 import asyncio
+import http.client
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -104,11 +104,16 @@ def wait_for_web_service(process: subprocess.Popen, config: StartConfig) -> None
         return_code = process.poll()
         if return_code is not None:
             raise RuntimeError(f"Web service exited during startup with code {return_code}")
+        connection = http.client.HTTPConnection(connect_host, config.port, timeout=0.5)
         try:
-            with socket.create_connection((connect_host, config.port), timeout=0.5):
-                return
-        except OSError:
+            connection.request("GET", "/", headers={"Connection": "close"})
+            response = connection.getresponse()
+            response.read()
+            return
+        except (OSError, http.client.HTTPException):
             time.sleep(0.25)
+        finally:
+            connection.close()
     raise TimeoutError(f"Web service did not listen on {connect_host}:{config.port} within {WEB_START_TIMEOUT_SECONDS:g} seconds")
 
 

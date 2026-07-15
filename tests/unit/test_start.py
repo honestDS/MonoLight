@@ -134,6 +134,42 @@ def test_connect_host_converts_wildcard_addresses(host, expected):
     assert start._connect_host(host) == expected
 
 
+def test_wait_for_web_service_completes_http_request_before_returning(monkeypatch):
+    process = ExitedProcess(return_code=None)
+    config = start.StartConfig(host="0.0.0.0", port=8001, web_workers=1)
+    events = []
+
+    class Response:
+        def read(self):
+            events.append("read")
+
+    class Connection:
+        def __init__(self, host, port, timeout):
+            events.append(("connect", host, port, timeout))
+
+        def request(self, method, path, *, headers):
+            events.append(("request", method, path, headers))
+
+        def getresponse(self):
+            events.append("response")
+            return Response()
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(start.http.client, "HTTPConnection", Connection)
+
+    start.wait_for_web_service(process, config)
+
+    assert events == [
+        ("connect", "127.0.0.1", 8001, 0.5),
+        ("request", "GET", "/", {"Connection": "close"}),
+        "response",
+        "read",
+        "close",
+    ]
+
+
 def test_wait_for_web_service_reports_early_process_exit():
     process = ExitedProcess(return_code=7)
     config = start.StartConfig(host="127.0.0.1", port=8001, web_workers=1)
