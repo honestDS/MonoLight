@@ -9,7 +9,7 @@ from app.core.utils.dispatcher import markdown_instruction as markdown_instructi
 from app.core.utils.dispatcher.markdown_instruction import (
     append_user_runtime_instruction_text,
     build_max_output_tokens_instruction,
-    materialize_latest_user_system_prompt,
+    materialize_latest_user_environment_prompt,
 )
 from app.models.message import InternalMessage, MessageRole
 
@@ -21,23 +21,23 @@ async def test_runtime_instruction_is_rebuilt_persisted_and_materialized_on_late
     stale_instruction = "stale runtime instruction" + build_max_output_tokens_instruction(200)
     latest_runtime_instruction = "latest runtime instruction" + build_max_output_tokens_instruction(256)
     quoted_instruction = "quoted notice" + build_max_output_tokens_instruction(999)
-    older_message = InternalMessage(id=1, role=MessageRole.USER, content=quoted_instruction, system_prompt=stale_instruction)
-    latest_message = InternalMessage(id=2, role=MessageRole.USER, content="current user input", system_prompt=stale_instruction)
-    persisted_system_prompts = []
+    older_message = InternalMessage(id=1, role=MessageRole.USER, content=quoted_instruction, environment_prompt=stale_instruction)
+    latest_message = InternalMessage(id=2, role=MessageRole.USER, content="current user input", environment_prompt=stale_instruction)
+    persisted_environment_prompts = []
 
     async def build_runtime_instructions(_db, session_id, max_tokens):
         assert session_id == "session-1"
         assert max_tokens == 256
         return latest_runtime_instruction
 
-    async def set_system_prompt(_db, message_id, system_prompt):
-        persisted_system_prompts.append((message_id, system_prompt))
+    async def set_environment_prompt(_db, message_id, environment_prompt):
+        persisted_environment_prompts.append((message_id, environment_prompt))
         return True
 
     monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", build_runtime_instructions)
-    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_system_prompt", set_system_prompt)
+    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
 
-    request_messages = await materialize_latest_user_system_prompt(
+    request_messages = await materialize_latest_user_environment_prompt(
         object(),
         "session-1",
         [older_message, latest_message],
@@ -48,9 +48,9 @@ async def test_runtime_instruction_is_rebuilt_persisted_and_materialized_on_late
     assert latest_message.content == "current user input"
     assert request_messages[0].content == quoted_instruction
     assert request_messages[1].content == "current user input" + latest_runtime_instruction
-    assert request_messages[1].system_prompt == latest_runtime_instruction
-    assert latest_message.system_prompt == stale_instruction
-    assert persisted_system_prompts == [(2, latest_runtime_instruction)]
+    assert request_messages[1].environment_prompt == latest_runtime_instruction
+    assert latest_message.environment_prompt == stale_instruction
+    assert persisted_environment_prompts == [(2, latest_runtime_instruction)]
     assert build_max_output_tokens_instruction(0) == ""
 
 
@@ -60,7 +60,7 @@ def test_runtime_instruction_assignment_does_not_change_message_content():
     append_user_runtime_instruction_text(message, "runtime instruction")
 
     assert message.content == "current user input"
-    assert message.system_prompt == "runtime instruction"
+    assert message.environment_prompt == "runtime instruction"
 
 
 @pytest.mark.asyncio

@@ -45,11 +45,11 @@ async def save_message(
 ) -> InternalMessage:
     # Determine attachments and final content payload
     attachments_to_save = None
-    system_prompt_to_save = None
+    environment_prompt_to_save = None
     if hasattr(content, "attachments"):
         attachments_to_save = content.attachments
-    if hasattr(content, "system_prompt"):
-        system_prompt_to_save = content.system_prompt
+    if hasattr(content, "environment_prompt"):
+        environment_prompt_to_save = content.environment_prompt
 
     obj_in_data = {
         "session_id": session_id,
@@ -57,7 +57,7 @@ async def save_message(
         "role": role,
         "type": msg_type,
         "content": _to_storable_content(content, msg_type),
-        "system_prompt": system_prompt_to_save,
+        "environment_prompt": environment_prompt_to_save,
         "attachments": attachments_to_save,
         "profile_id": profile_id,
         "is_processed": is_processed,
@@ -78,7 +78,7 @@ async def save_message(
         id=db_obj.id,
         role=role,
         content=db_obj.content,
-        system_prompt=db_obj.system_prompt,
+        environment_prompt=db_obj.environment_prompt,
         attachments=db_obj.attachments,
         created_at=db_obj.created_at.timestamp(),
     )

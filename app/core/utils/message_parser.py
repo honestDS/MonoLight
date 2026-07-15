@@ -16,7 +16,7 @@ def _parse_background_task_result_message(msg: Message, content: str) -> list[In
             id=msg.id,
             role=MessageRole.USER,
             content=content,
-            system_prompt=msg.system_prompt,
+            environment_prompt=msg.environment_prompt,
             attachments=msg.attachments,
         )
     ]
@@ -95,7 +95,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
                     id=msg.id,
                     role=role,
                     content=content,
-                    system_prompt=msg.system_prompt,
+                    environment_prompt=msg.environment_prompt,
                     attachments=msg.attachments,
                     tool_calls=tool_calls,
                     tool_call_id=tool_call_id,

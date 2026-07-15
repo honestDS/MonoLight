@@ -84,7 +84,7 @@ Use the query_knowledge_base tool when the user request requires factual informa
 </available_knowledge_bases>"""
 
 # System Environment Context Wrapper
-# Persisted in Message.system_prompt and materialized only on the latest user input.
+# Persisted in Message.environment_prompt and appended only to the latest user input.
 SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
 IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input.
 DO NOT call any tools or execute any commands to query, verify, or update system environment details unless explicitly requested by the user.
@@ -178,13 +178,13 @@ The following user-role message carries a temporary conclusion from the correspo
 </recent_tool_summary>"""
 
 # Markdown response format instruction
-# Persisted in Message.system_prompt and materialized only on the latest user input.
-MARKDOWN_FORMAT_INSTRUCTION_PROMPT = """[系统提示,此处不是用户说的话]
+# Persisted in Message.environment_prompt and appended only to the latest user input.
+MARKDOWN_FORMAT_INSTRUCTION_PROMPT = """[环境提示,此处不是用户说的话]
 当前会话 Markdown 格式开关状态：{status}。{requirement}
-[系统提示结束]"""
+[环境提示结束]"""
 
 # Maximum output token instruction
-# Persisted in Message.system_prompt and materialized only on the latest user input.
-MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT = """[系统提示,此处不是用户说的话]
+# Persisted in Message.environment_prompt and appended only to the latest user input.
+MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT = """[环境提示,此处不是用户说的话]
 平台为本次回复设置的最大输出 Token 数为 {max_tokens}。这是硬性输出上限，不是目标长度。请提前规划篇幅、预留收尾空间，并在达到上限前完整回答；优先保留结论和用户要求的关键内容，避免因逐字生成触及上限而截断。
-[系统提示结束]"""
+[环境提示结束]"""

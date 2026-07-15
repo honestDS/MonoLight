@@ -66,7 +66,7 @@ class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
     content: str | list[TextPart | ImagePart | FilePart | MessagePart] | None = None
-    system_prompt: str | None = None
+    environment_prompt: str | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
     attachments: list[str] | None = None
@@ -97,7 +97,7 @@ class Message(MessageBase, table=True):
     __tablename__ = "message"
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field()
-    system_prompt: str | None = Field(default=None, sa_column=Column(Text))
+    environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
     dedupe_key: str | None = Field(default=None, unique=True, max_length=64)
     created_at: datetime = Field(
         default_factory=get_local_time,
@@ -107,7 +107,7 @@ class Message(MessageBase, table=True):
 
 class MessageCreate(MessageBase):
     profile_id: int
-    system_prompt: str | None = None
+    environment_prompt: str | None = None
 
 
 class MessageResponse(MessageBase):

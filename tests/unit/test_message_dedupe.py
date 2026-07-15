@@ -22,7 +22,7 @@ async def clean_message_table():
 
 @pytest.mark.asyncio
 async def test_save_message_is_idempotent_by_dedupe_key():
-    message = InternalMessage(role=MessageRole.ERR, content="reply failed", system_prompt="internal notice")
+    message = InternalMessage(role=MessageRole.ERR, content="reply failed", environment_prompt="internal notice")
     dedupe_key = "background-task:1:reply-error"
 
     async with AsyncSessionLocal() as db:
@@ -50,25 +50,28 @@ async def test_save_message_is_idempotent_by_dedupe_key():
         persisted = await db.scalar(select(Message).where(Message.dedupe_key == dedupe_key))
 
     assert first.id == repeated.id
-    assert first.system_prompt == "internal notice"
-    assert persisted.system_prompt == "internal notice"
+    assert first.environment_prompt == "internal notice"
+    assert persisted.environment_prompt == "internal notice"
     assert count == 1
 
 
 @pytest.mark.asyncio
-async def test_message_system_prompt_migration_upgrades_legacy_schema():
-    migration = import_module("scripts.migration_20260715_add_message_system_prompt")
+async def test_message_environment_prompt_migration_upgrades_legacy_schema():
+    migration = import_module("scripts.migration_20260715_migrate_message_environment_prompt")
     migration_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(migration_engine, expire_on_commit=False)
 
     async with session_factory() as session:
-        await session.execute(text("CREATE TABLE message (id INTEGER PRIMARY KEY, content TEXT)"))
+        await session.execute(text("CREATE TABLE message (id INTEGER PRIMARY KEY, content TEXT, system_prompt TEXT)"))
+        await session.execute(text("INSERT INTO message (id, content, system_prompt) VALUES (1, 'hello', 'legacy environment')"))
         await migration.migrate(session)
         await migration.migrate(session)
         await session.commit()
 
         columns = await session.execute(text("PRAGMA table_info(message)"))
         column_names = {str(row[1]) for row in columns.fetchall()}
+        environment_prompt = await session.scalar(text("SELECT environment_prompt FROM message WHERE id = 1"))
 
     await migration_engine.dispose()
-    assert "system_prompt" in column_names
+    assert "environment_prompt" in column_names
+    assert environment_prompt == "legacy environment"

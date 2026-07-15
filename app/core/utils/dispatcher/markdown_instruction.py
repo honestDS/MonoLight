@@ -39,12 +39,12 @@ def build_max_output_tokens_instruction(max_tokens: int) -> str:
     return "\n\n" + MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT.format(max_tokens=max_tokens)
 
 
-def append_system_prompt_instruction(message: InternalMessage, instruction: str) -> InternalMessage:
-    message.system_prompt = f"{message.system_prompt or ''}{instruction}"
+def append_environment_prompt_instruction(message: InternalMessage, instruction: str) -> InternalMessage:
+    message.environment_prompt = f"{message.environment_prompt or ''}{instruction}"
     return message
 
 
-async def materialize_latest_user_system_prompt(
+async def materialize_latest_user_environment_prompt(
     db: AsyncSession,
     session_id: str,
     messages: list[InternalMessage],
@@ -52,12 +52,12 @@ async def materialize_latest_user_system_prompt(
 ) -> list[InternalMessage]:
     request_messages = [message.model_copy(deep=True) for message in messages]
     for message in reversed(request_messages):
-        if message.role != MessageRole.USER or (message.id is None and not message.system_prompt):
+        if message.role != MessageRole.USER or (message.id is None and not message.environment_prompt):
             continue
-        message.system_prompt = await build_user_runtime_instructions(db, session_id, max_tokens)
+        message.environment_prompt = await build_user_runtime_instructions(db, session_id, max_tokens)
         if message.id is not None:
-            await message_crud.set_system_prompt(db, message.id, message.system_prompt)
-        append_text_instruction(message, message.system_prompt)
+            await message_crud.set_environment_prompt(db, message.id, message.environment_prompt)
+        append_text_instruction(message, message.environment_prompt)
         break
     return request_messages
 
@@ -73,7 +73,7 @@ async def build_user_runtime_instructions(db: AsyncSession, session_id: str, max
 
 
 def append_user_runtime_instruction_text(message: InternalMessage, instruction: str) -> InternalMessage:
-    message.system_prompt = instruction
+    message.environment_prompt = instruction
     return message
 
 

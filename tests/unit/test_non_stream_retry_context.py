@@ -344,7 +344,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
         ),
     )
     model_requests = []
-    persisted_system_prompts = []
+    persisted_environment_prompts = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -370,7 +370,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
                 id=1,
                 role=MessageRole.USER,
                 content="original request",
-                system_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
+                environment_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
             )
         ]
 
@@ -394,12 +394,12 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     async def mark_processed(db, message_id):
         return None
 
-    async def set_system_prompt(_db, message_id, system_prompt):
-        persisted_system_prompts.append((message_id, system_prompt))
+    async def set_environment_prompt(_db, message_id, environment_prompt):
+        persisted_environment_prompts.append((message_id, environment_prompt))
         return True
 
     monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", _build_max_tokens_runtime_instruction)
-    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_system_prompt", set_system_prompt)
+    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
     monkeypatch.setattr(non_stream_module, "logger", logger)
     monkeypatch.setattr(non_stream_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(non_stream_module.profile_crud, "get_with_relations", get_profile)
@@ -451,7 +451,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert "最大输出 Token 数为 1024" in model_requests[0]["messages"][0].content
     assert "最大输出 Token 数为 256" in model_requests[1]["messages"][0].content
     assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
-    assert persisted_system_prompts[-1] == (1, build_max_output_tokens_instruction(256))
+    assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
 
@@ -468,7 +468,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         ),
     )
     model_requests = []
-    persisted_system_prompts = []
+    persisted_environment_prompts = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -500,7 +500,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
                 id=1,
                 role=MessageRole.USER,
                 content="original request",
-                system_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
+                environment_prompt=build_max_output_tokens_instruction(kwargs["max_tokens"]),
             )
         ]
 
@@ -516,12 +516,12 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     async def save_assistant(*args, **kwargs):
         return SimpleNamespace(content="ok")
 
-    async def set_system_prompt(_db, message_id, system_prompt):
-        persisted_system_prompts.append((message_id, system_prompt))
+    async def set_environment_prompt(_db, message_id, environment_prompt):
+        persisted_environment_prompts.append((message_id, environment_prompt))
         return True
 
     monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", _build_max_tokens_runtime_instruction)
-    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_system_prompt", set_system_prompt)
+    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
     monkeypatch.setattr(stream_module, "logger", logger)
     monkeypatch.setattr(stream_module.user_crud, "get_by_uid", get_user)
     monkeypatch.setattr(stream_module.profile_crud, "get_active", get_profile)
@@ -576,6 +576,6 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     assert "最大输出 Token 数为 1024" in model_requests[0]["messages"][0].content
     assert "最大输出 Token 数为 256" in model_requests[1]["messages"][0].content
     assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
-    assert persisted_system_prompts[-1] == (1, build_max_output_tokens_instruction(256))
+    assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
     assert [event["type"] for event in events] == ["task_start", "content", "turn_end", "done"]

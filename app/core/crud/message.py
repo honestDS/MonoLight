@@ -25,8 +25,8 @@ from app.models.user import User
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
-    async def set_system_prompt(self, db: AsyncSession, message_id: int, system_prompt: str | None) -> bool:
-        result = await db.execute(update(Message).where(Message.id == message_id).values(system_prompt=system_prompt))
+    async def set_environment_prompt(self, db: AsyncSession, message_id: int, environment_prompt: str | None) -> bool:
+        result = await db.execute(update(Message).where(Message.id == message_id).values(environment_prompt=environment_prompt))
         await db.commit()
         return bool(result.rowcount)
 

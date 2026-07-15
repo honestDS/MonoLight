@@ -42,7 +42,7 @@ from app.core.utils.dispatcher.helpers import (
     validate_background_proactive_tool_calls,
 )
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
-from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_system_prompt
+from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
@@ -88,7 +88,7 @@ class BackgroundDispatcherMixin:
         session_id: str,
     ) -> list[InternalMessage]:
         return ContextManager.trim_messages_for_model_request(
-            messages=await materialize_latest_user_system_prompt(
+            messages=await materialize_latest_user_environment_prompt(
                 db,
                 session_id,
                 messages,
@@ -177,7 +177,7 @@ class BackgroundDispatcherMixin:
                     tools=tools,
                 )
             return ContextManager.trim_messages_for_model_request(
-                messages=await materialize_latest_user_system_prompt(
+                messages=await materialize_latest_user_environment_prompt(
                     db,
                     session_id,
                     messages,
@@ -221,7 +221,7 @@ class BackgroundDispatcherMixin:
 
                 async def build_correction_request(retry_chat_params):
                     return ContextManager.trim_messages_for_model_request(
-                        messages=await materialize_latest_user_system_prompt(
+                        messages=await materialize_latest_user_environment_prompt(
                             db,
                             session_id,
                             correction_context_messages,
@@ -263,7 +263,7 @@ class BackgroundDispatcherMixin:
 
                     async def build_text_only_request(retry_chat_params):
                         return ContextManager.trim_messages_for_model_request(
-                            messages=await materialize_latest_user_system_prompt(
+                            messages=await materialize_latest_user_environment_prompt(
                                 db,
                                 session_id,
                                 text_only_context_messages,
@@ -356,7 +356,7 @@ class BackgroundDispatcherMixin:
                     tools=None,
                 )
             return ContextManager.trim_messages_for_model_request(
-                messages=await materialize_latest_user_system_prompt(
+                messages=await materialize_latest_user_environment_prompt(
                     db,
                     session_id,
                     messages,
