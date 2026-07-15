@@ -64,187 +64,13 @@
           <span>{{ $t('chat.context_summarizing') }}</span>
         </div>
       </Transition>
-      <div class="message-list" ref="messageList">
-        <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
-          <p>{{ $t('chat.empty_chat_tip') }}</p>
-        </div>
-
-        <template v-else>
-          <div v-for="msg in messages" :key="msg.id" :class="['message-item', getMessageClass(msg.role), { 'queued': msg.status === 'queued' }]">
-            <!-- 普通消息或工具调用消息 -->
-            <template v-if="isToolCall(msg)">
-              <div class="message-header">
-                <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
-              </div>
-              <div
-                v-if="getToolCallContent(msg).trim() && currentSessionEnableMarkdown"
-                class="content markdown-body tool-call-message"
-                v-html="renderMarkdown(getToolCallContent(msg))"
-              ></div>
-              <div
-                v-else-if="getToolCallContent(msg).trim()"
-                class="content tool-call-message"
-                style="white-space: pre-wrap;"
-              >
-                <template v-for="(part, idx) in renderTextWithLinks(getToolCallContent(msg))" :key="idx">
-                  <el-link
-                    v-if="part.type === 'link'"
-                    :href="part.href"
-                    class="message-link"
-                    type="primary"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    underline
-                  >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
-                </template>
-              </div>
-              <el-collapse v-model="activeCollapse">
-                <el-collapse-item
-                  v-for="(toolCall, toolIndex) in getToolCalls(msg)"
-                  :key="toolCall.id || toolCall.function?.id || `${msg.id}_${toolIndex}`"
-                  :name="`${msg.id}_${toolCall.id || toolCall.function?.id || toolIndex}`"
-                >
-                  <template #title>
-                    <span class="tool-call-title">{{ $t('chat.tool_call', { name: getToolCallName(toolCall) }) }}</span>
-                  </template>
-                  <div class="tool-call-content">
-                    <VirtualizedCode
-                      :ref="el => setCodeRef(`${msg.id}_${toolCall.id || toolCall.function?.id || toolIndex}`, el)"
-                      :content="getToolCallArguments(toolCall)"
-                      :max-height="300"
-                    />
-                  </div>
-                </el-collapse-item>
-              </el-collapse>
-            </template>
-            <template v-else-if="isToolResult(msg)">
-              <div class="message-header">
-                <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
-              </div>
-              <el-collapse v-model="activeCollapse">
-                <el-collapse-item :name="msg.id">
-                  <template #title>
-                    <span class="tool-result-title">{{ $t('chat.tool_result', { name: getToolResultName(msg) }) }}</span>
-                  </template>
-                  <div class="tool-result-content">
-                    <VirtualizedCode :ref="el => setCodeRef(msg.id, el)" :content="getToolResultContent(msg)" :max-height="300" />
-                  </div>
-                </el-collapse-item>
-              </el-collapse>
-            </template>
-            <template v-else-if="msg.role === 'background_system'">
-              <div class="message-header">
-                <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
-              </div>
-              <div class="content background-system-card">
-                <div class="background-system-title">{{ getBackgroundSystemTitle(msg) }}</div>
-                <div class="background-system-text">{{ getBackgroundSystemText(msg) }}</div>
-              </div>
-            </template>
-            <template v-else>
-              <div class="message-header">
-                <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
-              </div>
-              
-              <!-- 附件渲染区 -->
-              <div class="message-attachments" v-if="msg.attachments && msg.attachments.length > 0">
-                <div v-for="(att, idx) in msg.attachments" :key="idx" class="message-attachment-item">
-                  <template v-if="isImageFile(att)">
-                    <el-image 
-                      :src="fileApi.getDownloadUrl(att)" 
-                      :preview-src-list="getAttachmentImageUrls(msg)"
-                      :hide-on-click-modal="true"
-                      class="msg-attachment-image"
-                      @load="handleImageLoad"
-                    ></el-image>
-                  </template>
-                  <template v-else>
-                    <a :href="fileApi.getDownloadUrl(att)" target="_blank" class="msg-attachment-file">
-                      <img src="@/assets/svg/document.svg" class="icon-document" />
-                      <span class="file-name" :title="getFilename(att)">{{ getFilename(att) }}</span>
-                    </a>
-                  </template>
-                </div>
-              </div>
-
-              <!-- 消息主体内容 -->
-              <div class="content markdown-body" v-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && currentSessionEnableMarkdown">
-                <!-- 当处于 queued 时显示 Loading 动画图标 -->
-                <div class="queued-indicator" v-if="msg.status === 'queued'">
-                  <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div><div v-html="renderMarkdown(getMessageText(msg))"></div>
-              </div>
-              <div class="content" style="white-space: pre-wrap;" v-else-if="typeof getMessageText(msg) === 'string' && getMessageText(msg).trim() && !currentSessionEnableMarkdown">
-                <!-- 当处于 queued 时显示 Loading 动画图标 -->
-                <div class="queued-indicator" v-if="msg.status === 'queued'">
-                  <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div><template v-for="(part, idx) in renderTextWithLinks(getMessageText(msg))" :key="idx">
-                  <el-link
-                    v-if="part.type === 'link'"
-                    :href="part.href"
-                    class="message-link"
-                    type="primary"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    underline
-                  >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
-                </template>
-              </div>
-              <div class="content" v-else-if="Array.isArray(msg.content)">
-                <!-- 当处于 queued 时显示 Loading 动画图标 -->
-                <div class="queued-indicator" v-if="msg.status === 'queued'">
-                  <img src="@/assets/svg/wait.svg" class="is-loading" />
-                </div><div v-for="(part, idx) in msg.content" :key="idx" class="message-part">
-                  <div v-if="part.type === 'text'" class="text-part">
-                    <template v-for="(textPart, textIdx) in renderTextWithLinks(part.text)" :key="textIdx">
-                      <el-link
-                        v-if="textPart.type === 'link'"
-                        :href="textPart.href"
-                        class="message-link"
-                        type="primary"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        underline
-                      >{{ textPart.text }}</el-link><span v-else>{{ textPart.text }}</span>
-                    </template>
-                  </div>
-                  <div v-else-if="part.type === 'image_url'" class="image-part">
-                    <el-image
-                      :src="part.image_url.url"
-                      :preview-src-list="[part.image_url.url]"
-                      :hide-on-click-modal="true"
-                      class="msg-image"
-                      @load="handleImageLoad"
-                    ></el-image>
-                  </div>
-                  <div v-else class="text-part">{{ JSON.stringify(part) }}</div>
-                </div>
-              </div>
-
-              <div class="message-attachments message-sent-files" v-if="getMessageFiles(msg).length > 0">
-                <div v-for="file in getMessageFiles(msg)" :key="file.id" class="message-attachment-item">
-                  <template v-if="isPreviewImage(file)">
-                    <el-image
-                      :src="getSentFileUrl(file)"
-                      :preview-src-list="getSentFileImageUrls(msg)"
-                      :hide-on-click-modal="true"
-                      class="msg-attachment-image"
-                      @load="handleImageLoad"
-                    ></el-image>
-                  </template>
-                  <template v-else>
-                    <a :href="getSentFileUrl(file)" target="_blank" rel="noopener noreferrer" class="msg-attachment-file">
-                      <img src="@/assets/svg/document.svg" class="icon-document" />
-                      <span class="file-name" :title="file.name">{{ file.name }}</span>
-                      <span class="sent-file-meta">{{ file.mime_type }} · {{ formatFileSize(file.size) }}</span>
-                    </a>
-                  </template>
-                </div>
-              </div>
-            </template>
-          </div>
-        </template>
-      </div>
+      <ChatMessageList
+        ref="messageList"
+        v-model:active-collapse="activeCollapse"
+        :messages="messages"
+        :current-session-id="currentSessionId"
+        :current-session-enable-markdown="currentSessionEnableMarkdown"
+      />
       <div class="input-area">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
           {{ $t('chat.external_session_read_only') }}
@@ -357,91 +183,15 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
-import { ElCollapse, ElCollapseItem } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
-import VirtualizedCode from '../components/VirtualizedCode.vue'
-import { useChatSession } from '../composables/chat/useChatSession'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
+import ChatMessageList from '../components/ChatMessageList.vue'
+import { useChatSession } from '../composables/chat/useChatSession'
 import { fileApi, chatApi } from '../api'
 
 const { t } = useI18n()
-
-import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js'
-import 'highlight.js/styles/github.css'
-import 'github-markdown-css/github-markdown.css'
-
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: true,
-  highlight: function (str, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return '<pre class="hljs"><code>' +
-               hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
-               '</code></pre>'
-      } catch (__) {}
-    }
-    return '<pre class="hljs"><code>' + md.utils.escapeHtml(str) + '</code></pre>'
-  }
-})
-
-// 关闭裸域名模糊识别，避免中文前缀与域名连写时被整体识别为链接
-md.linkify.set({ fuzzyLink: false })
-
-const defaultLinkOpenRender = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
-
-md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-  tokens[idx].attrSet('class', 'el-link el-link--primary is-underline message-link')
-  tokens[idx].attrSet('target', '_blank')
-  tokens[idx].attrSet('rel', 'noopener noreferrer')
-  return defaultLinkOpenRender(tokens, idx, options, env, self)
-}
-
-const renderMarkdown = (text) => {
-  return md.render(text || '')
-}
-
-const renderTextWithLinks = (text) => {
-  if (!text) return []
-
-  const matches = md.linkify.match(text)
-  if (!matches) {
-    return [{ type: 'text', text }]
-  }
-
-  const parts = []
-  let lastIndex = 0
-
-  matches.forEach(match => {
-    if (match.index > lastIndex) {
-      parts.push({
-        type: 'text',
-        text: text.slice(lastIndex, match.index)
-      })
-    }
-
-    parts.push({
-      type: 'link',
-      text: match.text,
-      href: match.url
-    })
-
-    lastIndex = match.lastIndex
-  })
-
-  if (lastIndex < text.length) {
-    parts.push({
-      type: 'text',
-      text: text.slice(lastIndex)
-    })
-  }
-
-  return parts
-}
 
 const chat = useChatSession()
 
@@ -505,34 +255,10 @@ const {
   typingSessionId,
   activeCollapse,
   transportMode,
-  wsConnected,
-  sessionCreating,
   attachments,
   isCurrentSessionReadOnly,
   isContextSummarizing
 } = chat
-
-// 用于管理 VirtualizedCode 的引用
-const codeRefs = new Map()
-const setCodeRef = (id, el) => {
-  if (el) {
-    codeRefs.set(id, el)
-  } else {
-    codeRefs.delete(id)
-  }
-}
-
-// 监听折叠面板状态变化，当收起时重置 limit
-watch(activeCollapse, (newVal, oldVal) => {
-  // 找出被移除的 id (即被收起的面板)
-  const closedIds = oldVal.filter(id => !newVal.includes(id))
-  closedIds.forEach(id => {
-    const ref = codeRefs.get(id)
-    if (ref && typeof ref.reset === 'function') {
-      ref.reset()
-    }
-  })
-}, { deep: true })
 
 // 解构方法
 const {
@@ -543,28 +269,8 @@ const {
   send: originalSend,
   setTransportMode,
   disconnectWebSocket,
-  formatTimestamp,
-  isToolCall,
-  isToolResult,
-  getToolCalls,
-  getToolCallName,
-  getToolCallArguments,
-  getToolCallContent,
-  getToolResultName,
-  getToolResultContent,
-  getMessageTimestamp,
   handleScroll
 } = chat
-
-// 解决图片异步加载导致滚动定位不准的问题
-const handleImageLoad = () => {
-  if (messageList.value) {
-    messageList.value.scrollTo({
-      top: messageList.value.scrollHeight,
-      behavior: 'smooth'
-    })
-  }
-}
 
 // 拦截发送，发送完成后清空列表
 const send = async () => {
@@ -681,7 +387,6 @@ const handlePaste = (e) => {
   const items = clipboardData.items
   if (!items) return
 
-  let hasFile = false
   for (let i = 0; i < items.length; i++) {
     if (items[i].kind === 'file') {
       const file = items[i].getAsFile()
@@ -692,7 +397,6 @@ const handlePaste = (e) => {
           continue; // 拒绝并忽略文件夹的粘贴
         }
 
-        hasFile = true
         // 如果没有名字，通常是截图，给个默认名字
         if (file.name === 'image.png' || !file.name) {
           Object.defineProperty(file, 'name', {
@@ -706,101 +410,6 @@ const handlePaste = (e) => {
       }
     }
   }
-}
-
-// 判断是否为图片文件
-const isImageFile = (path) => {
-  if (!path) return false
-  const ext = path.split('.').pop().toLowerCase()
-  return ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)
-}
-
-// 提取文件名
-const getFilename = (path) => {
-  if (!path) return t('chat.unknown_file')
-  const name = path.split(/[/\\]/).pop()
-  // 去除 8 位 uuid_ 前缀
-  return name.length > 9 && name[8] === '_' ? name.substring(9) : name
-}
-
-const getSentFileUrl = (file) => {
-  return fileApi.resolveDownloadUrl(file?.download_url)
-}
-
-const getAttachmentImageUrls = (msg) => {
-  return (msg.attachments || [])
-    .filter(isImageFile)
-    .map(att => fileApi.getDownloadUrl(att))
-}
-
-const getSentFileImageUrls = (msg) => {
-  return getMessageFiles(msg)
-    .filter(isPreviewImage)
-    .map(getSentFileUrl)
-}
-
-const parseAssistantFilesContent = (content) => {
-  try {
-    const parsed = typeof content === 'string' ? JSON.parse(content) : content
-    if (parsed && parsed.type === 'assistant_files') {
-      return parsed
-    }
-  } catch {}
-  return null
-}
-
-const getMessageText = (msg) => {
-  const parsed = parseAssistantFilesContent(msg.content)
-  if (parsed) return parsed.text || ''
-  return msg.content
-}
-
-const getMessageFiles = (msg) => {
-  const parsed = parseAssistantFilesContent(msg.content)
-  return msg.files || parsed?.files || []
-}
-
-const parseBackgroundSystemContent = (content) => {
-  try {
-    const parsed = typeof content === 'string' ? JSON.parse(content) : content
-    if (parsed && parsed.type === 'background_tool_result') return parsed
-  } catch {}
-  return null
-}
-
-const getBackgroundSystemTitle = (msg) => {
-  const parsed = parseBackgroundSystemContent(msg.content)
-  const task = parsed?.task || {}
-  const toolName = task.tool_name || t('common.unknown_tool')
-  return t('chat.background_task_result', { name: toolName })
-}
-
-const getBackgroundSystemText = (msg) => {
-  const parsed = parseBackgroundSystemContent(msg.content)
-  const task = parsed?.task || {}
-  return task.summary || task.error || task.content || parsed?.instruction || ''
-}
-
-const isPreviewImage = (file) => {
-  return file?.previewable && file?.mime_type?.startsWith('image/')
-}
-
-const formatFileSize = (size) => {
-  if (!Number.isFinite(size)) return '-'
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / 1024 / 1024).toFixed(1)} MB`
-}
-
-// 消息角色映射到CSS类名的辅助函数
-const getMessageClass = (role) => {
-  const roleMap = {
-    user: 'user',
-    thinking: 'thinking',
-    background_system: 'background-system',
-    err: 'error'
-  }
-  return roleMap[role] || 'ai'
 }
 
 onMounted(() => {

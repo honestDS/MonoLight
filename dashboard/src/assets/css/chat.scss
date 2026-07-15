@@ -746,6 +746,32 @@
 }
 
 // 工具调用样式
+.tool-round-collapse {
+  width: 100%;
+  min-width: min(560px, 72vw);
+}
+
+.tool-round-title {
+  color: #409eff;
+  font-weight: 600;
+  padding: 10px 14px;
+
+  &.is-result {
+    color: #67c23a;
+  }
+}
+
+.tool-pair-collapse {
+  padding: 8px;
+}
+
+.tool-detail-title {
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .tool-call-title {
   color: #409eff;
   font-weight: 500;
@@ -756,6 +782,10 @@
   background: #f5f7fa;
   padding: 12px;
   border-radius: 4px;
+
+  .tool-detail-title {
+    color: #409eff;
+  }
 }
 
 .tool-result-title {
@@ -779,7 +809,6 @@
 
   .el-collapse-item {
     margin-bottom: 8px;
-
     &__header {
       background: #f5f7fa;
       border-radius: 4px;
@@ -792,6 +821,80 @@
 
     &__content {
       padding: 8px 0;
+    }
+  }
+
+  .tool-round-collapse {
+    box-sizing: border-box;
+    padding: 0 10px;
+    overflow: hidden;
+    background: #f5faff;
+    border: 1px solid #c6e2ff;
+    border-radius: 6px;
+
+    &.is-result {
+      background: #f5fbf2;
+      border-color: #b3e19d;
+    }
+
+    > .el-collapse-item {
+      margin-bottom: 0;
+
+      > .el-collapse-item__header {
+        box-sizing: border-box;
+        width: calc(100% + 20px);
+        margin: 0 -10px;
+        padding: 0 10px;
+        background: #ecf5ff;
+        border-radius: 0;
+      }
+
+      > .el-collapse-item__wrap {
+        background: transparent;
+
+        > .el-collapse-item__content {
+          padding: 10px 0;
+        }
+      }
+    }
+
+    &.is-result > .el-collapse-item > .el-collapse-item__header {
+      background: #f0f9eb;
+    }
+  }
+
+  .tool-pair-collapse {
+    box-sizing: border-box;
+    background: #fff;
+    border: 1px solid #dcdfe6;
+    border-radius: 5px;
+
+    > .el-collapse-item {
+      margin-bottom: 8px;
+      overflow: hidden;
+      border-left: 3px solid #409eff;
+      border-radius: 4px;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+
+      &.has-result {
+        border-left-color: #67c23a;
+      }
+
+      > .el-collapse-item__header {
+        padding-right: 10px;
+        background: #fafafa;
+        border: 1px solid #ebeef5;
+        border-left: none;
+        border-radius: 0 4px 4px 0;
+      }
+
+      > .el-collapse-item__wrap {
+        padding: 0 8px;
+        background: #fff;
+      }
     }
   }
 }

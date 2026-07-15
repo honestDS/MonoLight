@@ -8,6 +8,8 @@ export default {
   refresh_sessions: 'Refresh session list',
   no_sessions: 'No sessions',
   empty_chat_tip: 'Select a session on the left or create a new one to start chatting',
+  tool_activity: 'Tool calls',
+  tool: '{name}',
   tool_call: 'Tool call: {name}',
   tool_result: 'Tool result: {name}',
   background_task_result: 'Background task: {name}',

@@ -8,6 +8,8 @@ export default {
   refresh_sessions: '刷新会话列表',
   no_sessions: '暂无会话',
   empty_chat_tip: '请选择左侧会话或新建会话开始聊天',
+  tool_activity: '工具调用',
+  tool: '{name}',
   tool_call: '工具调用: {name}',
   tool_result: '工具返回: {name}',
   background_task_result: '后台任务: {name}',
