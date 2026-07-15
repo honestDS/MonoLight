@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import constants
+from app.core.i18n import t
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as stage_module
 from app.core.utils.context_summary.common import ContextSummaryWorkInvalidError
@@ -217,10 +219,7 @@ async def test_multifragment_stage_invalidates_when_work_lease_is_lost(
         ),
     )
 
-    with pytest.raises(
-        ContextSummaryWorkInvalidError,
-        match="became invalid during fragment execution",
-    ):
+    with pytest.raises(ContextSummaryWorkInvalidError) as exc_info:
         await stage_module.generate_snapshot_summary_result(
             object(),
             session_id="session-1",
@@ -234,6 +233,10 @@ async def test_multifragment_stage_invalidates_when_work_lease_is_lost(
             work_validity_checker=check_work_validity,
         )
 
+    assert str(exc_info.value) == t(
+        constants.ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+        stage="fragment execution",
+    )
     assert validity_checks >= 4
     assert [event[0] for event in events] == ["fail", "invalidate"]
 
@@ -538,13 +541,17 @@ async def test_refinement_stage_invalidates_recovered_non_reducing_fragment(
         lambda content: 100 if content == "long lower summary" else 10,
     )
 
-    with pytest.raises(RuntimeError, match="did not reduce its direct input"):
+    with pytest.raises(RuntimeError) as exc_info:
         await reduction_module.execute_refinement_stage(
             lower_stage=lower_stage,
             model=model,
             refinement_index=1,
         )
 
+    assert str(exc_info.value) == t(
+        constants.ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED,
+        stage="refinement",
+    )
     assert [event[0] for event in events] == ["fail", "invalidate"]
 
 

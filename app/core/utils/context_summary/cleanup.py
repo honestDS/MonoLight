@@ -1,7 +1,9 @@
 import asyncio
 from datetime import timedelta
 
+from app.core.constants import ERR_VALUE_MUST_BE_POSITIVE
 from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.time import get_local_time
 from app.providers.database import AsyncSessionLocal
@@ -40,7 +42,7 @@ async def cleanup_expired_context_summary_stages(
     retention_hours: int = CONTEXT_SUMMARY_STAGE_RETENTION_HOURS,
 ) -> int:
     if retention_hours < 1:
-        raise ValueError("retention_hours must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="retention_hours"))
 
     before = get_local_time() - timedelta(hours=retention_hours)
     deleted_count = 0
@@ -61,7 +63,7 @@ async def background_context_summary_cleaner(
     retention_hours: int = CONTEXT_SUMMARY_STAGE_RETENTION_HOURS,
 ) -> None:
     if interval_seconds < 1:
-        raise ValueError("interval_seconds must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="interval_seconds"))
 
     while True:
         try:

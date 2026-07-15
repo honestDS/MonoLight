@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import constants
+from app.core.i18n import t
 from app.core.utils.context_summary import merge as merge_module
 from app.core.utils.context_summary.merge import (
     CompletedSummaryFragment,
@@ -154,13 +156,15 @@ async def test_completed_lower_stage_iterator_rejects_uncompleted_stage(
         get_page,
     )
 
-    with pytest.raises(RuntimeError, match="not completed"):
+    with pytest.raises(RuntimeError) as exc_info:
         await anext(
             iter_completed_lower_stage_fragments(
                 work_dedupe_key="work-key",
                 lower_stage_key="lower-stage",
             )
         )
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE)
 
 
 @pytest.mark.asyncio
@@ -197,7 +201,7 @@ async def test_completed_lower_stage_iterator_rejects_identity_change_between_pa
         get_page,
     )
 
-    with pytest.raises(RuntimeError, match="changed during pagination"):
+    with pytest.raises(RuntimeError) as exc_info:
         _ = [
             fragment
             async for fragment in iter_completed_lower_stage_fragments(
@@ -206,6 +210,8 @@ async def test_completed_lower_stage_iterator_rejects_identity_change_between_pa
                 page_size=2,
             )
         ]
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED)
 
 
 @pytest.mark.asyncio
@@ -238,7 +244,7 @@ async def test_completed_lower_stage_iterator_rejects_incomplete_fragment_sequen
         get_page,
     )
 
-    with pytest.raises(RuntimeError, match="not continuous"):
+    with pytest.raises(RuntimeError) as exc_info:
         _ = [
             fragment
             async for fragment in iter_completed_lower_stage_fragments(
@@ -246,6 +252,8 @@ async def test_completed_lower_stage_iterator_rejects_incomplete_fragment_sequen
                 lower_stage_key="lower-stage",
             )
         ]
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS)
 
 
 @pytest.mark.asyncio
@@ -357,7 +365,7 @@ async def test_merge_groups_split_oversized_fragment_into_same_range_parts():
 
 @pytest.mark.asyncio
 async def test_merge_groups_reject_fragment_metadata_larger_than_budget():
-    with pytest.raises(RuntimeError, match="metadata exceeds the merge budget"):
+    with pytest.raises(RuntimeError) as exc_info:
         _ = [
             group
             async for group in group_completed_summary_fragments(
@@ -366,6 +374,8 @@ async def test_merge_groups_reject_fragment_metadata_larger_than_budget():
                 token_counter=lambda _content: 4,
             )
         ]
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET)
 
 
 @pytest.mark.asyncio
@@ -383,7 +393,7 @@ async def test_merge_groups_reject_overlapping_ranges():
         ),
     ]
 
-    with pytest.raises(RuntimeError, match="ranges overlap"):
+    with pytest.raises(RuntimeError) as exc_info:
         _ = [
             group
             async for group in group_completed_summary_fragments(
@@ -392,3 +402,5 @@ async def test_merge_groups_reject_overlapping_ranges():
                 token_counter=lambda _content: 1,
             )
         ]
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP)

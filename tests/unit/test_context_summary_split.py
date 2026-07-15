@@ -2,6 +2,8 @@ import re
 
 import pytest
 
+from app.core import constants
+from app.core.i18n import t
 from app.core.utils.context_summary import split as split_module
 from app.core.utils.context_summary.split import split_oversized_message
 from app.models.message import InternalMessage, MessageRole
@@ -64,10 +66,12 @@ def test_message_chunk_metadata_must_fit_budget(monkeypatch):
         tool_call_id="call-1",
     )
 
-    with pytest.raises(RuntimeError, match="metadata exceeds"):
+    with pytest.raises(RuntimeError) as exc_info:
         list(
             split_oversized_message(
                 message,
                 max_unit_tokens=1,
             )
         )
+
+    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET)

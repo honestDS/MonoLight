@@ -6,6 +6,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import (
+    ERR_VALUE_MUST_BE_BETWEEN,
+    ERR_VALUE_MUST_BE_NON_NEGATIVE,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
 from app.core.crud.base import CRUDBase
 from app.core.crud.context_summary_fragment import (
     build_context_summary_fragment_dedupe_key as build_context_summary_fragment_dedupe_key,
@@ -13,6 +18,7 @@ from app.core.crud.context_summary_fragment import (
 from app.core.crud.context_summary_fragment import (
     context_summary_fragment_crud as context_summary_fragment_crud,
 )
+from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.context_summary_stage import (
     ContextSummaryFragment,
@@ -36,7 +42,14 @@ class CompletedContextSummaryFragmentPage:
 
 def _validate_batch_size(batch_size: int) -> None:
     if not 1 <= batch_size <= CONTEXT_SUMMARY_CLEANUP_MAX_BATCH_SIZE:
-        raise ValueError(f"batch_size must be between 1 and {CONTEXT_SUMMARY_CLEANUP_MAX_BATCH_SIZE}")
+        raise ValueError(
+            t(
+                ERR_VALUE_MUST_BE_BETWEEN,
+                field="batch_size",
+                minimum=1,
+                maximum=CONTEXT_SUMMARY_CLEANUP_MAX_BATCH_SIZE,
+            )
+        )
 
 
 class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage, ContextSummaryStage]):
@@ -67,12 +80,17 @@ class CRUDContextSummaryStage(CRUDBase[ContextSummaryStage, ContextSummaryStage,
     ) -> CompletedContextSummaryFragmentPage | None:
         if not 1 <= limit <= CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE:
             raise ValueError(
-                f"limit must be between 1 and {CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE}",
+                t(
+                    ERR_VALUE_MUST_BE_BETWEEN,
+                    field="limit",
+                    minimum=1,
+                    maximum=CONTEXT_SUMMARY_FRAGMENT_MAX_PAGE_SIZE,
+                )
             )
         if page_after_message_id is not None and page_after_message_id < 1:
-            raise ValueError("page_after_message_id must be positive")
+            raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="page_after_message_id"))
         if page_after_fragment_index is not None and page_after_fragment_index < 0:
-            raise ValueError("page_after_fragment_index must be non-negative")
+            raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="page_after_fragment_index"))
 
         stage_result = await db.execute(
             select(ContextSummaryStage).where(

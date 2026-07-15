@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
-from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_VALIDATION_FAILED
+from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
@@ -53,7 +53,7 @@ class WebChatAdapter(BaseChatAdapter):
         attachments: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         if not session_id:
-            raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
+            raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
             await ensure_web_session_writable(
                 db,
@@ -104,7 +104,7 @@ class WebChatAdapter(BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ):
         if not session_id:
-            raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
+            raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
             await ensure_web_session_writable(
                 db,

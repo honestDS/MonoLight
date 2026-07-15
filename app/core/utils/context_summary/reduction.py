@@ -6,7 +6,22 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_FINAL_RESULT_EMPTY,
+    ERR_CONTEXT_SUMMARY_FINAL_STAGE_EMPTY,
+    ERR_CONTEXT_SUMMARY_FINAL_STAGE_MULTIPLE,
+    ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET,
+    ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED,
+    ERR_CONTEXT_SUMMARY_REDUCTION_NO_INPUT_GROUPS,
+    ERR_CONTEXT_SUMMARY_REDUCTION_STAGE_CONFLICT,
+    ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID,
+    ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED,
+    ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW,
+    ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED,
+    ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+)
 from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
     ContextSummaryWorkInvalidError,
@@ -117,11 +132,11 @@ async def read_single_completed_summary(stage: ContextSummaryStage) -> str:
     )
     fragment = await anext(fragments, None)
     if fragment is None:
-        raise RuntimeError("Context summary final stage is empty")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FINAL_STAGE_EMPTY))
     if await anext(fragments, None) is not None:
-        raise RuntimeError("Context summary final stage contains multiple fragments")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FINAL_STAGE_MULTIPLE))
     if not fragment.content:
-        raise RuntimeError("Context summary final stage returned an empty result")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FINAL_RESULT_EMPTY))
     return fragment.content
 
 
@@ -175,7 +190,7 @@ async def create_reduction_stage(
         or persisted.succeeded_fragment_count > expected_fragment_count
         or (persisted.status == ContextSummaryStageStatus.COMPLETED and persisted.succeeded_fragment_count != expected_fragment_count)
     ):
-        raise RuntimeError("Context summary reduction stage conflicts with existing state")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REDUCTION_STAGE_CONFLICT))
     return persisted
 
 
@@ -206,7 +221,7 @@ async def execute_reduction_stage(
     )
     max_group_tokens = model.input_budget_tokens - estimate_tokens(empty_prompt) - 32
     if max_group_tokens <= 0:
-        raise RuntimeError("Context summary reduction model has no usable input budget")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="reduction"))
 
     expected_fragment_count = await count_lower_stage_merge_groups(
         work_dedupe_key=lower_stage.work_dedupe_key,
@@ -214,7 +229,7 @@ async def execute_reduction_stage(
         max_group_tokens=max_group_tokens,
     )
     if expected_fragment_count <= 0:
-        raise RuntimeError("Context summary reduction stage has no input groups")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REDUCTION_NO_INPUT_GROUPS))
 
     await ensure_context_summary_work_valid(work_validity_checker)
     stage = await create_reduction_stage(
@@ -238,7 +253,7 @@ async def execute_reduction_stage(
         await ensure_context_summary_work_valid(work_validity_checker)
         prompt = merge_fragment_prompt(group)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
-            raise RuntimeError("Context summary reduction group exceeds the selected model window")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="reduction group"))
         generated = await call_fixed_summary_model(
             model=model,
             prompt=prompt,
@@ -268,9 +283,9 @@ async def execute_reduction_stage(
         lower_tokens = await measure_completed_stage_tokens(lower_stage)
         output_tokens = await measure_running_stage_tokens(stage)
         if output_tokens >= lower_tokens:
-            raise RuntimeError("Context summary reduction stage did not reduce its direct input")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED, stage="reduction"))
         if not await mark_summary_stage_completed(stage=stage):
-            raise RuntimeError("Context summary reduction stage failed completion validation")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED, stage="reduction"))
     except Exception as exc:
         await mark_summary_stage_failed(
             stage=stage,
@@ -278,7 +293,7 @@ async def execute_reduction_stage(
         )
         await invalidate_summary_stage(stage=stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError("Context summary work became invalid during reduction") from exc
+            raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="reduction")) from exc
         raise
 
     return stage
@@ -316,7 +331,7 @@ async def reduce_completed_summary_stage_result(
                 call_context=("context_summary" if not excluded_priorities else "context_summary_retry"),
             )
             if model is None or model.priority in excluded_priorities:
-                raise RuntimeError("Context summary reduction exhausted all models")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED, stage="reduction"))
             try:
                 next_stage = await execute_reduction_stage(
                     lower_stage=lower_stage,
@@ -356,14 +371,14 @@ async def execute_refinement_stage(
     )
     lower_fragment = await anext(lower_fragments, None)
     if lower_fragment is None or await anext(lower_fragments, None) is not None:
-        raise RuntimeError("Context summary refinement requires one completed lower fragment")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REFINEMENT_LOWER_INVALID))
 
     prompt = CONTEXT_SUMMARY_COMPRESS_PROMPT.format(
         summary=lower_fragment.content,
     )
     prompt_tokens = estimate_tokens(prompt)
     if not model.accepts_prompt_tokens(prompt_tokens):
-        raise RuntimeError("Context summary refinement input exceeds the selected model window")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="refinement"))
 
     await ensure_context_summary_work_valid(work_validity_checker)
     stage = await create_reduction_stage(
@@ -397,9 +412,9 @@ async def execute_refinement_stage(
         output_tokens = await measure_running_stage_tokens(stage)
         lower_tokens = max(1, estimate_tokens(lower_fragment.content))
         if output_tokens >= lower_tokens:
-            raise RuntimeError("Context summary refinement stage did not reduce its direct input")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED, stage="refinement"))
         if not await mark_summary_stage_completed(stage=stage):
-            raise RuntimeError("Context summary refinement stage failed completion validation")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED, stage="refinement"))
     except Exception as exc:
         await mark_summary_stage_failed(
             stage=stage,
@@ -407,7 +422,7 @@ async def execute_refinement_stage(
         )
         await invalidate_summary_stage(stage=stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError("Context summary work became invalid during refinement") from exc
+            raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="refinement")) from exc
         raise
 
     return stage
@@ -435,7 +450,7 @@ async def refine_completed_summary_stage(
             call_context=("context_summary" if not excluded_priorities else "context_summary_retry"),
         )
         if model is None or model.priority in excluded_priorities:
-            raise RuntimeError("Context summary refinement exhausted all models")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODELS_EXHAUSTED, stage="refinement"))
         try:
             stage = await execute_refinement_stage(
                 lower_stage=lower_stage,

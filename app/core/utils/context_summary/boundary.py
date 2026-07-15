@@ -4,7 +4,16 @@ from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_TOOL_TRIGGER_BOUNDARY_INVALID,
+    ERR_CONTEXT_SUMMARY_TRIGGER_MODE_UNSUPPORTED,
+    ERR_CONTEXT_SUMMARY_UPPER_NOT_FOUND,
+    ERR_CONTEXT_SUMMARY_UPPER_NOT_NEWER,
+    ERR_CONTEXT_SUMMARY_USER_TRIGGER_BOUNDARY_INVALID,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
 from app.core.crud.message import message_crud
+from app.core.i18n import t
 from app.models.message import Message, MessageRole, MessageType
 
 
@@ -81,9 +90,9 @@ async def resolve_context_summary_boundary(
     page_size: int = 200,
 ) -> ContextSummaryBoundary:
     if fixed_upper_message_id <= 0:
-        raise ValueError("fixed_upper_message_id must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="fixed_upper_message_id"))
     if expected_summary_message_id is not None and fixed_upper_message_id <= expected_summary_message_id:
-        raise ValueError("fixed upper message must be newer than the persisted summary boundary")
+        raise ValueError(t(ERR_CONTEXT_SUMMARY_UPPER_NOT_NEWER))
 
     fixed_upper = await _get_fixed_upper_message(
         db,
@@ -92,18 +101,18 @@ async def resolve_context_summary_boundary(
         message_id=fixed_upper_message_id,
     )
     if fixed_upper is None:
-        raise ValueError("fixed upper message does not exist in the requested session")
+        raise ValueError(t(ERR_CONTEXT_SUMMARY_UPPER_NOT_FOUND))
 
     if trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE:
         if fixed_upper.role != MessageRole.USER:
-            raise ValueError("user-message trigger requires a user message as the fixed upper boundary")
+            raise ValueError(t(ERR_CONTEXT_SUMMARY_USER_TRIGGER_BOUNDARY_INVALID))
         scan_before_id = fixed_upper_message_id
     elif trigger_mode == ContextSummaryTriggerMode.TOOL_RESULT:
         if fixed_upper.role != MessageRole.TOOL or fixed_upper.type != MessageType.TOOL_RESULT:
-            raise ValueError("tool-result trigger requires a completed tool result as the fixed upper boundary")
+            raise ValueError(t(ERR_CONTEXT_SUMMARY_TOOL_TRIGGER_BOUNDARY_INVALID))
         scan_before_id = fixed_upper_message_id + 1
     else:
-        raise ValueError(f"unsupported context summary trigger mode: {trigger_mode}")
+        raise ValueError(t(ERR_CONTEXT_SUMMARY_TRIGGER_MODE_UNSUPPORTED, trigger_mode=trigger_mode))
 
     page_after_id = expected_summary_message_id
     pending_tool_call_ids: set[str] = set()

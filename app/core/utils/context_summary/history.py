@@ -2,7 +2,13 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED,
+    ERR_VALUE_MUST_BE_NON_NEGATIVE,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
 from app.core.crud.message import message_crud
+from app.core.i18n import t
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary.common import join_messages, serialize_message
 from app.core.utils.context_summary.pipeline import SummaryFragmentInput
@@ -124,7 +130,7 @@ async def iter_persistent_summary_source_units(
             start_id = round_messages[0].id
             end_id = round_messages[-1].id
             if start_id is None or end_id is None:
-                raise RuntimeError("Context summary round messages must have database IDs")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
             source_units = (
                 SummarySourceUnit(
                     message_start_id=start_id,
@@ -168,9 +174,9 @@ async def iter_grouped_summary_source_units(
     existing_summary: str | None = None,
 ) -> AsyncIterator[SummaryFragmentInput]:
     if fragment_target_tokens <= 0:
-        raise ValueError("fragment_target_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="fragment_target_tokens"))
     if first_fragment_index < 0:
-        raise ValueError("first_fragment_index must be non-negative")
+        raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="first_fragment_index"))
 
     fragment_index = 0
     pending_units: list[SummarySourceUnit] = []

@@ -1,8 +1,12 @@
 import json
 from dataclasses import dataclass
 
-from app.core.constants import ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED
+from app.core.constants import (
+    ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
+    ERR_VALUE_MUST_BE_BETWEEN,
+)
 from app.core.exceptions import ParameterException
+from app.core.i18n import t
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
@@ -60,7 +64,14 @@ def measure_context_request_usage(
     additional_non_system_tokens: int = 0,
 ) -> ContextRequestUsage:
     if not 1 <= threshold_percent <= 100:
-        raise ValueError("threshold_percent must be between 1 and 100")
+        raise ValueError(
+            t(
+                ERR_VALUE_MUST_BE_BETWEEN,
+                field="threshold_percent",
+                minimum=1,
+                maximum=100,
+            )
+        )
 
     system_tokens, non_system_tokens = count_message_tokens(messages)
     non_system_tokens += max(additional_non_system_tokens, 0)

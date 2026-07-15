@@ -4,11 +4,27 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_FRAGMENT_RESULT_CONFLICT,
+    ERR_CONTEXT_SUMMARY_FRAGMENT_WRITE_ORDER_FAILED,
+    ERR_CONTEXT_SUMMARY_LAYER_CONFLICT,
+    ERR_CONTEXT_SUMMARY_LAYER_FAILED,
+    ERR_CONTEXT_SUMMARY_LAYER_UNSPLITTABLE,
+    ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET,
+    ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED,
+    ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY,
+    ERR_CONTEXT_SUMMARY_MODEL_RETRIES_EXHAUSTED,
+    ERR_CONTEXT_SUMMARY_SNAPSHOT_RANGE_MISSING,
+    ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED,
+    ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW,
+    ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+)
 from app.core.crud.context_summary_fragment import (
     build_context_summary_fragment_dedupe_key,
     context_summary_fragment_crud,
 )
 from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (
@@ -117,10 +133,16 @@ async def call_fixed_summary_model(
         try:
             generated = await call_context_summary_model(model=model, prompt=prompt)
             if not generated:
-                raise RuntimeError("Context summary model returned an empty result")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_RESULT_EMPTY))
             output_tokens = estimate_tokens(generated)
             if output_tokens >= input_tokens:
-                raise RuntimeError(f"Context summary model did not reduce its input: output_tokens={output_tokens}, replacement_input_tokens={input_tokens}")
+                raise RuntimeError(
+                    t(
+                        ERR_CONTEXT_SUMMARY_MODEL_NOT_REDUCED,
+                        output_tokens=output_tokens,
+                        input_tokens=input_tokens,
+                    )
+                )
             return generated
         except Exception as exc:
             last_error = exc
@@ -139,7 +161,7 @@ async def call_fixed_summary_model(
             ).warning("Context summary fixed-model attempt failed")
 
     detail = format_context_summary_exception(last_error) if last_error is not None else "unknown error"
-    raise RuntimeError(f"Context summary model failed after fixed-model retries: {detail}") from last_error
+    raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MODEL_RETRIES_EXHAUSTED, detail=detail)) from last_error
 
 
 def fragment_prompt(fragment: SummaryFragmentInput) -> str:
@@ -247,9 +269,9 @@ async def write_summary_fragment(
             fragment=fragment,
         )
     if persisted is None:
-        raise RuntimeError("Context summary fragment could not be written in order")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_WRITE_ORDER_FAILED))
     if not created and (persisted.message_start_id != result.message_start_id or persisted.message_end_id != result.message_end_id or persisted.content != result.content):
-        raise RuntimeError("Context summary fragment conflicts with an existing result")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_RESULT_CONFLICT))
 
 
 async def mark_summary_stage_completed(*, stage: ContextSummaryStage) -> bool:
@@ -322,7 +344,7 @@ async def generate_snapshot_summary_with_model(
     prompt_overhead_tokens = estimate_tokens(empty_prompt)
     max_fragment_tokens = model.input_budget_tokens - prompt_overhead_tokens - 32
     if max_fragment_tokens <= 0:
-        raise ContextSummaryLayerError("Context summary model has no usable input budget")
+        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_MODEL_NO_INPUT_BUDGET, stage="fragment"))
 
     fragment_target_tokens = balanced_fragment_target_tokens(
         total_tokens,
@@ -337,12 +359,12 @@ async def generate_snapshot_summary_with_model(
         max_fragment_tokens=max_fragment_tokens,
     )
     if expected_fragment_count <= 0:
-        raise ContextSummaryLayerError("Context summary layer cannot be split for the selected model")
+        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_UNSPLITTABLE))
 
     snapshot_max_message_id = snapshot.snapshot_max_message_id
     persistent_summary_target_id = snapshot.persistent_summary_target_id
     if snapshot_max_message_id is None or persistent_summary_target_id is None:
-        raise ContextSummaryLayerError("Context summary snapshot has no persistent range")
+        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_SNAPSHOT_RANGE_MISSING))
 
     work_id, work_dedupe_key, snapshot_key, stage_key, model_key = build_stage_identity(
         session_id=session_id,
@@ -387,7 +409,7 @@ async def generate_snapshot_summary_with_model(
         or persisted_stage.succeeded_fragment_count > expected_fragment_count
         or (persisted_stage.status == ContextSummaryStageStatus.COMPLETED and persisted_stage.succeeded_fragment_count != expected_fragment_count)
     ):
-        raise ContextSummaryLayerError("Context summary layer conflicts with an existing stage")
+        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_CONFLICT))
 
     first_fragment_index = persisted_stage.succeeded_fragment_count
     if persisted_stage.status == ContextSummaryStageStatus.COMPLETED:
@@ -429,7 +451,7 @@ async def generate_snapshot_summary_with_model(
                 message_count=summarized_message_count,
                 completed_stage=reduced.stage,
             )
-        error = "Context summary fragment stage failed completion validation"
+        error = t(ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED, stage="fragment")
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
         raise ContextSummaryLayerError(error)
@@ -449,7 +471,7 @@ async def generate_snapshot_summary_with_model(
         await ensure_context_summary_work_valid(work_validity_checker)
         prompt = fragment_prompt(fragment)
         if not model.accepts_prompt_tokens(estimate_tokens(prompt)):
-            raise RuntimeError("Context summary fragment exceeds the selected model window")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW, stage="fragment"))
         replacement_input_tokens = fragment_replacement_input_tokens(fragment)
         generated = await call_fixed_summary_model(
             model=model,
@@ -477,7 +499,7 @@ async def generate_snapshot_summary_with_model(
         )
         await ensure_context_summary_work_valid(work_validity_checker)
         if not await mark_summary_stage_completed(stage=persisted_stage):
-            raise RuntimeError("Context summary fragment stage failed completion validation")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_STAGE_COMPLETION_FAILED, stage="fragment"))
     except Exception as exc:
         error = format_context_summary_exception(exc)
         logger.bind(
@@ -496,8 +518,8 @@ async def generate_snapshot_summary_with_model(
         await mark_summary_stage_failed(stage=persisted_stage, error=error)
         await invalidate_summary_stage(stage=persisted_stage)
         if contains_context_summary_work_invalid(exc):
-            raise ContextSummaryWorkInvalidError("Context summary work became invalid during fragment execution") from exc
-        raise ContextSummaryLayerError(f"Context summary fragment layer failed: {error}") from exc
+            raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="fragment execution")) from exc
+        raise ContextSummaryLayerError(t(ERR_CONTEXT_SUMMARY_LAYER_FAILED, error=error)) from exc
 
     logger.bind(
         uid=uid,

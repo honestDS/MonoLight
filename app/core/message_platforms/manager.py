@@ -3,6 +3,7 @@ import uuid
 from contextlib import suppress
 from typing import Any
 
+from app.core.constants import ERR_MESSAGE_PLATFORM_EVENT_NOT_SENT
 from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.message_platform_outbox import message_platform_outbox_crud
 from app.core.i18n import t
@@ -154,7 +155,7 @@ class MessagePlatformPollingManager:
                 timeout=OUTBOX_DELIVERY_TIMEOUT_SECONDS,
             )
             if not sent:
-                raise RuntimeError("message platform handler did not send the event")
+                raise RuntimeError(t(ERR_MESSAGE_PLATFORM_EVENT_NOT_SENT))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

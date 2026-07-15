@@ -8,6 +8,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import ERR_SESSION_REPLY_DEDUPLICATION_FAILED
+from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
@@ -109,7 +111,7 @@ class CRUDSessionReplyWorkItem:
         if work is None:
             work = await self.get_by_dedupe_key(db, dedupe_key)
             if work is None:
-                raise RuntimeError("Session reply work deduplication failed")
+                raise RuntimeError(t(ERR_SESSION_REPLY_DEDUPLICATION_FAILED))
             if commit:
                 await db.commit()
             return work, False

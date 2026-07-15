@@ -1,10 +1,23 @@
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGE_INVALID,
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP,
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_SET_INCOMPLETE,
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS,
+    ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED,
+    ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE,
+    ERR_CONTEXT_SUMMARY_MERGE_GROUP_EMPTY,
+    ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET,
+    ERR_VALUE_MUST_BE_NON_NEGATIVE,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
 from app.core.crud.context_summary_stage import (
     CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
     context_summary_stage_crud,
 )
+from app.core.i18n import t
 from app.core.utils.context_summary.pipeline import SummaryFragmentInput
 from app.core.utils.tokenizer import estimate_tokens
 from app.providers.database import AsyncSessionLocal
@@ -58,7 +71,7 @@ def _split_completed_fragment(
             else:
                 high = middle - 1
         if best <= 0:
-            raise RuntimeError("Context summary merge fragment metadata exceeds the merge budget")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET))
         parts.append(
             _format_completed_fragment(
                 fragment,
@@ -96,7 +109,7 @@ async def iter_completed_lower_stage_fragments(
                 limit=page_size,
             )
             if page is None:
-                raise RuntimeError("Context summary direct lower stage is not completed")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE))
 
             current_stage_identity = (
                 page.stage.uid,
@@ -120,7 +133,7 @@ async def iter_completed_lower_stage_fragments(
                 expected_summary_message_id = page.stage.expected_summary_message_id
                 persistent_summary_target_id = page.stage.persistent_summary_target_id
             elif current_stage_identity != stage_identity:
-                raise RuntimeError("Context summary direct lower stage changed during pagination")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED))
 
             fragments = tuple(
                 CompletedSummaryFragment(
@@ -138,10 +151,10 @@ async def iter_completed_lower_stage_fragments(
 
         for fragment in fragments:
             if fragment.fragment_index != expected_fragment_index:
-                raise RuntimeError("Context summary direct lower stage fragments are not continuous")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS))
             repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
             if fragment.message_start_id > fragment.message_end_id or (expected_fragment_index == 0 and fragment.message_start_id <= (expected_summary_message_id or 0)) or (previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range):
-                raise RuntimeError("Context summary direct lower stage fragment range is invalid")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGE_INVALID))
             yield fragment
             expected_fragment_index += 1
             previous_message_start_id = fragment.message_start_id
@@ -151,7 +164,7 @@ async def iter_completed_lower_stage_fragments(
         fragments = ()
 
     if expected_fragment_count is None or expected_fragment_index != expected_fragment_count or previous_message_end_id != persistent_summary_target_id:
-        raise RuntimeError("Context summary direct lower stage fragment set is incomplete")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_SET_INCOMPLETE))
 
 
 async def group_completed_summary_fragments(
@@ -162,9 +175,9 @@ async def group_completed_summary_fragments(
     token_counter: Callable[[str], int] = estimate_tokens,
 ) -> AsyncIterator[SummaryFragmentInput]:
     if max_group_tokens <= 0:
-        raise ValueError("max_group_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_group_tokens"))
     if first_group_index < 0:
-        raise ValueError("first_group_index must be non-negative")
+        raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="first_group_index"))
 
     group_index = 0
     group_parts: list[str] = []
@@ -177,7 +190,7 @@ async def group_completed_summary_fragments(
 
     def build_group() -> SummaryFragmentInput:
         if group_start_id is None or group_end_id is None:
-            raise RuntimeError("Context summary merge group is empty")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MERGE_GROUP_EMPTY))
         content = "\n".join(group_parts)
         return SummaryFragmentInput(
             fragment_index=group_index,
@@ -189,10 +202,10 @@ async def group_completed_summary_fragments(
 
     async for fragment in fragments:
         if previous_fragment_index is not None and fragment.fragment_index != previous_fragment_index + 1:
-            raise RuntimeError("Context summary direct lower stage fragments are not continuous")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS))
         repeated_range = fragment.message_start_id == previous_message_start_id and fragment.message_end_id == previous_message_end_id
         if previous_message_end_id is not None and fragment.message_start_id <= previous_message_end_id and not repeated_range:
-            raise RuntimeError("Context summary direct lower stage fragment ranges overlap")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP))
 
         parts = _split_completed_fragment(
             fragment,

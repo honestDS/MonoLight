@@ -18,7 +18,9 @@ from sqlmodel import (
     SQLModel,
 )
 
+from app.core.constants import ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID
 from app.core.crypto import decrypt_api_key, encrypt_api_key
+from app.core.i18n import t
 
 ENCRYPTED_API_KEY_PREFIX = "enc:v1:"
 
@@ -70,7 +72,7 @@ class ChannelModelItem(BaseModel):
     @model_validator(mode="after")
     def validate_image_generation_fields(self):
         if self.usage != ModelUsage.IMAGE_GENERATION and (self.size is not None or self.quality is not None):
-            raise ValueError("size and quality are only allowed for IMAGE_GENERATION model usage")
+            raise ValueError(t(ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID))
         return self
 
 

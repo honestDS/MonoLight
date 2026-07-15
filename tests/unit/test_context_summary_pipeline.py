@@ -2,6 +2,8 @@ import asyncio
 
 import pytest
 
+from app.core import constants
+from app.core.i18n import t
 from app.core.utils.context_summary.pipeline import (
     SummaryFragmentInput,
     SummaryFragmentResult,
@@ -243,7 +245,10 @@ async def test_pipeline_rejects_non_contiguous_fragment_plan():
             persist_fragment=persist,
         )
 
-    assert any("continuous order" in str(error) for error in exc_info.value.exceptions)
+    assert any(
+        str(error) == t(constants.ERR_CONTEXT_SUMMARY_FRAGMENT_ORDER_INVALID)
+        for error in exc_info.value.exceptions
+    )
 
 
 @pytest.mark.asyncio

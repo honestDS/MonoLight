@@ -133,7 +133,7 @@ class ImageGenerationExecutor(BaseExecutor):
         self._log_image_save_started(source="remote_url", source_url=url)
         image_bytes, content_type = await self._download_remote_image(url)
         if not content_type.startswith("image/"):
-            raise ValueError(f"Downloaded image has unsupported content type: {content_type}")
+            raise ValueError(t(constants.ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED, content_type=content_type))
         extension = mimetypes.guess_extension(content_type) or ".img"
         if extension == ".jpe":
             extension = ".jpg"

@@ -9,8 +9,16 @@ from urllib.parse import quote
 import aiohttp
 
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
-from app.core.constants import ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED
+from app.core.constants import (
+    ERR_MESSAGE_PLATFORM_TOKEN_REQUIRED,
+    ERR_WEIXIN_OPENCLAW_CDN_DOWNLOAD_FAILED,
+    ERR_WEIXIN_OPENCLAW_CDN_UPLOAD_FAILED,
+    ERR_WEIXIN_OPENCLAW_CDN_UPLOAD_PARAM_MISSING,
+    ERR_WEIXIN_OPENCLAW_REQUEST_FAILED,
+    ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED,
+)
 from app.core.exceptions import BaseBusinessException
+from app.core.i18n import t
 
 
 class WeixinOpenClawClient:
@@ -56,7 +64,7 @@ class WeixinOpenClawClient:
     ) -> dict[str, Any]:
         await self.ensure_session()
         if self.session is None:
-            raise RuntimeError("aiohttp session is not initialized")
+            raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED))
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         timeout = aiohttp.ClientTimeout(total=(timeout_ms or self.config.api_timeout_ms) / 1000)
         request_headers = self.build_headers(token_required=token_required)
@@ -65,7 +73,15 @@ class WeixinOpenClawClient:
         async with self.session.request(method, url, params=params, json=payload, headers=request_headers, timeout=timeout) as response:
             text = await response.text()
             if response.status >= 400:
-                raise RuntimeError(f"{method} {endpoint} failed: {response.status} {text}")
+                raise RuntimeError(
+                    t(
+                        ERR_WEIXIN_OPENCLAW_REQUEST_FAILED,
+                        method=method,
+                        endpoint=endpoint,
+                        status=response.status,
+                        detail=text,
+                    )
+                )
             if not text:
                 return {}
             return json.loads(text)
@@ -73,18 +89,24 @@ class WeixinOpenClawClient:
     async def download_cdn_bytes(self, encrypted_query_param: str) -> bytes:
         await self.ensure_session()
         if self.session is None:
-            raise RuntimeError("aiohttp session is not initialized")
+            raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED))
         timeout = aiohttp.ClientTimeout(total=self.config.api_timeout_ms / 1000)
         async with self.session.get(self.build_cdn_download_url(encrypted_query_param), timeout=timeout) as response:
             if response.status >= 400:
                 detail = await response.text()
-                raise RuntimeError(f"download media from cdn failed: {response.status} {detail}")
+                raise RuntimeError(
+                    t(
+                        ERR_WEIXIN_OPENCLAW_CDN_DOWNLOAD_FAILED,
+                        status=response.status,
+                        detail=detail,
+                    )
+                )
             return await response.read()
 
     async def upload_cdn_bytes(self, upload_url: str, encrypted: bytes) -> str:
         await self.ensure_session()
         if self.session is None:
-            raise RuntimeError("aiohttp session is not initialized")
+            raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_SESSION_UNINITIALIZED))
 
         timeout = aiohttp.ClientTimeout(total=self.config.api_timeout_ms / 1000)
         async with self.session.post(
@@ -95,10 +117,16 @@ class WeixinOpenClawClient:
         ) as response:
             detail = await response.text()
             if response.status != 200:
-                raise RuntimeError(f"upload media to cdn failed: {response.status} {detail}")
+                raise RuntimeError(
+                    t(
+                        ERR_WEIXIN_OPENCLAW_CDN_UPLOAD_FAILED,
+                        status=response.status,
+                        detail=detail,
+                    )
+                )
             download_param = response.headers.get("x-encrypted-param")
             if not download_param:
-                raise RuntimeError("upload media to cdn failed: missing x-encrypted-param")
+                raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_CDN_UPLOAD_PARAM_MISSING))
             return download_param
 
     def build_cdn_upload_url(self, upload_param: str, file_key: str) -> str:

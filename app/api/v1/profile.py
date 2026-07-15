@@ -161,7 +161,11 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
         try:
             channel_config_obj = ChannelConfig.model_validate(channel_raw)
         except Exception as e:
-            raise ParameterException(f"{channel_key} 校验失败: {e}")
+            raise ParameterException(
+                constants.ERR_PROFILE_CHANNEL_CONFIG_INVALID,
+                channel_key=channel_key,
+                error=str(e),
+            ) from e
 
         await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
 

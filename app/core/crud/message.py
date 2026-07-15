@@ -11,7 +11,9 @@ from sqlmodel import (
     select,
 )
 
+from app.core.constants import ERR_VALUE_MUST_BE_BETWEEN
 from app.core.crud.base import CRUDBase
+from app.core.i18n import t
 from app.models.message import (
     Message,
     MessageCreate,
@@ -89,7 +91,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         按消息编号从旧到新读取固定开区间内的一页历史。
         """
         if not 1 <= limit <= 500:
-            raise ValueError("limit must be between 1 and 500")
+            raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="limit", minimum=1, maximum=500))
 
         lower_bound = after_id
         if page_after_id is not None:
@@ -119,7 +121,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         按消息编号从新到旧读取固定开区间内的一页历史。
         """
         if not 1 <= limit <= 500:
-            raise ValueError("limit must be between 1 and 500")
+            raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="limit", minimum=1, maximum=500))
 
         upper_bound = before_id
         if page_before_id is not None:

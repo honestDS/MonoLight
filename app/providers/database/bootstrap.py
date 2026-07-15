@@ -9,10 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel
 
 import app.models  # noqa
+from app.core.constants import (
+    ERR_MIGRATION_FUNCTION_MISSING,
+    ERR_MIGRATION_ID_INVALID,
+    ERR_MIGRATION_SCRIPT_INVALID,
+)
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.crud.user import user_crud
+from app.core.i18n import t
 from app.models.profile import (
     ProfileConfig,
 )
@@ -98,7 +104,7 @@ def load_migration_module(script_path: Path) -> ModuleType:
     module_name = f"monoligh_migration_{script_path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Invalid migration script: {script_path.name}")
+        raise RuntimeError(t(ERR_MIGRATION_SCRIPT_INVALID, script_name=script_path.name))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -117,9 +123,9 @@ async def run_once_migration_scripts(session: AsyncSession) -> None:
         migration_id = getattr(module, "MIGRATION_ID", script_path.stem)
         migrate_func = getattr(module, "migrate", None)
         if not isinstance(migration_id, str) or not migration_id.strip():
-            raise RuntimeError(f"Invalid MIGRATION_ID in {script_path.name}")
+            raise RuntimeError(t(ERR_MIGRATION_ID_INVALID, script_name=script_path.name))
         if migrate_func is None:
-            raise RuntimeError(f"Missing migrate(session) in {script_path.name}")
+            raise RuntimeError(t(ERR_MIGRATION_FUNCTION_MISSING, script_name=script_path.name))
         if await has_migration_executed(session, migration_id):
             continue
 

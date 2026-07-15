@@ -4,6 +4,12 @@ import base64
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from app.core.constants import (
+    ERR_WEIXIN_OPENCLAW_MEDIA_AES_KEY_EMPTY,
+    ERR_WEIXIN_OPENCLAW_MEDIA_AES_KEY_UNSUPPORTED,
+)
+from app.core.i18n import t
+
 
 def aes_padded_size(size: int) -> int:
     return size + (16 - (size % 16) or 16)
@@ -30,7 +36,7 @@ def pkcs7_unpad(data: bytes, block_size: int = 16) -> bytes:
 def parse_media_aes_key(aes_key_value: str) -> bytes:
     normalized = aes_key_value.strip()
     if not normalized:
-        raise ValueError("empty media aes key")
+        raise ValueError(t(ERR_WEIXIN_OPENCLAW_MEDIA_AES_KEY_EMPTY))
     padded = normalized + "=" * (-len(normalized) % 4)
     decoded = base64.b64decode(padded)
     if len(decoded) == 16:
@@ -38,7 +44,7 @@ def parse_media_aes_key(aes_key_value: str) -> bytes:
     decoded_text = decoded.decode("ascii", errors="ignore")
     if len(decoded) == 32 and all(c in "0123456789abcdefABCDEF" for c in decoded_text):
         return bytes.fromhex(decoded_text)
-    raise ValueError("unsupported media aes key format")
+    raise ValueError(t(ERR_WEIXIN_OPENCLAW_MEDIA_AES_KEY_UNSUPPORTED))
 
 
 def aes_ecb_encrypt(data: bytes, key: bytes) -> bytes:

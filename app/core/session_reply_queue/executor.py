@@ -201,7 +201,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             values={"execution_state": state},
         )
         if not updated:
-            raise RuntimeError("Session reply work lease was lost while saving execution checkpoint")
+            raise RuntimeError(t(constants.ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
         work.execution_state = state
 
     execution_state = work.execution_state or {}
@@ -343,7 +343,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
 
         result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
         if result_message is None:
-            raise RuntimeError("Final assistant message was not persisted")
+            raise RuntimeError(t(constants.ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
 
         state = {**(work.execution_state or {}), "response": response}
         updated = await session_reply_work_item_crud.update_claimed(

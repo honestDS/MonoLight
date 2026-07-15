@@ -24,6 +24,10 @@ from app.adapters.weixin_openclaw.crypto import (
     pkcs7_pad,
     pkcs7_unpad,
 )
+from app.core.constants import (
+    ERR_WEIXIN_OPENCLAW_INBOUND_MEDIA_TOO_LARGE,
+    ERR_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING,
+)
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR
@@ -86,7 +90,13 @@ class WeixinOpenClawMediaMixin:
     def save_inbound_media(self, content: bytes, *, prefix: str, file_name: str, fallback_suffix: str) -> Path:
         max_bytes = self.config.max_inbound_media_size_mb * 1024 * 1024
         if len(content) > max_bytes:
-            raise RuntimeError(f"inbound media exceeds size limit: {len(content)} > {max_bytes}")
+            raise RuntimeError(
+                t(
+                    ERR_WEIXIN_OPENCLAW_INBOUND_MEDIA_TOO_LARGE,
+                    actual_bytes=len(content),
+                    max_bytes=max_bytes,
+                )
+            )
 
         normalized_name = self.normalize_inbound_filename(file_name, f"{prefix}{fallback_suffix}")
         stem = Path(normalized_name).stem or prefix
@@ -186,7 +196,7 @@ class WeixinOpenClawMediaMixin:
         upload_url = self.client.resolve_cdn_upload_url(payload, file_key)
         if not upload_url:
             logger.bind(user_id=user_id, file_name=file_name, file_key=file_key, payload_keys=list(payload.keys())).warning(t("LOG_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING"))
-            raise RuntimeError("getuploadurl returned empty upload url")
+            raise RuntimeError(t(ERR_WEIXIN_OPENCLAW_UPLOAD_URL_MISSING))
 
         encrypted_query_param = await self.upload_to_cdn(upload_url, aes_key_hex, media_path)
         aes_key_b64 = base64.b64encode(aes_key_hex.encode("utf-8")).decode("utf-8")

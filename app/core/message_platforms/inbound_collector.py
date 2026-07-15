@@ -5,6 +5,14 @@ import time
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 
+from app.core.constants import (
+    ERR_INBOUND_MESSAGE_COLLECTOR_CLOSED,
+    ERR_VALUE_MUST_BE_NON_NEGATIVE,
+    ERR_VALUE_MUST_BE_POSITIVE,
+    ERR_VALUE_MUST_NOT_BE_SHORTER_THAN,
+)
+from app.core.i18n import t
+
 
 @dataclass
 class _PendingGroup[MessageT]:
@@ -24,11 +32,17 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
         dispatch: Callable[[MessageT], Awaitable[None]],
     ) -> None:
         if quiet_period_seconds < 0:
-            raise ValueError("quiet_period_seconds must not be negative")
+            raise ValueError(t(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="quiet_period_seconds"))
         if max_wait_seconds <= 0:
-            raise ValueError("max_wait_seconds must be positive")
+            raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_wait_seconds"))
         if max_wait_seconds < quiet_period_seconds:
-            raise ValueError("max_wait_seconds must not be shorter than quiet_period_seconds")
+            raise ValueError(
+                t(
+                    ERR_VALUE_MUST_NOT_BE_SHORTER_THAN,
+                    field="max_wait_seconds",
+                    other_field="quiet_period_seconds",
+                )
+            )
 
         self._quiet_period_seconds = quiet_period_seconds
         self._max_wait_seconds = max_wait_seconds
@@ -44,7 +58,7 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
         now = time.monotonic()
         async with self._lock:
             if self._closed:
-                raise RuntimeError("inbound message collector is closed")
+                raise RuntimeError(t(ERR_INBOUND_MESSAGE_COLLECTOR_CLOSED))
 
             pending = self._pending.get(key)
             if pending is None:

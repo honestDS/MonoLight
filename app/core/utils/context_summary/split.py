@@ -1,6 +1,13 @@
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET,
+    ERR_CONTEXT_SUMMARY_CHUNK_OVER_BUDGET,
+    ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
+from app.core.i18n import t
 from app.core.utils.context_summary.common import serialize_message
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage
@@ -21,7 +28,7 @@ def _message_chunk_content(
     payload: str,
 ) -> str:
     if message.id is None:
-        raise RuntimeError("Context summary source message must have a database ID")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
     return f'<message_chunk message_id="{message.id}" role="{message.role.value}" part="{part_index}">\n{payload}\n</message_chunk>'
 
 
@@ -50,9 +57,9 @@ def split_oversized_message(
     max_unit_tokens: int,
 ) -> Iterator[SummarySourceUnit]:
     if max_unit_tokens <= 0:
-        raise ValueError("max_unit_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_unit_tokens"))
     if message.id is None:
-        raise RuntimeError("Context summary source message must have a database ID")
+        raise RuntimeError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
 
     serialized = serialize_message(message)
     serialized_tokens = max(1, estimate_tokens(serialized))
@@ -82,11 +89,11 @@ def split_oversized_message(
             max_tokens=max_unit_tokens,
         )
         if prefix_length <= 0:
-            raise RuntimeError("Context summary message chunk metadata exceeds the selected model budget")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET))
         content = content_builder(remaining[:prefix_length])
         token_count = max(1, estimate_tokens(content))
         if token_count > max_unit_tokens:
-            raise RuntimeError("Context summary message chunk exceeds the selected model budget")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_CHUNK_OVER_BUDGET))
         yield SummarySourceUnit(
             message_start_id=message.id,
             message_end_id=message.id,
@@ -103,7 +110,7 @@ def iter_round_source_units(
     max_unit_tokens: int,
 ) -> Iterator[SummarySourceUnit]:
     if max_unit_tokens <= 0:
-        raise ValueError("max_unit_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_unit_tokens"))
 
     for message in messages:
         yield from split_oversized_message(

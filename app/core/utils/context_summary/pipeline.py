@@ -2,6 +2,18 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_EXCEEDED,
+    ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH,
+    ERR_CONTEXT_SUMMARY_FRAGMENT_DUPLICATED,
+    ERR_CONTEXT_SUMMARY_FRAGMENT_INDEX_UNPLANNED,
+    ERR_CONTEXT_SUMMARY_FRAGMENT_ORDER_INVALID,
+    ERR_CONTEXT_SUMMARY_REORDER_RESULTS_RETAINED,
+    ERR_CONTEXT_SUMMARY_RESULT_INDEX_MISMATCH,
+    ERR_VALUE_MUST_BE_POSITIVE,
+)
+from app.core.i18n import t
+
 CONTEXT_SUMMARY_FRAGMENT_CONCURRENCY = 4
 CONTEXT_SUMMARY_INPUT_QUEUE_CAPACITY = 8
 CONTEXT_SUMMARY_RESULT_QUEUE_CAPACITY = 8
@@ -44,9 +56,9 @@ PersistFragment = Callable[[SummaryFragmentResult], Awaitable[None]]
 
 def balanced_fragment_target_tokens(total_tokens: int, max_fragment_tokens: int) -> int:
     if total_tokens <= 0:
-        raise ValueError("total_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="total_tokens"))
     if max_fragment_tokens <= 0:
-        raise ValueError("max_fragment_tokens must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="max_fragment_tokens"))
     fragment_count = max(1, (total_tokens + max_fragment_tokens - 1) // max_fragment_tokens)
     return min(
         max_fragment_tokens,
@@ -67,17 +79,17 @@ async def run_bounded_fragment_pipeline(
     reorder_window: int = CONTEXT_SUMMARY_REORDER_WINDOW,
 ) -> SummaryPipelineStats:
     if expected_fragment_count <= 0:
-        raise ValueError("expected_fragment_count must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="expected_fragment_count"))
     if not 0 <= first_fragment_index < expected_fragment_count:
-        raise ValueError("first_fragment_index must identify a planned fragment")
+        raise ValueError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_INDEX_UNPLANNED))
     if concurrency <= 0:
-        raise ValueError("concurrency must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="concurrency"))
     if input_queue_capacity <= 0:
-        raise ValueError("input_queue_capacity must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="input_queue_capacity"))
     if result_queue_capacity <= 0:
-        raise ValueError("result_queue_capacity must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="result_queue_capacity"))
     if reorder_window <= 0:
-        raise ValueError("reorder_window must be positive")
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="reorder_window"))
 
     input_queue: asyncio.Queue[SummaryFragmentInput | None] = asyncio.Queue(maxsize=input_queue_capacity)
     result_queue: asyncio.Queue[SummaryFragmentResult] = asyncio.Queue(maxsize=result_queue_capacity)
@@ -93,16 +105,16 @@ async def run_bounded_fragment_pipeline(
         produced_count = first_fragment_index
         async for fragment in fragments:
             if fragment.fragment_index != produced_count:
-                raise RuntimeError("Context summary fragments must be produced in continuous order")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_ORDER_INVALID))
             if produced_count >= expected_fragment_count:
-                raise RuntimeError("Context summary produced more fragments than planned")
+                raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_EXCEEDED))
             await outstanding_slots.acquire()
             await input_queue.put(fragment)
             produced_count += 1
             max_input_queue_size = max(max_input_queue_size, input_queue.qsize())
 
         if produced_count != expected_fragment_count:
-            raise RuntimeError("Context summary produced fragment count does not match the plan")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_COUNT_MISMATCH))
         for _ in range(concurrency):
             await input_queue.put(None)
 
@@ -120,7 +132,7 @@ async def run_bounded_fragment_pipeline(
                 finally:
                     active_tasks -= 1
                 if result.fragment_index != fragment.fragment_index:
-                    raise RuntimeError("Context summary result index does not match its input")
+                    raise RuntimeError(t(ERR_CONTEXT_SUMMARY_RESULT_INDEX_MISMATCH))
                 await result_queue.put(result)
                 max_result_queue_size = max(max_result_queue_size, result_queue.qsize())
             finally:
@@ -134,7 +146,7 @@ async def run_bounded_fragment_pipeline(
             result = await result_queue.get()
             try:
                 if result.fragment_index < next_fragment_index or result.fragment_index in reorder_buffer:
-                    raise RuntimeError("Context summary returned a duplicate fragment")
+                    raise RuntimeError(t(ERR_CONTEXT_SUMMARY_FRAGMENT_DUPLICATED))
                 reorder_buffer[result.fragment_index] = result
                 waiting_count = sum(index > next_fragment_index for index in reorder_buffer)
                 max_reorder_size = max(max_reorder_size, waiting_count)
@@ -148,7 +160,7 @@ async def run_bounded_fragment_pipeline(
                 result_queue.task_done()
 
         if reorder_buffer:
-            raise RuntimeError("Context summary retained unexpected out-of-order results")
+            raise RuntimeError(t(ERR_CONTEXT_SUMMARY_REORDER_RESULTS_RETAINED))
 
     async with asyncio.TaskGroup() as task_group:
         task_group.create_task(produce())

@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
+    ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+)
 from app.core.crud.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -170,7 +174,7 @@ async def generate_summary_text(
             return generated
         except Exception as exc:
             if contains_context_summary_work_invalid(exc):
-                raise ContextSummaryWorkInvalidError("Context summary work became invalid during model execution") from exc
+                raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="model execution")) from exc
             excluded_priorities.add(model.priority)
             call_context = "context_summary_retry"
             logger.bind(
@@ -213,7 +217,7 @@ async def _ensure_context_summary(
     await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
     if (trigger_mode is None) != (fixed_upper_message_id is None):
-        raise ValueError("trigger_mode and fixed_upper_message_id must be provided together")
+        raise ValueError(t(ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED))
 
     boundary = None
     if trigger_mode is not None and fixed_upper_message_id is not None:
@@ -457,7 +461,7 @@ async def _ensure_context_summary(
                 )
             except Exception as exc:
                 if contains_context_summary_work_invalid(exc):
-                    raise ContextSummaryWorkInvalidError("Context summary work became invalid during refinement") from exc
+                    raise ContextSummaryWorkInvalidError(t(ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING, stage="refinement")) from exc
                 logger.bind(
                     uid=uid,
                     session_id=session_id,

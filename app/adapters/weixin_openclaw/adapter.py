@@ -26,7 +26,12 @@ from app.adapters.weixin_openclaw.message import (
 )
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
-from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID, ERR_VALIDATION_FAILED
+from app.core.constants import (
+    ERR_LLM_UNEXPECTED_ERROR,
+    ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID,
+    ERR_SESSION_ID_REQUIRED,
+    ERR_WEIXIN_OPENCLAW_GET_UPDATES_FAILED,
+)
 from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
@@ -148,7 +153,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
     ) -> WeixinOpenClawChatResult:
         if not session_id:
-            raise BaseBusinessException(message=ERR_VALIDATION_FAILED, detail="session_id is required")
+            raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
@@ -182,7 +187,14 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         ret = data.get("ret")
         errcode = data.get("errcode", 0)
         if ret not in (None, 0) or int(errcode or 0) != 0:
-            raise RuntimeError(f"getupdates failed: ret={ret}, errcode={errcode}, errmsg={data.get('errmsg', '')}")
+            raise RuntimeError(
+                t(
+                    ERR_WEIXIN_OPENCLAW_GET_UPDATES_FAILED,
+                    ret=ret,
+                    errcode=errcode,
+                    errmsg=data.get("errmsg", ""),
+                )
+            )
         next_sync_buf = update_sync_buf(data)
         if next_sync_buf:
             self.sync_buf = next_sync_buf
