@@ -65,6 +65,7 @@
         :current-session-id="currentSessionId"
         :current-session-enable-markdown="currentSessionEnableMarkdown"
         :history-loading="historyLoading"
+        :initial-history-loaded="initialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
       />
       <div class="input-area">
@@ -254,7 +255,8 @@ const {
   attachments,
   isCurrentSessionReadOnly,
   isContextSummarizing,
-  historyLoading
+  historyLoading,
+  initialHistoryLoaded
 } = chat
 
 // 解构方法

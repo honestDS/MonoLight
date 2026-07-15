@@ -273,7 +273,7 @@
                       <el-input v-model="form.configs.tool.firecrawl_api_key" :placeholder="$t('profiles.firecrawl_key_placeholder')" show-password></el-input>
                       <div class="help-text mt-5">
                         {{ $t('profiles.firecrawl_hint_1') }}
-                        <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" :underline="false">{{ $t('profiles.firecrawl_hint_2') }}</el-link>
+                        <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" underline="never">{{ $t('profiles.firecrawl_hint_2') }}</el-link>
                         {{ $t('profiles.firecrawl_hint_3') }}
                       </div>
                     </el-form-item>

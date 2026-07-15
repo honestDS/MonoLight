@@ -1,16 +1,19 @@
 <template>
   <div class="message-list-wrapper">
-    <div ref="messageListElement" class="message-list">
-      <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
-        <p>{{ $t('chat.empty_chat_tip') }}</p>
-      </div>
-
-      <template v-else>
-        <div
-          v-for="msg in displayMessages"
-          :key="msg.id"
-          :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
-        >
+    <VList
+      ref="virtualList"
+      class="message-list"
+      :class="{ 'is-layout-ready': messagesLayoutReady }"
+      :data="displayMessages"
+      :buffer-size="600"
+      :shift="maintainScrollPosition"
+      @scroll="handleVirtualScroll"
+    >
+      <template #default="{ item: msg }">
+        <div class="message-list-item" :key="msg.id">
+          <div
+            :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
+          >
         <template v-if="msg.type === 'tool_group'">
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -29,7 +32,7 @@
                 type="primary"
                 target="_blank"
                 rel="noopener noreferrer"
-                underline
+                underline="always"
               >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
             </template>
           </div>
@@ -118,7 +121,7 @@
                 type="primary"
                 target="_blank"
                 rel="noopener noreferrer"
-                underline
+                underline="always"
               >{{ part.text }}</el-link><span v-else>{{ part.text }}</span>
             </template>
           </div>
@@ -135,7 +138,7 @@
                     type="primary"
                     target="_blank"
                     rel="noopener noreferrer"
-                    underline
+                    underline="always"
                   >{{ textPart.text }}</el-link><span v-else>{{ textPart.text }}</span>
                 </template>
               </div>
@@ -169,8 +172,12 @@
             </div>
           </div>
         </template>
+          </div>
         </div>
       </template>
+    </VList>
+    <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
+      <p>{{ $t('chat.empty_chat_tip') }}</p>
     </div>
     <Transition name="history-loading">
       <div v-if="historyLoading" class="history-loading-indicator" role="status" aria-live="polite">
@@ -189,6 +196,7 @@
 
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
+import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
@@ -215,11 +223,15 @@ const props = defineProps({
   currentSessionEnableMarkdown: { type: Boolean, default: false },
   activeCollapse: { type: Array, default: () => [] },
   historyLoading: { type: Boolean, default: false },
+  initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse'])
 const { t } = useI18n()
-const messageListElement = ref(null)
+const virtualList = ref(null)
+const maintainScrollPosition = ref(false)
+const messagesLayoutReady = ref(false)
+const scrollListeners = new Set()
 const codeRefs = new Map()
 const collapseModel = computed({
   get: () => props.activeCollapse,
@@ -351,24 +363,73 @@ const displayMessages = computed(() => {
   return output
 })
 
-const captureScrollAnchor = () => {
-  const element = messageListElement.value
-  if (!element) return null
-  return {
-    scrollTop: element.scrollTop,
-    scrollHeight: element.scrollHeight
+let layoutGeneration = 0
+watch(() => props.currentSessionId, () => {
+  layoutGeneration += 1
+  if (!props.initialHistoryLoaded) {
+    messagesLayoutReady.value = false
   }
+}, { immediate: true, flush: 'sync' })
+watch(() => props.initialHistoryLoaded, async (historyLoaded) => {
+  layoutGeneration += 1
+  messagesLayoutReady.value = false
+  if (!historyLoaded) return
+
+  const generation = layoutGeneration
+  await nextTick()
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  if (generation === layoutGeneration && props.initialHistoryLoaded) {
+    messagesLayoutReady.value = true
+  }
+}, { immediate: true, flush: 'post' })
+
+const handleVirtualScroll = (offset) => {
+  scrollListeners.forEach(listener => listener(offset))
+}
+const captureScrollAnchor = () => {
+  if (!virtualList.value) return null
+  maintainScrollPosition.value = true
+  return true
 }
 const restoreScrollAnchor = async (anchor) => {
   if (!anchor) return
   await nextTick()
-  const element = messageListElement.value
-  if (!element) return
-  element.scrollTop = anchor.scrollTop + Math.max(0, element.scrollHeight - anchor.scrollHeight)
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  maintainScrollPosition.value = false
 }
-const scrollToBottom = (behavior = 'auto') => {
-  const element = messageListElement.value
-  element?.scrollTo({ top: element.scrollHeight, behavior })
+const MESSAGE_LIST_EDGE_PADDING = 20
+let bottomScrollRequest = 0
+const scrollToBottom = async (behavior = 'auto') => {
+  const request = ++bottomScrollRequest
+  const alignBottom = (smooth = false) => {
+    const list = virtualList.value
+    const lastIndex = displayMessages.value.length - 1
+    if (!list || lastIndex < 0) return null
+    list.scrollToIndex(lastIndex, {
+      align: 'end',
+      smooth,
+      offset: MESSAGE_LIST_EDGE_PADDING
+    })
+    return list
+  }
+
+  await nextTick()
+  if (behavior === 'smooth') {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    if (request !== bottomScrollRequest || !alignBottom(true)) return
+    await new Promise(resolve => setTimeout(resolve, 350))
+    if (request === bottomScrollRequest) alignBottom(true)
+    return
+  }
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (request !== bottomScrollRequest) return
+    const list = alignBottom()
+    if (!list) return
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    if (request !== bottomScrollRequest) return
+    list.scrollTo(list.scrollSize)
+  }
 }
 
 const getToolPairName = pair => pair.toolCall ? getToolCallName(pair.toolCall) : getToolResultName(pair.resultMessage)
@@ -436,20 +497,28 @@ const formatFileSize = (size) => {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 const getMessageClass = role => ({ user: 'user', thinking: 'thinking', background_system: 'background-system', err: 'error' })[role] || 'ai'
-const handleImageLoad = () => scrollToBottom('smooth')
+const handleImageLoad = () => {
+  const list = virtualList.value
+  if (!list || list.scrollSize - list.viewportSize - list.scrollOffset > 200) return
+  scrollToBottom('smooth')
+}
 
 defineExpose({
   captureScrollAnchor,
   restoreScrollAnchor,
   scrollToBottom,
-  scrollTo: options => messageListElement.value?.scrollTo(options),
-  addEventListener: (...args) => messageListElement.value?.addEventListener(...args),
-  removeEventListener: (...args) => messageListElement.value?.removeEventListener(...args),
+  scrollTo: options => virtualList.value?.scrollTo(typeof options === 'number' ? options : options?.top || 0),
+  addEventListener: (type, listener) => {
+    if (type === 'scroll') scrollListeners.add(listener)
+  },
+  removeEventListener: (type, listener) => {
+    if (type === 'scroll') scrollListeners.delete(listener)
+  },
   get scrollHeight() {
-    return messageListElement.value?.scrollHeight || 0
+    return virtualList.value?.scrollSize || 0
   },
   get scrollTop() {
-    return messageListElement.value?.scrollTop || 0
+    return virtualList.value?.scrollOffset || 0
   }
 })
 </script>

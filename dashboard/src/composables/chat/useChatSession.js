@@ -34,6 +34,7 @@ export function useChatSession() {
   // 新增附件状态
   const attachments = ref([])
   const contextSummarySessionId = ref(null)
+  const initialHistoryLoaded = ref(true)
   
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
@@ -66,16 +67,31 @@ export function useChatSession() {
     return true
   }
 
+  let restoringHistoryScroll = false
+
   // ==================== 设置模块间连接 ====================
   
   // 设置会话管理的历史记录加载回调
   sessionManager.setLoadHistoryCallback(async (pageCount) => {
+    const requestedSessionId = sessionManager.currentSessionId.value
     const historyData = await sessionManager.loadSessionHistory(pageCount)
-    if (historyData && historyData.length > 0) {
-      // 插入到消息列表开头
-      chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
+    if (requestedSessionId !== sessionManager.currentSessionId.value) return
+
+    restoringHistoryScroll = true
+    try {
+      if (historyData && historyData.length > 0) {
+        // 插入到消息列表开头
+        chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
+      }
+      initialHistoryLoaded.value = true
       await nextTick()
-      chatState.scrollToBottom('auto')
+      if (historyData && historyData.length > 0) {
+        await chatState.scrollToBottom('smooth')
+      }
+    } finally {
+      requestAnimationFrame(() => {
+        restoringHistoryScroll = false
+      })
     }
   })
 
@@ -521,6 +537,7 @@ export function useChatSession() {
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
     contextSummarySessionId.value = null
+    initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
@@ -533,6 +550,7 @@ export function useChatSession() {
    */
   const createNewSession = () => {    
     contextSummarySessionId.value = null
+    initialHistoryLoaded.value = true
     transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
@@ -542,7 +560,6 @@ export function useChatSession() {
   }
 
   // ==================== 滚动事件 ====================
-  let restoringHistoryScroll = false
   
   /**
    * 处理滚动事件
@@ -605,6 +622,7 @@ export function useChatSession() {
     loading: chatState.loading,
     messageList: chatState.messageList,
     isContextSummarizing,
+    initialHistoryLoaded,
     
     // 新增附件状态导出
     attachments,

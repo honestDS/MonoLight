@@ -62,8 +62,7 @@ export function useChatState() {
    */
   const scrollToBottom = (behavior = 'smooth') => {
     if (messageList.value?.scrollToBottom) {
-      messageList.value.scrollToBottom(behavior)
-      return
+      return messageList.value.scrollToBottom(behavior)
     }
     if (messageList.value) {
       messageList.value.scrollTo({

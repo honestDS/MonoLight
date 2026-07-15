@@ -164,6 +164,7 @@ export function useSessionManager() {
       })
       
       const newTitle = res.data?.data?.title || t('chat.default_title')
+      await loadSessions()
       
       // 更新本地会话列表中的标题
       let sessionIdx = sessions.value.findIndex(s => s.session_id === sessionId)
