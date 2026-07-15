@@ -9,6 +9,12 @@ const t = (key, ...args) => i18n.global.t(key, ...args)
 
 const resolveErrorMessage = (data, fallback) => data?.message || data?.content || data?.detail || data?.error || fallback
 
+const isWsErrorPayload = (data) => {
+  if (data?.type === 'error' || data?.error || data?.detail) return true
+  const choice = Array.isArray(data?.choices) ? data.choices[0] : null
+  return choice?.message?.role === 'err'
+}
+
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
 
@@ -34,7 +40,8 @@ export function useChatTransport() {
       data.type === 'proactive_reply' ||
       data.type === 'proactive_reply_error' ||
       data.type === 'context_summary_start' ||
-      data.type === 'context_summary_end'
+      data.type === 'context_summary_end' ||
+      isWsErrorPayload(data)
     ) {
       if (sessionEventCallbacks) {
         if (data.session_id && sessionEventCallbacks.sessionId && data.session_id !== sessionEventCallbacks.sessionId) return

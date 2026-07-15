@@ -132,19 +132,51 @@ export function useMessageProcessor() {
     if (existingIdx !== -1) {
       const existingMsg = messagesRef.value[existingIdx]
       const existingContent = normalizeMessageContent(existingMsg.content)
+      const existingToolCalls = Array.isArray(existingContent?.tool_calls) ? existingContent.tool_calls : []
       messagesRef.value[existingIdx] = {
         ...existingMsg,
         content: JSON.stringify({
+          ...existingContent,
           role: 'assistant',
-          content: existingContent?.content,
-          tool_calls: [{
-            ...existingContent?.tool_calls?.[0],
+          tool_calls: existingToolCalls.map(existingToolCall => {
+            const existingToolCallId = existingToolCall?.id || existingToolCall?.function?.id
+            if (existingToolCallId !== toolCall.id) return existingToolCall
+            return {
+              ...existingToolCall,
+              id: toolCall.id,
+              name: toolCall.name,
+              arguments: toolCall.arguments
+            }
+          })
+        }),
+        response_id: existingMsg.response_id || responseId,
+        request_id: existingMsg.request_id || requestId
+      }
+      return
+    }
+
+    const sameResponseToolCallIdx = responseId
+      ? messagesRef.value.findIndex(message =>
+        message.response_id === responseId &&
+        message.role === 'assistant' &&
+        isToolCall(message)
+      )
+      : -1
+    if (sameResponseToolCallIdx !== -1) {
+      const existingMsg = messagesRef.value[sameResponseToolCallIdx]
+      const existingContent = normalizeMessageContent(existingMsg.content)
+      const existingToolCalls = Array.isArray(existingContent?.tool_calls) ? existingContent.tool_calls : []
+      messagesRef.value[sameResponseToolCallIdx] = {
+        ...existingMsg,
+        content: JSON.stringify({
+          ...existingContent,
+          role: 'assistant',
+          tool_calls: [...existingToolCalls, {
             id: toolCall.id,
             name: toolCall.name,
             arguments: toolCall.arguments
           }]
         }),
-        response_id: existingMsg.response_id || responseId,
         request_id: existingMsg.request_id || requestId
       }
       return
@@ -206,7 +238,7 @@ export function useMessageProcessor() {
       return
     }
 
-    // 2. 跨 Turn 新建：如果是新 Turn 的工具调用且无占位符，插入到该请求最近的消息后面
+    // 2. 跨 Turn 新建：如果后续正文已经先到达，工具调用必须插在正文之前
     if (requestId) {
       let lastRelatedIdx = -1
       for (let i = messagesRef.value.length - 1; i >= 0; i--) {
@@ -216,7 +248,11 @@ export function useMessageProcessor() {
         }
       }
       if (lastRelatedIdx !== -1) {
-        messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+        const lastRelatedMessage = messagesRef.value[lastRelatedIdx]
+        const insertAt = lastRelatedMessage.role === 'assistant' && !isToolCall(lastRelatedMessage)
+          ? lastRelatedIdx
+          : lastRelatedIdx + 1
+        messagesRef.value.splice(insertAt, 0, newMsg)
         return
       }
     }
@@ -263,6 +299,21 @@ export function useMessageProcessor() {
       request_id: requestId,
       created_at: Date.now() / 1000
     }
+
+    const toolCallIdx = findToolCallIndex(messagesRef.value, toolEnd.tool_call_id)
+    if (toolCallIdx !== -1) {
+      let insertAt = toolCallIdx + 1
+      while (
+        insertAt < messagesRef.value.length &&
+        messagesRef.value[insertAt].role === 'tool' &&
+        messagesRef.value[insertAt].response_id === responseId
+      ) {
+        insertAt += 1
+      }
+      messagesRef.value.splice(insertAt, 0, newMsg)
+      return
+    }
+
     const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
     if (firstThinkingIdx !== -1) {
       messagesRef.value.splice(firstThinkingIdx, 0, newMsg)
