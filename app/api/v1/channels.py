@@ -20,7 +20,30 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS,
+    ERR_CHANNEL_BASE_URL_SCHEME,
+    ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE,
+    ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID,
+    ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE,
+    ERR_CHANNEL_MODEL_LIST_FAILED,
+    ERR_CHANNEL_MODEL_LIST_NO_API_KEY,
+    ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE,
+    ERR_CHANNEL_MODEL_LIST_NO_URL,
+    ERR_CHANNEL_NAME_EXISTS,
+    ERR_CHANNEL_NOT_FOUND,
+    ERR_CHANNEL_TEST_DIMENSION_ERROR,
+    ERR_CHANNEL_TEST_FAILED,
+    ERR_CHANNEL_TEST_NO_URL,
+    ERR_ONLY_ADMIN_ALLOWED,
+    MSG_CHANNEL_CHAT_TEST_SUCCESS,
+    MSG_CHANNEL_CREATED,
+    MSG_CHANNEL_DELETED,
+    MSG_CHANNEL_IMAGE_GENERATION_TEST_SUCCESS,
+    MSG_CHANNEL_MODEL_LIST_SUCCESS,
+    MSG_CHANNEL_TEST_SUCCESS,
+    MSG_CHANNEL_UPDATED,
+)
 from app.core.crud.channel import channel_crud
 from app.core.exceptions import (
     BaseBusinessException,
@@ -88,7 +111,7 @@ class ChannelImageGenerationTestRequest(BaseModel):
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
@@ -118,19 +141,19 @@ async def create_channel(
         return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
     if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
-        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_SCHEME)
+        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_SCHEME)
 
     if channel_in.model_ids and not channel_in.base_url:
-        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
+        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
 
     if await channel_crud.get_by_name(db, channel_in.name):
-        raise ParameterException(constants.ERR_CHANNEL_NAME_EXISTS)
+        raise ParameterException(ERR_CHANNEL_NAME_EXISTS)
 
     db_obj = await channel_crud.create_with_plain_api_key(db, obj_in=channel_in)
 
     return StandardResponse.success(
         data=ChannelResponse.model_validate(db_obj),
-        message=constants.MSG_CHANNEL_CREATED,
+        message=MSG_CHANNEL_CREATED,
     )
 
 
@@ -167,7 +190,7 @@ async def list_channels(
 async def get_channel(channel_id: int, db: AsyncSession = Depends(get_db)):
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
-        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
     return StandardResponse.success(data=ChannelResponse.model_validate(db_obj))
 
 
@@ -182,11 +205,11 @@ async def list_channel_models(
     base_url = payload.base_url
 
     if not channel_type:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
     if not base_url:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_URL)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
 
     try:
         models = await LLMClient.list_models(
@@ -197,13 +220,13 @@ async def list_channel_models(
         )
     except BaseBusinessException as e:
         detail = t(e.message, default=e.message, **e.kwargs)
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_FAILED, detail=detail) from e
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_FAILED, detail=detail) from e
     except Exception as e:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_FAILED, detail=str(e)) from e
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_FAILED, detail=str(e)) from e
 
     return StandardResponse.success(
         data={"models": models},
-        message=constants.MSG_CHANNEL_MODEL_LIST_SUCCESS,
+        message=MSG_CHANNEL_MODEL_LIST_SUCCESS,
     )
 
 
@@ -218,13 +241,13 @@ async def test_channel_chat(
     model_id = payload.model_id
 
     if not channel_type:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
     if not base_url:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_URL)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
     if not model_id or not model_id.strip():
-        raise ParameterException(constants.ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
+        raise ParameterException(ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
 
     try:
         response = await LLMClient.generate(
@@ -244,18 +267,18 @@ async def test_channel_chat(
         else:
             reply = json.dumps(content, ensure_ascii=False) if content else ""
         if not reply:
-            raise ParameterException(constants.ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE)
+            raise ParameterException(ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE)
     except ParameterException:
         raise
     except BaseBusinessException as e:
         detail = t(e.message, default=e.message, **e.kwargs)
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=detail) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=detail) from e
     except Exception as e:
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
 
     return StandardResponse.success(
         data={"model": response.model, "reply": reply, "usage": response.usage},
-        message=constants.MSG_CHANNEL_CHAT_TEST_SUCCESS,
+        message=MSG_CHANNEL_CHAT_TEST_SUCCESS,
     )
 
 
@@ -270,13 +293,13 @@ async def test_channel_image_generation(
     model_id = payload.model_id
 
     if not channel_type:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
     if not base_url:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_URL)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
-        raise ParameterException(constants.ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
+        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
     if not model_id or not model_id.strip():
-        raise ParameterException(constants.ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
+        raise ParameterException(ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
 
     try:
         response = await ImageGenerationClient.generate_image(
@@ -292,24 +315,24 @@ async def test_channel_image_generation(
         )
         images = response.get("data") if isinstance(response, dict) else None
         if not isinstance(images, list) or not images:
-            raise ParameterException(constants.ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE)
+            raise ParameterException(ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE)
         first_image = images[0] if isinstance(images[0], dict) else {}
         if not first_image.get("url") and not first_image.get("b64_json"):
-            raise ParameterException(constants.ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE)
+            raise ParameterException(ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE)
     except ParameterException:
         raise
     except BaseBusinessException as e:
         detail = t(e.message, default=e.message, **e.kwargs)
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=detail) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=detail) from e
     except Exception as e:
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
 
     return StandardResponse.success(
         data={
             "model": response.get("model", model_id.strip()) if isinstance(response, dict) else model_id.strip(),
             "image": first_image,
         },
-        message=constants.MSG_CHANNEL_IMAGE_GENERATION_TEST_SUCCESS,
+        message=MSG_CHANNEL_IMAGE_GENERATION_TEST_SUCCESS,
     )
 
 
@@ -322,11 +345,11 @@ async def update_channel(
 ):
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
-        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
 
     if channel_in.name and channel_in.name != db_obj.name:
         if await channel_crud.get_by_name(db, channel_in.name):
-            raise ParameterException(constants.ERR_CHANNEL_NAME_EXISTS)
+            raise ParameterException(ERR_CHANNEL_NAME_EXISTS)
 
     # 校验 model_ids 合法性（如果传入）
     if channel_in.model_ids is not None:
@@ -336,13 +359,13 @@ async def update_channel(
             return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
     if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
-        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_SCHEME)
+        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_SCHEME)
 
     # 跨字段校验：所有可调用模型类型都依赖 base_url 拼接供应商接口路径。
     final_model_ids = channel_in.model_ids if channel_in.model_ids is not None else db_obj.model_ids
     final_base_url = channel_in.base_url if "base_url" in channel_in.model_fields_set else db_obj.base_url
     if final_model_ids and not final_base_url:
-        return StandardResponse.error(code=422, message=constants.ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
+        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
 
     # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
     old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
@@ -386,7 +409,7 @@ async def update_channel(
             "synced_audit_refs": synced_audit_refs,
             "cleared_audit_refs": cleared_audit_refs,
         },
-        message=constants.MSG_CHANNEL_UPDATED,
+        message=MSG_CHANNEL_UPDATED,
     )
 
 
@@ -398,7 +421,7 @@ async def delete_channel(
 ):
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
-        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
 
     try:
         removed_profile_rules = await _remove_unavailable_channel_rules(db, channel_id, [])
@@ -411,7 +434,7 @@ async def delete_channel(
 
     return StandardResponse.success(
         data={"removed_profile_rules": removed_profile_rules, "cleared_audit_refs": cleared_audit_refs},
-        message=constants.MSG_CHANNEL_DELETED,
+        message=MSG_CHANNEL_DELETED,
     )
 
 
@@ -425,10 +448,10 @@ async def test_embedding_dimension(
     """自动检测嵌入模型的输出维度。"""
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
-        raise ResourceNotFoundException(constants.ERR_CHANNEL_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
 
     if not db_obj.base_url:
-        raise ParameterException(constants.ERR_CHANNEL_TEST_NO_URL)
+        raise ParameterException(ERR_CHANNEL_TEST_NO_URL)
 
     try:
         embedding_response = await EmbeddingClient.get_embeddings(
@@ -442,15 +465,15 @@ async def test_embedding_dimension(
             dimension = len(embedding_response["data"][0]["embedding"])
             return StandardResponse.success(
                 data={"dimension": dimension},
-                message=constants.MSG_CHANNEL_TEST_SUCCESS,
+                message=MSG_CHANNEL_TEST_SUCCESS,
                 dim=dimension,
             )
         else:
-            raise ParameterException(constants.ERR_CHANNEL_TEST_DIMENSION_ERROR)
+            raise ParameterException(ERR_CHANNEL_TEST_DIMENSION_ERROR)
     except ParameterException:
         raise
     except BaseBusinessException as e:
         detail = t(e.message, default=e.message, **e.kwargs)
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=detail) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=detail) from e
     except Exception as e:
-        raise ParameterException(constants.ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
+        raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e

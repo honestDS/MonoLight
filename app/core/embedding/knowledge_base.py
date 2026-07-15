@@ -7,7 +7,14 @@ from fastapi import HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_KB_NOT_FOUND_FOR_QUERY,
+    ERR_KB_NOT_IN_PROFILE,
+    ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED,
+    ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL,
+    ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND,
+    ERR_PROFILE_NO_EMBEDDING_MODEL,
+)
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -50,11 +57,11 @@ async def embed_chunks_with_knowledge_base_config(
 ) -> list[list[float]]:
     channel = await db.get(ModelChannel, kb.embedding_channel_id)
     if not channel:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
     if not channel.is_active:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
     if not channel.base_url:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
 
     model_entry = None
     for item in channel.model_ids or []:
@@ -62,7 +69,7 @@ async def embed_chunks_with_knowledge_base_config(
             model_entry = item
             break
     if not model_entry:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_NO_EMBEDDING_MODEL)
 
     model_timeout = model_entry.get("embedding_timeout")
     embedding_timeout = min(float(model_timeout), 600.0) if model_timeout else 30.0
@@ -120,12 +127,12 @@ async def query_knowledge_base(
     """根据知识库 ID 检索知识库。"""
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND_FOR_QUERY)
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND_FOR_QUERY)
 
     if require_binding:
         binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.profile_id == profile.id))
         if not binding_result.scalars().first():
-            raise HTTPException(status_code=403, detail=constants.ERR_KB_NOT_IN_PROFILE)
+            raise HTTPException(status_code=403, detail=ERR_KB_NOT_IN_PROFILE)
 
     query_embedding = (await embed_chunks_with_knowledge_base_config(db, kb, [query], 1))[0]
     final_top_k = top_k

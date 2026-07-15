@@ -6,7 +6,17 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_ONLY_ADMIN_ALLOWED,
+    ERR_PROMPT_IN_USE,
+    ERR_PROMPT_NAME_EXISTS,
+    ERR_PROMPT_NOT_FOUND,
+    ERR_PROMPT_REPLACEMENT_INVALID,
+    ERR_SESSION_NO_PERMISSION,
+    MSG_PROMPT_CREATED,
+    MSG_PROMPT_DELETED,
+    MSG_PROMPT_UPDATED,
+)
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
 from app.core.exceptions import (
@@ -35,7 +45,7 @@ router = APIRouter(
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
@@ -67,12 +77,12 @@ async def create_prompt(
 ):
     data.uid = None if getattr(current_user, "is_superuser", False) and data.uid is None else current_user.uid
     if await prompt_crud.get_by_name(db, data.name, uid=data.uid):
-        raise ParameterException(constants.ERR_PROMPT_NAME_EXISTS)
+        raise ParameterException(ERR_PROMPT_NAME_EXISTS)
 
     db_prompt = await prompt_crud.create(db, obj_in=data)
     return StandardResponse.success(
         data=PromptResponse.model_validate(db_prompt),
-        message=constants.MSG_PROMPT_CREATED,
+        message=MSG_PROMPT_CREATED,
     )
 
 
@@ -85,18 +95,18 @@ async def update_prompt(
 ):
     db_prompt = await prompt_crud.get(db, prompt_id)
     if not db_prompt:
-        raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
     if db_prompt.uid != current_user.uid and not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     if data.name and data.name != db_prompt.name:
         if await prompt_crud.get_by_name(db, data.name, uid=db_prompt.uid):
-            raise ParameterException(constants.ERR_PROMPT_NAME_EXISTS)
+            raise ParameterException(ERR_PROMPT_NAME_EXISTS)
 
     db_prompt = await prompt_crud.update(db, db_obj=db_prompt, obj_in=data)
     return StandardResponse.success(
         data=PromptResponse.model_validate(db_prompt),
-        message=constants.MSG_PROMPT_UPDATED,
+        message=MSG_PROMPT_UPDATED,
     )
 
 
@@ -110,27 +120,27 @@ async def delete_prompt(
 ):
     db_prompt = await prompt_crud.get(db, prompt_id)
     if not db_prompt:
-        raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
     if db_prompt.uid != current_user.uid and not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     referenced_profiles = await profile_crud.get_multi_by_prompt_id(db, prompt_id)
     if referenced_profiles:
         if not getattr(current_user, "is_superuser", False):
-            raise ParameterException(constants.ERR_PROMPT_IN_USE)
+            raise ParameterException(ERR_PROMPT_IN_USE)
         if not confirm_reassign or not replacement_prompt_id:
             response = StandardResponse.error(
                 code=409,
-                message=constants.ERR_PROMPT_IN_USE,
+                message=ERR_PROMPT_IN_USE,
             )
             response.data = {"referenced_count": len(referenced_profiles)}
             return JSONResponse(status_code=409, content=response.model_dump())
         if replacement_prompt_id == prompt_id:
-            raise ParameterException(constants.ERR_PROMPT_REPLACEMENT_INVALID)
+            raise ParameterException(ERR_PROMPT_REPLACEMENT_INVALID)
         replacement_prompt = await prompt_crud.get(db, replacement_prompt_id)
         if not replacement_prompt or replacement_prompt.uid is not None:
-            raise ParameterException(constants.ERR_PROMPT_REPLACEMENT_INVALID)
+            raise ParameterException(ERR_PROMPT_REPLACEMENT_INVALID)
         await profile_crud.reassign_prompt(db, source_prompt_id=prompt_id, target_prompt_id=replacement_prompt_id)
 
     await prompt_crud.remove(db, id=prompt_id)
-    return StandardResponse.success(message=constants.MSG_PROMPT_DELETED)
+    return StandardResponse.success(message=MSG_PROMPT_DELETED)

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from app.core import constants
+from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.utils.dispatcher import helpers
@@ -41,7 +41,7 @@ def _build_message_response(content: str) -> MessageResponse:
 def test_format_exception_message_preserves_business_error(monkeypatch):
     log = CapturingLogger()
     monkeypatch.setattr(helpers, "logger", log)
-    exc = ParameterException(message=constants.ERR_VALIDATION_FAILED)
+    exc = ParameterException(message=ERR_VALIDATION_FAILED)
 
     message = helpers.format_exception_message(exc)
 
@@ -56,7 +56,7 @@ def test_format_exception_message_hides_unknown_error_and_logs_details(monkeypat
 
     message = helpers.format_exception_message(exc)
 
-    assert message == t(constants.ERR_INTERNAL_SERVER_ERROR)
+    assert message == t(ERR_INTERNAL_SERVER_ERROR)
     assert "sensitive implementation detail" not in message
     assert log.bindings == [
         {

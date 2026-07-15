@@ -3,7 +3,7 @@ import time
 
 from fastapi import HTTPException
 
-from app.core import constants
+from app.core.constants import ERR_KB_DENSE_RETRIEVAL_FAILED
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.retrieval.fusion import reciprocal_rank_fusion
@@ -98,7 +98,7 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
         logger.bind(collection_name=collection_name, retrieval_type="dense").error(t("LOG_RETRIEVAL_DENSE_FAILED", error=str(dense_result)))
         if isinstance(dense_result, HTTPException):
             raise dense_result
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DENSE_RETRIEVAL_FAILED))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_DENSE_RETRIEVAL_FAILED))
 
     dense_hits = dense_result
     logger.bind(collection_name=collection_name, candidate_k=dense_candidate_k, hit_count=len(dense_hits), retrieval_type="dense", retrieval_stage="finished").info(t("LOG_RETRIEVAL_DENSE_FINISHED", count=len(dense_hits)))

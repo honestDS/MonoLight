@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import constants
+from app.core.constants import ERR_CONTEXT_SUMMARY_WORK_INVALID
 from app.core.i18n import t
 from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary import stage as stage_module
@@ -448,7 +448,7 @@ async def test_context_summary_work_invalid_before_persist_discards_candidate(
             work_validity_checker=check_work_validity,
         )
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_WORK_INVALID)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_WORK_INVALID)
     assert validity_checks == 3
     assert len(generated_calls) == 1
     assert update_calls == []

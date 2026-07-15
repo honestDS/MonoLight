@@ -5,8 +5,8 @@ get_profile_rerank_config() 走 rerank_channel 路由；超时从 model_entry �
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core import constants
 from app.core.channel_router import select_channel
+from app.core.constants import ERR_PROFILE_RERANK_CHANNEL_NO_URL
 from app.core.exceptions import RerankException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -57,7 +57,7 @@ async def get_profile_rerank_config(
     channel, model_entry, _rule = selection
 
     if not channel.base_url:
-        raise RerankException(constants.ERR_PROFILE_RERANK_CHANNEL_NO_URL)
+        raise RerankException(ERR_PROFILE_RERANK_CHANNEL_NO_URL)
 
     return RerankConfig(
         channel_id=channel.id,

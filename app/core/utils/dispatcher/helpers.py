@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core import constants
+from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -41,7 +41,7 @@ def format_exception_message(exc: Exception) -> str:
         exception_type=type(exc).__name__,
         exception_message=str(exc),
     ).opt(exception=exc).error(t("LOG_DISPATCHER_UNKNOWN_EXCEPTION"))
-    return t(constants.ERR_INTERNAL_SERVER_ERROR)
+    return t(ERR_INTERNAL_SERVER_ERROR)
 
 
 def extract_files_to_user(tool_responses: list[InternalMessage]) -> list[dict[str, Any]]:
@@ -142,7 +142,7 @@ def filter_background_proactive_tools(tools: list[dict[str, Any]], allowed_tool_
     allowed_names = allowed_tool_names or BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
     missing_tool_names = sorted(tool_name for tool_name in allowed_names if tool_name not in TOOL_EXECUTOR_MAP)
     if missing_tool_names:
-        raise ServerException(message=constants.ERR_INTERNAL_SERVER_ERROR, missing_tools=", ".join(missing_tool_names))
+        raise ServerException(message=ERR_INTERNAL_SERVER_ERROR, missing_tools=", ".join(missing_tool_names))
     return [tool for tool in tools if _get_tool_schema_name(tool) in allowed_names]
 
 
@@ -154,7 +154,7 @@ def get_unsupported_background_proactive_tool_names(tool_calls: list[InternalToo
 def validate_background_proactive_tool_calls(tool_calls: list[InternalToolCall], allowed_tool_names: set[str] | None = None) -> None:
     unsupported_tool_names = get_unsupported_background_proactive_tool_names(tool_calls, allowed_tool_names=allowed_tool_names)
     if unsupported_tool_names:
-        raise LLMException(message=constants.ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=", ".join(unsupported_tool_names))
+        raise LLMException(message=ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL, detail=", ".join(unsupported_tool_names))
 
 
 def reassemble_multimodal_messages(

@@ -1,6 +1,11 @@
 import json
 
-from app.core import constants
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE,
+    ERR_BACKGROUND_TASK_NOT_FOUND,
+    MSG_BACKGROUND_TASK_ALREADY_FINISHED,
+    MSG_BACKGROUND_TASK_CANCELLED,
+)
 from app.core.crud.background_task import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse, BackgroundTaskStatus
@@ -33,7 +38,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": t(constants.ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
+                    "error": t(ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
                 },
                 ensure_ascii=False,
             )
@@ -43,7 +48,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": t(constants.ERR_BACKGROUND_TASK_NOT_FOUND),
+                    "error": t(ERR_BACKGROUND_TASK_NOT_FOUND),
                     "task_id": task_id,
                 },
                 ensure_ascii=False,
@@ -52,7 +57,7 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
-                "message": t(constants.MSG_BACKGROUND_TASK_CANCELLED) if task.status == BackgroundTaskStatus.CANCELLED else t(constants.MSG_BACKGROUND_TASK_ALREADY_FINISHED),
+                "message": t(MSG_BACKGROUND_TASK_CANCELLED) if task.status == BackgroundTaskStatus.CANCELLED else t(MSG_BACKGROUND_TASK_ALREADY_FINISHED),
                 "task": BackgroundTaskResponse.model_validate(task).model_dump(mode="json"),
             },
             ensure_ascii=False,

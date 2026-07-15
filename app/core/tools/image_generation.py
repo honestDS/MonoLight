@@ -9,8 +9,17 @@ from urllib.parse import quote
 
 import aiohttp
 
-from app.core import constants
 from app.core.channel_router import select_channel
+from app.core.constants import (
+    ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED,
+    ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED,
+    ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE,
+    ERR_TOOL_IMAGE_EMPTY_RESPONSE,
+    ERR_TOOL_IMAGE_INVALID_ITEM,
+    ERR_TOOL_IMAGE_PROMPT_REQUIRED,
+    ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+    MSG_TOOL_IMAGE_SEND_INSTRUCTION,
+)
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -133,7 +142,7 @@ class ImageGenerationExecutor(BaseExecutor):
         self._log_image_save_started(source="remote_url", source_url=url)
         image_bytes, content_type = await self._download_remote_image(url)
         if not content_type.startswith("image/"):
-            raise ValueError(t(constants.ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED, content_type=content_type))
+            raise ValueError(t(ERR_IMAGE_CONTENT_TYPE_UNSUPPORTED, content_type=content_type))
         extension = mimetypes.guess_extension(content_type) or ".img"
         if extension == ".jpe":
             extension = ".jpg"
@@ -148,7 +157,7 @@ class ImageGenerationExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
-                "instruction": t(constants.MSG_TOOL_IMAGE_SEND_INSTRUCTION),
+                "instruction": t(MSG_TOOL_IMAGE_SEND_INSTRUCTION),
                 "send_file_to_user": {
                     "files": [
                         {
@@ -171,21 +180,21 @@ class ImageGenerationExecutor(BaseExecutor):
         **kwargs: Any,
     ) -> str:
         if not self.db or not self.profile or not self.cfg:
-            return json.dumps({"status": "failed", "error": t(constants.ERR_TOOL_RUNTIME_CONTEXT_MISSING)}, ensure_ascii=False)
+            return json.dumps({"status": "failed", "error": t(ERR_TOOL_RUNTIME_CONTEXT_MISSING)}, ensure_ascii=False)
 
         image_channel = self._get_channel_config()
         if not image_channel or not image_channel.rules:
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": t(constants.ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED),
+                    "error": t(ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED),
                 },
                 ensure_ascii=False,
             )
 
         prompt_text = (prompt or "").strip()
         if not prompt_text:
-            return json.dumps({"status": "failed", "error": t(constants.ERR_TOOL_IMAGE_PROMPT_REQUIRED)}, ensure_ascii=False)
+            return json.dumps({"status": "failed", "error": t(ERR_TOOL_IMAGE_PROMPT_REQUIRED)}, ensure_ascii=False)
 
         excluded_priorities: set[int] = set()
         last_error = ""
@@ -204,7 +213,7 @@ class ImageGenerationExecutor(BaseExecutor):
                 return json.dumps(
                     {
                         "status": "failed",
-                        "error": last_error or t(constants.ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE),
+                        "error": last_error or t(ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE),
                     },
                     ensure_ascii=False,
                 )
@@ -229,7 +238,7 @@ class ImageGenerationExecutor(BaseExecutor):
                     return json.dumps(
                         {
                             "status": "failed",
-                            "error": t(constants.ERR_TOOL_IMAGE_EMPTY_RESPONSE),
+                            "error": t(ERR_TOOL_IMAGE_EMPTY_RESPONSE),
                             "model": model_entry["model_id"],
                         },
                         ensure_ascii=False,
@@ -249,7 +258,7 @@ class ImageGenerationExecutor(BaseExecutor):
                 return json.dumps(
                     {
                         "status": "failed",
-                        "error": t(constants.ERR_TOOL_IMAGE_INVALID_ITEM),
+                        "error": t(ERR_TOOL_IMAGE_INVALID_ITEM),
                         "model": model_name,
                     },
                     ensure_ascii=False,

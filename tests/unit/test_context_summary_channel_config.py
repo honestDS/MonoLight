@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1 import profile as profile_api
-from app.core import constants
+from app.core.constants import ERR_CHANNEL_USAGE_MISMATCH
 from app.core.exceptions import ParameterException
 from app.core.utils import channel_profile_sync as channel_profile_sync_module
 from app.core.utils.context_summary import service as summary_service_module
@@ -158,7 +158,7 @@ async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
             },
         )
 
-    assert exc_info.value.message == constants.ERR_CHANNEL_USAGE_MISMATCH
+    assert exc_info.value.message == ERR_CHANNEL_USAGE_MISMATCH
 
 
 def test_channel_model_cleanup_includes_context_summary_rules():

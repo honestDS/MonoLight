@@ -2,7 +2,7 @@ import json
 
 from firecrawl import AsyncV1FirecrawlApp
 
-from app.core import constants
+from app.core.constants import ERR_TOOL_FIRECRAWL_API_KEY_MISSING, ERR_TOOL_FIRECRAWL_AUTH_FAILED, ERR_TOOL_FIRECRAWL_NETWORK_FAILED
 from app.core.i18n import t
 from app.core.utils.system import get_full_system_context
 
@@ -33,7 +33,7 @@ class FirecrawlSearchExecutor(BaseExecutor):
         api_key = self.cfg.tool.firecrawl_api_key if self.cfg else None
 
         if not api_key:
-            return json.dumps({"error": t(constants.ERR_TOOL_FIRECRAWL_API_KEY_MISSING), "system_info": system_info}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_FIRECRAWL_API_KEY_MISSING), "system_info": system_info}, ensure_ascii=False)
 
         try:
             self.logger.bind(uid=self.uid, query=query).info(t("LOG_FIRECRAWL_SEARCHING", limit=10, options={}))
@@ -53,9 +53,9 @@ class FirecrawlSearchExecutor(BaseExecutor):
             self.logger.bind(uid=self.uid, query=query).error(t("LOG_FIRECRAWL_SEARCH_FAILED"), exc_info=True)
             error_msg = str(e)
             if e is None or "NoneType" in error_msg:
-                error_msg = t(constants.ERR_TOOL_FIRECRAWL_NETWORK_FAILED)
+                error_msg = t(ERR_TOOL_FIRECRAWL_NETWORK_FAILED)
             elif "401" in error_msg or "Unauthorized" in error_msg:
-                error_msg = t(constants.ERR_TOOL_FIRECRAWL_AUTH_FAILED)
+                error_msg = t(ERR_TOOL_FIRECRAWL_AUTH_FAILED)
 
             return json.dumps({"error": error_msg, "system_info": system_info}, ensure_ascii=False)
 

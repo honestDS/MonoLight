@@ -7,7 +7,13 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core import constants
+from app.core.constants import (
+    ERR_LLM_UNEXPECTED_ERROR,
+    ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT,
+    ERR_SESSION_REPLY_NO_FOREGROUND_INPUT,
+    ERR_SESSION_REPLY_WORK_ENDED,
+    ERR_SESSION_REPLY_WORK_NOT_FOUND,
+)
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
@@ -48,7 +54,7 @@ async def _raise_work_failure(db: AsyncSession, work: SessionReplyWorkItem) -> N
     message = await db.get(Message, work.result_message_id) if work.result_message_id else None
     error_content = message.content if message and message.content else None
     raise BaseBusinessException(
-        message=error_content or constants.ERR_LLM_UNEXPECTED_ERROR,
+        message=error_content or ERR_LLM_UNEXPECTED_ERROR,
         default_message=error_content,
     )
 
@@ -198,7 +204,7 @@ class SessionReplyQueueManager:
         if not message_ids:
             if work.input_message_ids:
                 return await self._load_frozen_input(db, work.input_message_ids)
-            raise RuntimeError(t(constants.ERR_SESSION_REPLY_NO_FOREGROUND_INPUT))
+            raise RuntimeError(t(ERR_SESSION_REPLY_NO_FOREGROUND_INPUT))
 
         await db.execute(update(Message).where(Message.id.in_(message_ids)).values(is_processed=True))
         merged_ids = [item.id for item in contiguous[1:] if item.id is not None]
@@ -236,7 +242,7 @@ class SessionReplyQueueManager:
         )
         if not updated:
             await db.rollback()
-            raise RuntimeError(t(constants.ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
         await db.commit()
         return self._merge_messages(messages)
 
@@ -349,7 +355,7 @@ class SessionReplyQueueManager:
             async with AsyncSessionLocal() as db:
                 work = await session_reply_work_item_crud.resolve_merged_target(db, work_id)
                 if work is None:
-                    raise RuntimeError(t(constants.ERR_SESSION_REPLY_WORK_NOT_FOUND))
+                    raise RuntimeError(t(ERR_SESSION_REPLY_WORK_NOT_FOUND))
                 if work.status == SessionReplyWorkStatus.SUCCEEDED:
                     response = (work.execution_state or {}).get("response")
                     if isinstance(response, dict):
@@ -361,7 +367,7 @@ class SessionReplyQueueManager:
                 if work.status == SessionReplyWorkStatus.FAILED:
                     await _raise_work_failure(db, work)
                 if work.status == SessionReplyWorkStatus.CANCELLED:
-                    raise RuntimeError(work.error or t(constants.ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
+                    raise RuntimeError(work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)
 
     async def wait_for_stream(self, work_id: int):
@@ -373,7 +379,7 @@ class SessionReplyQueueManager:
             async with AsyncSessionLocal() as db:
                 work = await session_reply_work_item_crud.resolve_merged_target(db, target_work_id)
                 if work is None:
-                    raise RuntimeError(t(constants.ERR_SESSION_REPLY_WORK_NOT_FOUND))
+                    raise RuntimeError(t(ERR_SESSION_REPLY_WORK_NOT_FOUND))
                 if work.id != target_work_id:
                     target_work_id = work.id
                     after_sequence_no = 0
@@ -404,7 +410,7 @@ class SessionReplyQueueManager:
                 if work.status == SessionReplyWorkStatus.FAILED:
                     await _raise_work_failure(db, work)
                 if work.status == SessionReplyWorkStatus.CANCELLED:
-                    raise RuntimeError(work.error or t(constants.ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
+                    raise RuntimeError(work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)
 
 

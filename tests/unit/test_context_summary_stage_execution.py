@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import constants
+from app.core.constants import ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED, ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING
 from app.core.i18n import t
 from app.core.utils.context_summary import reduction as reduction_module
 from app.core.utils.context_summary import stage as stage_module
@@ -234,7 +234,7 @@ async def test_multifragment_stage_invalidates_when_work_lease_is_lost(
         )
 
     assert str(exc_info.value) == t(
-        constants.ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
+        ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
         stage="fragment execution",
     )
     assert validity_checks >= 4
@@ -549,7 +549,7 @@ async def test_refinement_stage_invalidates_recovered_non_reducing_fragment(
         )
 
     assert str(exc_info.value) == t(
-        constants.ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED,
+        ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED,
         stage="refinement",
     )
     assert [event[0] for event in events] == ["fail", "invalidate"]

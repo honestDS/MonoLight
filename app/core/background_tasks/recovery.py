@@ -1,4 +1,4 @@
-from app.core import constants
+from app.core.constants import ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.i18n import t
@@ -14,7 +14,7 @@ async def recover_pending_background_tasks() -> list[int]:
     offset = 0
     limit = 100
     reply_task_ids: list[int] = []
-    max_attempts_error = t(constants.ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED)
+    max_attempts_error = t(ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED)
     while True:
         async with AsyncSessionLocal() as db:
             profiles = await profile_crud.get_multi_all(db, skip=offset, limit=limit)

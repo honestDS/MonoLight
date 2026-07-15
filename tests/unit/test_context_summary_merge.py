@@ -2,7 +2,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import constants
+from app.core.constants import (
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP,
+    ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS,
+    ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED,
+    ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE,
+    ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET,
+)
 from app.core.i18n import t
 from app.core.utils.context_summary import merge as merge_module
 from app.core.utils.context_summary.merge import (
@@ -164,7 +170,7 @@ async def test_completed_lower_stage_iterator_rejects_uncompleted_stage(
             )
         )
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_LOWER_STAGE_INCOMPLETE)
 
 
 @pytest.mark.asyncio
@@ -211,7 +217,7 @@ async def test_completed_lower_stage_iterator_rejects_identity_change_between_pa
             )
         ]
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_LOWER_STAGE_CHANGED)
 
 
 @pytest.mark.asyncio
@@ -253,7 +259,7 @@ async def test_completed_lower_stage_iterator_rejects_incomplete_fragment_sequen
             )
         ]
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENTS_DISCONTINUOUS)
 
 
 @pytest.mark.asyncio
@@ -375,7 +381,7 @@ async def test_merge_groups_reject_fragment_metadata_larger_than_budget():
             )
         ]
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_MERGE_METADATA_OVER_BUDGET)
 
 
 @pytest.mark.asyncio
@@ -403,4 +409,4 @@ async def test_merge_groups_reject_overlapping_ranges():
             )
         ]
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_LOWER_FRAGMENT_RANGES_OVERLAP)

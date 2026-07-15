@@ -10,7 +10,27 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core import constants
+from app.core.constants import (
+    ERR_ACTIVATE_NO_CHANNEL,
+    ERR_CHANNEL_MODEL_NOT_FOUND,
+    ERR_CHANNEL_NOT_FOUND,
+    ERR_CHANNEL_USAGE_MISMATCH,
+    ERR_DELETE_ACTIVE_PROFILE,
+    ERR_DELETE_LAST_PROFILE,
+    ERR_KB_NOT_FOUND,
+    ERR_ONLY_ADMIN_ALLOWED,
+    ERR_PROFILE_AUDIT_MODEL_NOT_CHAT,
+    ERR_PROFILE_CHANNEL_CONFIG_INVALID,
+    ERR_PROFILE_NAME_EXISTS,
+    ERR_PROFILE_NOT_FOUND,
+    ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL,
+    ERR_PROMPT_NOT_FOUND,
+    ERR_SESSION_NO_PERMISSION,
+    MSG_PROFILE_ACTIVATED,
+    MSG_PROFILE_CREATED,
+    MSG_PROFILE_DELETED,
+    MSG_PROFILE_UPDATED,
+)
 from app.core.crud.channel import channel_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
@@ -73,7 +93,7 @@ async def replace_profile_knowledge_base_bindings(db: AsyncSession, profile_id: 
         result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id.in_(normalized_kb_ids)).where(KnowledgeBase.uid == uid))
         knowledge_bases = list(result.scalars().all())
         if len(knowledge_bases) != len(normalized_kb_ids):
-            raise ResourceNotFoundException(constants.ERR_KB_NOT_FOUND)
+            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
 
     existing_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
     for binding in existing_result.scalars().all():
@@ -95,7 +115,7 @@ async def build_profile_response(db: AsyncSession, profile: object, *, username:
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
@@ -108,11 +128,11 @@ async def validate_audit_model_config(db: AsyncSession, security_config: dict) -
 
     channel = await channel_crud.get(db, audit_channel_id)
     if not channel:
-        raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
 
     is_chat_model = any(item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT for item in (channel.model_ids or []))
     if not is_chat_model:
-        raise ParameterException(constants.ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
 
 
 async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: ChannelConfig, expected_usage: ModelUsage) -> None:
@@ -120,7 +140,7 @@ async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: Chan
     for rule in channel_config_obj.rules:
         channel = await channel_crud.get(db, rule.channel_id)
         if not channel:
-            raise ParameterException(constants.ERR_CHANNEL_NOT_FOUND)
+            raise ParameterException(ERR_CHANNEL_NOT_FOUND)
 
         matched_model = None
         for item in channel.model_ids or []:
@@ -130,11 +150,11 @@ async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: Chan
                     break
 
         if not matched_model:
-            raise ParameterException(constants.ERR_CHANNEL_MODEL_NOT_FOUND)
+            raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
 
         actual_usage = str(matched_model.get("usage"))
         if actual_usage != expected_usage.value:
-            raise ParameterException(constants.ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
+            raise ParameterException(ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
 
 
 async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> None:
@@ -162,7 +182,7 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
             channel_config_obj = ChannelConfig.model_validate(channel_raw)
         except Exception as e:
             raise ParameterException(
-                constants.ERR_PROFILE_CHANNEL_CONFIG_INVALID,
+                ERR_PROFILE_CHANNEL_CONFIG_INVALID,
                 channel_key=channel_key,
                 error=str(e),
             ) from e
@@ -170,7 +190,7 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
         await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
 
         if expected_usage == ModelUsage.RERANK and channel_config_obj.rerank_candidate_k < channel_config_obj.kb_query_top_k:
-            raise ParameterException(constants.ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
+            raise ParameterException(ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
@@ -182,7 +202,7 @@ async def create_profile(
     if getattr(current_user, "is_superuser", False):
         profile_in.uid = profile_in.uid or current_user.uid
     elif profile_in.uid and profile_in.uid != current_user.uid:
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
     else:
         profile_in.uid = current_user.uid
     profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
@@ -191,11 +211,11 @@ async def create_profile(
     await validate_audit_model_config(db, profile_in.configs.get("security", {}))
 
     if await profile_crud.get_by_name(db, profile_in.name, uid=profile_in.uid):
-        raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
+        raise ParameterException(ERR_PROFILE_NAME_EXISTS)
 
     if profile_in.prompt_id:
         if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=profile_in.uid):
-            raise ParameterException(constants.ERR_PROMPT_NOT_FOUND)
+            raise ParameterException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
     db_profile = await profile_crud.create(db, obj_in=profile_in.model_dump(exclude={"knowledge_base_ids"}))
@@ -205,7 +225,7 @@ async def create_profile(
     res_data = await build_profile_response(db, db_profile)
     return StandardResponse.success(
         data=res_data,
-        message=constants.MSG_PROFILE_CREATED,
+        message=MSG_PROFILE_CREATED,
     )
 
 
@@ -254,21 +274,21 @@ async def activate_profile(
 ):
     profile = await profile_crud.get(db, profile_id)
     if not profile:
-        raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     if profile.uid != current_user.uid:
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     # 校验 chat_channel 配置存在
     channel_config = profile.configs.get("channel", {})
     chat_channel = channel_config.get("chat_channel")
     if not chat_channel or not chat_channel.get("rules"):
-        raise ParameterException(constants.ERR_ACTIVATE_NO_CHANNEL)
+        raise ParameterException(ERR_ACTIVATE_NO_CHANNEL)
     await validate_channel_configs(db, channel_config)
 
     await profile_crud.deactivate_by_uid(db, profile.uid)
     profile.is_active = True
     await db.commit()
-    return StandardResponse.success(message=constants.MSG_PROFILE_ACTIVATED)
+    return StandardResponse.success(message=MSG_PROFILE_ACTIVATED)
 
 
 @router.post("/update", response_model=StandardResponse[ProfileResponse])
@@ -280,9 +300,9 @@ async def update_profile(
 ):
     db_profile = await profile_crud.get(db, profile_id)
     if not db_profile:
-        raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     if profile_in.configs:
         profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
@@ -292,11 +312,11 @@ async def update_profile(
 
     if profile_in.name and profile_in.name != db_profile.name:
         if await profile_crud.get_by_name(db, profile_in.name, uid=db_profile.uid):
-            raise ParameterException(constants.ERR_PROFILE_NAME_EXISTS)
+            raise ParameterException(ERR_PROFILE_NAME_EXISTS)
 
     if profile_in.prompt_id:
         if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=db_profile.uid):
-            raise ResourceNotFoundException(constants.ERR_PROMPT_NOT_FOUND)
+            raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
     db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in.model_dump(exclude={"knowledge_base_ids"}, exclude_unset=True))
@@ -306,7 +326,7 @@ async def update_profile(
     res_data = await build_profile_response(db, db_profile)
     return StandardResponse.success(
         data=res_data,
-        message=constants.MSG_PROFILE_UPDATED,
+        message=MSG_PROFILE_UPDATED,
     )
 
 
@@ -318,19 +338,19 @@ async def delete_profile(
 ):
     db_profile = await profile_crud.get(db, profile_id)
     if not db_profile:
-        raise ResourceNotFoundException(constants.ERR_PROFILE_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
-        raise ForbiddenException(constants.ERR_SESSION_NO_PERMISSION)
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
     count = len(await profile_crud.get_multi(db, uid=db_profile.uid))
     if count <= 1:
-        raise ParameterException(constants.ERR_DELETE_LAST_PROFILE)
+        raise ParameterException(ERR_DELETE_LAST_PROFILE)
 
     if db_profile.is_active:
-        raise ParameterException(constants.ERR_DELETE_ACTIVE_PROFILE)
+        raise ParameterException(ERR_DELETE_ACTIVE_PROFILE)
 
     binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
     for binding in binding_result.scalars().all():
         await db.delete(binding)
     await profile_crud.remove(db, id=profile_id)
-    return StandardResponse.success(message=constants.MSG_PROFILE_DELETED)
+    return StandardResponse.success(message=MSG_PROFILE_DELETED)

@@ -1,6 +1,12 @@
 import json
 
-from app.core import constants
+from app.core.constants import (
+    ERR_TOOL_INVALID_INTEGER_ARGUMENT,
+    ERR_TOOL_KNOWLEDGE_BASE_QUERY_FAILED,
+    ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
+    ERR_TOOL_RUNTIME_CONTEXT_MISSING,
+    ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE,
+)
 from app.core.embedding.knowledge_base import get_profile_kb_query_top_k, query_knowledge_base
 from app.core.i18n import t
 from app.core.tools.base import BaseExecutor
@@ -25,19 +31,19 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
         query = kwargs.get("query")
 
         if kb_id is None or query is None:
-            return json.dumps({"error": t(constants.ERR_TOOL_MISSING_REQUIRED_ARGUMENTS, fields="knowledge_base_id, query")}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_MISSING_REQUIRED_ARGUMENTS, fields="knowledge_base_id, query")}, ensure_ascii=False)
 
         try:
             kb_id = int(kb_id)
         except (TypeError, ValueError):
-            return json.dumps({"error": t(constants.ERR_TOOL_INVALID_INTEGER_ARGUMENT, field="knowledge_base_id", value=kb_id)}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_INVALID_INTEGER_ARGUMENT, field="knowledge_base_id", value=kb_id)}, ensure_ascii=False)
 
         # 校验白名单
         if not self.allowed_knowledge_base_ids or kb_id not in self.allowed_knowledge_base_ids:
-            return json.dumps({"error": t(constants.ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE, knowledge_base_id=kb_id)}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_UNAUTHORIZED_KNOWLEDGE_BASE, knowledge_base_id=kb_id)}, ensure_ascii=False)
 
         if not self.db or not self.profile:
-            return json.dumps({"error": t(constants.ERR_TOOL_RUNTIME_CONTEXT_MISSING)}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_RUNTIME_CONTEXT_MISSING)}, ensure_ascii=False)
 
         try:
             # 最终返回数量从 Profile 配置读取（缺省回退默认值）
@@ -62,4 +68,4 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
                 )
             return json.dumps({"items": items}, ensure_ascii=False)
         except Exception as e:
-            return json.dumps({"error": t(constants.ERR_TOOL_KNOWLEDGE_BASE_QUERY_FAILED, error=str(e))}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_TOOL_KNOWLEDGE_BASE_QUERY_FAILED, error=str(e))}, ensure_ascii=False)

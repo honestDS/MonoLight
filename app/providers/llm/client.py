@@ -4,7 +4,7 @@ from typing import (
     Any,
 )
 
-from app.core import constants
+from app.core.constants import ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, ERR_LLM_UNSUPPORTED_PROTOCOL
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
 from app.core.utils.tokenizer import estimate_tokens
@@ -94,7 +94,7 @@ class LLMClient:
     ) -> list[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(constants.ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, protocol=protocol)
+            raise LLMException(ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, protocol=protocol)
 
         return await transformer.list_models(
             api_key=api_key,
@@ -120,7 +120,7 @@ class LLMClient:
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
+            raise LLMException(message=ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
 
         _log_request_context(
             model_id=model_id,
@@ -252,7 +252,7 @@ class LLMClient:
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
+            raise LLMException(message=ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
 
         _log_request_context(
             model_id=model_id,

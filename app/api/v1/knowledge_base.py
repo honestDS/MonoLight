@@ -6,7 +6,30 @@ from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_KB_CHUNK_OVERLAP_ERROR,
+    ERR_KB_COLLECTION_CREATE_FAILED,
+    ERR_KB_CREATE_FAILED_WITH_ROLLBACK,
+    ERR_KB_DELETE_FAILED,
+    ERR_KB_DOC_DELETE_FAILED,
+    ERR_KB_DOC_NOT_FOUND,
+    ERR_KB_DOC_SAVE_FAILED,
+    ERR_KB_FILE_EMPTY,
+    ERR_KB_FILE_ENCODING_ERROR,
+    ERR_KB_NOT_FOUND,
+    ERR_KB_VECTOR_WRITE_FAILED,
+    ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED,
+    ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL,
+    ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND,
+    ERR_PROFILE_NO_EMBEDDING_MODEL,
+    ERR_PROFILE_NOT_FOUND,
+    ERR_SESSION_NO_PERMISSION,
+    MSG_KB_CREATED,
+    MSG_KB_DELETED,
+    MSG_KB_DOC_CREATED,
+    MSG_KB_DOC_DELETED,
+    MSG_KB_UPDATED,
+)
 from app.core.crud.profile import profile_crud
 
 # Re-use the refactored embedding and knowledge base query core functions
@@ -44,9 +67,9 @@ router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"])
 async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
-        raise HTTPException(status_code=403, detail=constants.ERR_SESSION_NO_PERMISSION)
+        raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
     return kb
 
 
@@ -74,16 +97,16 @@ async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> 
 async def load_embedding_model(db: AsyncSession, channel_id: int, model_id: str) -> tuple[ModelChannel, dict[str, Any]]:
     channel = await db.get(ModelChannel, channel_id)
     if not channel:
-        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
     if not channel.is_active:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
     if not channel.base_url:
-        raise HTTPException(status_code=400, detail=constants.ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
+        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
 
     for item in channel.model_ids or []:
         if item.get("model_id") == model_id and item.get("usage") == ModelUsage.EMBEDDING and item.get("is_enabled", True):
             return channel, item
-    raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NO_EMBEDDING_MODEL)
+    raise HTTPException(status_code=404, detail=ERR_PROFILE_NO_EMBEDDING_MODEL)
 
 
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
@@ -108,14 +131,14 @@ async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]
 async def load_user_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> tuple[KnowledgeBase, Profile]:
     kb = await db.get(KnowledgeBase, kb_id)
     if not kb:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
 
     result = await db.execute(select(Profile).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(Profile.uid == getattr(current_user, "uid", None)))
     profile = result.scalars().first()
     if not profile:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
 
     return kb, profile
 
@@ -137,7 +160,7 @@ async def create_knowledge_base(
     try:
         create_collection(collection_name)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
     # 存入关系型数据库
     db_kb = KnowledgeBase(
@@ -159,9 +182,9 @@ async def create_knowledge_base(
             delete_collection(collection_name)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_CREATE_FAILED_WITH_ROLLBACK, message=str(e)))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_CREATE_FAILED_WITH_ROLLBACK, message=str(e)))
 
-    return StandardResponse.success(data=await build_knowledge_base_response(db, db_kb), message=constants.MSG_KB_CREATED)
+    return StandardResponse.success(data=await build_knowledge_base_response(db, db_kb), message=MSG_KB_CREATED)
 
 
 @router.get("/list", response_model=StandardResponse[KnowledgeBaseListResponse])
@@ -214,7 +237,7 @@ async def update_knowledge_base(
     db.add(kb)
     await db.commit()
     await db.refresh(kb)
-    return StandardResponse.success(data=await build_knowledge_base_response(db, kb), message=constants.MSG_KB_UPDATED)
+    return StandardResponse.success(data=await build_knowledge_base_response(db, kb), message=MSG_KB_UPDATED)
 
 
 @router.get("/profile-bindings", response_model=StandardResponse[list[int]])
@@ -225,9 +248,9 @@ async def get_profile_knowledge_base_bindings(
 ):
     profile = await db.get(Profile, profile_id)
     if not profile:
-        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
-        raise HTTPException(status_code=403, detail=constants.ERR_SESSION_NO_PERMISSION)
+        raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
 
     result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBase.uid == profile.uid))
     return StandardResponse.success(data=list(result.scalars().all()))
@@ -242,16 +265,16 @@ async def update_profile_knowledge_base_bindings(
 ):
     profile = await db.get(Profile, profile_id)
     if not profile:
-        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
-        raise HTTPException(status_code=403, detail=constants.ERR_SESSION_NO_PERMISSION)
+        raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
 
     normalized_kb_ids = list(dict.fromkeys(binding_in.knowledge_base_ids))
     if normalized_kb_ids:
         result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id.in_(normalized_kb_ids)).where(KnowledgeBase.uid == profile.uid))
         knowledge_bases = list(result.scalars().all())
         if len(knowledge_bases) != len(normalized_kb_ids):
-            raise HTTPException(status_code=404, detail=constants.ERR_KB_NOT_FOUND)
+            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
 
     existing_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
     for binding in existing_result.scalars().all():
@@ -276,7 +299,7 @@ async def query_test_knowledge_base(
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
     profile = await profile_crud.get_active(db, uid=kb.uid)
     if not profile:
-        raise HTTPException(status_code=404, detail=constants.ERR_PROFILE_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
 
     response_data = await query_knowledge_base(db, profile, kb_id, query_in.query, query_in.top_k, expose_rerank_error=True, require_binding=False)
     return StandardResponse.success(data=response_data)
@@ -305,9 +328,9 @@ async def delete_knowledge_base(
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DELETE_FAILED, message=str(e)))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_DELETE_FAILED, message=str(e)))
 
-    return StandardResponse.success(data=True, message=constants.MSG_KB_DELETED)
+    return StandardResponse.success(data=True, message=MSG_KB_DELETED)
 
 
 @router.post("/documents/import", response_model=StandardResponse[KnowledgeBaseDocumentResponse])
@@ -323,7 +346,7 @@ async def import_document(
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
     if chunk_overlap >= chunk_size:
-        raise HTTPException(status_code=400, detail=constants.ERR_KB_CHUNK_OVERLAP_ERROR)
+        raise HTTPException(status_code=400, detail=ERR_KB_CHUNK_OVERLAP_ERROR)
 
     raw_content = await file.read()
     try:
@@ -332,11 +355,11 @@ async def import_document(
         try:
             content = raw_content.decode("gbk")
         except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail=constants.ERR_KB_FILE_ENCODING_ERROR)
+            raise HTTPException(status_code=400, detail=ERR_KB_FILE_ENCODING_ERROR)
 
     chunks = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap).split(content)
     if not chunks:
-        raise HTTPException(status_code=400, detail=constants.ERR_KB_FILE_EMPTY)
+        raise HTTPException(status_code=400, detail=ERR_KB_FILE_EMPTY)
 
     embeddings = await embed_chunks_with_knowledge_base_config(db, kb, chunks, batch_size)
     document_uuid = uuid.uuid4().hex
@@ -357,7 +380,7 @@ async def import_document(
         collection = get_or_create_collection(kb.collection_name)
         collection.add(ids=chunk_ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
 
     db_document = KnowledgeBaseDocument(
         knowledge_base_id=kb.id,
@@ -380,9 +403,9 @@ async def import_document(
             delete_collection_items(kb.collection_name, chunk_ids)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DOC_SAVE_FAILED, message=str(e)))
+        raise HTTPException(status_code=500, detail=t(ERR_KB_DOC_SAVE_FAILED, message=str(e)))
 
-    return StandardResponse.success(data=KnowledgeBaseDocumentResponse.model_validate(db_document), message=constants.MSG_KB_DOC_CREATED)
+    return StandardResponse.success(data=KnowledgeBaseDocumentResponse.model_validate(db_document), message=MSG_KB_DOC_CREATED)
 
 
 @router.get("/documents/list", response_model=StandardResponse[KnowledgeBaseDocumentListResponse])
@@ -425,7 +448,7 @@ async def get_document_content(
     await load_owned_knowledge_base(db, kb_id, current_user)
     document = await db.get(KnowledgeBaseDocument, document_id)
     if not document or document.knowledge_base_id != kb_id:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_DOC_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
     return StandardResponse.success(data=KnowledgeBaseDocumentContentResponse.model_validate(document))
 
 
@@ -440,7 +463,7 @@ async def delete_document(
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
     document = await db.get(KnowledgeBaseDocument, document_id)
     if not document or document.knowledge_base_id != kb_id:
-        raise HTTPException(status_code=404, detail=constants.ERR_KB_DOC_NOT_FOUND)
+        raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
 
     await db.delete(document)
     try:
@@ -449,5 +472,5 @@ async def delete_document(
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=t(constants.ERR_KB_DOC_DELETE_FAILED, message=str(e)))
-    return StandardResponse.success(data=True, message=constants.MSG_KB_DOC_DELETED)
+        raise HTTPException(status_code=500, detail=t(ERR_KB_DOC_DELETE_FAILED, message=str(e)))
+    return StandardResponse.success(data=True, message=MSG_KB_DOC_DELETED)

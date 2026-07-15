@@ -4,7 +4,13 @@ import os
 import shutil
 from pathlib import Path
 
-from app.core import constants
+from app.core.constants import (
+    ERR_LOG_CLEANER_FAILED,
+    ERR_TEMP_CLEANER_DELETE_FAILED,
+    ERR_TEMP_CLEANER_FAILED,
+    MSG_LOG_CLEANER_CLEARED,
+    MSG_TEMP_CLEANER_CLEARED,
+)
 from app.core.crud.log import system_log_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.i18n import t
@@ -72,7 +78,7 @@ def _cleanup_single_temp_dir_by_size(temp_dir: Path, max_size_bytes: int) -> tup
             deleted_count += _remove_temp_path(path)
             total_size -= file_size
         except OSError as e:
-            logger.bind(path=str(path)).warning(t(constants.ERR_TEMP_CLEANER_DELETE_FAILED, message=str(e)))
+            logger.bind(path=str(path)).warning(t(ERR_TEMP_CLEANER_DELETE_FAILED, message=str(e)))
 
     for path in reversed(pending_empty_dirs):
         try:
@@ -119,9 +125,9 @@ async def background_temp_cleaner(interval_seconds: int = 10):
                 max_size_bytes = max_size_mb * 1024 * 1024
                 deleted_count, current_size = await asyncio.to_thread(_cleanup_temp_dir_by_size, max_size_bytes)
                 if deleted_count > 0:
-                    logger.bind(deleted_count=deleted_count, current_size=current_size, max_size_bytes=max_size_bytes).info(t(constants.MSG_TEMP_CLEANER_CLEARED, deleted_count=deleted_count, current_size=current_size, max_size_bytes=max_size_bytes))
+                    logger.bind(deleted_count=deleted_count, current_size=current_size, max_size_bytes=max_size_bytes).info(t(MSG_TEMP_CLEANER_CLEARED, deleted_count=deleted_count, current_size=current_size, max_size_bytes=max_size_bytes))
         except Exception as e:
-            logger.error(t(constants.ERR_TEMP_CLEANER_FAILED, message=str(e)))
+            logger.error(t(ERR_TEMP_CLEANER_FAILED, message=str(e)))
 
         await asyncio.sleep(interval_seconds)
 
@@ -133,8 +139,8 @@ async def background_log_cleaner(days: int = 7):
                 deleted_count = await system_log_crud.clear_expired_logs(db, days=days)
                 await db.commit()
                 if deleted_count > 0:
-                    logger.bind(deleted_count=deleted_count, retention_days=days).info(t(constants.MSG_LOG_CLEANER_CLEARED, deleted_count=deleted_count))
+                    logger.bind(deleted_count=deleted_count, retention_days=days).info(t(MSG_LOG_CLEANER_CLEARED, deleted_count=deleted_count))
         except Exception as e:
-            logger.bind(retention_days=days).error(t(constants.ERR_LOG_CLEANER_FAILED, message=str(e)))
+            logger.bind(retention_days=days).error(t(ERR_LOG_CLEANER_FAILED, message=str(e)))
 
         await asyncio.sleep(86400)  # 24 hours

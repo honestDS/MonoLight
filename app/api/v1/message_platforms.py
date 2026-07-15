@@ -3,7 +3,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, normalize_weixin_openclaw_config
 from app.api.v1.users import check_admin_privilege
-from app.core import constants
+from app.core.constants import (
+    ERR_MESSAGE_PLATFORM_LOGIN_TOKEN_MISSING,
+    ERR_MESSAGE_PLATFORM_NAME_EXISTS,
+    ERR_MESSAGE_PLATFORM_NOT_FOUND,
+    ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
+    ERR_MESSAGE_PLATFORM_QRCODE_SESSION_NOT_FOUND,
+    ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING,
+    ERR_MESSAGE_PLATFORM_UID_REQUIRED,
+    ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE,
+    MSG_MESSAGE_PLATFORM_CREATED,
+    MSG_MESSAGE_PLATFORM_DELETED,
+    MSG_MESSAGE_PLATFORM_LOGIN_STARTED,
+    MSG_MESSAGE_PLATFORM_LOGIN_STATUS,
+    MSG_MESSAGE_PLATFORM_RECOVERED,
+    MSG_MESSAGE_PLATFORM_UPDATED,
+)
 from app.core.crud.message_platform import message_platform_crud
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.models.message_platform import (
@@ -52,7 +67,7 @@ def _normalize_uid(uid: str | None) -> str | None:
 
 def _ensure_uid_for_enabled(is_enabled: bool, uid: str | None) -> None:
     if is_enabled and not _normalize_uid(uid):
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_UID_REQUIRED)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_UID_REQUIRED)
 
 
 @router.get("/types", response_model=StandardResponse)
@@ -84,30 +99,30 @@ async def list_message_platforms(page: int = 1, size: int = 10, db: AsyncSession
 async def get_message_platform(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform))
 
 
 @router.post("/create", response_model=StandardResponse)
 async def create_message_platform(platform_in: MessagePlatformCreate, db: AsyncSession = Depends(get_db), admin=Depends(get_admin_from_request)):
     if await message_platform_crud.get_by_name(db, platform_in.name):
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     payload = _normalize_create_payload(platform_in)
     payload["uid"] = _normalize_uid(payload.get("uid") or getattr(admin, "uid", None))
     _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
     platform = await message_platform_crud.create(db, obj_in=payload)
-    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_CREATED)
+    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_CREATED)
 
 
 @router.post("/update", response_model=StandardResponse)
 async def update_message_platform(platform_id: int, platform_in: MessagePlatformUpdate, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     if platform_in.name and platform_in.name != platform.name:
         same_name = await message_platform_crud.get_by_name(db, platform_in.name)
         if same_name:
-            raise ParameterException(constants.ERR_MESSAGE_PLATFORM_NAME_EXISTS)
+            raise ParameterException(ERR_MESSAGE_PLATFORM_NAME_EXISTS)
     data = _normalize_update_payload(platform.platform_type, platform_in)
     if "uid" in data:
         data["uid"] = _normalize_uid(data.get("uid"))
@@ -120,39 +135,39 @@ async def update_message_platform(platform_id: int, platform_in: MessagePlatform
     next_uid = data["uid"] if "uid" in data else platform.uid
     _ensure_uid_for_enabled(next_is_enabled, next_uid)
     platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data)
-    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_UPDATED)
+    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_UPDATED)
 
 
 @router.post("/delete", response_model=StandardResponse)
 async def delete_message_platform(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     await message_platform_crud.remove(db, id=platform_id)
-    return StandardResponse.success(message=constants.MSG_MESSAGE_PLATFORM_DELETED)
+    return StandardResponse.success(message=MSG_MESSAGE_PLATFORM_DELETED)
 
 
 @router.post("/recover", response_model=StandardResponse)
 async def recover_message_platform(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     if platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW:
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE)
     if not platform.get_config_secret("token"):
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_RECOVER_TOKEN_MISSING)
     next_status = MessagePlatformStatus.CONNECTED if platform.is_enabled else MessagePlatformStatus.DISCONNECTED
     platform = await message_platform_crud.update_runtime_state(db, platform=platform, status=next_status, last_error="")
-    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=constants.MSG_MESSAGE_PLATFORM_RECOVERED)
+    return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_RECOVERED)
 
 
 @router.post("/{platform_id}/weixin-openclaw/login/start", response_model=StandardResponse)
 async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     if platform.platform_type != MessagePlatformType.WEIXIN_OPENCLAW:
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_UNSUPPORTED_TYPE)
     config = normalize_weixin_openclaw_config(platform.config)
     adapter = WeixinOpenClawAdapter(
         WeixinOpenClawConfig(
@@ -179,7 +194,7 @@ async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depen
         last_error="",
     )
     return StandardResponse.success(
-        message=constants.MSG_MESSAGE_PLATFORM_LOGIN_STARTED,
+        message=MSG_MESSAGE_PLATFORM_LOGIN_STARTED,
         data=WeixinOpenClawLoginStartResponse(
             platform_id=platform.id,
             qrcode=login_state["qrcode"],
@@ -193,10 +208,10 @@ async def start_weixin_openclaw_login(platform_id: int, db: AsyncSession = Depen
 async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = Depends(get_db)):
     platform = await message_platform_crud.get(db, platform_id)
     if not platform:
-        raise ResourceNotFoundException(constants.ERR_MESSAGE_PLATFORM_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_MESSAGE_PLATFORM_NOT_FOUND)
     qrcode = str((platform.state or {}).get("qrcode") or "")
     if not qrcode:
-        raise ParameterException(constants.ERR_MESSAGE_PLATFORM_QRCODE_SESSION_NOT_FOUND)
+        raise ParameterException(ERR_MESSAGE_PLATFORM_QRCODE_SESSION_NOT_FOUND)
     config = normalize_weixin_openclaw_config(platform.config)
     adapter = WeixinOpenClawAdapter(
         WeixinOpenClawConfig(
@@ -221,7 +236,7 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
     if qrcode_status == "confirmed":
         token = status_data.get("token") or ""
         if not token:
-            raise ParameterException(constants.ERR_MESSAGE_PLATFORM_LOGIN_TOKEN_MISSING)
+            raise ParameterException(ERR_MESSAGE_PLATFORM_LOGIN_TOKEN_MISSING)
         config_update = {"token": token}
         if status_data.get("base_url"):
             config_update["base_url"] = status_data["base_url"]
@@ -238,15 +253,15 @@ async def get_weixin_openclaw_login_status(platform_id: int, db: AsyncSession = 
         update_kwargs.update(
             {
                 "status": MessagePlatformStatus.ERROR,
-                "state": {**state, "qrcode": "", "qrcode_img_content": "", "qr_error": constants.ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED},
-                "last_error": constants.ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
+                "state": {**state, "qrcode": "", "qrcode_img_content": "", "qr_error": ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED},
+                "last_error": ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED,
             }
         )
     else:
         update_kwargs.update({"status": MessagePlatformStatus.WAITING_LOGIN})
     platform = await message_platform_crud.update_runtime_state(db, platform=platform, **update_kwargs)
     return StandardResponse.success(
-        message=constants.MSG_MESSAGE_PLATFORM_LOGIN_STATUS,
+        message=MSG_MESSAGE_PLATFORM_LOGIN_STATUS,
         data=WeixinOpenClawLoginStatusResponse(
             platform_id=platform.id,
             status=platform.status,

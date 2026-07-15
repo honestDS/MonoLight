@@ -6,7 +6,18 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_ONLY_ADMIN_ALLOWED,
+    ERR_PASSWORD_TOO_LONG_BYTES,
+    ERR_USER_NAME_EXISTS,
+    ERR_USER_NOT_FOUND,
+    ERR_USER_SUPER_DELETE_FORBIDDEN,
+    ERR_USER_SUPER_PROTECTED,
+    MSG_USER_CREATED,
+    MSG_USER_DELETED,
+    MSG_USER_LIST_SUCCESS,
+    MSG_USER_UPDATED,
+)
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
     ForbiddenException,
@@ -34,7 +45,7 @@ router = APIRouter(prefix="/user", tags=["User Management"], dependencies=[Depen
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
     if not getattr(current_user, "is_superuser", False):
-        raise ForbiddenException(constants.ERR_ONLY_ADMIN_ALLOWED)
+        raise ForbiddenException(ERR_ONLY_ADMIN_ALLOWED)
     return current_user
 
 
@@ -45,10 +56,10 @@ async def add_new_user(
     admin: dict = Depends(check_admin_privilege),
 ):
     if await user_crud.get_by_username(db, user_in.username):
-        raise ParameterException(constants.ERR_USER_NAME_EXISTS)
+        raise ParameterException(ERR_USER_NAME_EXISTS)
 
     if user_in.password and len(user_in.password.encode("utf-8")) > 72:
-        return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+        return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
 
     generated_uid = uuid.uuid4().hex
     new_user = await user_crud.create(
@@ -62,7 +73,7 @@ async def add_new_user(
     )
     await ensure_default_profile_for_user(db, new_user.uid)
 
-    return StandardResponse.success(data=UserResponse.model_validate(new_user), message=constants.MSG_USER_CREATED)
+    return StandardResponse.success(data=UserResponse.model_validate(new_user), message=MSG_USER_CREATED)
 
 
 @router.get("/list")
@@ -84,7 +95,7 @@ async def list_all_users(
     )
     return StandardResponse.success(
         data=page_data,
-        message=constants.MSG_USER_LIST_SUCCESS,
+        message=MSG_USER_LIST_SUCCESS,
     )
 
 
@@ -96,18 +107,18 @@ async def update_user(
 ):
     user = await user_crud.get_by_uid(db, user_in.uid)
     if not user:
-        raise ResourceNotFoundException(constants.ERR_USER_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
 
     if user.is_superuser:
         is_renaming = user_in.username and user_in.username != user.username
         is_deactivating = user_in.is_active is False
         if is_renaming or is_deactivating:
-            raise ParameterException(constants.ERR_USER_SUPER_PROTECTED)
+            raise ParameterException(ERR_USER_SUPER_PROTECTED)
 
     update_dict = {}
     if user_in.password:
         if len(user_in.password.encode("utf-8")) > 72:
-            return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+            return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
         update_dict["hashed_password"] = get_password_hash(user_in.password)
 
     if user_in.is_active is not None:
@@ -117,7 +128,7 @@ async def update_user(
         update_dict["username"] = user_in.username
 
     user = await user_crud.update(db, db_obj=user, obj_in=update_dict)
-    return StandardResponse.success(data=UserResponse.model_validate(user), message=constants.MSG_USER_UPDATED)
+    return StandardResponse.success(data=UserResponse.model_validate(user), message=MSG_USER_UPDATED)
 
 
 @router.post("/delete")
@@ -128,10 +139,10 @@ async def delete_user(
 ):
     user = await user_crud.get_by_uid(db, uid)
     if not user:
-        raise ResourceNotFoundException(constants.ERR_USER_NOT_FOUND)
+        raise ResourceNotFoundException(ERR_USER_NOT_FOUND)
 
     if user.is_superuser:
-        raise ParameterException(constants.ERR_USER_SUPER_DELETE_FORBIDDEN)
+        raise ParameterException(ERR_USER_SUPER_DELETE_FORBIDDEN)
 
     await user_crud.remove(db, id=user.id)
-    return StandardResponse.success(message=constants.MSG_USER_DELETED)
+    return StandardResponse.success(message=MSG_USER_DELETED)

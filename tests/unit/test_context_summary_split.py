@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from app.core import constants
+from app.core.constants import ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET
 from app.core.i18n import t
 from app.core.utils.context_summary import split as split_module
 from app.core.utils.context_summary.split import split_oversized_message
@@ -74,4 +74,4 @@ def test_message_chunk_metadata_must_fit_budget(monkeypatch):
             )
         )
 
-    assert str(exc_info.value) == t(constants.ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET)
+    assert str(exc_info.value) == t(ERR_CONTEXT_SUMMARY_CHUNK_METADATA_OVER_BUDGET)

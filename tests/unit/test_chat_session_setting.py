@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from app.adapters import chat_web as chat_web_adapter
 from app.api.v1 import chat as chat_api
-from app.core import constants
+from app.core.constants import ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
 from app.core.exceptions import ForbiddenException
 from app.core.utils import session as session_utils
 
@@ -118,7 +118,7 @@ async def test_http_adapter_rejects_external_session_before_llm_work(monkeypatch
     enqueue_calls = []
 
     async def reject_external_session(db, *, session_id, uid):
-        raise ForbiddenException(message=constants.ERR_SESSION_READ_ONLY)
+        raise ForbiddenException(message=ERR_SESSION_READ_ONLY)
 
     async def get_active(db, *, uid):
         profile_calls.append(uid)
@@ -198,7 +198,7 @@ async def test_external_session_source_is_read_only(monkeypatch):
             uid="user-1",
         )
 
-    assert exc_info.value.message == constants.ERR_SESSION_READ_ONLY
+    assert exc_info.value.message == ERR_SESSION_READ_ONLY
 
 
 @pytest.mark.asyncio
@@ -221,7 +221,7 @@ async def test_other_users_session_is_not_writable(monkeypatch):
             uid="user-1",
         )
 
-    assert exc_info.value.message == constants.ERR_SESSION_NO_PERMISSION
+    assert exc_info.value.message == ERR_SESSION_NO_PERMISSION
 
 
 def test_websocket_event_matches_only_its_session():

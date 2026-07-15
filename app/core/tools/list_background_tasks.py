@@ -1,6 +1,6 @@
 import json
 
-from app.core import constants
+from app.core.constants import ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE, MSG_BACKGROUND_TASK_LIST_SUCCESS
 from app.core.crud.background_task import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse
@@ -44,7 +44,7 @@ class ListBackgroundTasksExecutor(BaseExecutor):
             return json.dumps(
                 {
                     "status": "failed",
-                    "error": t(constants.ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
+                    "error": t(ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE),
                 },
                 ensure_ascii=False,
             )
@@ -64,7 +64,7 @@ class ListBackgroundTasksExecutor(BaseExecutor):
         return json.dumps(
             {
                 "status": "success",
-                "message": t(constants.MSG_BACKGROUND_TASK_LIST_SUCCESS),
+                "message": t(MSG_BACKGROUND_TASK_LIST_SUCCESS),
                 "page": page,
                 "size": size,
                 "session_id": task_session_id,

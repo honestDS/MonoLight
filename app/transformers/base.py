@@ -7,7 +7,7 @@ from typing import (
     Any,
 )
 
-from app.core import constants
+from app.core.constants import ERR_CHANNEL_MODEL_LIST_UNSUPPORTED
 from app.core.exceptions import LLMException
 from app.models.message import (
     InternalMessage,
@@ -23,7 +23,7 @@ class BaseTransformer(ABC):
         timeout: float = 30.0,
         **kwargs,
     ) -> list[dict[str, Any]]:
-        raise LLMException(constants.ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, protocol=self.__class__.__name__)
+        raise LLMException(ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, protocol=self.__class__.__name__)
 
     @abstractmethod
     async def generate(

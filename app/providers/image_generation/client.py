@@ -1,6 +1,6 @@
 from typing import Any
 
-from app.core import constants
+from app.core.constants import ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL
 from app.core.exceptions import LLMException
 from app.models.channel import ChannelType
 from app.transformers.base import BaseImageGenerationTransformer
@@ -16,7 +16,7 @@ class ImageGenerationClient:
     def get_transformer(cls, channel_type: ChannelType | str) -> BaseImageGenerationTransformer:
         transformer = cls._transformers.get(str(channel_type).lower())
         if not transformer:
-            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL, channel_type=channel_type)
+            raise LLMException(message=ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL, channel_type=channel_type)
         return transformer
 
     @classmethod

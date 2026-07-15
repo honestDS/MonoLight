@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
-from app.core import constants
+from app.core.constants import MSG_LOG_LIST_SUCCESS
 from app.core.crud.log import system_log_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.i18n.context import reset_current_locale, set_current_locale
@@ -67,7 +67,7 @@ async def get_system_logs(
         page=page,
         size=size,
     )
-    return StandardResponse.success(data=page_data, message=constants.MSG_LOG_LIST_SUCCESS)
+    return StandardResponse.success(data=page_data, message=MSG_LOG_LIST_SUCCESS)
 
 
 @router.websocket("/logs/ws")

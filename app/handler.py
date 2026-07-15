@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core import constants
+from app.core.constants import ERR_DB_OPERATION_FAILED, ERR_FAVICON_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
 from app.core.crud.system_setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ServerException
 from app.core.i18n import t
@@ -23,11 +23,11 @@ from app.schemas.response import StandardResponse
 async def favicon():
     if os.path.exists(FAVICON_PATH):
         return FileResponse(FAVICON_PATH)
-    return JSONResponse(status_code=404, content=StandardResponse.error(code=404, message=constants.ERR_FAVICON_NOT_FOUND).model_dump())
+    return JSONResponse(status_code=404, content=StandardResponse.error(code=404, message=ERR_FAVICON_NOT_FOUND).model_dump())
 
 
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
-    return JSONResponse(status_code=500, content=StandardResponse.error(code=500, message=constants.ERR_DB_OPERATION_FAILED).model_dump())
+    return JSONResponse(status_code=500, content=StandardResponse.error(code=500, message=ERR_DB_OPERATION_FAILED).model_dump())
 
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
@@ -45,7 +45,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             msg = error.get("msg")
         error_msgs.append(f"[{field}] {msg}")
 
-    validation_exc = ParameterException(constants.ERR_VALIDATION_FAILED, code=422, detail=" | ".join(error_msgs))
+    validation_exc = ParameterException(ERR_VALIDATION_FAILED, code=422, detail=" | ".join(error_msgs))
     return JSONResponse(status_code=422, content=StandardResponse.error(code=422, message=validation_exc.message, detail=" | ".join(error_msgs)).model_dump())
 
 
@@ -67,7 +67,7 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
 
 
 async def global_exception_handler(request: Request, exc: Exception):
-    server_exc = ServerException(message=constants.ERR_INTERNAL_SERVER_ERROR, cause=str(exc))
+    server_exc = ServerException(message=ERR_INTERNAL_SERVER_ERROR, cause=str(exc))
     return JSONResponse(status_code=500, content=StandardResponse.from_exception(server_exc).model_dump())
 
 

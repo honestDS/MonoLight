@@ -11,7 +11,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.core import constants
+from app.core.constants import LOG_MESSAGE_MAX_LENGTH, MSG_LOG_MESSAGE_TRUNCATED
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
@@ -66,8 +66,8 @@ class LogManager:
         """
         message = record["message"]
         is_tool_log = "tool_call" in record["extra"] or "tool_result" in record["extra"]
-        if is_tool_log and message and len(message) > constants.LOG_MESSAGE_MAX_LENGTH:
-            message = message[: constants.LOG_MESSAGE_MAX_LENGTH] + t(constants.MSG_LOG_MESSAGE_TRUNCATED, original_length=len(message))
+        if is_tool_log and message and len(message) > LOG_MESSAGE_MAX_LENGTH:
+            message = message[:LOG_MESSAGE_MAX_LENGTH] + t(MSG_LOG_MESSAGE_TRUNCATED, original_length=len(message))
         return message
 
     @classmethod

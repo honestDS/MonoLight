@@ -1,4 +1,4 @@
-from app.core import constants
+from app.core.constants import ERR_LLM_UNSUPPORTED_RERANK_CHANNEL
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -22,7 +22,7 @@ class RerankClient:
     def get_transformer(cls, channel_type: ChannelType | str) -> BaseRerankTransformer:
         transformer = cls._transformers.get(str(channel_type).lower())
         if not transformer:
-            raise LLMException(message=constants.ERR_LLM_UNSUPPORTED_RERANK_CHANNEL, channel_type=channel_type)
+            raise LLMException(message=ERR_LLM_UNSUPPORTED_RERANK_CHANNEL, channel_type=channel_type)
         return transformer
 
     @staticmethod

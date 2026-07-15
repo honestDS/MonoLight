@@ -9,7 +9,7 @@ import subprocess
 import sys
 import sysconfig
 
-from app.core import constants
+from app.core.constants import ERR_TOOL_COMMAND_TIMEOUT, ERR_TOOL_SHELL_BLACKLISTED
 from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -69,7 +69,7 @@ class ShellExecutor(BaseExecutor):
 
     def _build_timeout_result(self, profile_timeout: float, system_info: str) -> str:
         return json.dumps(
-            {"error": t(constants.ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
+            {"error": t(ERR_TOOL_COMMAND_TIMEOUT, timeout=profile_timeout), "system_info": system_info},
             ensure_ascii=False,
         )
 
@@ -185,7 +185,7 @@ class ShellExecutor(BaseExecutor):
         if blacklisted:
             return json.dumps(
                 {
-                    "stdout": t(constants.ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
+                    "stdout": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
                     "stderr": "",
                     "exit_code": 1,
                     "system_info": system_info,

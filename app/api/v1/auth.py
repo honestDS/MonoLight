@@ -8,7 +8,14 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import constants
+from app.core.constants import (
+    ERR_AUTH_RESET_TOKEN_INVALID,
+    ERR_INVALID_CREDENTIALS,
+    ERR_PASSWORD_TOO_LONG_BYTES,
+    ERR_USER_NOT_FOUND_OR_DISABLED,
+    MSG_ADMIN_RESET_SUCCESS,
+    MSG_LOGIN_SUCCESS,
+)
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
     AuthException,
@@ -33,20 +40,20 @@ router = APIRouter()
 @router.post("/login", response_model=StandardResponse)
 async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(get_db)):
     if len(request.password.encode("utf-8")) > 72:
-        return StandardResponse.error(code=422, message=constants.ERR_PASSWORD_TOO_LONG_BYTES)
+        return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
 
     user = await user_crud.get_by_username(db, request.username)
 
     if not user or not user.is_active:
-        raise AuthException(constants.ERR_USER_NOT_FOUND_OR_DISABLED)
+        raise AuthException(ERR_USER_NOT_FOUND_OR_DISABLED)
 
     if not user.hashed_password or not verify_password(request.password, user.hashed_password):
-        raise AuthException(constants.ERR_INVALID_CREDENTIALS)
+        raise AuthException(ERR_INVALID_CREDENTIALS)
 
     access_token = create_access_token(data={"sub": user.username})
     return StandardResponse.success(
         data={"access_token": access_token, "token_type": "bearer"},
-        message=constants.MSG_LOGIN_SUCCESS,
+        message=MSG_LOGIN_SUCCESS,
     )
 
 
@@ -54,7 +61,7 @@ async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(ge
 async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncSession = Depends(get_db)):
     env_reset_token = os.getenv("ADMIN_RESET_TOKEN")
     if not env_reset_token or request.reset_token != env_reset_token:
-        raise AuthException(constants.ERR_AUTH_RESET_TOKEN_INVALID)
+        raise AuthException(ERR_AUTH_RESET_TOKEN_INVALID)
 
     admin_username = os.getenv("ADMIN_USERNAME", "admin")
     user = await user_crud.get_by_username(db, admin_username)
@@ -96,5 +103,5 @@ async def reset_admin_account(request: ResetAdminRequest = Body(...), db: AsyncS
     }
     return StandardResponse.success(
         data=user_data,
-        message=constants.MSG_ADMIN_RESET_SUCCESS,
+        message=MSG_ADMIN_RESET_SUCCESS,
     )

@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
-from app.core import constants
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_UNSUPPORTED,
+    ERR_TOOL_NOT_ENABLED,
+    ERR_TOOL_NOT_REGISTERED,
+    ERR_TOOL_UNSUPPORTED_ARGUMENTS,
+    MSG_BACKGROUND_TASK_QUEUED,
+)
 from app.core.dispatch_context import build_dispatch_context
 from app.core.i18n import t
 from app.core.log import (
@@ -46,7 +52,7 @@ def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
 def _build_tool_disabled_result(tool_name: str) -> str:
     return json.dumps(
         {
-            "error": t(constants.ERR_TOOL_NOT_ENABLED, tool_name=tool_name),
+            "error": t(ERR_TOOL_NOT_ENABLED, tool_name=tool_name),
             "tool_name": tool_name,
             "status": "failed",
         },
@@ -60,7 +66,7 @@ def _build_background_task_queued_result(tool_name: str, task_id: int) -> str:
             "status": "queued",
             "tool_name": tool_name,
             "task_id": task_id,
-            "message": t(constants.MSG_BACKGROUND_TASK_QUEUED, tool_name=tool_name),
+            "message": t(MSG_BACKGROUND_TASK_QUEUED, tool_name=tool_name),
         },
         ensure_ascii=False,
     )
@@ -71,7 +77,7 @@ def _build_background_task_unsupported_result(tool_name: str) -> str:
         {
             "status": "failed",
             "tool_name": tool_name,
-            "error": t(constants.ERR_BACKGROUND_TASK_UNSUPPORTED, tool_name=tool_name),
+            "error": t(ERR_BACKGROUND_TASK_UNSUPPORTED, tool_name=tool_name),
             "instruction": BACKGROUND_TASK_UNSUPPORTED_PROMPT.format(tool_name=tool_name),
         },
         ensure_ascii=False,
@@ -95,7 +101,7 @@ def _build_unsupported_arguments_result(tool_name: str, unsupported_arguments: l
             "status": "failed",
             "tool_name": tool_name,
             "error": t(
-                constants.ERR_TOOL_UNSUPPORTED_ARGUMENTS,
+                ERR_TOOL_UNSUPPORTED_ARGUMENTS,
                 tool_name=tool_name,
                 fields=", ".join(unsupported_arguments),
             ),
@@ -218,7 +224,7 @@ async def process_single_tool(
                     active_tasks.discard(task)
         else:
             cmd_result = json.dumps(
-                {"error": t(constants.ERR_TOOL_NOT_REGISTERED, tool_name=tool_name)},
+                {"error": t(ERR_TOOL_NOT_REGISTERED, tool_name=tool_name)},
                 ensure_ascii=False,
             )
 

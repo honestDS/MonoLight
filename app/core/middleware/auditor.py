@@ -4,7 +4,13 @@ from typing import (
     Any,
 )
 
-from app.core import constants
+from app.core.constants import (
+    ERR_AUDIT_HIGH_RISK_BLOCKED,
+    ERR_AUDIT_SECURITY_BLOCKED,
+    ERR_AUDIT_SYSTEM_UNAVAILABLE,
+    ERR_AUDIT_TOKEN_MISMATCH,
+    ERR_TOOL_SHELL_BLACKLISTED,
+)
 from app.core.crud.channel import channel_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -111,8 +117,8 @@ class AuditMiddleware:
             if blacklisted:
                 return json.dumps(
                     {
-                        "error": t(constants.ERR_AUDIT_SECURITY_BLOCKED),
-                        "reason": t(constants.ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
+                        "error": t(ERR_AUDIT_SECURITY_BLOCKED),
+                        "reason": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
                     },
                     ensure_ascii=False,
                 )
@@ -157,7 +163,7 @@ class AuditMiddleware:
             return json.dumps(
                 {
                     "error": "token_mismatch",
-                    "reason": t(constants.ERR_AUDIT_TOKEN_MISMATCH, expected_token=hashlib.sha256(command.strip().encode()).hexdigest()[:12]),
+                    "reason": t(ERR_AUDIT_TOKEN_MISMATCH, expected_token=hashlib.sha256(command.strip().encode()).hexdigest()[:12]),
                 },
                 ensure_ascii=False,
             )
@@ -180,7 +186,7 @@ class AuditMiddleware:
 
         if audit_res is None:
             return json.dumps(
-                {"error": "audit_system_failure", "reason": t(constants.ERR_AUDIT_SYSTEM_UNAVAILABLE)},
+                {"error": "audit_system_failure", "reason": t(ERR_AUDIT_SYSTEM_UNAVAILABLE)},
                 ensure_ascii=False,
             )
 
@@ -188,7 +194,7 @@ class AuditMiddleware:
         audit_res.get("reason", "Unknown")
 
         if score >= 8:
-            return json.dumps({"error": t(constants.ERR_AUDIT_SECURITY_BLOCKED), "reason": t(constants.ERR_AUDIT_HIGH_RISK_BLOCKED, score=score)}, ensure_ascii=False)
+            return json.dumps({"error": t(ERR_AUDIT_SECURITY_BLOCKED), "reason": t(ERR_AUDIT_HIGH_RISK_BLOCKED, score=score)}, ensure_ascii=False)
         if score >= cfg.security.audit_threshold:
             cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
             dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"

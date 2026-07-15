@@ -6,7 +6,14 @@ from typing import Any
 
 from sqlalchemy import update
 
-from app.core import constants
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_NOT_FOUND,
+    ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
+    ERR_LLM_UNEXPECTED_ERROR,
+    ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND,
+    ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
+    ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
+)
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
@@ -201,7 +208,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             values={"execution_state": state},
         )
         if not updated:
-            raise RuntimeError(t(constants.ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
         work.execution_state = state
 
     execution_state = work.execution_state or {}
@@ -273,10 +280,10 @@ def _build_background_result_messages(task: BackgroundTask) -> list[InternalMess
 async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
     task = await background_task_crud.get(db, int(work.source_id))
     if task is None:
-        raise RuntimeError(t(constants.ERR_BACKGROUND_TASK_NOT_FOUND))
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_NOT_FOUND))
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
-        raise RuntimeError(t(constants.ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
+        raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
     submission_context = _load_background_submission_context(task)
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
@@ -303,7 +310,7 @@ async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
 async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
-        raise RuntimeError(t(constants.ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
+        raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,
@@ -343,7 +350,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
 
         result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
         if result_message is None:
-            raise RuntimeError(t(constants.ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
+            raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
 
         state = {**(work.execution_state or {}), "response": response}
         updated = await session_reply_work_item_crud.update_claimed(
@@ -391,7 +398,7 @@ async def fail_session_reply_work(
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
             return
-        error_content = user_error or t(constants.ERR_LLM_UNEXPECTED_ERROR)
+        error_content = user_error or t(ERR_LLM_UNEXPECTED_ERROR)
         error_message = await save_message(
             db,
             work.session_id,

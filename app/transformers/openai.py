@@ -8,7 +8,18 @@ from typing import (
 
 import aiohttp
 
-from app.core import constants
+from app.core.constants import (
+    ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR,
+    ERR_EMBEDDING_COUNT_MISMATCH,
+    ERR_EMBEDDING_DIMENSION_MISMATCH,
+    ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
+    ERR_LLM_CONNECTION_FAILED,
+    ERR_LLM_EMPTY_RESPONSE,
+    ERR_LLM_FIRST_CHAR_TIMEOUT,
+    ERR_PROFILE_EMBEDDING_CALL_FAILED,
+    ERR_PROFILE_RERANK_CALL_FAILED,
+    ERR_RERANK_FORMAT_ERROR,
+)
 from app.core.exceptions import EmbeddingException, LLMException, RerankException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -58,17 +69,17 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 async with session.get(url, headers=headers) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     parsed = json.loads(txt)
         except LLMException:
             raise
         except Exception as e:
             logger.bind(base_url=base_url).error(t("LOG_MODEL_LIST_FAILED", error=str(e)))
-            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
         raw_models = parsed.get("data")
         if not isinstance(raw_models, list):
-            raise LLMException(constants.ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR)
+            raise LLMException(ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR)
 
         models = []
         for item in raw_models:
@@ -124,15 +135,15 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
         except LLMException:
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
             if _is_timeout_exception(e):
-                raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
-            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+                raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
+            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_image(
         self,
@@ -182,13 +193,13 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
         except LLMException:
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_IMAGE_GENERATION_FAILED", error=str(e)))
-            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     async def generate_stream(
         self,
@@ -235,11 +246,11 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 try:
                     resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
                 except TimeoutError:
-                    raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
+                    raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
                 try:
                     if resp.status != 200:
                         txt = await resp.text()
-                        raise LLMException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
 
                     buffer = ""
                     first_content_yielded = False
@@ -252,7 +263,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                             else:
                                 line = await chunk_iter.__anext__()
                         except TimeoutError:
-                            raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
+                            raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
                         except StopAsyncIteration:
                             break
 
@@ -288,8 +299,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
             if _is_timeout_exception(e):
-                raise LLMException(constants.ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
-            raise LLMException(constants.ERR_LLM_CONNECTION_FAILED, detail=str(e))
+                raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
+            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     @staticmethod
     def _stream_chunk_has_payload(parsed: dict[str, Any]) -> bool:
@@ -343,7 +354,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise EmbeddingException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise EmbeddingException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
         except EmbeddingException:
             raise
@@ -352,7 +363,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(t("LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED", error=str(e)))
             else:
                 logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_EMBEDDING_FAILED", error=str(e)))
-            raise EmbeddingException(constants.ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
+            raise EmbeddingException(ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
 
     @staticmethod
     def _normalize_embedding_base_url(base_url: str) -> str:
@@ -397,13 +408,13 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
-                        raise RerankException(constants.ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+                        raise RerankException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
                     return json.loads(txt)
         except RerankException:
             raise
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_RERANK_FAILED", error=str(e)))
-            raise RerankException(constants.ERR_PROFILE_RERANK_CALL_FAILED, params={"message": str(e)})
+            raise RerankException(ERR_PROFILE_RERANK_CALL_FAILED, params={"message": str(e)})
 
     async def rerank_texts(
         self,
@@ -430,7 +441,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
 
         raw_results = response.get("results")
         if not isinstance(raw_results, list):
-            raise RerankException(constants.ERR_RERANK_FORMAT_ERROR)
+            raise RerankException(ERR_RERANK_FORMAT_ERROR)
 
         normalized: list[dict[str, Any]] = []
         for item in raw_results:
@@ -482,9 +493,9 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             batch_embeddings = [item["embedding"] for item in result["response"].get("data", [])]
 
             if len(batch_embeddings) != len(batch_texts):
-                raise EmbeddingException(constants.ERR_EMBEDDING_COUNT_MISMATCH)
+                raise EmbeddingException(ERR_EMBEDDING_COUNT_MISMATCH)
             if dimensions and dimensions_supported is True and batch_embeddings and len(batch_embeddings[0]) != dimensions:
-                raise EmbeddingException(constants.ERR_EMBEDDING_DIMENSION_MISMATCH, actual=len(batch_embeddings[0]), expected=dimensions)
+                raise EmbeddingException(ERR_EMBEDDING_DIMENSION_MISMATCH, actual=len(batch_embeddings[0]), expected=dimensions)
 
             embeddings.extend(batch_embeddings)
 
@@ -570,11 +581,11 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
     def from_provider(cls, provider_response: Any) -> InternalMessage:
         choices = provider_response.get("choices") if isinstance(provider_response, dict) else None
         if not choices:
-            raise LLMException(constants.ERR_LLM_EMPTY_RESPONSE)
+            raise LLMException(ERR_LLM_EMPTY_RESPONSE)
 
         choice = choices[0].get("message") if isinstance(choices[0], dict) else None
         if not isinstance(choice, dict):
-            raise LLMException(constants.ERR_LLM_EMPTY_RESPONSE)
+            raise LLMException(ERR_LLM_EMPTY_RESPONSE)
 
         tool_calls = None
         if "tool_calls" in choice and choice["tool_calls"] is not None:

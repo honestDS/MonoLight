@@ -8,7 +8,14 @@ import base64
 import binascii
 import os
 
-from app.core import constants
+from app.core.constants import (
+    ERR_API_KEY_CRYPTO_KEY_INVALID,
+    ERR_API_KEY_CRYPTO_KEY_MISSING,
+    ERR_API_KEY_DECRYPT_EMPTY,
+    ERR_API_KEY_DECRYPT_FAILED,
+    ERR_API_KEY_DECRYPT_INPUT_EMPTY,
+    ERR_API_KEY_ENCRYPT_INPUT_EMPTY,
+)
 from app.core.exceptions import ApiKeyException
 from app.core.log import get_logger
 
@@ -24,15 +31,15 @@ def _get_encryption_key() -> bytes:
     """获取加密密钥，优先从环境变量读取。"""
     key_hex = (os.getenv("MONOLIGH_ENCRYPTION_KEY") or "").strip()
     if not key_hex:
-        _raise_crypto_error(constants.ERR_API_KEY_CRYPTO_KEY_MISSING)
+        _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_MISSING)
 
     try:
         key = bytes.fromhex(key_hex)
     except ValueError:
-        _raise_crypto_error(constants.ERR_API_KEY_CRYPTO_KEY_INVALID)
+        _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_INVALID)
 
     if len(key) != 32:
-        _raise_crypto_error(constants.ERR_API_KEY_CRYPTO_KEY_INVALID)
+        _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_INVALID)
 
     return key
 
@@ -47,7 +54,7 @@ def encrypt_api_key(plain_text: str) -> str:
         Base64编码的密文
     """
     if not plain_text or not plain_text.strip():
-        _raise_crypto_error(constants.ERR_API_KEY_ENCRYPT_INPUT_EMPTY)
+        _raise_crypto_error(ERR_API_KEY_ENCRYPT_INPUT_EMPTY)
 
     key = _get_encryption_key()
     plain_bytes = plain_text.encode("utf-8")
@@ -69,14 +76,14 @@ def decrypt_api_key(encrypted_text: str) -> str:
         明文API密钥
     """
     if not encrypted_text or not encrypted_text.strip():
-        _raise_crypto_error(constants.ERR_API_KEY_DECRYPT_INPUT_EMPTY)
+        _raise_crypto_error(ERR_API_KEY_DECRYPT_INPUT_EMPTY)
 
     key = _get_encryption_key()
 
     try:
         encrypted_bytes = base64.b64decode(encrypted_text.encode("utf-8"), validate=True)
     except (binascii.Error, ValueError):
-        _raise_crypto_error(constants.ERR_API_KEY_DECRYPT_FAILED)
+        _raise_crypto_error(ERR_API_KEY_DECRYPT_FAILED)
 
     try:
         decrypted = bytearray()
@@ -85,10 +92,10 @@ def decrypt_api_key(encrypted_text: str) -> str:
 
         plain_text = bytes(decrypted).decode("utf-8")
     except UnicodeDecodeError:
-        _raise_crypto_error(constants.ERR_API_KEY_DECRYPT_FAILED)
+        _raise_crypto_error(ERR_API_KEY_DECRYPT_FAILED)
 
     if not plain_text.strip():
-        _raise_crypto_error(constants.ERR_API_KEY_DECRYPT_EMPTY)
+        _raise_crypto_error(ERR_API_KEY_DECRYPT_EMPTY)
 
     return plain_text
 

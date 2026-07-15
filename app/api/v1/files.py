@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import constants
+from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_KB_DOC_NOT_FOUND, ERR_UNAUTHORIZED
 from app.core.exceptions import ForbiddenException, ResourceNotFoundException, ServerException
 from app.core.paths import TEMP_DIR, get_user_temp_dir
 from app.core.security import get_current_user
@@ -42,7 +42,7 @@ async def upload_file(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as exc:
-        raise ServerException(message=constants.ERR_INTERNAL_SERVER_ERROR, cause=str(exc)) from exc
+        raise ServerException(message=ERR_INTERNAL_SERVER_ERROR, cause=str(exc)) from exc
     finally:
         file.file.close()
 
@@ -53,7 +53,7 @@ async def upload_file(
 @router.get("/download")
 async def download_file(path: str):
     if not os.path.exists(path):
-        raise ResourceNotFoundException(message=constants.ERR_KB_DOC_NOT_FOUND)
+        raise ResourceNotFoundException(message=ERR_KB_DOC_NOT_FOUND)
     filename = os.path.basename(path)
     display_name = filename[9:] if len(filename) > 9 and filename[8] == "_" else filename
     return FileResponse(path, filename=display_name)
@@ -64,8 +64,8 @@ async def download_sent_file(token: str):
     try:
         path = resolve_file_token(token)
     except FileNotFoundError as exc:
-        raise ResourceNotFoundException(message=constants.ERR_KB_DOC_NOT_FOUND) from exc
+        raise ResourceNotFoundException(message=ERR_KB_DOC_NOT_FOUND) from exc
     except Exception as exc:
-        raise ForbiddenException(message=constants.ERR_UNAUTHORIZED) from exc
+        raise ForbiddenException(message=ERR_UNAUTHORIZED) from exc
 
     return FileResponse(path, filename=path.name)

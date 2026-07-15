@@ -5,8 +5,7 @@ import uuid
 from time import monotonic
 from typing import Any
 
-from app.core import constants
-from app.core.constants import ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE
+from app.core.constants import ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatch_context import build_background_dispatch_context
@@ -205,7 +204,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
 
             executor_cls = TOOL_EXECUTOR_MAP.get(task.tool_name)
             if not executor_cls:
-                raise RuntimeError(t(constants.ERR_TOOL_NOT_REGISTERED, tool_name=task.tool_name))
+                raise RuntimeError(t(ERR_TOOL_NOT_REGISTERED, tool_name=task.tool_name))
 
             instance = executor_cls(project_root=os.getcwd(), uid=task.uid)
             if hasattr(instance, "set_config"):

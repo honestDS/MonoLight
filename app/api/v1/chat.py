@@ -17,8 +17,23 @@ from starlette.responses import StreamingResponse
 
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
-from app.core import constants
 from app.core.channel_router import select_channel
+from app.core.constants import (
+    ERR_BACKGROUND_TASK_NOT_FOUND,
+    ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED,
+    ERR_INTERNAL_SERVER_ERROR,
+    ERR_NO_VALID_CHANNEL,
+    ERR_SESSION_NO_PERMISSION,
+    ERR_SESSION_NOT_FOUND,
+    ERR_SESSION_READ_ONLY,
+    MSG_BACKGROUND_TASK_DETAIL_SUCCESS,
+    MSG_BACKGROUND_TASK_LIST_SUCCESS,
+    MSG_MESSAGE_LIST_SUCCESS,
+    MSG_SESSION_CLEARED,
+    MSG_SESSION_LIST_SUCCESS,
+    MSG_SESSION_UPDATED,
+    MSG_TITLE_GENERATED,
+)
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.profile import profile_crud
@@ -139,7 +154,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             }
         )
-    return StandardResponse.success(data=data, message=constants.MSG_SESSION_LIST_SUCCESS)
+    return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)
 
 
 @router.post("/sessions/delete")
@@ -159,10 +174,10 @@ async def delete_session(
     )
     if not deleted:
         await db.rollback()
-        return StandardResponse.error(code=404, message=constants.ERR_SESSION_NOT_FOUND)
+        return StandardResponse.error(code=404, message=ERR_SESSION_NOT_FOUND)
 
     await db.commit()
-    return StandardResponse.success(message=constants.MSG_SESSION_CLEARED)
+    return StandardResponse.success(message=MSG_SESSION_CLEARED)
 
 
 class SessionSettingRequest(BaseModel):
@@ -183,18 +198,18 @@ async def update_session_setting(
 
     session = await session_crud.get_by_session_id(db, request.session_id)
     if not session:
-        return StandardResponse.error(message=constants.ERR_SESSION_NOT_FOUND)
+        return StandardResponse.error(message=ERR_SESSION_NOT_FOUND)
 
     if not is_admin and session.uid != uid:
-        return StandardResponse.error(message=constants.ERR_SESSION_NO_PERMISSION)
+        return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
     if session.source not in {"http", "ws"}:
-        return StandardResponse.error(code=403, message=constants.ERR_SESSION_READ_ONLY)
+        return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
     await db.commit()
 
-    return StandardResponse.success(message=constants.MSG_SESSION_UPDATED)
+    return StandardResponse.success(message=MSG_SESSION_UPDATED)
 
 
 class SessionTitleGenerateRequest(BaseModel):
@@ -221,22 +236,22 @@ async def generate_title(
 
     profile = await profile_crud.get_active(db, uid=uid)
     if not profile:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+        return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
     # 从 chat_channel 中选择一个可用的渠道来生成标题
     channel_cfg = (profile.configs or {}).get("channel", {})
     chat_channel_raw = channel_cfg.get("chat_channel")
     if not chat_channel_raw:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+        return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
     try:
         chat_channel = ChannelConfig.model_validate(chat_channel_raw)
     except Exception:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+        return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
     selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation", cursor_key=None)
     if not selection:
-        return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+        return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
     excluded_priorities: set[int] = set()
 
@@ -254,7 +269,7 @@ async def generate_title(
                 max_tokens=model_entry.get("max_tokens") or 200,
                 raise_on_error=True,
             )
-            return StandardResponse.success(data={"title": title}, message=constants.MSG_TITLE_GENERATED)
+            return StandardResponse.success(data={"title": title}, message=MSG_TITLE_GENERATED)
         except LLMException as e:
             # 仅 LLM 调用相关异常做降级；其他异常向上抛出，避免掩盖真实问题
             excluded_priorities.add(_rule.priority)
@@ -266,7 +281,7 @@ async def generate_title(
 
         selection = await select_channel(db, chat_channel, "CHAT", call_context="session_title_generation_retry", excluded_priorities=excluded_priorities, cursor_key=None)
         if not selection:
-            return StandardResponse.error(message=constants.ERR_NO_VALID_CHANNEL)
+            return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
 
 @router.get("/background-tasks")
@@ -281,7 +296,7 @@ async def list_background_tasks(
     offset = (page - 1) * size
     tasks = await background_task_crud.list_user_tasks(db, uid=uid, session_id=session_id, skip=offset, limit=size)
     data = [BackgroundTaskResponse.model_validate(task) for task in tasks]
-    return StandardResponse.success(data=data, message=constants.MSG_BACKGROUND_TASK_LIST_SUCCESS)
+    return StandardResponse.success(data=data, message=MSG_BACKGROUND_TASK_LIST_SUCCESS)
 
 
 @router.get("/background-tasks/{task_id}")
@@ -293,8 +308,8 @@ async def get_background_task(
     uid = getattr(current_user, "uid", None)
     task = await background_task_crud.get_user_task(db, task_id=task_id, uid=uid)
     if not task:
-        return StandardResponse.error(code=404, message=constants.ERR_BACKGROUND_TASK_NOT_FOUND)
-    return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message=constants.MSG_BACKGROUND_TASK_DETAIL_SUCCESS)
+        return StandardResponse.error(code=404, message=ERR_BACKGROUND_TASK_NOT_FOUND)
+    return StandardResponse.success(data=BackgroundTaskResponse.model_validate(task), message=MSG_BACKGROUND_TASK_DETAIL_SUCCESS)
 
 
 @router.get("/sessions/history")
@@ -313,7 +328,7 @@ async def get_session_history(
     messages.reverse()
 
     data = [MessageResponse.model_validate(m) for m in messages]
-    return StandardResponse.success(data=data, message=constants.MSG_MESSAGE_LIST_SUCCESS)
+    return StandardResponse.success(data=data, message=MSG_MESSAGE_LIST_SUCCESS)
 
 
 @router.websocket("/ws")
@@ -409,7 +424,7 @@ async def chat_websocket(
                     await websocket.send_json(
                         {
                             "type": "error",
-                            "message": t(constants.ERR_INTERNAL_SERVER_ERROR),
+                            "message": t(ERR_INTERNAL_SERVER_ERROR),
                             "session_id": session_id,
                             "request_id": request_id,
                         }
@@ -452,7 +467,7 @@ async def chat_websocket(
                 await websocket.send_json(
                     {
                         "type": "error",
-                        "message": t(constants.ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED),
+                        "message": t(ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED),
                         "session_id": current_session_id,
                         "request_id": request_id,
                     }
@@ -534,7 +549,7 @@ async def chat_websocket(
         # 异常处理
         logger.bind(uid=uid).exception(t("LOG_CHAT_WS_EXCEPTION"))
         try:
-            await websocket.send_json({"type": "error", "message": t(constants.ERR_INTERNAL_SERVER_ERROR)})
+            await websocket.send_json({"type": "error", "message": t(ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
         await cancel_all_tasks()
