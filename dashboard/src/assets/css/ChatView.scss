@@ -24,7 +24,7 @@
 
 .context-summary-notice {
   position: absolute;
-  top: 14px;
+  bottom: 14px;
   left: 50%;
   z-index: 20;
   display: flex;
@@ -63,7 +63,7 @@
 .context-summary-notice-enter-from,
 .context-summary-notice-leave-to {
   opacity: 0;
-  transform: translate(-50%, -6px);
+  transform: translate(-50%, 6px);
 }
 
 @keyframes context-summary-spin {

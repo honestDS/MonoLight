@@ -58,18 +58,14 @@
 
     <!-- 右侧聊天区域 -->
     <div class="chat-main">
-      <Transition name="context-summary-notice">
-        <div v-if="isContextSummarizing" class="context-summary-notice" role="status" aria-live="polite">
-          <span class="context-summary-notice-spinner"></span>
-          <span>{{ $t('chat.context_summarizing') }}</span>
-        </div>
-      </Transition>
       <ChatMessageList
         ref="messageList"
         v-model:active-collapse="activeCollapse"
         :messages="messages"
         :current-session-id="currentSessionId"
         :current-session-enable-markdown="currentSessionEnableMarkdown"
+        :history-loading="historyLoading"
+        :context-summarizing="isContextSummarizing"
       />
       <div class="input-area">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
@@ -257,7 +253,8 @@ const {
   transportMode,
   attachments,
   isCurrentSessionReadOnly,
-  isContextSummarizing
+  isContextSummarizing,
+  historyLoading
 } = chat
 
 // 解构方法

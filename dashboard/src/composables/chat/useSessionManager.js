@@ -25,8 +25,6 @@ export function useSessionManager() {
   const hasMore = ref(true)
   const historyLoading = ref(false)
   const sessionCreating = ref(false)
-  let isFirstLoad = true
-  let loadedPageCount = 0
   let sessionGeneration = 0
 
   // 加载历史记录的回调（由外部注入）
@@ -71,8 +69,6 @@ export function useSessionManager() {
     currentPage.value = 1
     hasMore.value = true
     historyLoading.value = false
-    isFirstLoad = true
-    loadedPageCount = 0
     
     // 触发历史记录加载（如果有回调）
     if (loadHistoryCallback) {
@@ -80,31 +76,35 @@ export function useSessionManager() {
     }
   }
 
-  // 加载会话历史记录；pageCount 为页数
+  // 加载会话历史记录；pageCount 为本次连续加载的页数
   const loadSessionHistory = async (pageCount = 1) => {
-    if (!currentSessionId.value || historyLoading.value || !hasMore.value) return
+    if (!currentSessionId.value || historyLoading.value || !hasMore.value) return []
 
     const requestedSessionId = currentSessionId.value
     const requestedGeneration = sessionGeneration
     historyLoading.value = true
     try {
-      const totalSize = PAGE_SIZE * pageCount
-      const res = await chatApi.sessionsHistory(requestedSessionId, 1, totalSize)
-      if (requestedGeneration !== sessionGeneration || requestedSessionId !== currentSessionId.value) {
-        return []
-      }
+      const pages = []
+      const pagesToLoad = Math.max(1, pageCount)
 
-      const historyData = res.data?.data || []
+      for (let index = 0; index < pagesToLoad && hasMore.value; index += 1) {
+        const page = currentPage.value
+        const res = await chatApi.sessionsHistory(requestedSessionId, page, PAGE_SIZE)
+        if (requestedGeneration !== sessionGeneration || requestedSessionId !== currentSessionId.value) {
+          return []
+        }
 
-      if (historyData.length > 0) {
-        loadedPageCount += pageCount
-        if (historyData.length < totalSize) {
+        const historyData = res.data?.data || []
+        if (historyData.length > 0) {
+          pages.unshift(historyData)
+          currentPage.value = page + 1
+        }
+        if (historyData.length < PAGE_SIZE) {
           hasMore.value = false
         }
-      } else {
-        hasMore.value = false
       }
-      return historyData
+
+      return pages.flat()
     } catch (err) {
       if (requestedGeneration === sessionGeneration && requestedSessionId === currentSessionId.value) {
         ElMessage.error(err.message || t('chat.load_history_failed'))
@@ -143,14 +143,8 @@ export function useSessionManager() {
     currentPage.value = 1
     hasMore.value = true
     historyLoading.value = false
-    isFirstLoad = true
-    loadedPageCount = 0
   }
 
-  // 检查是否还有更多历史记录
-  const checkHasMore = () => {
-    return loadedPageCount >= 2 ? (hasMore.value = false, false) : hasMore.value
-  }
 
   // 异步生成并更新会话标题
   const updateSessionTitle = async (
@@ -234,7 +228,6 @@ export function useSessionManager() {
     loadSessionHistory,
     getSortedSessions,
     resetPagination,
-    checkHasMore,
     updateSessionTitle
   }
 }

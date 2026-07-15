@@ -60,11 +60,15 @@ export function useChatState() {
   /**
    * 滚动到消息列表底部
    */
-  const scrollToBottom = () => {
+  const scrollToBottom = (behavior = 'smooth') => {
+    if (messageList.value?.scrollToBottom) {
+      messageList.value.scrollToBottom(behavior)
+      return
+    }
     if (messageList.value) {
       messageList.value.scrollTo({
         top: messageList.value.scrollHeight,
-        behavior: 'smooth'
+        behavior
       })
     }
   }

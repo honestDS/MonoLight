@@ -75,7 +75,7 @@ export function useChatSession() {
       // 插入到消息列表开头
       chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
       await nextTick()
-      chatState.scrollToBottom()
+      chatState.scrollToBottom('auto')
     }
   })
 
@@ -542,20 +542,39 @@ export function useChatSession() {
   }
 
   // ==================== 滚动事件 ====================
+  let restoringHistoryScroll = false
   
   /**
    * 处理滚动事件
    */
-  const handleScroll = () => {
-    if (!chatState.messageList.value || !sessionManager.hasMore.value || sessionManager.historyLoading.value) return
-    
-    if (sessionManager.checkHasMore()) return
-    
-    if (chatState.messageList.value.scrollTop < 50) {
-      sessionManager.loadSessionHistory(2).then(historyData => {
-        if (historyData && historyData.length > 0) {
-          chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
-        }
+  const handleScroll = async () => {
+    const messageList = chatState.messageList.value
+    if (!messageList || restoringHistoryScroll || chatState.messages.value.length === 0 || !sessionManager.hasMore.value || sessionManager.historyLoading.value) return
+    if (messageList.scrollTop > 500) return
+
+    const historyData = await sessionManager.loadSessionHistory(1)
+    if (!historyData?.length) return
+
+    const existingKeys = new Set(chatState.messages.value.flatMap(message => [...getMessageDedupeKeys(message)]))
+    const uniqueMessages = historyData
+      .map(normalizeHistoryMessage)
+      .filter((message) => {
+        const messageKeys = getMessageDedupeKeys(message)
+        if ([...messageKeys].some(key => existingKeys.has(key))) return false
+        messageKeys.forEach(key => existingKeys.add(key))
+        return true
+      })
+    if (!uniqueMessages.length) return
+
+    const anchor = messageList.captureScrollAnchor()
+    restoringHistoryScroll = true
+    try {
+      chatState.insertMessage(0, uniqueMessages)
+      await nextTick()
+      await messageList.restoreScrollAnchor(anchor)
+    } finally {
+      requestAnimationFrame(() => {
+        restoringHistoryScroll = false
       })
     }
   }
@@ -598,6 +617,7 @@ export function useChatSession() {
     typingSessionId: sessionManager.typingSessionId,
     activeCollapse: sessionManager.activeCollapse,
     hasMore: sessionManager.hasMore,
+    historyLoading: sessionManager.historyLoading,
     sessionCreating: sessionManager.sessionCreating,
     currentSession,
     isCurrentSessionReadOnly,
