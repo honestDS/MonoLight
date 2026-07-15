@@ -355,11 +355,10 @@ class ContextManager:
         """
         默认策略：基于原子轮次对齐与工具审计的硬截断。
         """
-        known_tool_call_ids = {
-            tool_call.id
-            for message in parsed_history
-            for tool_call in (message.tool_calls or [])
-        }
+        known_tool_call_ids: set[str] = set()
+        for message in parsed_history:
+            for tool_call in message.tool_calls or []:
+                known_tool_call_ids.add(tool_call.id)
         temp_msgs = []
         current_total = current_msg_tokens
         raw_history_tokens = 0

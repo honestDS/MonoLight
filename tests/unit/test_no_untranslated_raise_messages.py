@@ -43,13 +43,8 @@ def _find_untranslated_raise_messages(path: Path) -> list[str]:
 
 
 def test_backend_raise_messages_are_connected_to_i18n():
-    violations = [
-        violation
-        for path in sorted(APP_ROOT.rglob("*.py"))
-        for violation in _find_untranslated_raise_messages(path)
-    ]
+    violations: list[str] = []
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        violations.extend(_find_untranslated_raise_messages(path))
 
-    assert not violations, (
-        "以下报错文本未接入多语言，请改用错误常量或 t(...)：\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "以下报错文本未接入多语言，请改用错误常量或 t(...)：\n" + "\n".join(violations)
