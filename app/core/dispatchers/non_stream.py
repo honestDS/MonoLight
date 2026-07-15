@@ -36,7 +36,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
-from app.core.utils.dispatcher.markdown_instruction import append_text_instruction, build_max_output_tokens_instruction
+from app.core.utils.dispatcher.markdown_instruction import append_system_prompt_instruction, build_max_output_tokens_instruction, materialize_latest_user_system_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
@@ -98,7 +98,7 @@ class NonStreamDispatcherMixin:
                     new_messages = await fetch_and_merge_new_user_messages(db, session_id, uid)
                 max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
                 for new_message in new_messages:
-                    append_text_instruction(new_message, max_tokens_instruction)
+                    append_system_prompt_instruction(new_message, max_tokens_instruction)
                 return new_messages
 
             final_ai_content = ""
@@ -229,7 +229,12 @@ class NonStreamDispatcherMixin:
                                         lifecycle_event_callback=context_summary_lifecycle_callback,
                                     )
                                 request_messages = ContextManager.trim_messages_for_model_request(
-                                    messages=messages,
+                                    messages=await materialize_latest_user_system_prompt(
+                                        db,
+                                        session_id,
+                                        messages,
+                                        chat_params["max_tokens"],
+                                    ),
                                     uid=uid,
                                     session_id=session_id,
                                     context_window_k=chat_params["context_window_k"],

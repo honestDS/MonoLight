@@ -32,6 +32,7 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
+from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_system_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
@@ -175,7 +176,12 @@ class StreamDispatcherMixin:
                                         tools=current_tools,
                                     )
                                 request_messages = ContextManager.trim_messages_for_model_request(
-                                    messages=messages,
+                                    messages=await materialize_latest_user_system_prompt(
+                                        db,
+                                        session_id,
+                                        messages,
+                                        chat_params["max_tokens"],
+                                    ),
                                     uid=uid,
                                     session_id=session_id,
                                     context_window_k=chat_params["context_window_k"],

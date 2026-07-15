@@ -5,23 +5,62 @@ import pytest
 
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.context_summary.common import ContextSummaryState
-from app.core.utils.dispatcher.markdown_instruction import append_text_instruction, build_max_output_tokens_instruction
+from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
+from app.core.utils.dispatcher.markdown_instruction import (
+    append_user_runtime_instruction_text,
+    build_max_output_tokens_instruction,
+    materialize_latest_user_system_prompt,
+)
 from app.models.message import InternalMessage, MessageRole
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
 
 
-def test_max_output_tokens_instruction_is_appended_as_platform_notice():
-    message = InternalMessage(role=MessageRole.USER, content="current user input")
-    instruction = build_max_output_tokens_instruction(200)
+@pytest.mark.asyncio
+async def test_runtime_instruction_is_rebuilt_persisted_and_materialized_on_latest_user_message(monkeypatch):
+    stale_instruction = "stale runtime instruction" + build_max_output_tokens_instruction(200)
+    latest_runtime_instruction = "latest runtime instruction" + build_max_output_tokens_instruction(256)
+    quoted_instruction = "quoted notice" + build_max_output_tokens_instruction(999)
+    older_message = InternalMessage(id=1, role=MessageRole.USER, content=quoted_instruction, system_prompt=stale_instruction)
+    latest_message = InternalMessage(id=2, role=MessageRole.USER, content="current user input", system_prompt=stale_instruction)
+    persisted_system_prompts = []
 
-    append_text_instruction(message, instruction)
+    async def build_runtime_instructions(_db, session_id, max_tokens):
+        assert session_id == "session-1"
+        assert max_tokens == 256
+        return latest_runtime_instruction
 
-    assert message.content == f"current user input{instruction}"
-    assert instruction.startswith("\n\n[系统提示,此处不是用户说的话]")
-    assert "最大输出 Token 数为 200" in instruction
-    assert instruction.endswith("[系统提示结束]")
+    async def set_system_prompt(_db, message_id, system_prompt):
+        persisted_system_prompts.append((message_id, system_prompt))
+        return True
+
+    monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_system_prompt", set_system_prompt)
+
+    request_messages = await materialize_latest_user_system_prompt(
+        object(),
+        "session-1",
+        [older_message, latest_message],
+        256,
+    )
+
+    assert older_message.content == quoted_instruction
+    assert latest_message.content == "current user input"
+    assert request_messages[0].content == quoted_instruction
+    assert request_messages[1].content == "current user input" + latest_runtime_instruction
+    assert request_messages[1].system_prompt == latest_runtime_instruction
+    assert latest_message.system_prompt == stale_instruction
+    assert persisted_system_prompts == [(2, latest_runtime_instruction)]
     assert build_max_output_tokens_instruction(0) == ""
+
+
+def test_runtime_instruction_assignment_does_not_change_message_content():
+    message = InternalMessage(role=MessageRole.USER, content="current user input")
+
+    append_user_runtime_instruction_text(message, "runtime instruction")
+
+    assert message.content == "current user input"
+    assert message.system_prompt == "runtime instruction"
 
 
 @pytest.mark.asyncio

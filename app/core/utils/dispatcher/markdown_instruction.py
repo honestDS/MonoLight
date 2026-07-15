@@ -1,9 +1,10 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crud.message import message_crud
 from app.core.crud.session import session_crud
 from app.core.prompts import MARKDOWN_FORMAT_INSTRUCTION_PROMPT, MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT, SYSTEM_CONTEXT_WRAPPER
 from app.core.utils.system import get_full_system_context
-from app.models.message import InternalMessage, TextPart
+from app.models.message import InternalMessage, MessageRole, TextPart
 
 
 def build_markdown_instruction(enable_markdown: bool) -> str:
@@ -38,6 +39,29 @@ def build_max_output_tokens_instruction(max_tokens: int) -> str:
     return "\n\n" + MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT.format(max_tokens=max_tokens)
 
 
+def append_system_prompt_instruction(message: InternalMessage, instruction: str) -> InternalMessage:
+    message.system_prompt = f"{message.system_prompt or ''}{instruction}"
+    return message
+
+
+async def materialize_latest_user_system_prompt(
+    db: AsyncSession,
+    session_id: str,
+    messages: list[InternalMessage],
+    max_tokens: int,
+) -> list[InternalMessage]:
+    request_messages = [message.model_copy(deep=True) for message in messages]
+    for message in reversed(request_messages):
+        if message.role != MessageRole.USER or (message.id is None and not message.system_prompt):
+            continue
+        message.system_prompt = await build_user_runtime_instructions(db, session_id, max_tokens)
+        if message.id is not None:
+            await message_crud.set_system_prompt(db, message.id, message.system_prompt)
+        append_text_instruction(message, message.system_prompt)
+        break
+    return request_messages
+
+
 def build_runtime_environment_instruction() -> str:
     return "\n\n" + SYSTEM_CONTEXT_WRAPPER.format(context=get_full_system_context())
 
@@ -49,7 +73,8 @@ async def build_user_runtime_instructions(db: AsyncSession, session_id: str, max
 
 
 def append_user_runtime_instruction_text(message: InternalMessage, instruction: str) -> InternalMessage:
-    return append_text_instruction(message, instruction)
+    message.system_prompt = instruction
+    return message
 
 
 async def append_user_runtime_instructions(db: AsyncSession, session_id: str, message: InternalMessage, max_tokens: int = 0) -> InternalMessage:

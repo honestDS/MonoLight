@@ -2,6 +2,7 @@ from typing import (
     Any,
 )
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -24,6 +25,11 @@ from app.models.user import User
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
+    async def set_system_prompt(self, db: AsyncSession, message_id: int, system_prompt: str | None) -> bool:
+        result = await db.execute(update(Message).where(Message.id == message_id).values(system_prompt=system_prompt))
+        await db.commit()
+        return bool(result.rowcount)
+
     async def get_by_dedupe_key(self, db: AsyncSession, dedupe_key: str) -> Message | None:
         result = await db.execute(select(Message).where(Message.dedupe_key == dedupe_key))
         return result.scalars().first()

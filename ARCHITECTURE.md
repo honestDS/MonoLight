@@ -483,7 +483,8 @@ scripts/
 ├── migration_20260712_add_session_reply_queue.py       # 会话回复队列表
 ├── migration_20260712_add_session_reply_stream_event.py # 会话回复流事件表
 ├── migration_20260712_drop_active_session.py           # 删除旧活跃会话表
-└── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
+├── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
+└── migration_20260715_add_message_system_prompt.py     # 消息系统提醒字段
 ```
 
 ## 运行期目录
