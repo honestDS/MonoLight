@@ -110,6 +110,17 @@ def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
     return False
 
 
+def get_tool_required_parameters(tool_name: str) -> list[str]:
+    for schema in _iter_tool_schemas():
+        if schema["function"]["name"] != tool_name:
+            continue
+        required = schema.get("function", {}).get("parameters", {}).get("required", [])
+        if not isinstance(required, list):
+            return []
+        return [parameter_name for parameter_name in required if isinstance(parameter_name, str)]
+    return []
+
+
 def tool_runs_in_background(tool_name: str) -> bool:
     return tool_name in ALWAYS_BACKGROUND_TOOL_NAMES
 

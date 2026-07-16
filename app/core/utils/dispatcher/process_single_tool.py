@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     ERR_BACKGROUND_TASK_UNSUPPORTED,
+    ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_NOT_REGISTERED,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
@@ -26,6 +27,7 @@ from app.core.log import (
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
+    get_tool_required_parameters,
     tool_runs_in_background,
     tool_schema_has_parameter,
 )
@@ -95,6 +97,21 @@ def _build_tool_error_result(tool_name: str, error_message: str) -> str:
     )
 
 
+def _build_missing_required_arguments_result(tool_name: str, missing_arguments: list[str]) -> str:
+    return json.dumps(
+        {
+            "status": "failed",
+            "tool_name": tool_name,
+            "error": t(
+                ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
+                fields=", ".join(missing_arguments),
+            ),
+            "missing_arguments": missing_arguments,
+        },
+        ensure_ascii=False,
+    )
+
+
 def _build_unsupported_arguments_result(tool_name: str, unsupported_arguments: list[str]) -> str:
     return json.dumps(
         {
@@ -128,6 +145,7 @@ async def process_single_tool(
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
+    missing_arguments = sorted(parameter_name for parameter_name in get_tool_required_parameters(tool_name) if parameter_name not in args)
     unsupported_arguments = sorted(argument_name for argument_name in args if not tool_schema_has_parameter(tool_name, argument_name))
     background_requested = bool(args.pop("run_in_background", False))
     background_required = tool_runs_in_background(tool_name)
@@ -137,6 +155,8 @@ async def process_single_tool(
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
+    elif missing_arguments:
+        cmd_result = _build_missing_required_arguments_result(tool_name, missing_arguments)
     elif unsupported_arguments:
         cmd_result = _build_unsupported_arguments_result(tool_name, unsupported_arguments)
     elif run_in_background and not allow_background_submission:
