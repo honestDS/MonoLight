@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.tools import image_generation as image_generation_module
 from app.core.tools import tool_runs_in_background, tool_schema_has_parameter
-from app.core.tools.image_generation import IMAGE_GENERATION_TOOL_SCHEMA
+from app.core.tools.image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
 
@@ -76,3 +77,81 @@ async def test_image_generation_is_submitted_in_background_without_parameter(mon
     assert payload["task_id"] == 42
     assert submitted["tool_name"] == "generate_image"
     assert submitted["arguments"] == {"prompt": "a cat"}
+
+
+@pytest.mark.asyncio
+async def test_image_generation_releases_database_connection_before_remote_call(monkeypatch):
+    commits = []
+    generate_calls = []
+
+    class TrackingSession:
+        async def commit(self):
+            commits.append("commit")
+
+    async def select_channel(db, *_args, **_kwargs):
+        assert db is session
+        channel = SimpleNamespace(
+            channel_type="OPENAI",
+            base_url="https://example.invalid",
+            get_decrypted_api_key=lambda: "secret",
+        )
+        model_entry = {
+            "model_id": "image-model",
+            "size": "1024x1024",
+            "quality": "auto",
+        }
+        return channel, model_entry, SimpleNamespace(priority=1)
+
+    async def generate_image(**kwargs):
+        generate_calls.append(list(commits))
+        return {
+            "model": "image-model",
+            "data": [{"b64_json": "aGVsbG8="}],
+        }
+
+    async def save_base64_image(_payload):
+        return {
+            "id": "file-1",
+            "name": "image.png",
+            "path": "image.png",
+            "description": "Generated image",
+            "mime_type": "image/png",
+            "size": 5,
+            "download_url": "/image.png",
+            "previewable": True,
+        }
+
+    session = TrackingSession()
+    executor = ImageGenerationExecutor(project_root=".", uid="user-1")
+    executor.set_config(
+        ProfileConfig.model_validate(
+            {
+                "channel": {
+                    "image_generation_channel": {
+                        "rules": [
+                            {
+                                "channel_id": 1,
+                                "model_id": "image-model",
+                                "priority": 1,
+                                "weight": 1,
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+    )
+    executor.set_runtime_context(
+        db=session,
+        profile=Profile(id=3, uid="user-1", name="profile", configs={}),
+        session_id="session-1",
+    )
+    monkeypatch.setattr(image_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(image_generation_module.ImageGenerationClient, "generate_image", generate_image)
+    monkeypatch.setattr(executor, "_save_base64_image", save_base64_image)
+
+    result = json.loads(await executor.execute(prompt="a cat"))
+
+    assert result["status"] == "success"
+    assert commits == ["commit"]
+    assert generate_calls == [["commit"]]

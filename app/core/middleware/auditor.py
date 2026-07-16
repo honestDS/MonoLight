@@ -182,6 +182,7 @@ class AuditMiddleware:
             logger.bind(uid=uid, session_id=session_id, security=True).warning(t("LOG_AUDIT_PROVIDER_DISABLED"))
             return None
 
+        await db.commit()
         audit_res = await audit_command(command, channel.base_url, channel.get_decrypted_api_key(), cfg.security.audit_model_id, session_id=session_id, uid=uid)
 
         if audit_res is None:

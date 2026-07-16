@@ -49,6 +49,7 @@ async def generate_chat_with_fallback(
         chat_params = resolve_chat_params(model_entry, chat_channel)
         try:
             request_messages = await _resolve_request_messages(request_builder, chat_params)
+            await db.commit()
             response = await LLMClient.generate(
                 api_key=chat_channel_obj.get_decrypted_api_key(),
                 base_url=chat_channel_obj.base_url,

@@ -214,6 +214,7 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
 
             args = dict(task.arguments or {})
             args.pop("run_in_background", None)
+            await db.commit()
             raw_result = await instance.execute(**args)
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:

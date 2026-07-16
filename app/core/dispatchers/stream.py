@@ -188,6 +188,7 @@ class StreamDispatcherMixin:
                                     max_tokens=chat_params["max_tokens"],
                                     tools=current_tools,
                                 )
+                                await db.commit()
                                 async for chunk in LLMClient.generate_stream(
                                     api_key=chat_channel_obj.get_decrypted_api_key(),
                                     base_url=chat_channel_obj.base_url,

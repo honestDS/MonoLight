@@ -1,10 +1,14 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
 
 from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
-from app.core.utils.dispatcher import helpers
-from app.models.message import MessageResponse, MessageRole, MessageType
+from app.core.middleware import auditor as auditor_module
+from app.core.utils.dispatcher import channel_call, helpers
+from app.models.message import InternalMessage, InternalResponse, MessageResponse, MessageRole, MessageType
 
 
 class CapturingLogger:
@@ -78,3 +82,85 @@ def test_message_response_restores_structured_content_list():
     response = _build_message_response('[{"type": "text", "text": "hello"}]')
 
     assert response.content == [{"type": "text", "text": "hello"}]
+
+
+class _TrackingSession:
+    def __init__(self):
+        self.commit_count = 0
+
+    async def commit(self):
+        self.commit_count += 1
+
+
+@pytest.mark.asyncio
+async def test_channel_call_releases_connection_before_model_request(monkeypatch):
+    db = _TrackingSession()
+    model_call_commit_counts = []
+    channel = SimpleNamespace(
+        base_url="https://example.invalid",
+        protocol="openai",
+        get_decrypted_api_key=lambda: "secret",
+    )
+
+    async def select_channel(*_args, **_kwargs):
+        return channel, {"model_id": "model-1"}, SimpleNamespace(priority=1)
+
+    async def generate(**_kwargs):
+        model_call_commit_counts.append(db.commit_count)
+        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model="model-1")
+
+    monkeypatch.setattr(channel_call, "select_channel", select_channel)
+    monkeypatch.setattr(channel_call.LLMClient, "generate", generate)
+
+    await channel_call.generate_chat_with_fallback(
+        db,
+        chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
+        request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
+        call_context="test",
+        cursor_key="profile:CHAT",
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert model_call_commit_counts == [1]
+
+
+@pytest.mark.asyncio
+async def test_tool_audit_releases_connection_before_model_request(monkeypatch):
+    db = _TrackingSession()
+    audit_call_commit_counts = []
+    channel = SimpleNamespace(
+        is_active=True,
+        base_url="https://example.invalid",
+        get_decrypted_api_key=lambda: "secret",
+    )
+    cfg = SimpleNamespace(
+        security=SimpleNamespace(
+            audit_threshold=5,
+            audit_channel_id=1,
+            audit_model_id="audit-model",
+        )
+    )
+
+    async def get_channel(_db, _channel_id):
+        return channel
+
+    async def audit_command(*_args, **_kwargs):
+        audit_call_commit_counts.append(db.commit_count)
+        return {"score": 0}
+
+    monkeypatch.setattr(auditor_module.channel_crud, "get", get_channel)
+    monkeypatch.setattr(auditor_module, "audit_command", audit_command)
+
+    result = await auditor_module.AuditMiddleware.audit(
+        db,
+        SimpleNamespace(),
+        cfg,
+        "execute_shell",
+        {"command": "echo hello"},
+        session_id="session-1",
+        uid="user-1",
+    )
+
+    assert result is None
+    assert audit_call_commit_counts == [1]

@@ -54,6 +54,8 @@ async def embed_chunks_with_knowledge_base_config(
     kb: KnowledgeBase,
     texts: list[str],
     batch_size: int,
+    *,
+    release_connection: bool = False,
 ) -> list[list[float]]:
     channel = await db.get(ModelChannel, kb.embedding_channel_id)
     if not channel:
@@ -73,6 +75,8 @@ async def embed_chunks_with_knowledge_base_config(
 
     model_timeout = model_entry.get("embedding_timeout")
     embedding_timeout = min(float(model_timeout), 600.0) if model_timeout else 30.0
+    if release_connection:
+        await db.commit()
     return await EmbeddingClient.embed_texts(
         channel_type=channel.channel_type,
         api_key=channel.get_decrypted_api_key(),
@@ -134,7 +138,7 @@ async def query_knowledge_base(
         if not binding_result.scalars().first():
             raise HTTPException(status_code=403, detail=ERR_KB_NOT_IN_PROFILE)
 
-    query_embedding = (await embed_chunks_with_knowledge_base_config(db, kb, [query], 1))[0]
+    query_embedding = (await embed_chunks_with_knowledge_base_config(db, kb, [query], 1, release_connection=True))[0]
     final_top_k = top_k
 
     excluded_rerank_priorities: set[int] = set()
@@ -154,6 +158,7 @@ async def query_knowledge_base(
 
         rerank_attempted = True
         effective_candidate_k = max(rerank_config.candidate_k, final_top_k)
+        await db.commit()
         fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k)
 
         if len(fused_hits) <= final_top_k:
@@ -189,6 +194,7 @@ async def query_knowledge_base(
     if rerank_attempted and rerank_error and expose_rerank_error:
         raise HTTPException(status_code=502, detail=rerank_error)
 
+    await db.commit()
     fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k)
     return build_query_test_response(
         fused_hits[:final_top_k],

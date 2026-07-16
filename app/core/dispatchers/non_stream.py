@@ -253,6 +253,7 @@ class NonStreamDispatcherMixin:
                                     "protocol": getattr(chat_channel_obj, "protocol", "openai"),
                                     "timeout": chat_params["chat_timeout"],
                                 }
+                                await db.commit()
                                 if stream_event_callback is None:
                                     response = await LLMClient.generate(**generation_kwargs)
                                 else:

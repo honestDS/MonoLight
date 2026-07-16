@@ -258,6 +258,7 @@ async def generate_title(
     while True:
         channel, model_entry, _rule = selection
         try:
+            await db.commit()
             title = await generate_session_title(
                 uid=uid,
                 session_id=request.session_id,

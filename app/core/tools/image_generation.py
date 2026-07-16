@@ -222,6 +222,7 @@ class ImageGenerationExecutor(BaseExecutor):
             try:
                 resolved_size = size or model_entry.get("size") or "1024x1024"
                 resolved_quality = quality or model_entry.get("quality") or "auto"
+                await self.db.commit()
                 response = await ImageGenerationClient.generate_image(
                     channel_type=channel.channel_type,
                     api_key=channel.get_decrypted_api_key(),

@@ -1,12 +1,14 @@
+import asyncio
 from importlib import import_module
 
 import pytest
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.providers.database import AsyncSessionLocal, engine
+from app.providers.database.client import CancellationSafeAsyncSession
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +55,33 @@ async def test_save_message_is_idempotent_by_dedupe_key():
     assert first.environment_prompt == "internal notice"
     assert persisted.environment_prompt == "internal notice"
     assert count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["commit", "rollback", "close"])
+async def test_session_finishes_database_cleanup_before_propagating_cancellation(monkeypatch, method_name):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def delayed_operation(_session):
+        started.set()
+        await release.wait()
+        completed.set()
+
+    monkeypatch.setattr(AsyncSession, method_name, delayed_operation)
+    session = CancellationSafeAsyncSession()
+    operation = asyncio.create_task(getattr(session, method_name)())
+    await started.wait()
+
+    operation.cancel()
+    await asyncio.sleep(0)
+
+    assert not operation.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert completed.is_set()
 
 
 @pytest.mark.asyncio

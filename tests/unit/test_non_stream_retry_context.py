@@ -11,6 +11,14 @@ from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 
+class _Session:
+    def __init__(self):
+        self.commit_count = 0
+
+    async def commit(self):
+        self.commit_count += 1
+
+
 class _Dispatcher(non_stream_module.NonStreamDispatcherMixin):
     @classmethod
     async def validate_initial_message_before_save(cls, db, message, uid, session_id, profile, attachments):
@@ -173,7 +181,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
-        db=SimpleNamespace(),
+        db=_Session(),
         message="original request",
         uid="user-1",
         session_id="session-1",
@@ -301,7 +309,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
     monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
-        db=SimpleNamespace(),
+        db=_Session(),
         message="original request",
         uid="user-1",
         session_id="session-1",
@@ -434,7 +442,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
-        db=SimpleNamespace(),
+        db=_Session(),
         message="original request",
         uid="user-1",
         session_id="session-1",
@@ -564,7 +572,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     events = [
         event
         async for event in _StreamDispatcher.dispatch_stream(
-            db=SimpleNamespace(),
+            db=_Session(),
             message="original request",
             uid="user-1",
             session_id="session-1",

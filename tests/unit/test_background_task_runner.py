@@ -17,6 +17,17 @@ class SessionContext:
         return None
 
 
+class TrackingSession:
+    def __init__(self):
+        self.commits = 0
+
+    async def commit(self):
+        self.commits += 1
+
+    async def refresh(self, _value):
+        return None
+
+
 class CapturingLog:
     def __init__(self):
         self.errors = []
@@ -167,3 +178,66 @@ async def test_lost_lease_cancels_execution_and_releases_claim(monkeypatch):
 
     assert execution_cancelled.is_set()
     assert released == [(task.id, "worker-a")]
+
+
+@pytest.mark.asyncio
+async def test_background_tool_releases_database_connection_before_execution(monkeypatch):
+    db = TrackingSession()
+    task = SimpleNamespace(
+        id=9,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        tool_name="generate_image",
+        arguments={"prompt": "sunrise"},
+        extra={},
+        status="running",
+        auto_reply=False,
+    )
+    profile = SimpleNamespace(id=3, uid="user-1", configs={})
+    execution_commit_counts = []
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            return None
+
+        def set_config(self, _cfg):
+            return None
+
+        def set_runtime_context(self, **_kwargs):
+            return None
+
+        async def execute(self, **_kwargs):
+            execution_commit_counts.append(db.commits)
+            return {"ok": True}
+
+    async def get_task(_db, _task_id):
+        return task
+
+    async def get_profile(_db, _profile_id):
+        return profile
+
+    async def mark_succeeded(_db, **_kwargs):
+        return True
+
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", lambda: _SingleSessionContext(db))
+    monkeypatch.setattr(runner_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(runner_module.profile_crud, "get", get_profile)
+    monkeypatch.setattr(runner_module.background_task_crud, "mark_succeeded", mark_succeeded)
+    monkeypatch.setitem(runner_module.TOOL_EXECUTOR_MAP, "generate_image", Executor)
+
+    result = await runner_module._execute_claimed_background_task(task.id, "worker-a", CapturingLog())
+
+    assert result is True
+    assert execution_commit_counts == [1]
+
+
+class _SingleSessionContext:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None

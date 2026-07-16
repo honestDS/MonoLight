@@ -1,5 +1,7 @@
+import asyncio
 import os
 import sys
+from collections.abc import Awaitable
 
 from dotenv import load_dotenv
 from sqlalchemy import event
@@ -12,6 +14,33 @@ from sqlalchemy.ext.asyncio import (
 from app.core.paths import SQLITE_DB_PATH, TEST_SESSION_DB_PATH, ensure_data_dirs
 
 load_dotenv()
+
+
+async def _await_cancellation_safe[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
+    operation = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                continue
+        if not operation.cancelled():
+            operation.exception()
+        raise
+
+
+class CancellationSafeAsyncSession(AsyncSession):
+    async def commit(self) -> None:
+        await _await_cancellation_safe(super().commit())
+
+    async def rollback(self) -> None:
+        await _await_cancellation_safe(super().rollback())
+
+    async def close(self) -> None:
+        await _await_cancellation_safe(super().close())
+
 
 ensure_data_dirs()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -45,7 +74,7 @@ if DATABASE_URL.startswith("sqlite+"):
             cursor.close()
 
 
-AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=CancellationSafeAsyncSession, expire_on_commit=False)
 
 
 async def get_db():
