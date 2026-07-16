@@ -51,7 +51,7 @@ class SecurityConfig(BaseModel):
 
     audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
-    audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发审计拦截的风险评分阈值（0-7）")
+    audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发二次确认的风险评分阈值（1-7），0 表示关闭二次确认")
 
 
 class ToolConfig(BaseModel):

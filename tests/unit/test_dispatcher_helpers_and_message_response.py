@@ -1,9 +1,10 @@
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
-from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
+from app.core.constants import ERR_AUDIT_SECURITY_BLOCKED, ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.middleware import auditor as auditor_module
@@ -164,3 +165,59 @@ async def test_tool_audit_releases_connection_before_model_request(monkeypatch):
 
     assert result is None
     assert audit_call_commit_counts == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("audit_result", "expected_error"),
+    [
+        ({"score": 7}, None),
+        ({"score": 8}, t(ERR_AUDIT_SECURITY_BLOCKED)),
+        (None, "audit_system_failure"),
+    ],
+)
+async def test_disabled_secondary_confirmation_keeps_audit_active(monkeypatch, audit_result, expected_error):
+    db = _TrackingSession()
+    audit_call_count = 0
+    channel = SimpleNamespace(
+        is_active=True,
+        base_url="https://example.invalid",
+        get_decrypted_api_key=lambda: "secret",
+    )
+    cfg = SimpleNamespace(
+        security=SimpleNamespace(
+            audit_threshold=0,
+            audit_channel_id=1,
+            audit_model_id="audit-model",
+        )
+    )
+
+    async def get_channel(_db, _channel_id):
+        return channel
+
+    async def audit_command(*_args, **_kwargs):
+        nonlocal audit_call_count
+        audit_call_count += 1
+        return audit_result
+
+    monkeypatch.setattr(auditor_module.channel_crud, "get", get_channel)
+    monkeypatch.setattr(auditor_module, "audit_command", audit_command)
+
+    result = await auditor_module.AuditMiddleware.audit(
+        db,
+        SimpleNamespace(),
+        cfg,
+        "execute_shell",
+        {"command": "echo hello"},
+        session_id="session-1",
+        uid="user-1",
+    )
+
+    assert audit_call_count == 1
+    assert db.commit_count == 1
+    if expected_error is None:
+        assert result is None
+    else:
+        payload = json.loads(result)
+        assert payload["error"] == expected_error
+        assert payload["error"] != "confirmation_required"

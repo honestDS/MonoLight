@@ -132,8 +132,15 @@
                     ></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.audit_threshold')" label-width="auto">
-                  <el-slider v-model="form.configs.security.audit_threshold" :min="0" :max="7" show-stops show-input></el-slider>
+                <el-form-item :label="$t('profiles.secondary_confirmation')" label-width="auto">
+                  <el-switch
+                    :model-value="form.configs.security.audit_threshold > 0"
+                    @update:model-value="form.configs.security.audit_threshold = $event ? 5 : 0"
+                  ></el-switch>
+                  <div class="help-text">{{ $t('profiles.secondary_confirmation_hint') }}</div>
+                </el-form-item>
+                <el-form-item v-if="form.configs.security.audit_threshold > 0" :label="$t('profiles.audit_threshold')" label-width="auto">
+                  <el-slider v-model="form.configs.security.audit_threshold" :min="1" :max="7" show-stops show-input></el-slider>
                   <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
                 </el-form-item>
               </div>

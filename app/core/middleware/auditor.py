@@ -168,9 +168,6 @@ class AuditMiddleware:
                 ensure_ascii=False,
             )
 
-        if cfg.security.audit_threshold == 0:
-            return None
-
         if not cfg.security.audit_channel_id or cfg.security.audit_channel_id <= 0:
             return None
 
@@ -196,7 +193,7 @@ class AuditMiddleware:
 
         if score >= 8:
             return json.dumps({"error": t(ERR_AUDIT_SECURITY_BLOCKED), "reason": t(ERR_AUDIT_HIGH_RISK_BLOCKED, score=score)}, ensure_ascii=False)
-        if score >= cfg.security.audit_threshold:
+        if cfg.security.audit_threshold > 0 and score >= cfg.security.audit_threshold:
             cmd_hash = hashlib.sha256(command.strip().encode()).hexdigest()[:12]
             dynamic_token = f"{CONFIRMATION_PREFIX}{cmd_hash}"
 
