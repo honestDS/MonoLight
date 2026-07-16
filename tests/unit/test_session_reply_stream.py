@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.adapters import chat_web as chat_web_module
+from app.core.exceptions import BaseBusinessException
 from app.core.session_reply_queue.executor import _execute_foreground
 from app.core.session_reply_queue.manager import (
     SessionReplyQueueManager,
@@ -360,6 +362,50 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
 
 
 @pytest.mark.asyncio
+async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch):
+    adapter = chat_web_module.WebChatAdapter()
+    original_work = SimpleNamespace(id=9)
+    resolved_event_id = "session-reply-work:resolved:error"
+
+    async def ensure_writable(*_args, **_kwargs):
+        return None
+
+    async def get_profile(*_args, **_kwargs):
+        return SimpleNamespace(id=1)
+
+    async def validate_message(*_args, **_kwargs):
+        return None
+
+    async def enqueue_message(*_args, **_kwargs):
+        return SimpleNamespace(id=1), original_work
+
+    async def wait_for_result(work_id):
+        assert work_id == 9
+        raise BaseBusinessException(
+            message="等待对话模型首字响应超时（60.0 秒）",
+            default_message="等待对话模型首字响应超时（60.0 秒）",
+            data={"work_id": 7, "event_id": resolved_event_id},
+        )
+
+    monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
+    monkeypatch.setattr(chat_web_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "enqueue_foreground_message", enqueue_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_result", wait_for_result)
+
+    response = await adapter.chat(
+        db=SimpleNamespace(),
+        message="test",
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert response["work_id"] == 7
+    assert response["event_id"] == resolved_event_id
+    assert response["choices"][0]["message"]["content"] == "等待对话模型首字响应超时（60.0 秒）"
+
+
+@pytest.mark.asyncio
 async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monkeypatch):
     manager = SessionReplyQueueManager()
     states = [
@@ -443,6 +489,58 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
     assert [event["type"] for event in yielded] == ["content", "content", "done"]
     assert "".join(event["content"] for event in yielded if event["type"] == "content") == "你好"
     assert yielded[-1]["history"] == [{"role": "assistant", "content": "你好"}]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
+    manager = SessionReplyQueueManager()
+    work = SimpleNamespace(
+        id=7,
+        session_id="session-1",
+        status=SessionReplyWorkStatus.FAILED,
+        execution_state={},
+        error="timeout",
+        result_message_id=9,
+        dedupe_key="foreground-message:session-1:11",
+        created_at=datetime(2026, 7, 16, 21, 0, 0),
+    )
+
+    class FakeSession:
+        async def get(self, model, item_id):
+            assert item_id == 9
+            return SimpleNamespace(content="等待对话模型首字响应超时（60.0 秒）")
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve_merged_target(db, work_id: int):
+        return work
+
+    async def list_after_sequence(db, *, work_id: int, after_sequence_no: int):
+        return []
+
+    monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_work_item_crud.resolve_merged_target",
+        resolve_merged_target,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_stream_event_crud.list_after_sequence",
+        list_after_sequence,
+    )
+
+    yielded = [event async for event in manager.wait_for_stream(7)]
+
+    assert len(yielded) == 1
+    assert yielded[0]["type"] == "error"
+    assert yielded[0]["work_id"] == 7
+    assert yielded[0]["message"] == "等待对话模型首字响应超时（60.0 秒）"
+    assert yielded[0]["event_id"].startswith("session-reply-work:")
+    assert yielded[0]["event_id"].endswith(":error")
 
 
 @pytest.mark.asyncio

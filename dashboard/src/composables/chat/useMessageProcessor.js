@@ -331,14 +331,24 @@ export function useMessageProcessor() {
   }
 
   // 处理流式下的业务错误事件
-  const processStreamError = (messagesRef, errorMessage, thinkingId) => {
+  const processStreamError = (messagesRef, errorMessage, thinkingId, workId = null, eventId = null) => {
     removeThinkingMessage(messagesRef, thinkingId)
+
+    const alreadyHandled = messagesRef.value.some(message =>
+      message.role === 'err' && (
+        (eventId && message.event_id === eventId) ||
+        (workId && message.work_id === workId)
+      )
+    )
+    if (alreadyHandled) return false
 
     const newMsg = {
       id: thinkingId || Date.now(),
       role: 'err',
       content: errorMessage,
-      created_at: Date.now() / 1000
+      created_at: Date.now() / 1000,
+      ...(workId ? { work_id: workId } : {}),
+      ...(eventId ? { event_id: eventId } : {})
     }
     const firstThinkingIdx = messagesRef.value.findIndex(m => m.role === 'thinking')
     if (firstThinkingIdx !== -1) {
@@ -346,6 +356,7 @@ export function useMessageProcessor() {
     } else {
       messagesRef.value.push(newMsg)
     }
+    return true
   }
   
   // 处理完整的 AI 响应消息，WS 和 HTTP 共用

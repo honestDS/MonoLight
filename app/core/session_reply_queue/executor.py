@@ -1,4 +1,3 @@
-import hashlib
 import json
 import time
 from datetime import datetime
@@ -24,7 +23,7 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import t
 from app.core.message_platforms.notifier import send_session_event
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
-from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_session_reply_work_event_id, build_session_reply_work_identity, session_reply_queue_manager
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
@@ -38,17 +37,7 @@ SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX = "session-reply-work"
 
 
 def _work_identity(work: SessionReplyWorkItem) -> str:
-    created_at = work.created_at.replace(tzinfo=None).isoformat(timespec="microseconds") if isinstance(work.created_at, datetime) else str(work.created_at)
-    payload = json.dumps(
-        {
-            "dedupe_key": work.dedupe_key,
-            "created_at": created_at,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    return build_session_reply_work_identity(work)
 
 
 def _result_message_dedupe_key(work: SessionReplyWorkItem) -> str:
@@ -130,7 +119,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: "scheduled_task",
     }[work.work_type]
     event = {
-        "event_id": f"session-reply-work:{_work_identity(work)}:{'error' if error else 'event'}",
+        "event_id": build_session_reply_work_event_id(work, error=error),
         "type": "proactive_reply_error" if error else "proactive_reply",
         "source": source,
         "session_id": work.session_id,

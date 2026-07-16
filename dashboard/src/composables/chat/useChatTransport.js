@@ -181,7 +181,7 @@ export function useChatTransport() {
       if (onProactiveReplyError) {
         onProactiveReplyError(data)
       } else if (onError) {
-        onError(resolveErrorMessage(data, 'Background proactive reply failed'), thinkingId, requestId)
+        onError(resolveErrorMessage(data, 'Background proactive reply failed'), thinkingId, requestId, data)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -202,7 +202,7 @@ export function useChatTransport() {
       const errorMessage = resolveErrorMessage(data, t('chat.stream_error'))
       console.error('WebSocket业务错误:', errorMessage)
       if (onError) {
-        onError(errorMessage, thinkingId, requestId)
+        onError(errorMessage, thinkingId, requestId, data)
       }
       if (setLoading) {
         setLoading(false)
@@ -222,7 +222,7 @@ export function useChatTransport() {
       const finishReason = choice.finish_reason
 
       if (choice.message?.role === 'err') {
-        if (onError) onError(content, thinkingId, requestId)
+        if (onError) onError(content, thinkingId, requestId, data)
         if (setLoading) setLoading(false)
         if (requestId) callbacksMap.delete(requestId)
         return

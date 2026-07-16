@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import update
@@ -50,12 +51,38 @@ def build_foreground_message_dedupe_key(session_id: str, message_id: int) -> str
     return f"foreground-message:{session_digest}:{message_id}"
 
 
-async def _raise_work_failure(db: AsyncSession, work: SessionReplyWorkItem) -> None:
+def build_session_reply_work_identity(work: SessionReplyWorkItem) -> str:
+    created_at = work.created_at.replace(tzinfo=None).isoformat(timespec="microseconds") if isinstance(work.created_at, datetime) else str(work.created_at)
+    payload = json.dumps(
+        {
+            "dedupe_key": work.dedupe_key,
+            "created_at": created_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def build_session_reply_work_event_id(work: SessionReplyWorkItem, *, error: bool = False) -> str:
+    return f"session-reply-work:{build_session_reply_work_identity(work)}:{'error' if error else 'event'}"
+
+
+async def _get_work_failure_content(db: AsyncSession, work: SessionReplyWorkItem) -> str:
     message = await db.get(Message, work.result_message_id) if work.result_message_id else None
-    error_content = message.content if message and message.content else None
+    return message.content if message and message.content else t(ERR_LLM_UNEXPECTED_ERROR)
+
+
+async def _raise_work_failure(db: AsyncSession, work: SessionReplyWorkItem) -> None:
+    error_content = await _get_work_failure_content(db, work)
     raise BaseBusinessException(
-        message=error_content or ERR_LLM_UNEXPECTED_ERROR,
+        message=error_content,
         default_message=error_content,
+        data={
+            "work_id": work.id,
+            "event_id": build_session_reply_work_event_id(work, error=True),
+        },
     )
 
 
@@ -408,7 +435,15 @@ class SessionReplyQueueManager:
                     }
                     return
                 if work.status == SessionReplyWorkStatus.FAILED:
-                    await _raise_work_failure(db, work)
+                    error_content = await _get_work_failure_content(db, work)
+                    yield {
+                        "event_id": build_session_reply_work_event_id(work, error=True),
+                        "type": "error",
+                        "message": error_content,
+                        "session_id": work.session_id,
+                        "work_id": target_work_id,
+                    }
+                    return
                 if work.status == SessionReplyWorkStatus.CANCELLED:
                     raise RuntimeError(work.error or t(ERR_SESSION_REPLY_WORK_ENDED, status=work.status))
             await asyncio.sleep(WORK_RESULT_POLL_INTERVAL_SECONDS)

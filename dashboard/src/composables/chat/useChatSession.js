@@ -390,12 +390,18 @@ export function useChatSession() {
         if (!isCurrentRequestSession()) return
         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam)
       },
-      onError: (errorMessage, thinkingIdParam, requestIdParam) => {
+      onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
         if (contextSummarySessionId.value === requestSessionId) {
           contextSummarySessionId.value = null
         }
         if (!isCurrentRequestSession()) return
-        messageProcessor.processStreamError(chatState.messages, errorMessage, thinkingId)
+        const inserted = messageProcessor.processStreamError(
+          chatState.messages,
+          errorMessage,
+          thinkingId,
+          errorData.work_id,
+          errorData.event_id
+        )
         // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败：
         // 清除全部排队消息的视觉状态，并清理残留的 thinking 占位（含追加消息产生的占位）
         chatState.messages.value.forEach(m => {
@@ -404,7 +410,9 @@ export function useChatSession() {
           }
         })
         messageProcessor.cleanupThinkingMessage(chatState.messages)
-        ElMessage.error(errorMessage || t('chat.stream_error'))
+        if (inserted) {
+          ElMessage.error(errorMessage || t('chat.stream_error'))
+        }
       },
       onProactiveReply: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
@@ -415,8 +423,16 @@ export function useChatSession() {
       onProactiveReplyError: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
         const errorMessage = data.content || data.message || 'Background proactive reply failed'
-        messageProcessor.processStreamError(chatState.messages, errorMessage, null)
-        ElMessage.error(errorMessage)
+        const inserted = messageProcessor.processStreamError(
+          chatState.messages,
+          errorMessage,
+          null,
+          data.work_id,
+          data.event_id
+        )
+        if (inserted) {
+          ElMessage.error(errorMessage)
+        }
         void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
           console.error('Proactive reply error history merge failed:', err)
         })

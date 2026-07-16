@@ -262,5 +262,10 @@ async def test_wait_for_result_restores_persisted_user_error_for_adapter(monkeyp
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
 
-    with pytest.raises(BaseBusinessException, match="所有对话渠道均不可用"):
-        await manager.wait_for_result(7)
+    with pytest.raises(BaseBusinessException, match="所有对话渠道均不可用") as exc_info:
+        await manager.wait_for_result(9)
+
+    assert exc_info.value.data == {
+        "work_id": 7,
+        "event_id": executor_module.build_session_reply_work_event_id(work, error=True),
+    }

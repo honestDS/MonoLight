@@ -337,3 +337,4 @@ def test_work_message_keys_do_not_depend_on_reusable_work_id():
     assert len(first_key) <= 64
     assert len(second_key) <= 64
     assert executor_module._event_for_work(first, {"content": "first"})["event_id"] != executor_module._event_for_work(second, {"content": "second"})["event_id"]
+    assert executor_module._event_for_work(first, {"content": "failed"}, error=True)["event_id"] == executor_module.build_session_reply_work_event_id(first, error=True)

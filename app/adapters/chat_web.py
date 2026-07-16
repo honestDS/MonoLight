@@ -13,7 +13,7 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_session_reply_work_event_id, session_reply_queue_manager
 from app.core.utils.session import ensure_web_session_writable
 from app.models.message import MessageRole
 from app.schemas.response import (
@@ -105,6 +105,7 @@ class WebChatAdapter(BaseChatAdapter):
     ):
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
+        work = None
         try:
             await ensure_web_session_writable(
                 db,
@@ -128,7 +129,7 @@ class WebChatAdapter(BaseChatAdapter):
                 llm_response["background_task_poll_interval"] = 2
             return llm_response
         except BaseBusinessException as e:
-            return LLMResponse(
+            response = LLMResponse(
                 choices=[
                     LLMChoice(
                         message=LLMChoiceMessage(role=MessageRole.ERR, content=t(e.message, default=e.message, **e.kwargs)),
@@ -138,6 +139,16 @@ class WebChatAdapter(BaseChatAdapter):
                 ],
                 history=[],
             ).model_dump()
+            failure_data = e.data if isinstance(e.data, dict) else {}
+            resolved_work_id = failure_data.get("work_id")
+            resolved_event_id = failure_data.get("event_id")
+            if resolved_work_id is not None and isinstance(resolved_event_id, str):
+                response["work_id"] = resolved_work_id
+                response["event_id"] = resolved_event_id
+            elif work is not None:
+                response["work_id"] = work.id
+                response["event_id"] = build_session_reply_work_event_id(work, error=True)
+            return response
         except Exception as e:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_ADAPTER_WEB_UNEXPECTED_ERROR", error=str(e)), exc_info=True)
             return LLMResponse(
