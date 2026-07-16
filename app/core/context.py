@@ -467,6 +467,10 @@ class ContextManager:
     ) -> list[InternalMessage]:
         audited_msgs = []
         consumed_msg_ids = set()
+        effective_known_tool_call_ids = set(known_tool_call_ids or ())
+        for message in messages:
+            for tool_call in message.tool_calls or []:
+                effective_known_tool_call_ids.add(tool_call.id)
 
         i = 0
         while i < len(messages):
@@ -477,7 +481,7 @@ class ContextManager:
                 continue
 
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-                required_ids = [tc.id for tc in msg.tool_calls]
+                required_ids = list(dict.fromkeys(tc.id for tc in msg.tool_calls))
                 matched_tools = []
                 found_tool_call_ids = set()
 
@@ -521,7 +525,7 @@ class ContextManager:
                 if _is_background_tool_result_message(msg):
                     i += 1
                     continue
-                if emit_logs and msg.tool_call_id not in (known_tool_call_ids or set()):
+                if emit_logs and msg.tool_call_id not in effective_known_tool_call_ids:
                     logger.bind(uid=uid, session_id=session_id).warning(t("LOG_CONTEXT_ORPHAN_TOOL_RESULT", tool_call_id=msg.tool_call_id))
                 i += 1
             else:

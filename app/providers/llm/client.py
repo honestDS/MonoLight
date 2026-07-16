@@ -1,4 +1,5 @@
 import json
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import (
     Any,
@@ -82,6 +83,19 @@ def _log_request_context(
 
 class LLMClient:
     _transformers = {"openai": OpenAITransformer()}
+
+    @staticmethod
+    def normalize_tool_calls(tool_calls: list[InternalToolCall] | None) -> list[InternalToolCall] | None:
+        if not tool_calls:
+            return None
+
+        return [
+            tool_call.model_copy(
+                update={"id": f"call_{uuid.uuid4().hex}"},
+                deep=True,
+            )
+            for tool_call in tool_calls
+        ]
 
     @classmethod
     async def list_models(
@@ -229,7 +243,7 @@ class LLMClient:
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="".join(content_chunks) or None,
-                tool_calls=tool_calls or None,
+                tool_calls=cls.normalize_tool_calls(tool_calls),
             ),
             model=model,
             usage=usage,
@@ -275,8 +289,9 @@ class LLMClient:
             **kwargs,
         )
 
-        # Transformer 返回 InternalMessage，客户端统一封装为 InternalResponse。
+        # Transformer 返回 InternalMessage，客户端统一替换工具调用编号并封装响应。
         ai_message = transformer.from_provider(raw_response)
+        ai_message.tool_calls = cls.normalize_tool_calls(ai_message.tool_calls)
 
         return InternalResponse(
             message=ai_message,

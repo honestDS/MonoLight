@@ -9,7 +9,7 @@ from sqlmodel import SQLModel
 from app.core import context as context_module
 from app.core.context import ContextManager
 from app.core.utils.message_parser import parse_db_messages_to_internal
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.profile import Profile
 
 
@@ -287,6 +287,28 @@ def test_atomic_truncate_still_reports_genuine_orphan_tool_result(
     assert retained == []
     assert len(log.warning_messages) == 1
     assert "missing-call" in log.warning_messages[0]
+
+
+def test_tool_audit_does_not_report_duplicate_known_results_as_orphaned(monkeypatch):
+    log = CapturingLogger()
+    monkeypatch.setattr(context_module, "logger", log)
+    user_message = InternalMessage(role=MessageRole.USER, content="run tool")
+    tool_call_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={})],
+    )
+    tool_call_message.tool_calls.append(InternalToolCall(id="call-1", name="execute_shell", arguments={}))
+    first_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="call-1", content="first")
+    repeated_result = InternalMessage(role=MessageRole.TOOL, tool_call_id="call-1", content="repeated")
+
+    retained = ContextManager.audit_tool_chain(
+        [user_message, tool_call_message, first_result, repeated_result],
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert retained == [user_message, tool_call_message, first_result]
+    assert log.warning_messages == []
 
 
 @pytest.mark.asyncio

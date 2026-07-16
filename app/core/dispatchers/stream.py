@@ -279,7 +279,11 @@ class StreamDispatcherMixin:
                         if not final_tool_calls and not final_content.strip():
                             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
-                        ai_msg = InternalMessage(role=MessageRole.ASSISTANT, content=final_content if final_content else None, tool_calls=final_tool_calls if final_tool_calls else None)
+                        ai_msg = InternalMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=final_content if final_content else None,
+                            tool_calls=LLMClient.normalize_tool_calls(final_tool_calls),
+                        )
                         if not ai_msg.tool_calls and files_to_user:
                             ai_msg.content = json.dumps(
                                 {

@@ -140,11 +140,58 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     assert emitted == ["你", "好"]
     assert response.message.content == "你好"
     assert response.message.tool_calls is not None
-    assert response.message.tool_calls[0].id == "call-1"
+    assert response.message.tool_calls[0].id.startswith("call_")
+    assert response.message.tool_calls[0].id != "call-1"
+    assert len(response.message.tool_calls[0].id) == 37
+    int(response.message.tool_calls[0].id.removeprefix("call_"), 16)
     assert response.message.tool_calls[0].name == "search"
     assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+def test_normalize_tool_calls_replaces_upstream_ids_and_preserves_identical_calls():
+    upstream_calls = [
+        InternalToolCall(id="upstream-1", name="search", arguments={"query": "MonoLight"}),
+        InternalToolCall(id="upstream-2", name="search", arguments={"query": "MonoLight"}),
+        InternalToolCall(id="upstream-1", name="search", arguments={"query": "Kilo"}),
+    ]
+
+    normalized_calls = LLMClient.normalize_tool_calls(upstream_calls)
+
+    assert normalized_calls is not None
+    assert len(normalized_calls) == 3
+    assert [tool_call.arguments for tool_call in normalized_calls] == [{"query": "MonoLight"}, {"query": "MonoLight"}, {"query": "Kilo"}]
+    assert len({tool_call.id for tool_call in normalized_calls}) == 3
+    assert all(tool_call.id.startswith("call_") and len(tool_call.id) == 37 for tool_call in normalized_calls)
+    assert [tool_call.id for tool_call in upstream_calls] == ["upstream-1", "upstream-2", "upstream-1"]
+
+
+@pytest.mark.asyncio
+async def test_generate_replaces_provider_tool_call_ids(monkeypatch):
+    class Transformer:
+        async def generate(self, **_kwargs):
+            return {"model": "model-final"}
+
+        def from_provider(self, _raw_response):
+            return InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="provider-call", name="search", arguments={"query": "MonoLight"})],
+            )
+
+    monkeypatch.setitem(LLMClient._transformers, "test", Transformer())
+
+    response = await LLMClient.generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        protocol="test",
+    )
+
+    assert response.message.tool_calls is not None
+    assert response.message.tool_calls[0].id.startswith("call_")
+    assert response.message.tool_calls[0].id != "provider-call"
 
 
 def test_foreground_message_dedupe_key_scopes_reused_message_id_to_session():
