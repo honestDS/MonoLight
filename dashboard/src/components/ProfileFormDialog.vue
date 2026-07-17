@@ -132,6 +132,17 @@
                     ></el-option>
                   </el-select>
                 </el-form-item>
+                <el-form-item :label="$t('profiles.audit_report_language')" label-width="auto">
+                  <el-select v-model="form.configs.security.audit_report_language" class="full-width-input">
+                    <el-option
+                      v-for="locale in localeOptions"
+                      :key="locale.value"
+                      :label="locale.label"
+                      :value="locale.value"
+                    ></el-option>
+                  </el-select>
+                  <div class="help-text mt-5">{{ $t('profiles.audit_report_language_hint') }}</div>
+                </el-form-item>
                 <el-form-item :label="$t('profiles.secondary_confirmation')" label-width="auto">
                   <el-switch
                     :model-value="form.configs.security.audit_threshold > 0"
@@ -314,6 +325,7 @@ defineProps({
   fileSendBlockedExtensionInput: { type: String, required: true },
   form: { type: Object, required: true },
   knowledgeBaseOptions: { type: Array, required: true },
+  localeOptions: { type: Array, required: true },
   prompts: { type: Array, required: true },
   showOwnerColumn: { type: Boolean, required: true },
   submitting: { type: Boolean, required: true },

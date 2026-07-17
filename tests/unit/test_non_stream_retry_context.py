@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.dispatchers import foreground as foreground_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.exceptions import LLMException
@@ -148,15 +149,15 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
     async def fetch_additional():
         return []
 
-    monkeypatch.setattr(non_stream_module, "logger", logger)
-    monkeypatch.setattr(non_stream_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(non_stream_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(non_stream_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(non_stream_module, "select_channel", select_channel)
-    monkeypatch.setattr(non_stream_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(non_stream_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(foreground_module, "logger", logger)
+    monkeypatch.setattr(foreground_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(foreground_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(foreground_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(foreground_module, "select_channel", select_channel)
+    monkeypatch.setattr(foreground_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(foreground_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "resolve_chat_params",
         lambda model_entry, channel: {
             "temperature": None,
@@ -166,19 +167,19 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             "context_window_k": 4,
         },
     )
-    monkeypatch.setattr(non_stream_module, "prepare_messages", prepare_messages)
+    monkeypatch.setattr(foreground_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "apply_context_summary_checkpoint",
         apply_checkpoint,
     )
     monkeypatch.setattr(
-        non_stream_module.ContextManager,
+        foreground_module.ContextManager,
         "trim_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
-    monkeypatch.setattr(non_stream_module.LLMClient, "generate", generate)
-    monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(foreground_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(foreground_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
         db=_Session(),
@@ -273,15 +274,15 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
     async def stream_event_callback(event):
         emitted_events.append(event)
 
-    monkeypatch.setattr(non_stream_module, "logger", logger)
-    monkeypatch.setattr(non_stream_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(non_stream_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(non_stream_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(non_stream_module, "select_channel", select_channel)
-    monkeypatch.setattr(non_stream_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(non_stream_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(foreground_module, "logger", logger)
+    monkeypatch.setattr(foreground_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(foreground_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(foreground_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(foreground_module, "select_channel", select_channel)
+    monkeypatch.setattr(foreground_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(foreground_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "resolve_chat_params",
         lambda model_entry, channel: {
             "temperature": None,
@@ -292,21 +293,21 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
         },
     )
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "apply_context_summary_checkpoint",
         _passthrough_context_summary_checkpoint,
     )
     monkeypatch.setattr(
-        non_stream_module.ContextManager,
+        foreground_module.ContextManager,
         "trim_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(
-        non_stream_module.LLMClient,
+        foreground_module.LLMClient,
         "generate_with_stream_callback",
         generate_with_stream_callback,
     )
-    monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(foreground_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
         db=_Session(),
@@ -408,16 +409,16 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
 
     monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", _build_max_tokens_runtime_instruction)
     monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
-    monkeypatch.setattr(non_stream_module, "logger", logger)
-    monkeypatch.setattr(non_stream_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(non_stream_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(non_stream_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(non_stream_module, "mark_initial_message_processed", mark_processed)
-    monkeypatch.setattr(non_stream_module, "select_channel", select_channel)
-    monkeypatch.setattr(non_stream_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(non_stream_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(foreground_module, "logger", logger)
+    monkeypatch.setattr(foreground_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(foreground_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(foreground_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(foreground_module, "mark_initial_message_processed", mark_processed)
+    monkeypatch.setattr(foreground_module, "select_channel", select_channel)
+    monkeypatch.setattr(foreground_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(foreground_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "resolve_chat_params",
         lambda model_entry, channel: {
             "temperature": None,
@@ -427,19 +428,19 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
             "context_window_k": 4,
         },
     )
-    monkeypatch.setattr(non_stream_module, "prepare_messages", prepare_messages)
+    monkeypatch.setattr(foreground_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
-        non_stream_module,
+        foreground_module,
         "apply_context_summary_checkpoint",
         _passthrough_context_summary_checkpoint,
     )
     monkeypatch.setattr(
-        non_stream_module.ContextManager,
+        foreground_module.ContextManager,
         "trim_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
-    monkeypatch.setattr(non_stream_module.LLMClient, "generate", generate)
-    monkeypatch.setattr(non_stream_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(foreground_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(foreground_module, "save_assistant_message", save_assistant)
 
     response = await _Dispatcher.dispatch(
         db=_Session(),
@@ -476,6 +477,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         ),
     )
     model_requests = []
+    channel_call_contexts = []
     persisted_environment_prompts = []
     logger = _Logger()
 
@@ -495,6 +497,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         return None
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
+        channel_call_contexts.append(kwargs["call_context"])
         if kwargs.get("excluded_priorities"):
             return _Channel(), {"model_id": "model-2", "max_tokens": 256}, SimpleNamespace(priority=2)
         return _Channel(), {"model_id": "model-1", "max_tokens": 1024}, SimpleNamespace(priority=1)
@@ -515,11 +518,12 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     async def fetch_new_messages(*args, **kwargs):
         return []
 
-    async def generate_stream(**kwargs):
+    async def generate_with_stream_callback(**kwargs):
         model_requests.append(kwargs)
         if kwargs["model_id"] == "model-1":
             raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
-        yield {"choices": [{"delta": {"content": "ok"}}]}
+        await kwargs["on_content"]("ok")
+        return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
 
     async def save_assistant(*args, **kwargs):
         return SimpleNamespace(content="ok")
@@ -531,16 +535,17 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", _build_max_tokens_runtime_instruction)
     monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
     monkeypatch.setattr(stream_module, "logger", logger)
-    monkeypatch.setattr(stream_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(stream_module.profile_crud, "get_active", get_profile)
-    monkeypatch.setattr(stream_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(stream_module, "save_initial_message", save_initial)
-    monkeypatch.setattr(stream_module, "mark_initial_message_processed", mark_processed)
-    monkeypatch.setattr(stream_module, "select_channel", select_channel)
-    monkeypatch.setattr(stream_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(stream_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(foreground_module, "get_logger", lambda _name: logger)
+    monkeypatch.setattr(foreground_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(foreground_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(foreground_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(foreground_module, "save_initial_message", save_initial)
+    monkeypatch.setattr(foreground_module, "mark_initial_message_processed", mark_processed)
+    monkeypatch.setattr(foreground_module, "select_channel", select_channel)
+    monkeypatch.setattr(foreground_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(foreground_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
     monkeypatch.setattr(
-        stream_module,
+        foreground_module,
         "resolve_chat_params",
         lambda model_entry, channel: {
             "temperature": None,
@@ -550,24 +555,24 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
             "context_window_k": 4,
         },
     )
-    monkeypatch.setattr(stream_module, "prepare_messages", prepare_messages)
+    monkeypatch.setattr(foreground_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
-        stream_module,
+        foreground_module,
         "fetch_and_merge_new_user_messages",
         fetch_new_messages,
     )
     monkeypatch.setattr(
-        stream_module,
+        foreground_module,
         "apply_context_summary_checkpoint",
         _passthrough_context_summary_checkpoint,
     )
     monkeypatch.setattr(
-        stream_module.ContextManager,
+        foreground_module.ContextManager,
         "trim_messages_for_model_request",
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
-    monkeypatch.setattr(stream_module.LLMClient, "generate_stream", generate_stream)
-    monkeypatch.setattr(stream_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(foreground_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
+    monkeypatch.setattr(foreground_module, "save_assistant_message", save_assistant)
 
     events = [
         event
@@ -581,6 +586,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     ]
 
     assert [request["model_id"] for request in model_requests] == ["model-1", "model-2"]
+    assert channel_call_contexts == ["chat_dispatch_stream", "chat_dispatch_stream_retry"]
     assert "最大输出 Token 数为 1024" in model_requests[0]["messages"][0].content
     assert "最大输出 Token 数为 256" in model_requests[1]["messages"][0].content
     assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content

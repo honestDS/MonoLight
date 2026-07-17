@@ -25,6 +25,26 @@ const normalizeHistoryMessage = (message) => {
   return message
 }
 
+const getAuditConfirmationRecordId = (message) => {
+  if (message?.type !== 'audit_confirmation') return null
+  try {
+    const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
+    return payload?.audit_record_id ? String(payload.audit_record_id) : null
+  } catch {
+    return null
+  }
+}
+
+const hasOpenAuditConfirmation = (messages) => messages.some((message) => {
+  if (message?.type !== 'audit_confirmation') return false
+  try {
+    const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
+    return ['pending', 'executing'].includes(payload?.status)
+  } catch {
+    return false
+  }
+})
+
 export function useChatSession() {
   // ==================== 组合各模块 ====================
 
@@ -106,6 +126,15 @@ export function useChatSession() {
     const newMessages = []
     for (const item of historyData) {
       const message = normalizeHistoryMessage({ ...item, db_id: item.id })
+      const auditRecordId = getAuditConfirmationRecordId(message)
+      if (auditRecordId) {
+        const existingIndex = chatState.messages.value.findIndex(existing => getAuditConfirmationRecordId(existing) === auditRecordId)
+        if (existingIndex !== -1) {
+          chatState.messages.value[existingIndex] = { ...chatState.messages.value[existingIndex], ...message }
+          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+          continue
+        }
+      }
       const messageKeys = getMessageDedupeKeys(message)
       if ([...messageKeys].some(key => existingKeys.has(key))) continue
       newMessages.push(message)
@@ -114,6 +143,31 @@ export function useChatSession() {
     if (newMessages.length) {
       chatState.messages.value.push(...newMessages)
     }
+  }
+
+  const applyAuditConfirmationStatus = (data) => {
+    if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+    const auditRecordId = String(data.audit_record_id || '')
+    const messageIndex = chatState.messages.value.findIndex((message) => {
+      if (data.message_id && String(message.db_id || message.id) === String(data.message_id)) return true
+      if (message.type !== 'audit_confirmation') return false
+      try {
+        const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
+        return auditRecordId && String(payload?.audit_record_id || '') === auditRecordId
+      } catch {
+        return false
+      }
+    })
+    if (messageIndex === -1) {
+      void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
+        console.error('Audit confirmation history merge failed:', err)
+      })
+      return
+    }
+
+    const message = chatState.messages.value[messageIndex]
+    const content = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || {})
+    chatState.messages.value[messageIndex] = { ...message, type: 'audit_confirmation', content }
   }
 
   const pollBackgroundTasksUntilSettled = async (sessionId, intervalSeconds = 2) => {
@@ -292,6 +346,13 @@ export function useChatSession() {
         contextSummarySessionId.value = null
       }
       if (requestSessionId === sessionManager.currentSessionId.value) {
+        if (hasOpenAuditConfirmation(chatState.messages.value)) {
+          try {
+            await mergeLatestSessionHistory(requestSessionId)
+          } catch (err) {
+            console.error('Audit confirmation history refresh failed:', err)
+          }
+        }
         // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
         const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
         if (!hasThinking) {
@@ -437,6 +498,7 @@ export function useChatSession() {
           console.error('Proactive reply error history merge failed:', err)
         })
       },
+      onAuditConfirmationStatus: applyAuditConfirmationStatus,
       onSessionId: (newSessionId) => {
         if (requestSessionId !== sessionManager.currentSessionId.value) return
         requestSessionId = newSessionId

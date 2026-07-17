@@ -65,11 +65,18 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
 
 
 async def ensure_migration_record_table(session: AsyncSession) -> None:
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        id_definition = "SERIAL PRIMARY KEY"
+    elif dialect_name == "mysql":
+        id_definition = "INTEGER PRIMARY KEY AUTO_INCREMENT"
+    else:
+        id_definition = "INTEGER PRIMARY KEY AUTOINCREMENT"
     await session.execute(
         text(
             f"""
             CREATE TABLE IF NOT EXISTS {MIGRATION_RECORD_TABLE} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {id_definition},
                 migration_id VARCHAR(255) NOT NULL UNIQUE,
                 script_name VARCHAR(255) NOT NULL,
                 executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL

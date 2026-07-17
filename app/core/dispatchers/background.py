@@ -1,25 +1,31 @@
 import asyncio
 import json
+import socket
 from functools import partial
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.service import audit_tool_round
 from app.core.constants import (
+    ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_BACKGROUND_FINAL_REPLY_TOOL_CALL_FORBIDDEN,
     ERR_BACKGROUND_TASK_NOT_FOUND,
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_BACKGROUND_TOO_MANY_TOOL_CALLS,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_TOOL_ROUND_PRECHECK_FAILED,
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES,
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
 )
 from app.core.context import ContextManager
+from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import LLMException, ServerException
-from app.core.i18n import t
+from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.prompts import (
     BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT,
@@ -44,13 +50,26 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.inject_system_prompt import build_system_prompt, inject_system_prompt_text
 from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
+from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
+from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
-from app.models.message import InternalMessage, MessageRole
+from app.models.audit import AuditExecutionStatus, AuditRecordStatus
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
+
+
+def _tool_result_succeeded(content: str | None) -> bool:
+    try:
+        payload = json.loads(content or "{}")
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(payload, dict):
+        return True
+    return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
 
 
 class BackgroundDispatcherMixin:
@@ -313,24 +332,149 @@ class BackgroundDispatcherMixin:
         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
             raise LLMException(message=ERR_BACKGROUND_TOO_MANY_TOOL_CALLS, count=len(ai_msg.tool_calls))
 
-        tool_responses = await asyncio.gather(
-            *[
-                process_single_tool_with_isolated_db(
-                    tool_call,
-                    profile,
-                    cfg,
-                    messages,
-                    username,
-                    session_id,
-                    0,
-                    uid,
-                    allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                    context_window_k=chat_params["context_window_k"],
-                    allow_background_submission=False,
+        audit_round = None
+        audit_claim_token = None
+        audit_execution_ids: dict[str, int] = {}
+        precheck_errors = prevalidate_tool_round(
+            ai_msg.tool_calls,
+            cfg,
+            allow_background_submission=False,
+            tool_schemas=tools,
+        )
+        if precheck_errors:
+            tool_responses = [
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id=tool_call.id,
+                    content=precheck_errors.get(tool_call.id)
+                    or json.dumps(
+                        {
+                            "status": "failed",
+                            "tool_name": tool_call.name,
+                            "error": t(ERR_TOOL_ROUND_PRECHECK_FAILED),
+                        },
+                        ensure_ascii=False,
+                    ),
                 )
                 for tool_call in ai_msg.tool_calls
             ]
-        )
+        else:
+            if cfg.security.audit_channel_id and cfg.security.audit_model_id:
+                audit_round = await audit_tool_round(
+                    db,
+                    cfg=cfg,
+                    tool_calls=ai_msg.tool_calls,
+                    source_assistant_message_id=ai_msg.id,
+                    uid=uid,
+                    operator_username=username,
+                    session_id=session_id,
+                    source=reply_source,
+                    language=get_current_locale(),
+                )
+            if audit_round is not None and not audit_round.may_execute:
+                tool_responses = list(audit_round.tool_results)
+            else:
+                claimed_record = None
+                if audit_round is not None:
+                    claimed_record, audit_claim_token = await audit_crud.claim_passed_for_execution(
+                        db,
+                        audit_record_id=audit_round.audit_record_id,
+                    )
+                    if claimed_record is not None and audit_claim_token is not None:
+                        audit_details = await audit_crud.list_tool_details(db, audit_round.audit_record_id)
+                        detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
+                        for tool_call in ai_msg.tool_calls:
+                            detail = detail_by_call_id.get(tool_call.id)
+                            if detail is None:
+                                audit_claim_token = None
+                                break
+                            execution = await audit_crud.create_execution_attempt(
+                                db,
+                                audit_record_id=audit_round.audit_record_id,
+                                audit_tool_detail_id=detail.id,
+                                claim_token=audit_claim_token,
+                                execution_node=socket.gethostname(),
+                                new_tool_call_id=tool_call.id,
+                            )
+                            if execution is None:
+                                audit_claim_token = None
+                                break
+                            audit_execution_ids[tool_call.id] = execution.id
+                claim_failed = audit_round is not None and (audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls))
+                if claim_failed:
+                    for execution_id in audit_execution_ids.values():
+                        await audit_crud.finish_execution_attempt(
+                            db,
+                            execution_record_id=execution_id,
+                            status=AuditExecutionStatus.CANCELLED,
+                            error=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                        )
+                    if claimed_record is not None and claimed_record.execution_claim_token:
+                        await audit_crud.finish_execution_round(
+                            db,
+                            audit_record_id=audit_round.audit_record_id,
+                            claim_token=claimed_record.execution_claim_token,
+                            status=AuditRecordStatus.FAILED,
+                            error_reason=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                        )
+                        await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                    audit_claim_token = None
+                    tool_responses = [
+                        InternalMessage(
+                            role=MessageRole.TOOL,
+                            tool_call_id=tool_call.id,
+                            content=json.dumps(
+                                {
+                                    "status": "failed",
+                                    "tool_name": tool_call.name,
+                                    "error": t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                        for tool_call in ai_msg.tool_calls
+                    ]
+                else:
+                    tool_responses = await asyncio.gather(
+                        *[
+                            process_single_tool_with_isolated_db(
+                                tool_call,
+                                profile,
+                                cfg,
+                                messages,
+                                username,
+                                session_id,
+                                0,
+                                uid,
+                                allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                context_window_k=chat_params["context_window_k"],
+                                allow_background_submission=False,
+                                audit_preapproved=audit_round is not None,
+                            )
+                            for tool_call in ai_msg.tool_calls
+                        ]
+                    )
+
+        if audit_round is not None and audit_claim_token is not None:
+            audit_all_succeeded = True
+            for tool_response in tool_responses:
+                execution_succeeded = _tool_result_succeeded(tool_response.content)
+                audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                await audit_crud.finish_execution_attempt(
+                    db,
+                    execution_record_id=audit_execution_ids[tool_response.tool_call_id],
+                    status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
+                    result_summary=(tool_response.content or "")[:1000],
+                    error=None if execution_succeeded else (tool_response.content or "")[:1000],
+                )
+            await audit_crud.finish_execution_round(
+                db,
+                audit_record_id=audit_round.audit_record_id,
+                claim_token=audit_claim_token,
+                status=AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED,
+                error_reason=None if audit_all_succeeded else "一个或多个工具执行失败",
+            )
+            await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
 
         files_to_user = extract_files_to_user(tool_responses)
         persisted_tool_result_ids: list[int] = []
@@ -338,6 +482,27 @@ class BackgroundDispatcherMixin:
             stored_tool_response = await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
             if stored_tool_response is not None and stored_tool_response.id is not None:
                 persisted_tool_result_ids.append(stored_tool_response.id)
+
+        if audit_round is not None and audit_round.confirmation_payload is not None:
+            confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
+            await save_message(
+                db,
+                session_id,
+                uid,
+                MessageRole.ASSISTANT,
+                MessageType.AUDIT_CONFIRMATION,
+                audit_round.confirmation_payload,
+                profile.id,
+                is_processed=True,
+                dedupe_key=final_message_dedupe_key,
+            )
+            await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+            confirmation_message = InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=confirmation_content,
+            )
+            turn_messages.append(confirmation_message)
+            return confirmation_message, turn_messages, []
 
         async def build_final_request(final_chat_params):
             nonlocal messages

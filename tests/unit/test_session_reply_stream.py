@@ -362,6 +362,48 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
 
 
 @pytest.mark.asyncio
+async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
+    adapter = chat_web_module.WebChatAdapter()
+    captured_kwargs = {}
+
+    async def ensure_writable(*_args, **_kwargs):
+        return None
+
+    async def get_profile(*_args, **_kwargs):
+        return SimpleNamespace(id=1)
+
+    async def validate_message(*_args, **_kwargs):
+        return None
+
+    async def enqueue_message(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(id=1), SimpleNamespace(id=9), "queued"
+
+    async def wait_for_stream(_work_id):
+        yield {"type": "done", "response": {"history": [], "files": None}}
+
+    monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
+    monkeypatch.setattr(chat_web_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_stream", wait_for_stream)
+
+    events = [
+        event
+        async for event in adapter.chat_stream(
+            db=SimpleNamespace(),
+            message="test",
+            uid="user-1",
+            session_id="session-1",
+        )
+    ]
+
+    assert captured_kwargs["stream_requested"] is True
+    assert captured_kwargs["context_summary_events_requested"] is True
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch):
     adapter = chat_web_module.WebChatAdapter()
     original_work = SimpleNamespace(id=9)
@@ -377,7 +419,7 @@ async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch
         return None
 
     async def enqueue_message(*_args, **_kwargs):
-        return SimpleNamespace(id=1), original_work
+        return SimpleNamespace(id=1), original_work, "queued"
 
     async def wait_for_result(work_id):
         assert work_id == 9
@@ -390,7 +432,7 @@ async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch
     monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
     monkeypatch.setattr(chat_web_module.profile_crud, "get_active", get_profile)
     monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
-    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "enqueue_foreground_message", enqueue_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_result", wait_for_result)
 
     response = await adapter.chat(
@@ -583,36 +625,36 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     async def publish(db, *, work_id, sequence_no, event):
         published.append((sequence_no, event))
 
-    async def dispatch(**kwargs):
+    async def dispatch_stream(**kwargs):
         dispatch_kwargs.update(kwargs)
-        callback = kwargs["stream_event_callback"]
-        await callback(
-            {
-                "type": "tool_start",
-                "name": "search",
-                "arguments": {"query": "MonoLight"},
-                "tool_call_id": "call-1",
-                "response_id": "response-turn-1",
-            }
-        )
-        await callback(
-            {
-                "type": "tool_end",
-                "name": "search",
-                "result": '{"status":"success"}',
-                "tool_call_id": "call-1",
-                "response_id": "response-turn-1",
-            }
-        )
-        await callback(
-            {
-                "type": "content",
-                "content": "完成",
-                "turn": 2,
-                "response_id": "response-turn-2",
-            }
-        )
-        return {"history": [], "files": None}
+        yield {
+            "type": "task_start",
+            "session_id": "session-1",
+        }
+        yield {
+            "type": "tool_start",
+            "name": "search",
+            "arguments": {"query": "MonoLight"},
+            "tool_call_id": "call-1",
+            "response_id": "response-turn-1",
+        }
+        yield {
+            "type": "tool_end",
+            "name": "search",
+            "result": '{"status":"success"}',
+            "tool_call_id": "call-1",
+            "response_id": "response-turn-1",
+        }
+        yield {
+            "type": "content",
+            "content": "完成",
+            "turn": 2,
+            "response_id": "response-turn-2",
+        }
+        yield {
+            "type": "done",
+            "response": {"history": [], "files": None},
+        }
 
     monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
@@ -627,20 +669,26 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         "app.core.session_reply_queue.executor.session_reply_stream_event_crud.publish",
         publish,
     )
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", dispatch)
+
+    async def unexpected_non_stream_dispatch(**_kwargs):
+        raise AssertionError("stream work must not use ChatDispatcher.dispatch")
+
+    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", dispatch_stream)
+    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", unexpected_non_stream_dispatch)
 
     result = await _execute_foreground(FakeDb(), work, "worker-1")
 
     assert result == {"history": [], "files": None}
     assert dispatch_kwargs["expose_tool_call_content"] is False
-    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3]
+    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4]
     assert [event["type"] for _sequence_no, event in published] == [
+        "task_start",
         "tool_start",
         "tool_end",
         "content",
     ]
-    assert published[0][1]["response_id"] == "response-turn-1"
-    assert published[1][1]["tool_call_id"] == "call-1"
-    assert published[2][1]["response_id"] == "response-turn-2"
+    assert published[1][1]["response_id"] == "response-turn-1"
+    assert published[2][1]["tool_call_id"] == "call-1"
+    assert published[3][1]["response_id"] == "response-turn-2"
     assert all(event["session_id"] == "session-1" for _sequence_no, event in published)
     assert all(event["work_id"] == 7 for _sequence_no, event in published)

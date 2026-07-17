@@ -6,10 +6,12 @@ from app.core.crud.session_reply_stream_event import session_reply_stream_event_
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import get_logger
-from app.core.session_reply_queue.executor import execute_session_reply_work, fail_session_reply_work, retry_delay_seconds
+from app.core.session_reply_queue.executor import execute_session_reply_work, fail_session_reply_work, mark_confirmed_execution_unknown, retry_delay_seconds
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.models.profile import ProfileConfig
+from app.models.session_reply_work_item import SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -100,7 +102,8 @@ class SessionReplyConsumer:
                         )
                     if work is None or work.id is None:
                         break
-                    task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts))
+                    language = str((work.execution_state or {}).get("language") or "zh")
+                    task = asyncio.create_task(self._run_claimed(work.id, worker_id, work.attempt_count, work.max_attempts, language))
                     self._running[work.id] = (task, worker_id)
                     task.add_done_callback(lambda _task, work_id=work.id: self._running.pop(work_id, None))
                     claimed_count += 1
@@ -115,20 +118,30 @@ class SessionReplyConsumer:
                 logger.exception("Session reply consumer loop failed")
                 await asyncio.sleep(SESSION_REPLY_POLL_INTERVAL_SECONDS)
 
-    async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int) -> None:
+    async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int, language: str = "zh") -> None:
+        locale_token = set_current_locale(language)
         try:
             await execute_session_reply_work(work_id, worker_id)
         except asyncio.CancelledError:
+            await mark_confirmed_execution_unknown(
+                work_id,
+                worker_id,
+                "Confirmed tool execution lease was lost; result unknown and automatic retry is forbidden",
+            )
             raise
         except Exception as exc:
             error = format_exception_message(exc)
             logger.bind(work_id=work_id, worker_id=worker_id).error("Session reply work failed", exc_info=True)
             async with AsyncSessionLocal() as db:
+                work = await session_reply_work_item_crud.get(db, work_id)
                 stream_started = await session_reply_stream_event_crud.has_events(
                     db,
                     work_id=work_id,
                 )
-            if isinstance(exc, BaseBusinessException):
+            if work is not None and work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+                await mark_confirmed_execution_unknown(work_id, worker_id, error)
+                await fail_session_reply_work(work_id, worker_id, error)
+            elif isinstance(exc, BaseBusinessException):
                 await fail_session_reply_work(
                     work_id,
                     worker_id,
@@ -146,11 +159,14 @@ class SessionReplyConsumer:
                         error=error,
                         delay_seconds=retry_delay_seconds(attempt_count),
                     )
+        finally:
+            reset_current_locale(locale_token)
 
     async def _recover_expired(self) -> None:
         async with AsyncSessionLocal() as db:
             _recovered_count, terminal_claims = await session_reply_work_item_crud.recover_expired(db)
         for work_id, worker_id, error in terminal_claims:
+            await mark_confirmed_execution_unknown(work_id, worker_id, error)
             await fail_session_reply_work(work_id, worker_id, error)
 
     async def _cleanup_terminal_items_if_due(self, now: float) -> None:

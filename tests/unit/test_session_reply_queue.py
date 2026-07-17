@@ -219,6 +219,38 @@ async def test_recover_expired_fails_work_at_max_attempts(db_session: AsyncSessi
 
 
 @pytest.mark.asyncio
+async def test_recover_expired_never_retries_confirmed_tool_execution(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    confirmed = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id=10,
+        dedupe_key="confirmed-audit:10",
+    )
+    confirmed.status = SessionReplyWorkStatus.RUNNING
+    confirmed.locked_by = "lost-worker"
+    confirmed.lock_until = 0
+    confirmed.attempt_count = 1
+    confirmed.max_attempts = 2
+    await db_session.commit()
+
+    recovered_count, terminal_claims = await crud.recover_expired(db_session)
+
+    await db_session.refresh(confirmed)
+    assert recovered_count == 1
+    assert terminal_claims == [
+        (
+            confirmed.id,
+            "lost-worker",
+            "Confirmed tool execution was interrupted; result unknown and automatic retry is forbidden",
+        )
+    ]
+    assert confirmed.status == SessionReplyWorkStatus.RUNNING
+    assert confirmed.locked_by == "lost-worker"
+
+
+@pytest.mark.asyncio
 async def test_scheduled_claim_respects_profile_limit_and_still_claims_other_work(db_session: AsyncSession):
     crud = CRUDSessionReplyWorkItem()
     running = await enqueue(

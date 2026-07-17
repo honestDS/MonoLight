@@ -1,5 +1,6 @@
 import asyncio
 import http.client
+import logging
 import os
 import signal
 import subprocess
@@ -16,6 +17,8 @@ WEB_START_TIMEOUT_SECONDS = 60.0
 PROCESS_STOP_TIMEOUT_SECONDS = 3.0
 PROCESS_KILL_TIMEOUT_SECONDS = 2.0
 PROCESS_POLL_INTERVAL_SECONDS = 0.05
+
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -84,11 +87,21 @@ def report_process_started(process_name: str, process: subprocess.Popen) -> None
 
 
 async def initialize_system() -> None:
+    from app.core.audit.startup import recover_and_cleanup_audit_data
+    from app.core.crud.system_setting import system_setting_crud
     from app.providers.database import AsyncSessionLocal
     from app.providers.database.bootstrap import init_system_data
 
     async with AsyncSessionLocal() as session:
         await init_system_data(session)
+        settings = await system_setting_crud.get_runtime_settings(session)
+        recovery_result = await recover_and_cleanup_audit_data(
+            session,
+            retention_days=settings.audit_retention_days,
+        )
+
+    if recovery_result.file_cleanup.failed_paths:
+        logger.warning("AUDIT: startup cleanup retained %s paths that could not be deleted", len(recovery_result.file_cleanup.failed_paths))
 
 
 def _connect_host(host: str) -> str:

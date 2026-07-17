@@ -5,6 +5,7 @@ from typing import Any
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
 from app.adapters.weixin_openclaw.message import merge_message_pair
+from app.core.audit.confirmation import message_has_quote, parse_confirmation_decision
 from app.core.crud.message_platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -71,9 +72,24 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         assert platform is not None
                         if adapter.sync_buf != previous_sync_buf:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
-                        assert collector is not None
-                        for message in messages:
-                            await collector.add((message.user_id, message.session_id), message)
+                    assert collector is not None
+                    for message in messages:
+                        collector_key = (message.user_id, message.session_id)
+                        if parse_confirmation_decision(
+                            message.text,
+                            attachments=message.attachments,
+                            has_quote=message_has_quote(message.raw),
+                        ):
+                            await collector.flush_and_wait(collector_key)
+                            await self._handle_message(
+                                adapter,
+                                message,
+                                uid=platform_uid or message.user_id,
+                                platform_id=platform_id,
+                                adapter_signature=adapter_signature,
+                            )
+                        else:
+                            await collector.add(collector_key, message)
                     if adapter.config.poll_interval_ms > 0:
                         await asyncio.sleep(adapter.config.poll_interval_ms / 1000)
                 except asyncio.CancelledError:

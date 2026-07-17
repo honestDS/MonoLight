@@ -480,11 +480,13 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.id,
                 SessionReplyWorkItem.locked_by,
                 streamed_work.label("stream_started"),
+                SessionReplyWorkItem.work_type,
             ).where(
                 *expired_conditions,
                 or_(
                     streamed_work,
                     SessionReplyWorkItem.attempt_count >= SessionReplyWorkItem.max_attempts,
+                    SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
                 ),
                 SessionReplyWorkItem.locked_by.is_not(None),
             )
@@ -493,9 +495,9 @@ class CRUDSessionReplyWorkItem:
             (
                 work_id,
                 worker_id,
-                "Stream interrupted after partial response" if stream_started else "Maximum retry attempts reached after worker interruption",
+                ("Confirmed tool execution was interrupted; result unknown and automatic retry is forbidden" if work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION else "Stream interrupted after partial response" if stream_started else "Maximum retry attempts reached after worker interruption"),
             )
-            for work_id, worker_id, stream_started in terminal_result.all()
+            for work_id, worker_id, stream_started, work_type in terminal_result.all()
             if worker_id is not None
         ]
         retry_result = await db.execute(
@@ -504,6 +506,7 @@ class CRUDSessionReplyWorkItem:
                 *expired_conditions,
                 ~streamed_work,
                 SessionReplyWorkItem.attempt_count < SessionReplyWorkItem.max_attempts,
+                SessionReplyWorkItem.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
             )
             .values(
                 status=SessionReplyWorkStatus.READY_FOR_LLM,

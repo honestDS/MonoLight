@@ -103,6 +103,7 @@ app/adapters/
 
 ```text
 app/core/
+├── audit/                  # 整轮审计、确认判定、参数完整性与文件存储
 ├── background_tasks/       # 后台任务与定时任务
 ├── crud/                   # 数据访问
 ├── dispatchers/            # 对话分发实现
@@ -131,6 +132,19 @@ app/core/
 └── session_notifier.py     # 会话事件通知
 ```
 
+### 审计记录：`app/core/audit/`
+
+```text
+app/core/audit/
+├── __init__.py             # 审计能力导出
+├── confirmation.py         # 确认词识别与确认消息状态更新
+├── integrity.py            # 整轮和逐工具参数摘要及文件摘要
+├── persistence.py          # 审计文件与数据库明细保存编排
+├── service.py              # 整轮评分、受限文件读取与确认摘要
+├── startup.py              # 启动恢复及保留期清理
+└── storage.py              # 审计文件原子写入与路径核对
+```
+
 ### 后台任务：`app/core/background_tasks/`
 
 ```text
@@ -150,8 +164,8 @@ app/core/background_tasks/
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
 ├── consumer.py             # 工作认领、并发执行与恢复
-├── executor.py             # 前台及任务总结回复执行
-└── manager.py              # 工作入队、消息合并与结果读取
+├── executor.py             # 前台、任务总结及已确认工具执行
+└── manager.py              # 统一用户消息提交、确认判定与工作入队
 ```
 
 ### 消息平台：`app/core/message_platforms/`
@@ -170,6 +184,7 @@ app/core/message_platforms/
 
 ```text
 app/core/crud/
+├── audit.py                # 审计整轮、工具明细、确认占用与执行记录访问
 ├── background_task.py      # 后台任务数据访问
 ├── base.py                 # 通用数据访问基类
 ├── channel.py              # 渠道与模型数据访问
@@ -198,6 +213,7 @@ app/core/crud/
 app/core/dispatchers/
 ├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
+├── foreground.py           # 流式与非流式前台对话的共用执行流程
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用逻辑
 └── stream.py               # 流式对话分发
@@ -323,6 +339,7 @@ app/core/middleware/
 ```text
 app/models/
 ├── __init__.py             # 模型导出
+├── audit.py                # 审计整轮、工具明细、确认占用与执行记录模型
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由游标模型
@@ -485,12 +502,14 @@ scripts/
 ├── migration_20260712_drop_active_session.py           # 删除旧活跃会话表
 ├── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
 ├── migration_20260715_add_message_system_prompt.py     # 旧消息系统提醒字段
-└── migration_20260715_migrate_message_environment_prompt.py # 消息环境提示字段迁移
+├── migration_20260715_migrate_message_environment_prompt.py # 消息环境提示字段迁移
+└── migration_20260717_add_audit_confirmation_records.py # 审计与确认记录表
 ```
 
 ## 运行期目录
 
 ```text
-data/                       # SQLite、Chroma 与日志数据
+data/                       # SQLite、Chroma、日志与独立审计文件
+├── audit/                  # 按用户保存的审计文件，只在系统启动阶段清理
 temp/                       # 上传文件、工具结果与其他临时文件
 ```

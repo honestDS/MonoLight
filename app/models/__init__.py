@@ -1,3 +1,7 @@
+from app.models.audit import AuditConfirmationClaim as AuditConfirmationClaim
+from app.models.audit import AuditExecutionRecord as AuditExecutionRecord
+from app.models.audit import AuditRecord as AuditRecord
+from app.models.audit import AuditToolDetail as AuditToolDetail
 from app.models.background_task import BackgroundTask as BackgroundTask
 from app.models.channel import ModelChannel as ModelChannel
 from app.models.channel_cursor import ChannelCursor as ChannelCursor

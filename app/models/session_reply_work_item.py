@@ -9,12 +9,14 @@ from app.core.utils.time import get_local_time
 
 class SessionReplyWorkType(StrEnum):
     FOREGROUND_REPLY = "foreground_reply"
+    CONFIRMED_TOOL_EXECUTION = "confirmed_tool_execution"
     BACKGROUND_TOOL_SUMMARY = "background_tool_summary"
     SCHEDULED_TASK_SUMMARY = "scheduled_task_summary"
 
 
 class SessionReplySourceType(StrEnum):
     USER_MESSAGE = "user_message"
+    AUDIT_RECORD = "audit_record"
     BACKGROUND_TASK = "background_task"
     SCHEDULED_TASK_RUN = "scheduled_task_run"
     TOOL_RESULT = "tool_result"

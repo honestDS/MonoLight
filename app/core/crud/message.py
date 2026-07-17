@@ -34,6 +34,86 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(select(Message).where(Message.dedupe_key == dedupe_key))
         return result.scalars().first()
 
+    async def get_latest_by_type(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        message_type: MessageType,
+    ) -> Message | None:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.type == message_type,
+            )
+            .order_by(Message.id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def list_by_type(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        message_type: MessageType,
+    ) -> list[Message]:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.uid == uid,
+                Message.session_id == session_id,
+                Message.type == message_type,
+            )
+            .order_by(Message.id.desc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def update_content(
+        self,
+        db: AsyncSession,
+        *,
+        message_id: int,
+        content: str,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(update(Message).where(Message.id == message_id).values(content=content).execution_options(synchronize_session=False))
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
+    async def update_content_if_matches(
+        self,
+        db: AsyncSession,
+        *,
+        message_id: int,
+        expected_content: str | None,
+        content: str,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(
+            update(Message)
+            .where(
+                Message.id == message_id,
+                Message.type == MessageType.AUDIT_CONFIRMATION,
+                Message.content == expected_content,
+            )
+            .values(content=content)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
     async def create_idempotent(
         self,
         db: AsyncSession,

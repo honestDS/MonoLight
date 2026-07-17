@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.constants import (
     ERR_BACKGROUND_TASK_UNSUPPORTED,
+    ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
     ERR_TOOL_NOT_ENABLED,
     ERR_TOOL_NOT_REGISTERED,
@@ -27,6 +28,7 @@ from app.core.log import (
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
     TOOL_EXECUTOR_MAP,
+    get_tool_parameters_schema,
     get_tool_required_parameters,
     tool_runs_in_background,
     tool_schema_has_parameter,
@@ -128,6 +130,110 @@ def _build_unsupported_arguments_result(tool_name: str, unsupported_arguments: l
     )
 
 
+def _schema_type_matches(value: Any, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return False
+
+
+def _validate_schema_value(value: Any, schema: dict[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str) and not _schema_type_matches(value, expected_type):
+        return [f"{path} must be {expected_type}"]
+    if isinstance(expected_type, list) and not any(isinstance(item, str) and _schema_type_matches(value, item) for item in expected_type):
+        return [f"{path} has an invalid type"]
+    if "enum" in schema and isinstance(schema["enum"], list) and value not in schema["enum"]:
+        errors.append(f"{path} must be one of {schema['enum']}")
+    if isinstance(value, str):
+        if isinstance(schema.get("minLength"), int) and len(value) < schema["minLength"]:
+            errors.append(f"{path} is shorter than {schema['minLength']}")
+        if isinstance(schema.get("maxLength"), int) and len(value) > schema["maxLength"]:
+            errors.append(f"{path} is longer than {schema['maxLength']}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
+            errors.append(f"{path} must be at least {schema['minimum']}")
+        if isinstance(schema.get("maximum"), (int, float)) and value > schema["maximum"]:
+            errors.append(f"{path} must be at most {schema['maximum']}")
+    if isinstance(value, list):
+        if isinstance(schema.get("minItems"), int) and len(value) < schema["minItems"]:
+            errors.append(f"{path} must contain at least {schema['minItems']} items")
+        if isinstance(schema.get("maxItems"), int) and len(value) > schema["maxItems"]:
+            errors.append(f"{path} must contain at most {schema['maxItems']} items")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                errors.extend(_validate_schema_value(item, item_schema, f"{path}[{index}]"))
+    if isinstance(value, dict):
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        for field in required:
+            if isinstance(field, str) and field not in value:
+                errors.append(f"{path}.{field} is required")
+        if schema.get("additionalProperties") is False:
+            for field in value:
+                if field not in properties:
+                    errors.append(f"{path}.{field} is not allowed")
+        for field, field_value in value.items():
+            field_schema = properties.get(field)
+            if isinstance(field_schema, dict):
+                errors.extend(_validate_schema_value(field_value, field_schema, f"{path}.{field}"))
+    return errors
+
+
+def _build_schema_validation_result(tool_name: str, errors: list[str]) -> str:
+    detail = "; ".join(errors[:10])
+    return _build_tool_error_result(tool_name, t(ERR_TOOL_ARGUMENT_SCHEMA_INVALID, tool_name=tool_name, detail=detail))
+
+
+def prevalidate_tool_round(
+    tool_calls: list[Any],
+    cfg: ProfileConfig,
+    *,
+    allow_background_submission: bool = True,
+    tool_schemas: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    errors: dict[str, str] = {}
+    for tool_call in tool_calls:
+        tool_name = tool_call.name
+        args = dict(tool_call.arguments or {})
+        background_requested = bool(args.pop("run_in_background", False))
+        parameters_schema = get_tool_parameters_schema(tool_name, tool_schemas=tool_schemas)
+        required_parameters = parameters_schema.get("required", []) if parameters_schema is not None else []
+        declared_properties = parameters_schema.get("properties", {}) if parameters_schema is not None else {}
+        missing_arguments = sorted(parameter_name for parameter_name in required_parameters if isinstance(parameter_name, str) and parameter_name not in args)
+        unsupported_arguments = sorted(argument_name for argument_name in args if parameters_schema is not None and argument_name not in declared_properties)
+        if not _is_tool_enabled(tool_name, cfg):
+            errors[tool_call.id] = _build_tool_disabled_result(tool_name)
+        elif missing_arguments:
+            errors[tool_call.id] = _build_missing_required_arguments_result(
+                tool_name,
+                missing_arguments,
+            )
+        elif unsupported_arguments:
+            errors[tool_call.id] = _build_unsupported_arguments_result(
+                tool_name,
+                unsupported_arguments,
+            )
+        elif parameters_schema is not None and (schema_errors := _validate_schema_value(args, parameters_schema, "arguments")):
+            errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
+        elif (tool_runs_in_background(tool_name) or background_requested) and not allow_background_submission:
+            errors[tool_call.id] = _build_background_task_unsupported_result(tool_name)
+    return errors
+
+
 async def process_single_tool(
     tool_call: Any,
     db: AsyncSession,
@@ -142,6 +248,7 @@ async def process_single_tool(
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
     allow_background_submission: bool = True,
+    audit_preapproved: bool = False,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -162,15 +269,19 @@ async def process_single_tool(
     elif run_in_background and not allow_background_submission:
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
-        cmd_result = await audit_tool_call(
-            db,
-            profile,
-            cfg,
-            tool_name,
-            args,
-            messages,
-            session_id=session_id,
-            uid=uid,
+        cmd_result = (
+            None
+            if audit_preapproved
+            else await audit_tool_call(
+                db,
+                profile,
+                cfg,
+                tool_name,
+                args,
+                messages,
+                session_id=session_id,
+                uid=uid,
+            )
         )
 
     if cmd_result is None and run_in_background:

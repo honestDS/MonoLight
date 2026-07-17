@@ -14,7 +14,6 @@ from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.core.prompts import CONFIRMATION_PREFIX
 from app.core.utils.system import get_full_system_context
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
@@ -85,6 +84,7 @@ class ShellExecutor(BaseExecutor):
     async def _execute_argv(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
         process = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.user_temp_dir),
@@ -111,6 +111,7 @@ class ShellExecutor(BaseExecutor):
         try:
             process = subprocess.Popen(
                 argv,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(self.user_temp_dir),
@@ -176,9 +177,6 @@ class ShellExecutor(BaseExecutor):
         return 30.0
 
     async def execute(self, command: str) -> str:
-        if command.startswith(CONFIRMATION_PREFIX):
-            command = command.split(" ", 1)[-1]
-
         system_info = get_full_system_context()
 
         blacklisted = self.check_blacklist(command)
@@ -209,7 +207,7 @@ class ShellExecutor(BaseExecutor):
                     nonlocal process
                     if managed_argv is not None:
                         return self._execute_argv_sync(managed_argv, profile_timeout, system_info)
-                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=self._build_subprocess_env())
+                    process = subprocess.Popen(command, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.user_temp_dir), env=self._build_subprocess_env())
                     return process.communicate(timeout=profile_timeout)
 
                 result = await asyncio.wait_for(loop.run_in_executor(None, run_sync), timeout=profile_timeout + 1.0)
@@ -242,6 +240,7 @@ class ShellExecutor(BaseExecutor):
 
             process = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.user_temp_dir),

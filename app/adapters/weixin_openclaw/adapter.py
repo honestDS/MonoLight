@@ -19,13 +19,13 @@ from app.adapters.weixin_openclaw.message import (
     extract_messages,
     extract_sender_id,
     extract_text_and_attachments,
-    merge_single_poll_messages,
     parse_session_user_id,
     text_item,
     update_sync_buf,
 )
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
+from app.core.audit.confirmation import message_has_quote
 from app.core.constants import (
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_MESSAGE_PLATFORM_QRCODE_RESPONSE_INVALID,
@@ -151,13 +151,14 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
+        has_quote: bool = False,
     ) -> WeixinOpenClawChatResult:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            await session_reply_queue_manager.enqueue_foreground_message(
+            await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -165,6 +166,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 message=message,
                 attachments=attachments,
                 source="weixin-openclaw",
+                has_quote=has_quote,
             )
             return WeixinOpenClawChatResult()
         except BaseBusinessException as exc:
@@ -204,8 +206,6 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             converted = await self.convert_message(item)
             if converted is not None:
                 messages.append(converted)
-        if self.config.merge_single_poll_messages:
-            return merge_single_poll_messages(messages)
         return messages
 
     async def reply_text(self, user_id: str, text: str, *, context_token: str = "") -> bool:
@@ -261,6 +261,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 session_id=message.session_id,
                 attachments=message.attachments or None,
                 active_tasks=active_tasks,
+                has_quote=message_has_quote(getattr(message, "raw", None)),
             )
             if result.text or result.files:
                 sent = False

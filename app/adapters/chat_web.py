@@ -62,7 +62,7 @@ class WebChatAdapter(BaseChatAdapter):
             )
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            _initial_message, work = await session_reply_queue_manager.enqueue_foreground_message(
+            _initial_message, work, _status = await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -70,7 +70,7 @@ class WebChatAdapter(BaseChatAdapter):
                 message=message,
                 attachments=attachments,
                 source="http",
-                stream_requested=False,
+                stream_requested=True,
                 context_summary_events_requested=True,
             )
             async for event in session_reply_queue_manager.wait_for_stream(work.id):
@@ -114,7 +114,7 @@ class WebChatAdapter(BaseChatAdapter):
             )
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            _initial_message, work = await session_reply_queue_manager.enqueue_foreground_message(
+            _initial_message, work, _status = await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
                 session_id=session_id,

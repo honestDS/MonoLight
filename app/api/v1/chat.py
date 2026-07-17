@@ -529,7 +529,7 @@ async def chat_websocket(
                                 }
                             )
                             continue
-                        await session_reply_queue_manager.enqueue_foreground_message(
+                        await session_reply_queue_manager.submit_user_message(
                             db,
                             uid=uid,
                             session_id=session_id,

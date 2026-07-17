@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.crud.message_platform_outbox import message_platform_outbox_crud
@@ -20,6 +21,13 @@ async def delete_session_data(
     if session is None or (not is_admin and session.uid != uid):
         return False
 
+    await audit_crud.cancel_confirmation_by_session(
+        db,
+        uid=session.uid,
+        session_id=session_id,
+        error_reason="会话已删除，待确认审计已取消",
+        commit=False,
+    )
     await session_reply_work_item_crud.delete_by_session(
         db,
         session_id=session_id,

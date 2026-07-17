@@ -8,20 +8,25 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status
 from app.core.constants import (
+    ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
     ERR_LLM_UNEXPECTED_ERROR,
+    ERR_PERSISTED_USER_MESSAGE_MISMATCH,
     ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT,
     ERR_SESSION_REPLY_NO_FOREGROUND_INPUT,
     ERR_SESSION_REPLY_WORK_ENDED,
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
+from app.core.crud.audit import audit_crud
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException
-from app.core.i18n import t
+from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
+from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
@@ -87,6 +92,152 @@ async def _raise_work_failure(db: AsyncSession, work: SessionReplyWorkItem) -> N
 
 
 class SessionReplyQueueManager:
+    async def submit_user_message(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile: Profile,
+        message: str | list[dict[str, Any]],
+        attachments: list[str] | None,
+        source: str,
+        stream_requested: bool | None = None,
+        context_summary_events_requested: bool | None = None,
+        has_quote: bool = False,
+    ) -> tuple[InternalMessage, SessionReplyWorkItem, str]:
+        await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
+        current_confirmation = await audit_crud.get_current_confirmation(db, uid=uid, session_id=session_id)
+        if current_confirmation is None:
+            initial_message, work = await self._enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=attachments,
+                source=source,
+                stream_requested=stream_requested,
+                context_summary_events_requested=context_summary_events_requested,
+            )
+            return initial_message, work, "queued"
+
+        decision = parse_confirmation_decision(
+            message,
+            attachments=attachments,
+            has_quote=has_quote,
+        )
+        if decision != ConfirmationDecision.APPROVE:
+            profile_id = profile.id if profile and profile.id else -1
+            message_row = Message(
+                session_id=session_id,
+                uid=uid,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content=_serialize_message_content(message),
+                attachments=attachments,
+                profile_id=profile_id,
+                is_processed=False,
+            )
+            db.add(message_row)
+            await db.flush()
+            if decision == ConfirmationDecision.REJECT:
+                await audit_crud.close_pending(
+                    db,
+                    audit_record_id=current_confirmation.id,
+                    uid=uid,
+                    session_id=session_id,
+                    status=AuditRecordStatus.REJECTED,
+                    decision_message_id=message_row.id,
+                    decision_raw_message=message,
+                    decided_by=current_confirmation.operator_username,
+                )
+                await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
+                submission_status = "rejected"
+            else:
+                await audit_crud.cancel_confirmation_by_session(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    error_reason="用户发送了其他消息，旧确认已取消",
+                )
+                await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
+                submission_status = "cancelled_and_queued"
+            initial_message, work = await self._enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=attachments,
+                source=source,
+                stream_requested=stream_requested,
+                context_summary_events_requested=context_summary_events_requested,
+                persisted_message_row=message_row,
+            )
+            return initial_message, work, submission_status
+
+        profile_id = profile.id if profile and profile.id else -1
+        message_row = Message(
+            session_id=session_id,
+            uid=uid,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=_serialize_message_content(message),
+            attachments=None,
+            profile_id=profile_id,
+            is_processed=True,
+        )
+        db.add(message_row)
+        await db.flush()
+        claimed_record, claim_token = await audit_crud.claim_pending_for_execution(
+            db,
+            audit_record_id=current_confirmation.id,
+            uid=uid,
+            session_id=session_id,
+            decision_message_id=message_row.id,
+            decision_raw_message=message,
+            decided_by=current_confirmation.operator_username,
+        )
+        if claimed_record is None or claim_token is None:
+            raise RuntimeError(t(ERR_AUDIT_CONFIRMATION_UNAVAILABLE))
+        await update_confirmation_message_status(db, audit_record_id=claimed_record.id)
+        work, _created = await session_reply_work_item_crud.enqueue(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile_id=profile_id,
+            work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            source_type=SessionReplySourceType.AUDIT_RECORD,
+            source_id=claimed_record.id,
+            dedupe_key=f"confirmed-audit:{claimed_record.id}",
+            commit=False,
+        )
+        work.execution_state = {
+            **(work.execution_state or {}),
+            "audit_claim_token": claim_token,
+            "decision_message_id": message_row.id,
+            "stream_requested": source == "ws" if stream_requested is None else stream_requested,
+            "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
+            "expose_tool_call_content": source != "weixin-openclaw",
+            "language": get_current_locale(),
+            "message_source": source,
+        }
+        db.add(work)
+        await db.commit()
+        await db.refresh(message_row)
+        await db.refresh(work)
+        return (
+            InternalMessage(
+                id=message_row.id,
+                role=MessageRole.USER,
+                content=message_row.content,
+                created_at=message_row.created_at.timestamp(),
+            ),
+            work,
+            "approved",
+        )
+
     async def enqueue_foreground_message(
         self,
         db: AsyncSession,
@@ -99,6 +250,47 @@ class SessionReplyQueueManager:
         source: str,
         stream_requested: bool | None = None,
         context_summary_events_requested: bool | None = None,
+        has_quote: bool = False,
+    ) -> tuple[InternalMessage, SessionReplyWorkItem]:
+        if not hasattr(db, "execute"):
+            return await self._enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=attachments,
+                source=source,
+                stream_requested=stream_requested,
+                context_summary_events_requested=context_summary_events_requested,
+            )
+        initial_message, work, _status = await self.submit_user_message(
+            db,
+            uid=uid,
+            session_id=session_id,
+            profile=profile,
+            message=message,
+            attachments=attachments,
+            source=source,
+            stream_requested=stream_requested,
+            context_summary_events_requested=context_summary_events_requested,
+            has_quote=has_quote,
+        )
+        return initial_message, work
+
+    async def _enqueue_foreground_message(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        profile: Profile,
+        message: str | list[dict[str, Any]],
+        attachments: list[str] | None,
+        source: str,
+        stream_requested: bool | None = None,
+        context_summary_events_requested: bool | None = None,
+        persisted_message_row: Message | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -110,18 +302,22 @@ class SessionReplyQueueManager:
                 source=source,
             )
 
-        message_row = Message(
-            session_id=session_id,
-            uid=uid,
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=_serialize_message_content(message),
-            attachments=attachments,
-            profile_id=profile_id,
-            is_processed=False,
-        )
-        db.add(message_row)
-        await db.flush()
+        message_row = persisted_message_row
+        if message_row is None:
+            message_row = Message(
+                session_id=session_id,
+                uid=uid,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content=_serialize_message_content(message),
+                attachments=attachments,
+                profile_id=profile_id,
+                is_processed=False,
+            )
+            db.add(message_row)
+            await db.flush()
+        elif message_row.uid != uid or message_row.session_id != session_id or message_row.profile_id != profile_id:
+            raise ValueError(t(ERR_PERSISTED_USER_MESSAGE_MISMATCH))
         work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -141,6 +337,8 @@ class SessionReplyQueueManager:
                 # 微信 OpenClaw 对发送频率有限制，工具调用阶段的正文只保留在
                 # 数据库和日志中，不作为额外的用户可见消息发送到微信。
                 "expose_tool_call_content": source != "weixin-openclaw",
+                "language": get_current_locale(),
+                "message_source": source,
             }
             db.add(work)
         await db.commit()
@@ -167,7 +365,7 @@ class SessionReplyQueueManager:
         background_task_id: int,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
-        return await session_reply_work_item_crud.enqueue(
+        work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
             session_id=session_id,
@@ -176,8 +374,20 @@ class SessionReplyQueueManager:
             source_type=SessionReplySourceType.BACKGROUND_TASK,
             source_id=background_task_id,
             dedupe_key=f"background-task-summary:{background_task_id}",
-            commit=commit,
+            commit=False,
         )
+        if created:
+            work.execution_state = {
+                **(work.execution_state or {}),
+                "language": get_current_locale(),
+            }
+            db.add(work)
+        if commit:
+            await db.commit()
+            await db.refresh(work)
+        else:
+            await db.flush()
+        return work, created
 
     async def enqueue_scheduled_summary(
         self,
@@ -190,7 +400,7 @@ class SessionReplyQueueManager:
         trigger_message_id: int,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
-        return await session_reply_work_item_crud.enqueue(
+        work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
             session_id=session_id,
@@ -199,8 +409,20 @@ class SessionReplyQueueManager:
             source_type=SessionReplySourceType.SCHEDULED_TASK_RUN,
             source_id=trigger_message_id,
             dedupe_key=f"scheduled-task-summary:{scheduled_task_id}:{trigger_message_id}",
-            commit=commit,
+            commit=False,
         )
+        if created:
+            work.execution_state = {
+                **(work.execution_state or {}),
+                "language": get_current_locale(),
+            }
+            db.add(work)
+        if commit:
+            await db.commit()
+            await db.refresh(work)
+        else:
+            await db.flush()
+        return work, created
 
     async def freeze_foreground_input(
         self,

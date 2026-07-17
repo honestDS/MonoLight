@@ -74,6 +74,31 @@
             </el-collapse-item>
           </el-collapse>
         </template>
+        <template v-else-if="msg.type === 'audit_confirmation'">
+          <div class="message-header">
+            <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
+          </div>
+          <div class="content audit-confirmation-card">
+            <div class="audit-confirmation-title">{{ $t('chat.audit_confirmation_title') }}</div>
+            <div class="audit-confirmation-summary">{{ getAuditConfirmation(msg).summary }}</div>
+            <div class="audit-confirmation-meta">
+              <span>{{ $t('chat.audit_status', { status: getAuditStatusLabel(msg) }) }}</span>
+              <span>{{ $t('chat.audit_risk', { score: getAuditConfirmation(msg).risk }) }}</span>
+              <span>{{ $t('chat.audit_expires_at', { time: getAuditConfirmation(msg).expires_at || '-' }) }}</span>
+            </div>
+            <div class="audit-confirmation-actions">
+              <el-button
+                type="primary"
+                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending'"
+                @click="submitAuditDecision(msg, 'approve')"
+              >{{ $t('chat.audit_approve') }}</el-button>
+              <el-button
+                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending'"
+                @click="submitAuditDecision(msg, 'reject')"
+              >{{ $t('chat.audit_reject') }}</el-button>
+            </div>
+          </div>
+        </template>
         <template v-else-if="msg.role === 'background_system'">
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
@@ -233,13 +258,16 @@ const props = defineProps({
   messages: { type: Array, default: () => [] },
   currentSessionId: { type: String, default: null },
   currentSessionEnableMarkdown: { type: Boolean, default: false },
+  currentSessionReadOnly: { type: Boolean, default: false },
   activeCollapse: { type: Array, default: () => [] },
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false }
 })
-const emit = defineEmits(['update:activeCollapse'])
+const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
+const pendingAuditDecisions = ref(new Set())
+const auditDecisionStatuses = ref(new Map())
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
 const messagesLayoutReady = ref(false)
@@ -629,6 +657,34 @@ const getMessageText = (message) => {
   return parsed ? parsed.text || '' : message.content
 }
 const getMessageFiles = (message) => message.files || parseAssistantFilesContent(message.content)?.files || []
+const parseAuditConfirmation = (content) => {
+  try {
+    const parsed = typeof content === 'string' ? JSON.parse(content) : content
+    return parsed?.type === 'audit_confirmation' ? parsed : null
+  } catch {
+    return null
+  }
+}
+const getAuditConfirmation = (message) => {
+  const payload = parseAuditConfirmation(message?.content) || {}
+  const localStatus = auditDecisionStatuses.value.get(payload.audit_record_id)
+  const terminalStatuses = new Set(['rejected', 'cancelled', 'expired', 'succeeded', 'failed', 'execution_unknown'])
+  if (terminalStatuses.has(payload.status)) return payload
+  if (localStatus) return { ...payload, status: localStatus }
+  return payload
+}
+const isAuditDecisionPending = message => pendingAuditDecisions.value.has(getAuditConfirmation(message).audit_record_id)
+const getAuditStatusLabel = message => t(`chat.audit_status_${getAuditConfirmation(message).status || 'pending'}`)
+const submitAuditDecision = (message, decision) => {
+  const auditRecordId = getAuditConfirmation(message).audit_record_id
+  if (!auditRecordId || pendingAuditDecisions.value.has(auditRecordId)) return
+  pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
+  auditDecisionStatuses.value = new Map([
+    ...auditDecisionStatuses.value,
+    [auditRecordId, decision === 'approve' ? 'executing' : 'rejected']
+  ])
+  emit('audit-decision', { auditRecordId, decision })
+}
 const parseBackgroundSystemContent = (content) => {
   try {
     const parsed = typeof content === 'string' ? JSON.parse(content) : content

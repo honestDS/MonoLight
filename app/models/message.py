@@ -7,7 +7,7 @@ from typing import (
     Literal,
 )
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from pydantic import Field as PyField
 from sqlalchemy import Text
 from sqlmodel import (
@@ -33,6 +33,7 @@ class MessageType(StrEnum):
     TEXT = "text"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    AUDIT_CONFIRMATION = "audit_confirmation"
     BACKGROUND_TASK_RESULT = "background_result"
     SCHEDULED_TASK_TRIGGER = "scheduled_task_trigger"
 
@@ -119,11 +120,13 @@ class MessageResponse(MessageBase):
 
     @field_validator("content", mode="before")
     @classmethod
-    def parse_content(cls, v):
+    def parse_content(cls, v, info: ValidationInfo):
         if isinstance(v, str):
             try:
                 parsed = json.loads(v)
                 if isinstance(parsed, list):
+                    return parsed
+                if isinstance(parsed, dict) and info.data.get("type") == MessageType.AUDIT_CONFIRMATION:
                     return parsed
             except Exception:
                 pass

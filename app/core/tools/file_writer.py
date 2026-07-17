@@ -1,8 +1,10 @@
 import json
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from app.core.constants import ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS
+from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.core.prompts import CONFIRMATION_PREFIX
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -20,6 +22,16 @@ class FileWriterExecutor(BaseExecutor):
         if not self.user_temp_dir.exists():
             self.user_temp_dir.mkdir(parents=True, exist_ok=True)
 
+    def _resolve_target_path(self, file_path: str) -> Path:
+        if not file_path or PurePosixPath(file_path).is_absolute() or PureWindowsPath(file_path).is_absolute():
+            raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+
+        workspace_path = self.user_temp_dir.resolve(strict=True)
+        target_path = (workspace_path / file_path).resolve(strict=False)
+        if target_path == workspace_path or not target_path.is_relative_to(workspace_path):
+            raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+        return target_path
+
     async def execute(self, file_path: str, content: str, append: bool = False) -> str:
         """
         将内容写入指定文件。
@@ -28,16 +40,9 @@ class FileWriterExecutor(BaseExecutor):
         :param content: 要写入的文本内容
         :param append: 是否以追加模式写入，默认为 False (覆盖)
         """
-        # 处理可能的确认前缀
-        if file_path.startswith(CONFIRMATION_PREFIX):
-            file_path = file_path.split(" ", 1)[-1]
-        if isinstance(content, str) and content.startswith(CONFIRMATION_PREFIX):
-            content = content.split(" ", 1)[-1]
-
         system_info = get_full_system_context()
         try:
-            # 确保文件路径在用户临时目录内，防止路径穿越攻击
-            target_path = (self.user_temp_dir / file_path).resolve()
+            target_path = self._resolve_target_path(file_path)
 
             # 确保父目录存在
             target_path.parent.mkdir(parents=True, exist_ok=True)

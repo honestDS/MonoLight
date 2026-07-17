@@ -1,51 +1,101 @@
 import asyncio
-import json
-import uuid
-from collections.abc import AsyncGenerator, MutableSet
+from collections.abc import AsyncGenerator, Awaitable, Callable, MutableSet
+from functools import partial
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.channel_router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
-from app.core.context import ContextManager
-from app.core.crud.profile import profile_crud
-from app.core.crud.user import user_crud
-from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException
+from app.core.dispatchers.foreground import ForegroundDispatcherMixin
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
-from app.core.log import channel_log_extra, get_logger
-from app.core.prompts import PROMPT_MAX_TURNS_REACHED
-from app.core.tools import get_tools_for_profile
-from app.core.tools.send_file_to_user import sanitize_files_to_user_result
-from app.core.utils.context_summary import ContextSummaryTriggerMode
-from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
-from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
-from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
-from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
-from app.core.utils.dispatcher.helpers import (
-    dump_output_history,
-    extract_files_to_user,
-    format_exception_message,
-    get_multimodal_from_entry,
-    process_single_tool_with_isolated_db,
-    reassemble_multimodal_messages,
-    resolve_chat_params,
-)
-from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
-from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
-from app.core.utils.dispatcher.prepare_messages import prepare_messages
-from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
-from app.core.utils.dispatcher.save_initial_message import save_initial_message
-from app.core.utils.dispatcher.save_tool_response import save_tool_response
-from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
-from app.core.utils.message_assembler import MessageAssembler
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
-from app.providers.llm.client import LLMClient
+from app.core.log import get_logger
+from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
+from app.models.message import InternalMessage
 
 logger = get_logger(__name__)
 
 
-class StreamDispatcherMixin:
+class StreamDispatcherMixin(ForegroundDispatcherMixin):
+    @staticmethod
+    async def _emit_event(
+        event: dict[str, Any],
+        *,
+        event_queue: asyncio.Queue[tuple[str, Any]],
+        session_id: str,
+        request_id: str | None,
+        response_state: dict[str, str | None],
+    ) -> None:
+        normalized_event = {
+            **event,
+            "session_id": session_id,
+        }
+        if request_id is not None:
+            normalized_event.setdefault("request_id", request_id)
+        response_id = normalized_event.get("response_id")
+        if isinstance(response_id, str):
+            response_state["latest_response_id"] = response_id
+        await event_queue.put(("event", normalized_event))
+
+    @classmethod
+    async def _run_dispatch(
+        cls,
+        *,
+        event_queue: asyncio.Queue[tuple[str, Any]],
+        dispatch_kwargs: dict[str, Any],
+        uid: str,
+        session_id: str,
+    ) -> None:
+        try:
+            response = await cls._dispatch_foreground(**dispatch_kwargs)
+        except BaseBusinessException as exc:
+            await event_queue.put(("error", t(exc.message, default=exc.message, **exc.kwargs)))
+        except Exception as exc:
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_STREAM_ERROR"), exc_info=True)
+            await event_queue.put(("error", t(str(exc), default=str(exc))))
+        else:
+            await event_queue.put(("done", response))
+
+    @staticmethod
+    def _build_task_start_event(session_id: str, request_id: str | None) -> dict[str, Any]:
+        event = {
+            "type": "task_start",
+            "session_id": session_id,
+        }
+        if request_id is not None:
+            event["request_id"] = request_id
+        return event
+
+    @staticmethod
+    def _build_error_event(message: Any, session_id: str, request_id: str | None) -> dict[str, Any]:
+        event = {
+            "type": "error",
+            "message": message,
+            "session_id": session_id,
+        }
+        if request_id is not None:
+            event["request_id"] = request_id
+        return event
+
+    @staticmethod
+    def _build_done_event(
+        response: dict[str, Any],
+        *,
+        session_id: str,
+        request_id: str | None,
+        response_id: str | None,
+    ) -> dict[str, Any]:
+        event = {
+            "type": "done",
+            "session_id": session_id,
+            "history": response.get("history", []),
+            "files": response.get("files"),
+            "response": response,
+            "response_id": response_id,
+        }
+        if request_id is not None:
+            event["request_id"] = request_id
+        return event
+
     @classmethod
     async def dispatch_stream(
         cls,
@@ -57,363 +107,82 @@ class StreamDispatcherMixin:
         request_id: str | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
         session_source: str = "ws",
+        persisted_initial_message: InternalMessage | None = None,
+        history_before_id: int | None = None,
+        frozen_user_message_ids: list[int] | None = None,
+        final_message_dedupe_key: str | None = None,
+        persisted_profile_id: int | None = None,
+        context_summary_lifecycle_callback: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+        context_summary_events_requested: bool = False,
+        additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
+        execution_resume_state: dict[str, Any] | None = None,
+        execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
+        expose_tool_call_content: bool = True,
     ) -> AsyncGenerator[dict[str, Any]]:
+        event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
+        response_state: dict[str, str | None] = {"latest_response_id": None}
+        emit_event = partial(
+            cls._emit_event,
+            event_queue=event_queue,
+            session_id=session_id,
+            request_id=request_id,
+            response_state=response_state,
+        )
+        dispatch_kwargs = {
+            "db": db,
+            "message": message,
+            "uid": uid,
+            "session_id": session_id,
+            "attachments": attachments,
+            "active_tasks": active_tasks,
+            "session_source": session_source,
+            "persisted_initial_message": persisted_initial_message,
+            "history_before_id": history_before_id,
+            "frozen_user_message_ids": frozen_user_message_ids,
+            "final_message_dedupe_key": final_message_dedupe_key,
+            "persisted_profile_id": persisted_profile_id,
+            "stream_event_callback": emit_event,
+            "context_summary_lifecycle_callback": context_summary_lifecycle_callback or (emit_event if context_summary_events_requested else None),
+            "additional_user_messages_fetcher": additional_user_messages_fetcher,
+            "execution_resume_state": execution_resume_state,
+            "execution_checkpoint_callback": execution_checkpoint_callback,
+            "context_summary_work_validity_checker": context_summary_work_validity_checker,
+            "expose_tool_call_content": expose_tool_call_content,
+            "dispatcher_mode": "stream",
+        }
+        dispatch_task = asyncio.create_task(
+            cls._run_dispatch(
+                event_queue=event_queue,
+                dispatch_kwargs=dispatch_kwargs,
+                uid=uid,
+                session_id=session_id,
+            )
+        )
+        if active_tasks is not None:
+            active_tasks.add(dispatch_task)
         try:
-            user = await user_crud.get_by_uid(db, uid)
-            username = user.username if user else "Unknown"
-            profile = await profile_crud.get_active(db, uid=uid)
-
-            logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
-
-            await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-
-            # 1. 初始保存消息
-            initial_msg = await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
-
-            turn_messages: list[InternalMessage] = []
-            files_to_user: list[dict[str, Any]] = []
-            final_response_id: str | None = None
-            is_first_iter = True
-            checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-            checkpoint_upper_id = initial_msg.id
+            yield cls._build_task_start_event(session_id, request_id)
 
             while True:
-                try:
-                    yield {"type": "task_start", "request_id": request_id}
-
-                    cfg = await validate_profile_and_cfg(db, profile)
-
-                    if is_first_iter:
-                        await mark_initial_message_processed(db, initial_msg.id)
-
-                    # ========== 渠道路由选择 ==========
-                    chat_channel = cfg.channel.chat_channel
-                    chat_cursor_key = f"{profile.id}:CHAT"
-                    selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream", cursor_key=chat_cursor_key)
-                    if not selection:
-                        raise LLMException(message=ERR_CHAT_CHANNEL_NOT_FOUND)
-
-                    chat_channel_obj, model_entry, _channel_rule = selection
-                    img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
-                    chat_params = resolve_chat_params(model_entry, chat_channel)
-                    tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
-
-                    messages = await prepare_messages(
-                        db,
-                        session_id,
-                        uid,
-                        profile,
-                        cfg,
-                        initial_msg,
-                        message,
-                        is_first_iter,
-                        context_window_k=chat_params["context_window_k"],
-                        max_tokens=chat_params["max_tokens"],
-                        tools=tools,
-                    )
-
-                    # 重新组装带附件的多模态消息
-                    for idx, m in enumerate(messages):
-                        if m.role == MessageRole.USER and (m.attachments or isinstance(m.content, list)):
-                            is_history = idx != len(messages) - 1
-                            messages[idx] = MessageAssembler.assemble(
-                                m,
-                                image_understanding=img_understanding,
-                                audio_understanding=audio_understanding,
-                                video_understanding=video_understanding,
-                                is_history=is_history,
-                            )
-
-                    max_turns = cfg.tool.max_turns
-                    current_turn = 0
-
-                    while current_turn <= max_turns:
-                        # 检查新指令并合并
-                        new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
-                        if new_user_msgs:
-                            current_turn = 0
-                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
-                            latest_user_id = max(
-                                (item.id for item in new_user_msgs if item.id is not None),
-                                default=None,
-                            )
-                            if latest_user_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                checkpoint_upper_id = latest_user_id
-
-                        current_turn += 1
-
-                        if current_turn == max_turns:
-                            summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=max_turns)
-                            notice_msg = InternalMessage(role=MessageRole.USER, content=summary_notice)
-                            messages.append(notice_msg)
-                            current_tools = None
-                        else:
-                            current_tools = tools
-
-                        current_tool_calls_map = {}
-                        current_content_chunks = []
-
-                        response_id = str(uuid.uuid4())
-                        final_response_id = response_id
-
-                        excluded_priorities: set[int] = set()
-                        while True:
-                            emitted_chunk = False
-                            try:
-                                if checkpoint_upper_id is not None:
-                                    messages = await apply_context_summary_checkpoint(
-                                        db,
-                                        session_id=session_id,
-                                        uid=uid,
-                                        profile=profile,
-                                        cfg=cfg,
-                                        messages=messages,
-                                        trigger_mode=checkpoint_mode,
-                                        fixed_upper_message_id=checkpoint_upper_id,
-                                        context_window_k=chat_params["context_window_k"],
-                                        max_tokens=chat_params["max_tokens"],
-                                        tools=current_tools,
-                                    )
-                                request_messages = ContextManager.trim_messages_for_model_request(
-                                    messages=await materialize_latest_user_environment_prompt(
-                                        db,
-                                        session_id,
-                                        messages,
-                                        chat_params["max_tokens"],
-                                    ),
-                                    uid=uid,
-                                    session_id=session_id,
-                                    context_window_k=chat_params["context_window_k"],
-                                    max_tokens=chat_params["max_tokens"],
-                                    tools=current_tools,
-                                )
-                                await db.commit()
-                                async for chunk in LLMClient.generate_stream(
-                                    api_key=chat_channel_obj.get_decrypted_api_key(),
-                                    base_url=chat_channel_obj.base_url,
-                                    model_id=model_entry["model_id"],
-                                    messages=request_messages,
-                                    temperature=chat_params["temperature"],
-                                    top_p=chat_params["top_p"],
-                                    max_tokens=chat_params["max_tokens"],
-                                    tools=current_tools,
-                                    protocol=getattr(chat_channel_obj, "protocol", "openai"),
-                                    timeout=chat_params["chat_timeout"],
-                                ):
-                                    choices = chunk.get("choices", [])
-                                    if not choices:
-                                        continue
-                                    choice = choices[0]
-                                    delta = choice.get("delta", {})
-
-                                    content = delta.get("content")
-                                    if content:
-                                        emitted_chunk = True
-                                        current_content_chunks.append(content)
-                                        yield {
-                                            "type": "content",
-                                            "content": content,
-                                            "turn": current_turn,
-                                            "response_id": response_id,
-                                            "request_id": request_id,
-                                            "session_id": session_id,
-                                        }
-
-                                    tool_calls = delta.get("tool_calls")
-                                    if tool_calls:
-                                        emitted_chunk = True
-                                        for tc in tool_calls:
-                                            idx = tc.get("index", 0)
-                                            if idx not in current_tool_calls_map:
-                                                current_tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                                            if tc.get("id"):
-                                                current_tool_calls_map[idx]["id"] = tc.get("id")
-                                            if tc.get("function", {}).get("name"):
-                                                current_tool_calls_map[idx]["name"] = tc.get("function", {}).get("name")
-                                            if tc.get("function", {}).get("arguments"):
-                                                current_tool_calls_map[idx]["arguments"] += tc.get("function", {}).get("arguments")
-
-                                # 流式结束后若本轮未产出任何有效内容（既无文本也无工具调用），
-                                # 视为空响应：此时尚未向前端推送过内容，可安全降级到下一优先级组重试
-                                stream_text = "".join(current_content_chunks).strip()
-                                stream_has_tool = any(v.get("name") for v in current_tool_calls_map.values())
-                                if not stream_text and not stream_has_tool:
-                                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-                                break
-                            except ApiKeyException:
-                                raise
-                            except LLMException as exc:
-                                # 仅捕获 LLM 调用相关异常做降级；已向前端推送过内容则不可降级，直接抛出
-                                if emitted_chunk:
-                                    raise
-                                excluded_priorities.add(_channel_rule.priority)
-                                logger.bind(
-                                    uid=uid,
-                                    session_id=session_id,
-                                    **channel_log_extra(chat_channel_obj, model_entry),
-                                ).warning(t("LOG_DISPATCHER_STREAM_CHANNEL_FAILED", error=format_exception_message(exc)))
-                                selection = await select_channel(db, chat_channel, "CHAT", call_context="chat_dispatch_stream_retry", excluded_priorities=excluded_priorities, cursor_key=chat_cursor_key)
-                                if not selection:
-                                    raise
-                                chat_channel_obj, model_entry, _channel_rule = selection
-                                img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
-                                chat_params = resolve_chat_params(model_entry, chat_channel)
-                                # 保留固定快照内的完整工具链，下一次请求前按新模型窗口重新检查。
-                                reassemble_multimodal_messages(messages, img_understanding, audio_understanding, video_understanding)
-                                current_tool_calls_map = {}
-                                current_content_chunks = []
-
-                        final_content = "".join(current_content_chunks)
-                        final_tool_calls = []
-                        for idx, tc_data in sorted(current_tool_calls_map.items()):
-                            if tc_data.get("name"):
-                                args_dict = {}
-                                if tc_data.get("arguments"):
-                                    try:
-                                        args_dict = json.loads(tc_data.get("arguments"))
-                                    except Exception:
-                                        pass
-                                final_tool_calls.append(InternalToolCall(id=tc_data.get("id") or f"call_{idx}", name=tc_data.get("name"), arguments=args_dict))
-
-                        if not final_tool_calls and not final_content.strip():
-                            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-
-                        ai_msg = InternalMessage(
-                            role=MessageRole.ASSISTANT,
-                            content=final_content if final_content else None,
-                            tool_calls=LLMClient.normalize_tool_calls(final_tool_calls),
-                        )
-                        if not ai_msg.tool_calls and files_to_user:
-                            ai_msg.content = json.dumps(
-                                {
-                                    "type": "assistant_files",
-                                    "text": ai_msg.content or "",
-                                    "files": files_to_user,
-                                },
-                                ensure_ascii=False,
-                            )
-
-                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=current_turn, content=ai_msg.content or "[工具调用]"))
-
-                        messages.append(ai_msg)
-                        turn_messages.append(ai_msg)
-
-                        saved_msg = await save_assistant_message(db, session_id, uid, profile.id, ai_msg)
-
-                        if saved_msg:
-                            yield {
-                                "type": "turn_end",
-                                "response_id": response_id,
-                                "content": ai_msg.content if ai_msg.tool_calls else saved_msg.content,
-                                "request_id": request_id,
-                                "session_id": session_id,
-                            }
-
-                        if not ai_msg.tool_calls:
-                            new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
-                            if not new_user_msgs:
-                                break
-
-                            append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
-                            latest_user_id = max(
-                                (item.id for item in new_user_msgs if item.id is not None),
-                                default=None,
-                            )
-                            if latest_user_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                checkpoint_upper_id = latest_user_id
-                            current_turn = 0
-                            continue
-
-                        if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
-                            latest_tool_result_id = await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
-                            if latest_tool_result_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                checkpoint_upper_id = latest_tool_result_id
-                            continue
-
-                        for tc in ai_msg.tool_calls:
-                            yield {
-                                "type": "tool_start",
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                                "tool_call_id": tc.id,
-                                "response_id": response_id,
-                                "request_id": request_id,
-                                "session_id": session_id,
-                            }
-
-                        sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
-
-                        async def wrapped_tool_call(tc):
-                            async with sem:
-                                task = asyncio.create_task(
-                                    process_single_tool_with_isolated_db(
-                                        tc,
-                                        profile,
-                                        cfg,
-                                        messages,
-                                        username,
-                                        session_id,
-                                        current_turn,
-                                        uid,
-                                        allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                                        context_window_k=chat_params["context_window_k"],
-                                    )
-                                )
-
-                                if active_tasks is not None:
-                                    active_tasks.add(task)
-
-                                try:
-                                    return await task
-                                finally:
-                                    if active_tasks is not None:
-                                        active_tasks.discard(task)
-
-                        tasks = [wrapped_tool_call(tc) for tc in ai_msg.tool_calls]
-                        tool_responses = await asyncio.gather(*tasks)
-
-                        files_to_user.extend(extract_files_to_user(tool_responses))
-                        persisted_tool_result_ids: list[int] = []
-                        for tool_res in tool_responses:
-                            stored_tool_res = await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
-                            if stored_tool_res.id is not None:
-                                persisted_tool_result_ids.append(stored_tool_res.id)
-                            tool_call = next((tc for tc in ai_msg.tool_calls if tc.id == tool_res.tool_call_id), None)
-                            tool_name = tool_call.name if tool_call else "unknown"
-                            yield {
-                                "type": "tool_end",
-                                "name": tool_name,
-                                "result": sanitize_files_to_user_result(tool_res.content),
-                                "tool_call_id": tool_res.tool_call_id,
-                                "response_id": response_id,
-                                "request_id": request_id,
-                                "session_id": session_id,
-                            }
-                        if persisted_tool_result_ids:
-                            checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                            checkpoint_upper_id = max(persisted_tool_result_ids)
-
-                finally:
-                    is_first_iter = False
-
-                new_user_msgs = await fetch_and_merge_new_user_messages(db, session_id, uid, chat_params["max_tokens"])
-                if not new_user_msgs:
+                item_type, payload = await event_queue.get()
+                if item_type == "event":
+                    yield payload
+                    continue
+                if item_type == "error":
+                    yield cls._build_error_event(payload, session_id, request_id)
                     break
-                latest_user_id = max(
-                    (item.id for item in new_user_msgs if item.id is not None),
-                    default=None,
+
+                yield cls._build_done_event(
+                    payload,
+                    session_id=session_id,
+                    request_id=request_id,
+                    response_id=response_state["latest_response_id"],
                 )
-                if latest_user_id is not None:
-                    checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                    checkpoint_upper_id = latest_user_id
-
-            yield {"type": "done", "session_id": session_id, "history": dump_output_history(turn_messages), "files": files_to_user or None, "response_id": final_response_id, "request_id": request_id}
-
-        except BaseBusinessException as bbe:
-            yield {"type": "error", "message": t(bbe.message, default=bbe.message, **bbe.kwargs), "request_id": request_id}
-        except Exception as e:
-            logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_STREAM_ERROR"), exc_info=True)
-            yield {"type": "error", "message": t(str(e), default=str(e)), "request_id": request_id}
+                break
+        finally:
+            if not dispatch_task.done():
+                dispatch_task.cancel()
+            await asyncio.gather(dispatch_task, return_exceptions=True)
+            if active_tasks is not None:
+                active_tasks.discard(dispatch_task)

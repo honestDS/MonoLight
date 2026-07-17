@@ -64,9 +64,11 @@
         :messages="messages"
         :current-session-id="currentSessionId"
         :current-session-enable-markdown="currentSessionEnableMarkdown"
+        :current-session-read-only="isCurrentSessionReadOnly"
         :history-loading="historyLoading"
         :initial-history-loaded="initialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
+        @audit-decision="handleAuditDecision"
       />
       <div class="input-area">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
@@ -300,6 +302,13 @@ const send = async () => {
   const promise = originalSend()
   uploadFileList.value = []
   await promise
+}
+
+const handleAuditDecision = async ({ decision }) => {
+  if (isCurrentSessionReadOnly.value || loading.value) return
+  inputMsg.value = decision === 'approve' ? (t('chat.audit_approve_word')) : (t('chat.audit_reject_word'))
+  attachments.value = []
+  await originalSend()
 }
 
 // 通信模式切换

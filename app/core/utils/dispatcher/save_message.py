@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
+from app.core.audit.integrity import canonical_json_dumps
 from app.core.crud.message import (
     message_crud,
 )
@@ -18,6 +19,11 @@ from app.models.message import (
 
 
 def _to_storable_content(content: Any, msg_type: MessageType) -> str:
+    if msg_type == MessageType.AUDIT_CONFIRMATION:
+        if hasattr(content, "model_dump"):
+            content = content.model_dump(mode="json", exclude_none=True)
+        return canonical_json_dumps(content)
+
     if msg_type in {MessageType.TEXT, MessageType.BACKGROUND_TASK_RESULT} and hasattr(content, "content"):
         payload = content.content
         if isinstance(payload, str) or payload is None:
@@ -25,6 +31,9 @@ def _to_storable_content(content: Any, msg_type: MessageType) -> str:
         if hasattr(content, "model_dump"):
             payload = content.model_dump(mode="json", include={"content"}).get("content")
         return json.dumps(payload, ensure_ascii=False)
+
+    if msg_type == MessageType.TOOL_CALL and hasattr(content, "model_dump"):
+        return canonical_json_dumps(content.model_dump(mode="python", exclude_none=True))
 
     if hasattr(content, "model_dump_json"):
         return content.model_dump_json(exclude_none=True)

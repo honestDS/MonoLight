@@ -49,6 +49,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
   - 每个新增的 API 路由必须在 `tests/integration` 中拥有对应的异步请求测试。
   - 使用 `conftest.py` 中定义的 `db_session` fixture 进行数据库隔离测试。
   - 测试中的 Mock 逻辑必须基于 `InternalResponse` 等标准对象，严禁使用旧版字典结构。
+- **禁止项**：禁止编写和使用前端测试，前端相关测试应由用户自行进行。
 
 ## 七、 异常处理规范
 1. 业务异常必须继承自 `app.core.exceptions` 中的 `BaseBusinessException`。

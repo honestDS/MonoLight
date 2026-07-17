@@ -63,6 +63,7 @@
       :dialog-type="dialogType"
       :form="form"
       :knowledge-base-options="knowledgeBaseOptions"
+      :locale-options="localeOptions"
       :prompts="prompts"
       :show-owner-column="showOwnerColumn"
       :submitting="submitting"
@@ -86,6 +87,14 @@
         <el-form-item :label="$t('profiles.temp_dir_max_size_mb')">
           <el-input-number v-model="systemSettings.temp_dir_max_size_mb" :min="1" :max="1048576" class="full-width-input" controls-position="right" />
           <div class="help-text mt-5">{{ $t('profiles.temp_dir_max_size_mb_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t('profiles.audit_retention_days')">
+          <el-input-number v-model="systemSettings.audit_retention_days" :min="1" :max="3650" class="full-width-input" controls-position="right" />
+          <div class="help-text mt-5">{{ $t('profiles.audit_retention_days_hint') }}</div>
+        </el-form-item>
+        <el-form-item :label="$t('profiles.audit_report_email')">
+          <el-input v-model.trim="systemSettings.audit_report_email" type="email" :placeholder="$t('profiles.audit_report_email_placeholder')" class="full-width-input" />
+          <div class="help-text mt-5">{{ $t('profiles.audit_report_email_hint') }}</div>
         </el-form-item>
         <el-form-item :label="$t('profiles.session_reply_max_concurrency')">
           <el-input-number v-model="systemSettings.session_reply_max_concurrency" :min="1" :max="100" class="full-width-input" controls-position="right" />
@@ -140,6 +149,8 @@ const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 const systemSettings = reactive({
   log_locale: 'zh',
   temp_dir_max_size_mb: 1024,
+  audit_retention_days: 90,
+  audit_report_email: '',
   session_reply_max_concurrency: 4
 })
 

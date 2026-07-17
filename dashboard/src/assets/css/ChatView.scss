@@ -71,3 +71,39 @@
     transform: rotate(360deg);
   }
 }
+
+.audit-confirmation-card {
+  width: min(520px, 100%);
+  padding: 16px;
+  border: 1px solid #e6a23c;
+  border-radius: 8px;
+  background: #fffdf6;
+}
+
+.audit-confirmation-title {
+  color: #303133;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.audit-confirmation-summary {
+  margin-top: 8px;
+  color: #303133;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.audit-confirmation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 10px;
+  color: #606266;
+  font-size: 12px;
+}
+
+.audit-confirmation-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}

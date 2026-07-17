@@ -59,6 +59,21 @@ async def test_execute_python_inline_command_normalizes_compound_statement(monke
     assert payload == {"name": "测试对象", "data": [10]}
 
 
+@pytest.mark.asyncio
+async def test_execute_command_receives_closed_stdin(monkeypatch, tmp_path):
+    executor = ShellExecutor(project_root=str(tmp_path), uid="u1")
+
+    async def fake_get_profile_timeout():
+        return 1.0
+
+    monkeypatch.setattr(executor, "_get_profile_timeout", fake_get_profile_timeout)
+    result = json.loads(await executor.execute(command='python -c "import sys; print(len(sys.stdin.read()))"'))
+
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "0"
+    assert result["stderr"] == ""
+
+
 def test_python_inline_command_detection_skips_shell_composition(tmp_path):
     executor = ShellExecutor(project_root=str(tmp_path), uid="u1")
 

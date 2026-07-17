@@ -51,6 +51,7 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
         self._pending: dict[KeyT, _PendingGroup[MessageT]] = {}
         self._timer_tasks: dict[KeyT, asyncio.Task[None]] = {}
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
+        self._dispatch_tasks_by_key: dict[KeyT, set[asyncio.Task[None]]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -81,12 +82,12 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
     async def flush(self, key: KeyT | None = None) -> None:
         async with self._lock:
             keys = [key] if key is not None else list(self._pending)
-            messages: list[MessageT] = []
+            messages: list[tuple[KeyT, MessageT]] = []
             timers: list[asyncio.Task[None]] = []
             for pending_key in keys:
                 pending = self._pending.pop(pending_key, None)
                 if pending is not None:
-                    messages.append(pending.message)
+                    messages.append((pending_key, pending.message))
                 timer = self._timer_tasks.pop(pending_key, None)
                 if timer is not None and timer is not asyncio.current_task():
                     timer.cancel()
@@ -94,8 +95,17 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
 
         if timers:
             await asyncio.gather(*timers, return_exceptions=True)
-        for message in messages:
-            self._start_dispatch(message)
+        for pending_key, message in messages:
+            self._start_dispatch(pending_key, message)
+
+    async def flush_and_wait(self, key: KeyT) -> None:
+        await self.flush(key)
+        while True:
+            async with self._lock:
+                tasks = tuple(self._dispatch_tasks_by_key.get(key, set()))
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self) -> None:
         async with self._lock:
@@ -133,16 +143,22 @@ class InboundMessageCollector[KeyT: Hashable, MessageT]:
                 message = self._pending.pop(key).message
                 self._timer_tasks.pop(key, None)
 
-            self._start_dispatch(message)
+            self._start_dispatch(key, message)
         except asyncio.CancelledError:
             raise
 
-    def _start_dispatch(self, message: MessageT) -> None:
+    def _start_dispatch(self, key: KeyT, message: MessageT) -> None:
         task = asyncio.create_task(self._dispatch(message))
         self._dispatch_tasks.add(task)
-        task.add_done_callback(self._complete_dispatch)
+        self._dispatch_tasks_by_key.setdefault(key, set()).add(task)
+        task.add_done_callback(lambda completed: self._complete_dispatch(key, completed))
 
-    def _complete_dispatch(self, task: asyncio.Task[None]) -> None:
+    def _complete_dispatch(self, key: KeyT, task: asyncio.Task[None]) -> None:
         self._dispatch_tasks.discard(task)
+        key_tasks = self._dispatch_tasks_by_key.get(key)
+        if key_tasks is not None:
+            key_tasks.discard(task)
+            if not key_tasks:
+                self._dispatch_tasks_by_key.pop(key, None)
         if not task.cancelled():
             task.exception()

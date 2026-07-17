@@ -8,6 +8,7 @@ from sqlmodel import SQLModel, select
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.session_cleanup import delete_session_data
+from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.message_platform_outbox import MessagePlatformOutbox
@@ -33,6 +34,8 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                 sync_connection,
                 tables=[
                     ChatSession.__table__,
+                    AuditRecord.__table__,
+                    AuditConfirmationClaim.__table__,
                     Message.__table__,
                     SessionReplySequence.__table__,
                     SessionReplyWorkItem.__table__,
@@ -60,6 +63,21 @@ async def _seed_session_data(db: AsyncSession) -> tuple[int, int, int]:
             reply_target_source="weixin-openclaw",
         )
     )
+    audit_record = AuditRecord(
+        uid="user-1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="zh",
+        status=AuditRecordStatus.PENDING,
+        source_assistant_message_id=1,
+        working_directory="/workspace",
+        round_arguments_hash="a" * 64,
+        tool_count=1,
+    )
+    db.add(audit_record)
+    await db.flush()
+    db.add(AuditConfirmationClaim(uid="user-1", session_id="session-1", audit_record_id=audit_record.id))
     message = Message(
         uid="user-1",
         session_id="session-1",
@@ -202,6 +220,11 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
         ScheduledTask,
     ):
         assert list((await db_session.execute(select(model))).scalars().all()) == []
+
+    audit_records = list((await db_session.execute(select(AuditRecord).execution_options(populate_existing=True))).scalars().all())
+    assert len(audit_records) == 1
+    assert audit_records[0].status == AuditRecordStatus.CANCELLED
+    assert list((await db_session.execute(select(AuditConfirmationClaim))).scalars().all()) == []
 
     assert await db_session.get(BackgroundTask, completed_task_id) is None
     assert await db_session.get(BackgroundTask, pending_task_id) is None

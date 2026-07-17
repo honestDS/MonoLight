@@ -8,6 +8,8 @@ from app.models.system_setting import SystemRuntimeSettings, SystemSetting
 DEFAULT_SYSTEM_SETTINGS = {
     "log_locale": DEFAULT_LOCALE,
     "temp_dir_max_size_mb": "1024",
+    "audit_retention_days": "90",
+    "audit_report_email": "",
     "session_reply_max_concurrency": "4",
 }
 
@@ -22,11 +24,17 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         values = {item.key: item.value for item in result.scalars().all()}
         raw_log_locale = values.get("log_locale", DEFAULT_SYSTEM_SETTINGS["log_locale"])
         raw_temp_dir_max_size_mb = values.get("temp_dir_max_size_mb", DEFAULT_SYSTEM_SETTINGS["temp_dir_max_size_mb"])
+        raw_audit_retention_days = values.get("audit_retention_days", DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
+        raw_audit_report_email = values.get("audit_report_email", DEFAULT_SYSTEM_SETTINGS["audit_report_email"])
         raw_session_reply_max_concurrency = values.get("session_reply_max_concurrency", DEFAULT_SYSTEM_SETTINGS["session_reply_max_concurrency"])
         try:
             temp_dir_max_size_mb = int(raw_temp_dir_max_size_mb)
         except (TypeError, ValueError):
             temp_dir_max_size_mb = int(DEFAULT_SYSTEM_SETTINGS["temp_dir_max_size_mb"])
+        try:
+            audit_retention_days = int(raw_audit_retention_days)
+        except (TypeError, ValueError):
+            audit_retention_days = int(DEFAULT_SYSTEM_SETTINGS["audit_retention_days"])
         try:
             session_reply_max_concurrency = int(raw_session_reply_max_concurrency)
         except (TypeError, ValueError):
@@ -34,6 +42,8 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         return SystemRuntimeSettings(
             log_locale=normalize_locale(raw_log_locale),
             temp_dir_max_size_mb=temp_dir_max_size_mb,
+            audit_retention_days=audit_retention_days,
+            audit_report_email=str(raw_audit_report_email or "").strip(),
             session_reply_max_concurrency=session_reply_max_concurrency,
         )
 
@@ -42,6 +52,8 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         values = {
             "log_locale": normalized.log_locale,
             "temp_dir_max_size_mb": str(normalized.temp_dir_max_size_mb),
+            "audit_retention_days": str(normalized.audit_retention_days),
+            "audit_report_email": normalized.audit_report_email,
             "session_reply_max_concurrency": str(normalized.session_reply_max_concurrency),
         }
         for key, value in values.items():

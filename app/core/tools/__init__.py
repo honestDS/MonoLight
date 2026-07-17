@@ -110,6 +110,18 @@ def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
     return False
 
 
+def get_tool_parameters_schema(tool_name: str, *, tool_schemas: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    schemas = tool_schemas if tool_schemas is not None else _iter_tool_schemas()
+    for schema in schemas:
+        function = schema.get("function", {})
+        if function.get("name") != tool_name:
+            continue
+        tool_schema = _inject_background_control(copy.deepcopy(schema))
+        parameters = tool_schema.get("function", {}).get("parameters")
+        return parameters if isinstance(parameters, dict) else None
+    return None
+
+
 def get_tool_required_parameters(tool_name: str) -> list[str]:
     for schema in _iter_tool_schemas():
         if schema["function"]["name"] != tool_name:

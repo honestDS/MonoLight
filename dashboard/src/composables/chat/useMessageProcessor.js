@@ -410,8 +410,15 @@ export function useMessageProcessor() {
 
     const tempMsg = { content: aiContent }
     let finalAiMsg = null
+    let auditConfirmation = null
+    try {
+      const parsed = typeof aiContent === 'string' ? JSON.parse(aiContent) : aiContent
+      if (parsed?.type === 'audit_confirmation') auditConfirmation = parsed
+    } catch {}
 
-    if (isToolResult(tempMsg)) {
+    if (auditConfirmation) {
+      finalAiMsg = { id: thinkingId || Date.now(), role: 'assistant', type: 'audit_confirmation', content: JSON.stringify(auditConfirmation), created_at: aiCreatedAt }
+    } else if (isToolResult(tempMsg)) {
       finalAiMsg = { id: thinkingId || Date.now(), role: 'tool', content: aiContent, created_at: aiCreatedAt }
     } else if (isToolCall(tempMsg)) {
       finalAiMsg = { id: thinkingId || Date.now(), role: 'assistant', content: aiContent, created_at: aiCreatedAt }
