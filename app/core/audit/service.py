@@ -125,7 +125,7 @@ def _tool_payload(tool_calls: list[InternalToolCall]) -> list[dict[str, Any]]:
 
 
 _DIRECT_SCRIPT_SUFFIXES = {".py", ".sh", ".ps1", ".bat", ".cmd", ".js", ".mjs", ".cjs", ".rb", ".pl"}
-_INTERPRETER_NAMES = {"bash", "node", "perl", "powershell", "pwsh", "python", "ruby", "sh", "zsh"}
+_INTERPRETER_NAMES = {"bash", "node", "perl", "powershell", "pwsh", "py", "python", "python3", "ruby", "sh", "zsh"}
 _COMMAND_SEPARATORS = {";", "&&", "||", "|", "&"}
 _DYNAMIC_SHELL_VALUE = re.compile(r"(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|%[^%]+%|`[^`]+`|\$\([^)]*\))")
 _TRANSPARENT_WRAPPER_NAMES = {"cmd", "env", "sudo"}

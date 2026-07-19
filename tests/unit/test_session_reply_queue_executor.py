@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -537,6 +538,370 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
         "claim_token": "claim-token",
     }
     assert SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in persisted_states[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["false", "exception", "cancelled"])
+async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, failure):
+    work = SimpleNamespace(id=7, source_id="42", execution_state={})
+    finish_calls = []
+    update_calls = []
+
+    async def update_claimed(db, **kwargs):
+        if failure == "false":
+            return False
+        if failure == "exception":
+            raise RuntimeError("lease update failed")
+        raise asyncio.CancelledError
+
+    async def mark_execution_unknown(db, **kwargs):
+        update_calls.append(kwargs)
+        return False
+
+    async def finish_execution_round(db, **kwargs):
+        finish_calls.append(kwargs)
+        return True
+
+    async def update_confirmation(db, *, audit_record_id):
+        assert audit_record_id == 99
+
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+
+    expected_exception = asyncio.CancelledError if failure == "cancelled" else RuntimeError
+    with pytest.raises(expected_exception) as exc_info:
+        await executor_module._persist_confirmed_work_audit_execution_binding(
+            object(),
+            work=work,
+            worker_id="worker-1",
+            audit_record_id=99,
+            claim_token="new-token",
+        )
+
+    if failure == "exception":
+        assert str(exc_info.value) == "lease update failed"
+    assert update_calls[0]["audit_record_id"] == 99
+    assert update_calls[0]["claim_token"] == "new-token"
+    assert finish_calls[0]["audit_record_id"] == 99
+    assert finish_calls[0]["claim_token"] == "new-token"
+    assert finish_calls[0]["status"] == AuditRecordStatus.EXECUTION_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_confirmed_binding_cleanup_does_not_mask_update_exception(monkeypatch):
+    async def update_claimed(db, **kwargs):
+        raise RuntimeError("original update failure")
+
+    async def mark_execution_unknown(db, **kwargs):
+        raise RuntimeError("cleanup failure")
+
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+
+    with pytest.raises(RuntimeError, match="original update failure"):
+        await executor_module._persist_confirmed_work_audit_execution_binding(
+            object(),
+            work=SimpleNamespace(id=7, source_id="42", execution_state={}),
+            worker_id="worker-1",
+            audit_record_id=99,
+            claim_token="new-token",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mark_work_audit_execution_unknown_closes_bound_round_without_attempt(monkeypatch):
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id="99",
+        execution_state={"audit_claim_token": "new-token"},
+    )
+    finish_calls = []
+    confirmation_calls = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_work(db, work_id):
+        assert work_id == 7
+        return work
+
+    async def list_background_tasks(db, audit_record_id):
+        assert audit_record_id == 99
+        return []
+
+    async def mark_execution_unknown(db, **kwargs):
+        assert kwargs["audit_record_id"] == 99
+        assert kwargs["claim_token"] == "new-token"
+        return False
+
+    async def finish_execution_round(db, **kwargs):
+        finish_calls.append(kwargs)
+        return True
+
+    async def update_confirmation(db, *, audit_record_id):
+        confirmation_calls.append(audit_record_id)
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+
+    await executor_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
+
+    assert finish_calls == [
+        {
+            "audit_record_id": 99,
+            "claim_token": "new-token",
+            "status": AuditRecordStatus.EXECUTION_UNKNOWN,
+            "error_reason": "interrupted",
+        }
+    ]
+    assert confirmation_calls == [99]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    original_record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="old-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        source="confirmed_tool_execution",
+        round_arguments_hash="a" * 64,
+    )
+    new_record = SimpleNamespace(operator_username="tester")
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    work = SimpleNamespace(
+        id=7,
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id="42",
+        execution_state={"audit_claim_token": "old-token"},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="confirmed-audit:42",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    update_calls = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            assert item_id == 1
+            return source_message
+
+    async def get_record(db, audit_record_id):
+        assert audit_record_id == 42
+        return original_record
+
+    async def list_details(db, audit_record_id):
+        return details
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace()
+
+    async def audit_round(*args, **kwargs):
+        return SimpleNamespace(may_execute=True, audit_record_id=99)
+
+    async def claim_passed(db, *, audit_record_id):
+        assert audit_record_id == 99
+        return new_record, "new-token"
+
+    async def update_claimed(db, **kwargs):
+        update_calls.append(kwargs)
+        work.source_id = kwargs["values"]["source_id"]
+        work.execution_state = kwargs["values"]["execution_state"]
+        return True
+
+    async def get_tools(db, profile):
+        return [], None
+
+    async def create_execution(db, **kwargs):
+        return None
+
+    async def finish_round(db, **kwargs):
+        return True
+
+    async def save_assistant(*args, **kwargs):
+        return None
+
+    async def save_tool_response(*args, **kwargs):
+        return None
+
+    async def generate_reply(db, **kwargs):
+        return InternalMessage(role=MessageRole.ASSISTANT, content="重审完成"), [], []
+
+    async def cancel_reaudit(*args, **kwargs):
+        return True
+
+    async def update_confirmation(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(executor_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_module.audit_crud, "claim_passed_for_execution", claim_passed)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
+    monkeypatch.setattr(executor_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(executor_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
+
+    await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+
+    assert update_calls[0]["work_id"] == 7
+    assert update_calls[0]["worker_id"] == "worker-1"
+    assert update_calls[0]["values"]["source_id"] == "99"
+    assert update_calls[0]["values"]["execution_state"]["audit_claim_token"] == "new-token"
+    assert executor_module.get_bound_audit_execution(work) == (99, "new-token")
+
+
+@pytest.mark.asyncio
+async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monkeypatch):
+    source_internal = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})])
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="claim-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        round_arguments_hash="a" * 64,
+    )
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    work = SimpleNamespace(
+        source_id="42",
+        execution_state={"audit_claim_token": "claim-token"},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="confirmed-audit:42",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    cancelled_attempts = []
+    round_calls = []
+    complete_calls = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            assert item_id == 1
+            return source_message
+
+    async def create_execution(db, **kwargs):
+        return SimpleNamespace(id=101)
+
+    async def finish_attempt(db, **kwargs):
+        cancelled_attempts.append(kwargs)
+        return True
+
+    async def finish_round(db, **kwargs):
+        round_calls.append(kwargs)
+        record.status = kwargs["status"]
+        return True
+
+    async def finish_round_if_complete(db, **kwargs):
+        complete_calls.append(kwargs)
+        raise AssertionError("precheck failure must close the round as failed directly")
+
+    async def save_assistant(*args, **kwargs):
+        return None
+
+    async def save_tool_response(*args, **kwargs):
+        return None
+
+    async def generate_reply(db, **kwargs):
+        return InternalMessage(role=MessageRole.ASSISTANT, content="工具预检失败"), [], []
+
+    def prevalidate(calls, *args, **kwargs):
+        return {calls[0].id: json.dumps({"status": "failed", "tool_name": calls[0].name, "error": "bad args"})}
+
+    async def get_record(db, audit_record_id):
+        return record
+
+    async def list_details(db, audit_record_id):
+        return details
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace()
+
+    async def get_tools(db, profile):
+        return [], None
+
+    async def update_confirmation(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(executor_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_module, "prevalidate_tool_round", prevalidate)
+    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
+
+    await executor_module._execute_confirmed_tools(FakeDb(), work)
+
+    assert record.status == AuditRecordStatus.FAILED
+    assert len(cancelled_attempts) == 1
+    assert cancelled_attempts[0]["status"] == AuditExecutionStatus.CANCELLED
+    assert len(round_calls) == 1
+    assert round_calls[0]["status"] == AuditRecordStatus.FAILED
+    assert complete_calls == []
 
 
 @pytest.mark.asyncio

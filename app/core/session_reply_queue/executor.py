@@ -1,3 +1,4 @@
+import asyncio
 import json
 import socket
 import time
@@ -169,6 +170,78 @@ async def _persist_work_audit_execution_binding(
     work.execution_state = state
 
 
+async def _mark_audit_execution_unknown_reliably(
+    db,
+    *,
+    audit_record_id: int,
+    claim_token: str,
+    error_reason: str,
+) -> bool:
+    marked = await audit_crud.mark_execution_unknown(
+        db,
+        audit_record_id=audit_record_id,
+        claim_token=claim_token,
+        error_reason=error_reason,
+    )
+    if not marked:
+        marked = await audit_crud.finish_execution_round(
+            db,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+            status=AuditRecordStatus.EXECUTION_UNKNOWN,
+            error_reason=error_reason,
+        )
+    if marked:
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    return marked
+
+
+async def _persist_confirmed_work_audit_execution_binding(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+    audit_record_id: int,
+    claim_token: str,
+) -> None:
+    async def mark_new_execution_unknown_without_masking() -> None:
+        try:
+            await _mark_audit_execution_unknown_reliably(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+                error_reason=t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT),
+            )
+        except BaseException:
+            pass
+
+    state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+    state["audit_claim_token"] = claim_token
+    values = {
+        "source_id": str(audit_record_id),
+        "execution_state": state,
+    }
+    if worker_id:
+        try:
+            updated = await session_reply_work_item_crud.update_claimed(
+                db,
+                work_id=work.id,
+                worker_id=worker_id,
+                values=values,
+            )
+        except asyncio.CancelledError:
+            await mark_new_execution_unknown_without_masking()
+            raise
+        except Exception:
+            await mark_new_execution_unknown_without_masking()
+            raise
+        if not updated:
+            await mark_new_execution_unknown_without_masking()
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+    work.source_id = str(audit_record_id)
+    work.execution_state = state
+
+
 def get_bound_audit_execution(work: SessionReplyWorkItem) -> tuple[int, str] | None:
     """读取回复工作中可恢复的审计整轮绑定。"""
     state_value = getattr(work, "execution_state", None)
@@ -233,13 +306,12 @@ async def mark_work_audit_execution_unknown(work_id: int, worker_id: str, error:
                 error_reason=error,
             )
             return
-        await audit_crud.mark_execution_unknown(
+        await _mark_audit_execution_unknown_reliably(
             db,
             audit_record_id=audit_record_id,
             claim_token=claim_token,
             error_reason=error,
         )
-        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
 
 
 def _confirmed_file_snapshots_changed(details: list[Any], *, working_directory: str) -> bool:
@@ -377,7 +449,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     return response
 
 
-async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, Any]:
+async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
     """校验并执行已确认工具，同时完整关闭审计执行整轮。"""
     audit_record_id = int(work.source_id)
     claim_token = str((work.execution_state or {}).get("audit_claim_token") or "")
@@ -526,6 +598,13 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
         if record is None or claim_token is None:
             raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
         audit_record_id = reaudit_round.audit_record_id
+        await _persist_confirmed_work_audit_execution_binding(
+            db,
+            work=work,
+            worker_id=worker_id,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+        )
         details = await audit_crud.list_tool_details(db, audit_record_id)
 
     _tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile)
@@ -587,7 +666,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
                 messages,
                 turn_messages,
             )
-        if not all_attempts_created:
+        if precheck_errors or not all_attempts_created:
             round_closed = await audit_crud.finish_execution_round(
                 db,
                 audit_record_id=audit_record_id,
@@ -782,7 +861,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         elif work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
             response = await _execute_foreground(db, work, worker_id)
         elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
-            response = await _execute_confirmed_tools(db, work)
+            response = await _execute_confirmed_tools(db, work, worker_id)
         elif work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
             response = await _execute_background(db, work, worker_id)
         else:

@@ -211,16 +211,14 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
             if not lease_renewed:
                 execution_task.cancel()
                 await asyncio.gather(execution_task, return_exceptions=True)
-                lock_until = getattr(task, "lock_until", None)
-                release = _release_task_claim(task_id, worker, log) if lock_until is None else _release_task_claim(task_id, worker, log, lock_until)
-                await asyncio.shield(release)
+                await asyncio.shield(_release_task_claim(task_id, worker, log))
                 return
     except asyncio.CancelledError:
         execution_task.cancel()
         await asyncio.gather(execution_task, return_exceptions=True)
-        lock_until = getattr(task, "lock_until", None)
-        release = _release_task_claim(task_id, worker, log) if lock_until is None else _release_task_claim(task_id, worker, log, lock_until)
-        await asyncio.shield(release)
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
+        await asyncio.shield(_release_task_claim(task_id, worker, log))
         raise
     finally:
         lease_task.cancel()

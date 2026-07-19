@@ -122,6 +122,8 @@ def test_direct_script_extraction_preserves_all_candidates_and_dynamic_metadata(
 
     dynamic = _direct_script_paths('python "$SCRIPT"')
     assert dynamic.dynamic_interpreter_targets == ("$SCRIPT",)
+    assert _direct_script_paths('py "$SCRIPT"').dynamic_interpreter_targets == ("$SCRIPT",)
+    assert _direct_script_paths('python3 "$SCRIPT"').dynamic_interpreter_targets == ("$SCRIPT",)
     assert _direct_script_paths('echo "$SCRIPT"').dynamic_interpreter_targets == ()
 
     invalid = _direct_script_paths('python "unterminated.py')
@@ -132,6 +134,8 @@ def test_direct_script_extraction_preserves_all_candidates_and_dynamic_metadata(
     ("command", "expected_targets"),
     [
         ('env python "$SCRIPT"', ("$SCRIPT",)),
+        ('env py "$SCRIPT"', ("$SCRIPT",)),
+        ('env python3 "$SCRIPT"', ("$SCRIPT",)),
         ('env -i --unset=PYTHONPATH python "$SCRIPT"', ("$SCRIPT",)),
         ('env -S "python $SCRIPT"', ("$SCRIPT",)),
         ('sudo -u runner --preserve-env python "$SCRIPT"', ("$SCRIPT",)),

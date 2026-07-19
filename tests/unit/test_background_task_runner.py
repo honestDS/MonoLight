@@ -149,6 +149,7 @@ async def test_lost_lease_cancels_execution_and_releases_claim(monkeypatch):
         session_id="session-1",
         profile_id=3,
         tool_name="execute_shell",
+        lock_until=123,
     )
 
     async def try_claim(db, **kwargs):
@@ -165,8 +166,8 @@ async def test_lost_lease_cancels_execution_and_releases_claim(monkeypatch):
         await execution_started.wait()
         return False
 
-    async def release_task_claim(task_id, worker_id, log):
-        released.append((task_id, worker_id))
+    async def release_task_claim(task_id, worker_id, log, expected_lock_until=None):
+        released.append((task_id, worker_id, expected_lock_until))
 
     monkeypatch.setattr(runner_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(runner_module.background_task_crud, "try_claim", try_claim)
@@ -177,7 +178,63 @@ async def test_lost_lease_cancels_execution_and_releases_claim(monkeypatch):
     await runner_module.run_background_task(task.id, worker_id="worker-a")
 
     assert execution_cancelled.is_set()
-    assert released == [(task.id, "worker-a")]
+    assert released == [(task.id, "worker-a", None)]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_background_runner_releases_claim_without_stale_lock(monkeypatch):
+    execution_started = asyncio.Event()
+    lease_started = asyncio.Event()
+    lease_completed = asyncio.Event()
+    events = []
+    released = []
+    task = SimpleNamespace(
+        id=9,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        tool_name="execute_shell",
+        lock_until=123,
+    )
+
+    async def try_claim(db, **kwargs):
+        return task
+
+    async def execute_claimed(task_id, worker_id, log):
+        execution_started.set()
+        await asyncio.Event().wait()
+
+    async def renew_task_lease(task_id, worker_id, log):
+        lease_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("lease_cancelled")
+            raise
+        finally:
+            events.append("lease_completed")
+            lease_completed.set()
+
+    async def release_task_claim(task_id, worker_id, log, expected_lock_until=None):
+        assert lease_completed.is_set()
+        events.append("release")
+        released.append((task_id, worker_id, expected_lock_until))
+
+    monkeypatch.setattr(runner_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(runner_module.background_task_crud, "try_claim", try_claim)
+    monkeypatch.setattr(runner_module, "_execute_claimed_background_task", execute_claimed)
+    monkeypatch.setattr(runner_module, "_renew_task_lease", renew_task_lease)
+    monkeypatch.setattr(runner_module, "_release_task_claim", release_task_claim)
+
+    task_runner = asyncio.create_task(runner_module.run_background_task(task.id, worker_id="worker-a"))
+    await execution_started.wait()
+    await lease_started.wait()
+    task_runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_runner
+
+    assert released == [(task.id, "worker-a", None)]
+    assert events == ["lease_cancelled", "lease_completed", "release"]
 
 
 @pytest.mark.asyncio
