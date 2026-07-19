@@ -407,14 +407,25 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol_case", ["invalid_id", "wrong_tool", "missing_id"])
-async def test_audit_round_confirms_unassociated_read_protocol_failure(monkeypatch, tmp_path, protocol_case):
+@pytest.mark.parametrize(("audit_threshold", "expected_status"), [(5, "pending"), (0, "passed")])
+async def test_audit_round_handles_unassociated_read_protocol_failure_by_threshold(monkeypatch, tmp_path, protocol_case, audit_threshold, expected_status):
     import app.core.audit.service as service
 
     cfg = _profile_config()
     cfg.security.audit_channel_id = 1
     cfg.security.audit_model_id = "audit-model"
+    cfg.security.audit_threshold = audit_threshold
     captured = {}
     calls = []
+    logs = []
+
+    class FakeBoundLogger:
+        def info(self, message):
+            logs.append(message)
+
+    class FakeLogger:
+        def bind(self, **_kwargs):
+            return FakeBoundLogger()
 
     class FakeDb:
         async def commit(self):
@@ -477,6 +488,7 @@ async def test_audit_round_confirms_unassociated_read_protocol_failure(monkeypat
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
     monkeypatch.setattr(service.LLMClient, "generate", generate)
+    monkeypatch.setattr(service, "logger", FakeLogger())
 
     result = await service.audit_tool_round(
         FakeDb(),
@@ -494,9 +506,20 @@ async def test_audit_round_confirms_unassociated_read_protocol_failure(monkeypat
         working_directory=tmp_path,
     )
 
-    assert result.status.value == "pending"
-    assert all(detail["conclusion"] == "pending" for detail in captured["tool_details"])
+    assert result.status.value == expected_status
+    assert all(detail["conclusion"] == expected_status for detail in captured["tool_details"])
+    assert all(detail["score"] == audit_threshold for detail in captured["tool_details"])
     assert all(detail["server_confirmation_reasons"][-1]["code"] == "file_read_protocol_invalid" for detail in captured["tool_details"])
+    assert len(logs) == 2
+    assert "安全审计 LLM" in logs[0] or "Security audit LLM" in logs[0]
+    assert "record_id=123" in logs[0]
+    assert "record_id=123" in logs[1]
+    assert f"status={expected_status}" in logs[1]
+    assert f"max_score={audit_threshold}" in logs[1]
+    assert f"summary={'Confirm command' if expected_status == 'pending' else '-'}" in logs[1]
+    if audit_threshold == 0:
+        assert result.tool_results == ()
+        assert result.confirmation_payload is None
 
 
 def test_audit_file_reader_enforces_total_bytes_and_call_count(monkeypatch, tmp_path):

@@ -33,6 +33,8 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "[Dispatcher/Stream] Session {session_id} already has an active dispatcher, current request queued.",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] user message: {message}; attachments: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] turn {turn} | LLM response: {content}",
+    "LOG_AUDIT_ROUND_STARTED": "Security audit LLM triggered: record_id={audit_record_id}, model={model_id}, tool_count={tool_count}, source={source}",
+    "LOG_AUDIT_ROUND_COMPLETED": "Security audit result: record_id={audit_record_id}, status={status}, max_score={max_score}, summary={summary}",
     "LOG_PROACTIVE_REPLY_GENERATION_STARTED": "Proactive reply generation started",
     "LOG_BACKGROUND_TASK_QUEUED": "Background task queued",
     "LOG_BACKGROUND_TASK_SCHEDULE_NO_SLOT": "Background task scheduling skipped: no free concurrency slot",

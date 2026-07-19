@@ -37,6 +37,7 @@ from app.core.constants import (
 from app.core.crud.audit import audit_crud
 from app.core.crud.channel import channel_crud
 from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.tools.file_writer import resolve_file_writer_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
@@ -46,6 +47,8 @@ from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConcl
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
 from app.providers.llm.client import LLMClient
+
+logger = get_logger(__name__)
 
 AUDIT_BATCH_PROMPT = """You are a security auditor. Assess one complete tool-call round before anything executes.
 Return only JSON with this shape: {\"results\":[{\"tool_call_id\":\"...\",\"score\":0,\"reason\":\"...\",\"file_checks\":[]}]}.
@@ -172,6 +175,7 @@ def _read_for_audit_sync(
     read_limit = min(AUDIT_FILE_MAX_BYTES, remaining_bytes)
     if read_limit <= 0:
         return {"path": path, "tool_call_id": original_tool_call_id, "status": "limit_exceeded", "truncated": True, "error": "audit file byte limit exceeded"}
+    # 审计 LLM 必须拥有系统内最高且高于其他 LLM 的文件读取权限，否则可能因证据不可达而无法正常审计。
     result = read_text_file(path, working_directory=working_directory, max_bytes=read_limit)
     read_state["bytes"] += result.bytes_read
     return {"path": path, "tool_call_id": original_tool_call_id, **result.to_dict()}
@@ -529,6 +533,22 @@ async def audit_tool_round(
         round_arguments_hash=snapshot.round_sha256,
         tool_count=len(tool_calls),
     )
+    logger.bind(
+        audit_record_id=record.id,
+        uid=uid,
+        session_id=session_id,
+        source=source,
+        model_id=str(cfg.security.audit_model_id or "-"),
+        tool_count=len(tool_calls),
+    ).info(
+        t(
+            "LOG_AUDIT_ROUND_STARTED",
+            audit_record_id=record.id,
+            model_id=str(cfg.security.audit_model_id or "-"),
+            tool_count=len(tool_calls),
+            source=source,
+        )
+    )
     request_payload = {
         "confirmation_threshold": cfg.security.audit_threshold,
         "working_directory": str(workdir),
@@ -625,7 +645,8 @@ async def audit_tool_round(
                 requires_confirmation=requires_confirmation,
             )
             conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
-            if (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
+            # 阈值为 0 表示关闭二次确认，仅保留高风险阻断和审计失败状态。
+            if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
                 conclusion = AuditToolConclusion.PENDING
             conclusions.append(conclusion)
         status = _aggregate(conclusions)
@@ -689,6 +710,28 @@ async def audit_tool_round(
         status = AuditRecordStatus.AUDIT_FAILED
         error_reason = "audit persistence failed"
         parsed_results = [{**item, "reason": error_reason} for item in parsed_results]
+
+    tool_scores = {str(item.get("tool_call_id")): item.get("score") for item in parsed_results if isinstance(item, dict) and item.get("tool_call_id")}
+    score_values = [score for score in tool_scores.values() if isinstance(score, int) and not isinstance(score, bool)]
+    max_score = max(score_values) if score_values else "-"
+    logger.bind(
+        audit_record_id=record.id,
+        uid=uid,
+        session_id=session_id,
+        source=source,
+        status=status.value,
+        max_score=max_score,
+        tool_scores=tool_scores,
+        summary=intent_summary or "-",
+    ).info(
+        t(
+            "LOG_AUDIT_ROUND_COMPLETED",
+            audit_record_id=record.id,
+            status=status.value,
+            max_score=max_score,
+            summary=intent_summary or "-",
+        )
+    )
 
     if status == AuditRecordStatus.PASSED:
         return AuditRoundResult(audit_record_id=record.id, status=status, tool_results=())

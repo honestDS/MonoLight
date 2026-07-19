@@ -33,6 +33,8 @@ MESSAGES = {
     "LOG_DISPATCHER_STREAM_QUEUED": "【调度器/流式】会话 {session_id} 已有活跃调度器，当前请求进入队列。",
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] 用户消息: {message} 附件列表: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] 第 {turn} 轮 | LLM 响应: {content}",
+    "LOG_AUDIT_ROUND_STARTED": "触发安全审计 LLM: record_id={audit_record_id}, model={model_id}, tool_count={tool_count}, source={source}",
+    "LOG_AUDIT_ROUND_COMPLETED": "安全审计结果: record_id={audit_record_id}, status={status}, max_score={max_score}, summary={summary}",
     "LOG_PROACTIVE_REPLY_GENERATION_STARTED": "主动回复生成开始",
     "LOG_BACKGROUND_TASK_QUEUED": "后台任务已入队",
     "LOG_BACKGROUND_TASK_SCHEDULE_NO_SLOT": "后台任务调度跳过：无可用并发槽位",
