@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import update
 
 from app.core.audit.confirmation import update_confirmation_message_status
-from app.core.audit.integrity import create_file_integrity_snapshot, verify_persisted_tool_round
+from app.core.audit.integrity import create_file_integrity_snapshot, verify_file_integrity_snapshot, verify_persisted_tool_round
 from app.core.audit.service import audit_tool_round
 from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
@@ -20,6 +20,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
@@ -35,15 +36,16 @@ from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT, BACKGROUND_TAS
 from app.core.session_reply_queue.manager import build_session_reply_work_event_id, build_session_reply_work_identity, session_reply_queue_manager
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
+from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history
-from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round, process_single_tool
+from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round, process_single_tool
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
-from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkItem, SessionReplyWorkStatus, SessionReplyWorkType
 from app.providers.database import AsyncSessionLocal
@@ -63,10 +65,6 @@ def _error_message_dedupe_key(work: SessionReplyWorkItem) -> str:
     return f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{_work_identity(work)}:error"
 
 
-def _legacy_result_message_dedupe_key(work_id: int) -> str:
-    return f"{SESSION_REPLY_WORK_MESSAGE_KEY_PREFIX}:{work_id}:result"
-
-
 def _message_belongs_to_work(message: Message, work: SessionReplyWorkItem) -> bool:
     if message.uid != work.uid or message.session_id != work.session_id or message.profile_id != work.profile_id:
         return False
@@ -84,11 +82,6 @@ async def _get_persisted_result(db, work: SessionReplyWorkItem) -> Message | Non
     if persisted_result is not None and _message_belongs_to_work(persisted_result, work):
         return persisted_result
 
-    if work.id is None:
-        return None
-    legacy_result = await message_crud.get_by_dedupe_key(db, _legacy_result_message_dedupe_key(work.id))
-    if legacy_result is not None and _message_belongs_to_work(legacy_result, work):
-        return legacy_result
     return None
 
 
@@ -152,21 +145,117 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
     return event
 
 
-async def mark_confirmed_execution_unknown(work_id: int, worker_id: str, error: str) -> None:
+async def _persist_work_audit_execution_binding(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+    binding: dict[str, Any] | None,
+) -> None:
+    """持久化后台回复工作当前的审计执行绑定。"""
+    state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+    if binding is None:
+        state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+    else:
+        state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = dict(binding)
+    updated = await session_reply_work_item_crud.update_claimed(
+        db,
+        work_id=work.id,
+        worker_id=worker_id,
+        values={"execution_state": state},
+    )
+    if not updated:
+        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+    work.execution_state = state
+
+
+def get_bound_audit_execution(work: SessionReplyWorkItem) -> tuple[int, str] | None:
+    """读取回复工作中可恢复的审计整轮绑定。"""
+    state_value = getattr(work, "execution_state", None)
+    state = state_value if isinstance(state_value, dict) else {}
+    work_type = getattr(work, "work_type", None)
+    if work_type in {
+        SessionReplyWorkType.FOREGROUND_REPLY,
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+    }:
+        binding = state.get(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY)
+        if not isinstance(binding, dict):
+            return None
+        audit_record_id = binding.get("audit_record_id")
+        claim_token = binding.get("claim_token")
+    elif work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+        audit_record_id = getattr(work, "source_id", None)
+        claim_token = state.get("audit_claim_token")
+    else:
+        return None
+
+    try:
+        audit_record_id = int(audit_record_id)
+    except (TypeError, ValueError):
+        return None
+    if audit_record_id <= 0 or not isinstance(claim_token, str) or not claim_token:
+        return None
+    return audit_record_id, claim_token
+
+
+def work_has_active_audit_execution(work: SessionReplyWorkItem) -> bool:
+    """判断回复工作是否持有需要禁止自动重试的活动审计绑定。"""
+    if getattr(work, "work_type", None) not in {
+        SessionReplyWorkType.FOREGROUND_REPLY,
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+    }:
+        return False
+    state_value = getattr(work, "execution_state", None)
+    state = state_value if isinstance(state_value, dict) else {}
+    return SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in state
+
+
+async def mark_work_audit_execution_unknown(work_id: int, worker_id: str, error: str) -> None:
+    """将中断回复工作绑定的审计整轮标记为结果未知。"""
     async with AsyncSessionLocal() as db:
         work = await session_reply_work_item_crud.get(db, work_id)
-        if work is None or work.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+        if work is None:
             return
-        claim_token = str((work.execution_state or {}).get("audit_claim_token") or "")
-        if not claim_token:
+        binding = get_bound_audit_execution(work)
+        if binding is None:
+            return
+        audit_record_id, claim_token = binding
+        background_tasks = await background_task_crud.list_by_audit_record(db, audit_record_id)
+        active_background_execution_ids = {task.audit_execution_record_id for task in background_tasks if task.status in {BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING} and task.audit_execution_record_id is not None}
+        if active_background_execution_ids:
+            await audit_crud.mark_running_executions_unknown_except(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+                excluded_execution_record_ids=active_background_execution_ids,
+                error_reason=error,
+            )
             return
         await audit_crud.mark_execution_unknown(
             db,
-            audit_record_id=int(work.source_id),
+            audit_record_id=audit_record_id,
             claim_token=claim_token,
             error_reason=error,
         )
-        await update_confirmation_message_status(db, audit_record_id=int(work.source_id))
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+
+
+def _confirmed_file_snapshots_changed(details: list[Any], *, working_directory: str) -> bool:
+    """检查已确认工具引用的文件快照是否发生变化。"""
+    try:
+        for detail in details:
+            for file_snapshot in detail.file_snapshots:
+                path = file_snapshot.get("absolute_path")
+                if not isinstance(path, str):
+                    return True
+                current = create_file_integrity_snapshot(path, working_directory=working_directory)
+                if not verify_file_integrity_snapshot(file_snapshot, current):
+                    return True
+    except Exception:
+        return True
+    return False
 
 
 async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
@@ -219,10 +308,17 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
 
     async def save_execution_checkpoint(checkpoint: dict[str, Any]) -> None:
+        active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
+        active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
         state = {
             **(work.execution_state or {}),
             "dispatcher_checkpoint": checkpoint,
         }
+        if active_audit_execution_present:
+            if active_audit_execution is None:
+                state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+            else:
+                state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work.id,
@@ -282,6 +378,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
 
 
 async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, Any]:
+    """校验并执行已确认工具，同时完整关闭审计执行整轮。"""
     audit_record_id = int(work.source_id)
     claim_token = str((work.execution_state or {}).get("audit_claim_token") or "")
     record = await audit_crud.get_record(db, audit_record_id)
@@ -351,22 +448,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
         return {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
 
     cfg = await validate_profile_and_cfg(db, profile)
-    files_changed = False
-    try:
-        for detail in details:
-            for file_snapshot in detail.file_snapshots:
-                expected_hash = file_snapshot.get("sha256")
-                path = file_snapshot.get("resolved_path") or file_snapshot.get("absolute_path")
-                if not path or not expected_hash:
-                    continue
-                current = create_file_integrity_snapshot(path, working_directory=record.working_directory)
-                if current.sha256 != expected_hash or current.size != file_snapshot.get("size"):
-                    files_changed = True
-                    break
-            if files_changed:
-                break
-    except Exception:
-        files_changed = True
+    files_changed = _confirmed_file_snapshots_changed(details, working_directory=record.working_directory)
 
     if files_changed:
         await audit_crud.cancel_execution_for_file_reaudit(
@@ -471,6 +553,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
     precheck_errors = prevalidate_tool_round(confirmed_calls, cfg, tool_schemas=_tools)
     all_attempts_created = len(executions_by_original_call_id) == len(source_tool_calls)
     all_succeeded = all_attempts_created and not precheck_errors
+    execution_round_status = None
     if not all_succeeded:
         cancellation_error = t(ERR_TOOL_ROUND_PRECHECK_FAILED) if precheck_errors else t(ERR_AUDIT_EXECUTION_CLAIM_FAILED)
         for execution in executions_by_original_call_id.values():
@@ -504,6 +587,17 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
                 messages,
                 turn_messages,
             )
+        if not all_attempts_created:
+            round_closed = await audit_crud.finish_execution_round(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+                status=AuditRecordStatus.FAILED,
+                error_reason=cancellation_error,
+            )
+            if not round_closed:
+                raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+            execution_round_status = AuditRecordStatus.FAILED
     else:
         for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
             detail = detail_by_original_id[original_call.id]
@@ -519,31 +613,31 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem) -> dict[str, 
                 detail.turn_index,
                 work.uid,
                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                audit_preapproved=True,
             )
             await save_tool_response(db, work.session_id, work.uid, profile.id, tool_result, messages, turn_messages)
             try:
                 result_payload = json.loads(tool_result.content or "{}")
             except (TypeError, ValueError):
                 result_payload = {}
-            succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
-            all_succeeded = all_succeeded and succeeded
-            await audit_crud.finish_execution_attempt(
-                db,
-                execution_record_id=execution.id,
-                status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
-                result_summary=(tool_result.content or "")[:1000],
-                error=None if succeeded else (tool_result.content or "")[:1000],
-            )
+            if get_queued_background_task_id(tool_result.content) is None:
+                succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
+                all_succeeded = all_succeeded and succeeded
+                await audit_crud.finish_execution_attempt(
+                    db,
+                    execution_record_id=execution.id,
+                    status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
+                    result_summary=sanitize_execution_summary(tool_result.content, redact_text=True),
+                    error=None if succeeded else sanitize_execution_summary(tool_result.content, redact_text=True),
+                )
 
-    await audit_crud.finish_execution_round(
-        db,
-        audit_record_id=audit_record_id,
-        claim_token=claim_token,
-        status=AuditRecordStatus.SUCCEEDED if all_succeeded else AuditRecordStatus.FAILED,
-        error_reason=None if all_succeeded else "一个或多个工具执行失败",
-    )
-    await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    if execution_round_status is None:
+        execution_round_status = await audit_crud.finish_execution_round_if_complete(
+            db,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+        )
+    if execution_round_status is not None:
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
     ai_msg, final_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,
@@ -596,13 +690,24 @@ def _build_background_result_messages(task: BackgroundTask) -> list[InternalMess
     ]
 
 
-async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
+async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
+    """生成后台任务总结并绑定可恢复的审计执行状态。"""
     task = await background_task_crud.get(db, int(work.source_id))
     if task is None:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_NOT_FOUND))
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
+
+    async def persist_audit_binding(binding: dict[str, Any] | None) -> None:
+        """更新后台任务总结工作中的审计绑定。"""
+        await _persist_work_audit_execution_binding(
+            db,
+            work=work,
+            worker_id=worker_id,
+            binding=binding,
+        )
+
     submission_context = _load_background_submission_context(task)
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
@@ -617,6 +722,7 @@ async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         initial_fixed_upper_message_id=_last_frozen_user_message_id(submission_context),
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
+        audit_execution_binding_callback=persist_audit_binding,
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {
@@ -626,10 +732,21 @@ async def _execute_background(db, work: SessionReplyWorkItem) -> dict[str, Any]:
     }
 
 
-async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
+async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
+    """生成定时任务总结并绑定可恢复的审计执行状态。"""
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
+
+    async def persist_audit_binding(binding: dict[str, Any] | None) -> None:
+        """更新定时任务总结工作中的审计绑定。"""
+        await _persist_work_audit_execution_binding(
+            db,
+            work=work,
+            worker_id=worker_id,
+            binding=binding,
+        )
+
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,
@@ -642,6 +759,7 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
         restrict_tools_to_background_allowlist=False,
         reply_source="scheduled_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
+        audit_execution_binding_callback=persist_audit_binding,
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {
@@ -652,6 +770,7 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem) -> dict[str, Any]:
 
 
 async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
+    """执行已领取的会话回复工作并完成结果投递。"""
     async with AsyncSessionLocal() as db:
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id:
@@ -665,9 +784,9 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
             response = await _execute_confirmed_tools(db, work)
         elif work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-            response = await _execute_background(db, work)
+            response = await _execute_background(db, work, worker_id)
         else:
-            response = await _execute_scheduled(db, work)
+            response = await _execute_scheduled(db, work, worker_id)
 
         result_message = persisted_result or await message_crud.get_by_dedupe_key(db, _result_message_dedupe_key(work))
         if result_message is None:

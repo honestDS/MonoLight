@@ -11,7 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.audit.service import audit_tool_round
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_AUDIT_EXECUTION_CLAIM_FAILED, ERR_CHAT_CHANNEL_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_EMPTY_RESPONSE, ERR_TOOL_ROUND_PRECHECK_FAILED
+from app.core.constants import (
+    ERR_AUDIT_EXECUTION_CLAIM_FAILED,
+    ERR_CHAT_CHANNEL_NOT_FOUND,
+    ERR_INTERNAL_SERVER_ERROR,
+    ERR_LLM_EMPTY_RESPONSE,
+    ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    ERR_TOOL_ROUND_PRECHECK_FAILED,
+    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
+)
 from app.core.context import ContextManager
 from app.core.crud.audit import audit_crud
 from app.core.crud.profile import profile_crud
@@ -23,6 +31,7 @@ from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
+from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import (
     ContextSummaryWorkValidityChecker,
@@ -43,7 +52,7 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
 from app.core.utils.dispatcher.markdown_instruction import append_environment_prompt_instruction, build_max_output_tokens_instruction, materialize_latest_user_environment_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
-from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
+from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.save_message import save_message
@@ -58,6 +67,11 @@ from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 logger = get_logger(__name__)
 
 
+class AuditExecutionStatePersistenceError(ServerException):
+    def __init__(self, cause: str) -> None:
+        super().__init__(message=ERR_AUDIT_EXECUTION_CLAIM_FAILED, cause=cause)
+
+
 def _tool_result_succeeded(content: str | None) -> bool:
     try:
         payload = json.loads(content or "{}")
@@ -68,9 +82,9 @@ def _tool_result_succeeded(content: str | None) -> bool:
     return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
 
 
-class ForegroundDispatcherMixin:
+class InteractiveDispatcherMixin:
     @classmethod
-    async def _dispatch_foreground(
+    async def _dispatch_interactive(
         cls,
         db: AsyncSession,
         message: str | list[dict[str, Any]],
@@ -135,19 +149,35 @@ class ForegroundDispatcherMixin:
                 if isinstance(saved_checkpoint_upper_id, int):
                     checkpoint_upper_id = saved_checkpoint_upper_id
 
-            async def save_execution_checkpoint(messages: list[InternalMessage], current_turn: int) -> None:
+            async def save_execution_checkpoint(
+                messages: list[InternalMessage],
+                current_turn: int,
+                *,
+                active_audit_execution: dict[str, Any] | None = None,
+                update_active_audit_execution: bool = False,
+            ) -> None:
                 if execution_checkpoint_callback is None:
                     return
-                await execution_checkpoint_callback(
-                    {
-                        "messages": [item.model_dump(mode="json") for item in messages],
-                        "turn_messages": [item.model_dump(mode="json") for item in turn_messages],
-                        "files_to_user": files_to_user,
-                        "current_turn": current_turn,
-                        "context_summary_trigger_mode": checkpoint_mode.value,
-                        "context_summary_fixed_upper_message_id": checkpoint_upper_id,
-                    }
+                checkpoint = {
+                    "messages": [item.model_dump(mode="json") for item in messages],
+                    "turn_messages": [item.model_dump(mode="json") for item in turn_messages],
+                    "files_to_user": files_to_user,
+                    "current_turn": current_turn,
+                    "context_summary_trigger_mode": checkpoint_mode.value,
+                    "context_summary_fixed_upper_message_id": checkpoint_upper_id,
+                }
+                if update_active_audit_execution:
+                    checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
+                await execution_checkpoint_callback(checkpoint)
+
+            async def mark_claimed_audit_execution_unknown(audit_record_id: int, claim_token: str) -> None:
+                await audit_crud.mark_execution_unknown(
+                    db,
+                    audit_record_id=audit_record_id,
+                    claim_token=claim_token,
+                    error_reason=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
                 )
+                await update_confirmation_message_status(db, audit_record_id=audit_record_id)
 
             while True:
                 try:
@@ -428,125 +458,149 @@ class ForegroundDispatcherMixin:
                             await save_execution_checkpoint(messages, current_turn)
                             continue
 
-                        audit_round = None
-                        if cfg.security.audit_channel_id and cfg.security.audit_model_id:
-                            audit_round = await audit_tool_round(
-                                db,
-                                cfg=cfg,
-                                tool_calls=ai_msg.tool_calls,
-                                source_assistant_message_id=saved_msg.id,
-                                uid=uid,
-                                operator_username=username,
-                                session_id=session_id,
-                                source=session_source,
-                                language=get_current_locale(),
-                            )
-                            if not audit_round.may_execute:
-                                persisted_tool_result_ids = []
-                                for tool_result in audit_round.tool_results:
-                                    stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
-                                    if stored_tool_result.id is not None:
-                                        persisted_tool_result_ids.append(stored_tool_result.id)
-                                if audit_round.confirmation_payload is not None:
-                                    confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
-                                    await save_message(
-                                        db,
-                                        session_id,
-                                        uid,
-                                        MessageRole.ASSISTANT,
-                                        MessageType.AUDIT_CONFIRMATION,
-                                        audit_round.confirmation_payload,
-                                        profile.id,
-                                        is_processed=True,
-                                        dedupe_key=final_message_dedupe_key,
-                                    )
-                                    await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
-                                    final_ai_content = confirmation_content
-                                    return LLMResponse(
-                                        choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=confirmation_content), finish_reason=True, created_at=time.time())],
-                                        history=dump_output_history(turn_messages),
-                                        files=files_to_user or None,
-                                    ).model_dump()
-                                if persisted_tool_result_ids:
-                                    checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                    checkpoint_upper_id = max(persisted_tool_result_ids)
-                                await save_execution_checkpoint(messages, current_turn)
-                                continue
+                        audit_round = await audit_tool_round(
+                            db,
+                            cfg=cfg,
+                            tool_calls=ai_msg.tool_calls,
+                            source_assistant_message_id=saved_msg.id,
+                            uid=uid,
+                            operator_username=username,
+                            session_id=session_id,
+                            source=session_source,
+                            language=get_current_locale(),
+                        )
+                        if not audit_round.may_execute:
+                            persisted_tool_result_ids = []
+                            for tool_result in audit_round.tool_results:
+                                stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
+                                if stored_tool_result.id is not None:
+                                    persisted_tool_result_ids.append(stored_tool_result.id)
+                            if audit_round.confirmation_payload is not None:
+                                confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
+                                await save_message(
+                                    db,
+                                    session_id,
+                                    uid,
+                                    MessageRole.ASSISTANT,
+                                    MessageType.AUDIT_CONFIRMATION,
+                                    audit_round.confirmation_payload,
+                                    profile.id,
+                                    is_processed=True,
+                                    dedupe_key=final_message_dedupe_key,
+                                )
+                                await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                                final_ai_content = confirmation_content
+                                return LLMResponse(
+                                    choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=confirmation_content), finish_reason=True, created_at=time.time())],
+                                    history=dump_output_history(turn_messages),
+                                    files=files_to_user or None,
+                                ).model_dump()
+                            if persisted_tool_result_ids:
+                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_upper_id = max(persisted_tool_result_ids)
+                            await save_execution_checkpoint(messages, current_turn)
+                            continue
 
                         audit_claim_token = None
                         audit_execution_ids: dict[str, int] = {}
+                        audit_execution_checkpoint_state: dict[str, Any] | None = None
+                        audit_all_succeeded = True
                         if audit_round is not None:
-                            claimed_record, audit_claim_token = await audit_crud.claim_passed_for_execution(
-                                db,
-                                audit_record_id=audit_round.audit_record_id,
-                            )
-                            if claimed_record is not None and audit_claim_token is not None:
-                                audit_details = await audit_crud.list_tool_details(db, audit_round.audit_record_id)
-                                detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
-                                for tool_call in ai_msg.tool_calls:
-                                    detail = detail_by_call_id.get(tool_call.id)
-                                    if detail is None:
-                                        audit_claim_token = None
-                                        break
-                                    execution = await audit_crud.create_execution_attempt(
-                                        db,
-                                        audit_record_id=audit_round.audit_record_id,
-                                        audit_tool_detail_id=detail.id,
-                                        claim_token=audit_claim_token,
-                                        execution_node=socket.gethostname(),
-                                        new_tool_call_id=tool_call.id,
-                                    )
-                                    if execution is None:
-                                        audit_claim_token = None
-                                        break
-                                    audit_execution_ids[tool_call.id] = execution.id
-                            if audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls):
-                                for execution_id in audit_execution_ids.values():
-                                    await audit_crud.finish_execution_attempt(
-                                        db,
-                                        execution_record_id=execution_id,
-                                        status=AuditExecutionStatus.CANCELLED,
-                                        error=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
-                                    )
-                                if claimed_record is not None and claimed_record.execution_claim_token:
-                                    await audit_crud.finish_execution_round(
-                                        db,
-                                        audit_record_id=audit_round.audit_record_id,
-                                        claim_token=claimed_record.execution_claim_token,
-                                        status=AuditRecordStatus.FAILED,
-                                        error_reason=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
-                                    )
-                                    await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
-                                persisted_tool_result_ids = []
-                                for tool_call in ai_msg.tool_calls:
-                                    tool_result = InternalMessage(
-                                        role=MessageRole.TOOL,
-                                        tool_call_id=tool_call.id,
-                                        content=json.dumps(
-                                            {
-                                                "status": "failed",
-                                                "tool_name": tool_call.name,
-                                                "error": t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
-                                            },
-                                            ensure_ascii=False,
-                                        ),
-                                    )
-                                    stored_tool_result = await save_tool_response(
-                                        db,
-                                        session_id,
-                                        uid,
-                                        profile.id,
-                                        tool_result,
+                            claimed_record = None
+                            try:
+                                claimed_record, audit_claim_token = await audit_crud.claim_passed_for_execution(
+                                    db,
+                                    audit_record_id=audit_round.audit_record_id,
+                                )
+                                if claimed_record is not None and audit_claim_token is not None:
+                                    audit_details = await audit_crud.list_tool_details(db, audit_round.audit_record_id)
+                                    detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
+                                    for tool_call in ai_msg.tool_calls:
+                                        detail = detail_by_call_id.get(tool_call.id)
+                                        if detail is None:
+                                            audit_claim_token = None
+                                            break
+                                        execution = await audit_crud.create_execution_attempt(
+                                            db,
+                                            audit_record_id=audit_round.audit_record_id,
+                                            audit_tool_detail_id=detail.id,
+                                            claim_token=audit_claim_token,
+                                            execution_node=socket.gethostname(),
+                                            new_tool_call_id=tool_call.id,
+                                        )
+                                        if execution is None:
+                                            audit_claim_token = None
+                                            break
+                                        audit_execution_ids[tool_call.id] = execution.id
+                                if audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls):
+                                    for execution_id in audit_execution_ids.values():
+                                        await audit_crud.finish_execution_attempt(
+                                            db,
+                                            execution_record_id=execution_id,
+                                            status=AuditExecutionStatus.CANCELLED,
+                                            error=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                                        )
+                                    if claimed_record is not None and claimed_record.execution_claim_token:
+                                        await audit_crud.finish_execution_round(
+                                            db,
+                                            audit_record_id=audit_round.audit_record_id,
+                                            claim_token=claimed_record.execution_claim_token,
+                                            status=AuditRecordStatus.FAILED,
+                                            error_reason=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                                        )
+                                        await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                                    persisted_tool_result_ids = []
+                                    for tool_call in ai_msg.tool_calls:
+                                        tool_result = InternalMessage(
+                                            role=MessageRole.TOOL,
+                                            tool_call_id=tool_call.id,
+                                            content=json.dumps(
+                                                {
+                                                    "status": "failed",
+                                                    "tool_name": tool_call.name,
+                                                    "error": t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                                                },
+                                                ensure_ascii=False,
+                                            ),
+                                        )
+                                        stored_tool_result = await save_tool_response(
+                                            db,
+                                            session_id,
+                                            uid,
+                                            profile.id,
+                                            tool_result,
+                                            messages,
+                                            turn_messages,
+                                        )
+                                        if stored_tool_result.id is not None:
+                                            persisted_tool_result_ids.append(stored_tool_result.id)
+                                    if persisted_tool_result_ids:
+                                        checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                        checkpoint_upper_id = max(persisted_tool_result_ids)
+                                    await save_execution_checkpoint(messages, current_turn)
+                                    continue
+
+                                if execution_checkpoint_callback is not None:
+                                    audit_execution_checkpoint_state = {
+                                        "audit_record_id": audit_round.audit_record_id,
+                                        "claim_token": audit_claim_token,
+                                    }
+                                    await save_execution_checkpoint(
                                         messages,
-                                        turn_messages,
+                                        current_turn,
+                                        active_audit_execution=audit_execution_checkpoint_state,
+                                        update_active_audit_execution=True,
                                     )
-                                    if stored_tool_result.id is not None:
-                                        persisted_tool_result_ids.append(stored_tool_result.id)
-                                if persisted_tool_result_ids:
-                                    checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                    checkpoint_upper_id = max(persisted_tool_result_ids)
-                                await save_execution_checkpoint(messages, current_turn)
-                                continue
+                            except asyncio.CancelledError:
+                                if audit_claim_token is not None:
+                                    await mark_claimed_audit_execution_unknown(audit_round.audit_record_id, audit_claim_token)
+                                    raise AuditExecutionStatePersistenceError(cause=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN))
+                                raise
+                            except Exception as exc:
+                                if audit_claim_token is not None:
+                                    await mark_claimed_audit_execution_unknown(audit_round.audit_record_id, audit_claim_token)
+                                    raise AuditExecutionStatePersistenceError(cause=str(exc)) from exc
+                                raise
 
                         if stream_event_callback is not None:
                             for tool_call in ai_msg.tool_calls:
@@ -580,7 +634,6 @@ class ForegroundDispatcherMixin:
                                         uid,
                                         allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                         context_window_k=chat_params["context_window_k"],
-                                        audit_preapproved=audit_round is not None,
                                     )
                                 )
 
@@ -594,27 +647,41 @@ class ForegroundDispatcherMixin:
                                         active_tasks.discard(task)
 
                         tasks = [asyncio.create_task(wrapped_tool_call(tc)) for tc in ai_msg.tool_calls]
-                        audit_all_succeeded = True
                         persisted_tool_result_ids: list[int] = []
                         try:
                             for completed_task in asyncio.as_completed(tasks):
                                 tool_res = await completed_task
                                 if audit_claim_token is not None:
                                     execution_id = audit_execution_ids[tool_res.tool_call_id]
-                                    execution_succeeded = _tool_result_succeeded(tool_res.content)
-                                    audit_all_succeeded = audit_all_succeeded and execution_succeeded
-                                    await audit_crud.finish_execution_attempt(
-                                        db,
-                                        execution_record_id=execution_id,
-                                        status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
-                                        result_summary=(tool_res.content or "")[:1000],
-                                        error=None if execution_succeeded else (tool_res.content or "")[:1000],
-                                    )
+                                    queued_task_id = get_queued_background_task_id(tool_res.content)
+                                    if queued_task_id is None:
+                                        execution_succeeded = _tool_result_succeeded(tool_res.content)
+                                        audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                                        await audit_crud.finish_execution_attempt(
+                                            db,
+                                            execution_record_id=execution_id,
+                                            status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
+                                            result_summary=sanitize_execution_summary(tool_res.content, redact_text=True),
+                                            error=None if execution_succeeded else sanitize_execution_summary(tool_res.content, redact_text=True),
+                                        )
+                                    elif audit_execution_checkpoint_state is not None:
+                                        audit_execution_checkpoint_state["handoff_state"] = "persisted"
+                                        task_ids = audit_execution_checkpoint_state.setdefault("background_task_ids", [])
+                                        if queued_task_id not in task_ids:
+                                            task_ids.append(queued_task_id)
                                 files_to_user.extend(extract_files_to_user([tool_res]))
                                 stored_tool_res = await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
                                 if stored_tool_res.id is not None:
                                     persisted_tool_result_ids.append(stored_tool_res.id)
-                                await save_execution_checkpoint(messages, current_turn)
+                                if audit_execution_checkpoint_state is not None and get_queued_background_task_id(tool_res.content) is not None:
+                                    await save_execution_checkpoint(
+                                        messages,
+                                        current_turn,
+                                        active_audit_execution=audit_execution_checkpoint_state,
+                                        update_active_audit_execution=True,
+                                    )
+                                else:
+                                    await save_execution_checkpoint(messages, current_turn)
                                 if stream_event_callback is not None:
                                     tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
                                     await stream_event_callback(
@@ -633,14 +700,32 @@ class ForegroundDispatcherMixin:
                             await asyncio.gather(*tasks, return_exceptions=True)
 
                         if audit_round is not None and audit_claim_token is not None:
-                            await audit_crud.finish_execution_round(
-                                db,
-                                audit_record_id=audit_round.audit_record_id,
-                                claim_token=audit_claim_token,
-                                status=AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED,
-                                error_reason=None if audit_all_succeeded else "一个或多个工具执行失败",
-                            )
-                            await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                            if hasattr(db, "execute"):
+                                execution_round_status = await audit_crud.finish_execution_round_if_complete(
+                                    db,
+                                    audit_record_id=audit_round.audit_record_id,
+                                    claim_token=audit_claim_token,
+                                )
+                            else:
+                                legacy_round_finished = await audit_crud.finish_execution_round(
+                                    db,
+                                    audit_record_id=audit_round.audit_record_id,
+                                    claim_token=audit_claim_token,
+                                    status=AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED,
+                                    error_reason=None if audit_all_succeeded else t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
+                                )
+                                if not legacy_round_finished:
+                                    raise AuditExecutionStatePersistenceError(cause=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+                                execution_round_status = AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED
+                            if execution_round_status is not None and execution_checkpoint_callback is not None:
+                                await save_execution_checkpoint(
+                                    messages,
+                                    current_turn,
+                                    active_audit_execution=None,
+                                    update_active_audit_execution=True,
+                                )
+                            if execution_round_status is not None:
+                                await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
 
                         if persisted_tool_result_ids:
                             checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT

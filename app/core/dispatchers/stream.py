@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dispatchers.foreground import ForegroundDispatcherMixin
+from app.core.dispatchers.interactive import InteractiveDispatcherMixin
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -15,7 +15,7 @@ from app.models.message import InternalMessage
 logger = get_logger(__name__)
 
 
-class StreamDispatcherMixin(ForegroundDispatcherMixin):
+class StreamDispatcherMixin(InteractiveDispatcherMixin):
     @staticmethod
     async def _emit_event(
         event: dict[str, Any],
@@ -46,7 +46,7 @@ class StreamDispatcherMixin(ForegroundDispatcherMixin):
         session_id: str,
     ) -> None:
         try:
-            response = await cls._dispatch_foreground(**dispatch_kwargs)
+            response = await cls._dispatch_interactive(**dispatch_kwargs)
         except BaseBusinessException as exc:
             await event_queue.put(("error", t(exc.message, default=exc.message, **exc.kwargs)))
         except Exception as exc:

@@ -154,6 +154,10 @@
                   <el-slider v-model="form.configs.security.audit_threshold" :min="1" :max="7" show-stops show-input></el-slider>
                   <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
                 </el-form-item>
+                <el-form-item :label="$t('profiles.audit_confirmation_timeout_minutes')" label-width="auto">
+                  <el-input-number v-model="form.configs.security.audit_confirmation_timeout_minutes" :min="1" :max="1440" :step="1" class="full-width-input" controls-position="right"></el-input-number>
+                  <div class="help-text">{{ $t('profiles.audit_confirmation_timeout_minutes_hint') }}</div>
+                </el-form-item>
               </div>
             </div>
           </el-tab-pane>

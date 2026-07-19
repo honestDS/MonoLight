@@ -5,9 +5,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
+from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
+from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.i18n import t
@@ -59,21 +62,55 @@ class BackgroundTaskManager:
         source: str = "llm_tool_call",
         messages: list[InternalMessage] | None = None,
     ) -> BackgroundTask:
-        task = await background_task_crud.create_task(
-            db,
-            uid=uid,
-            session_id=session_id,
-            profile_id=profile.id,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            auto_reply=True,
-            extra={
-                "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
-                "source": source,
-                "submission_context": _build_submission_context(messages or [], tool_call_id),
-            },
-        )
+        audit_record_id = None
+        audit_execution_record_id = None
+        extra_payload: dict[str, Any] = {
+            "allowed_knowledge_base_ids": allowed_knowledge_base_ids or [],
+            "source": source,
+            "submission_context": _build_submission_context(messages or [], tool_call_id),
+        }
+        if hasattr(db, "execute"):
+            binding = await audit_crud.get_execution_binding_for_tool_call(db, new_tool_call_id=tool_call_id)
+            if binding is not None:
+                audit_record, execution = binding
+                existing = await background_task_crud.get_by_audit_execution_record_id(db, execution.id)
+                if existing is not None:
+                    return existing
+                if execution.status != "running" or audit_record.status != "executing" or audit_record.execution_claim_token != execution.claim_token:
+                    raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                audit_record_id = audit_record.id
+                audit_execution_record_id = execution.id
+                extra_payload["audit_binding"] = {
+                    "audit_record_id": audit_record.id,
+                    "audit_execution_record_id": execution.id,
+                    "claim_token": execution.claim_token,
+                    "handoff_state": "persisted",
+                }
+        try:
+            task = await background_task_crud.create_task(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile.id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                auto_reply=True,
+                extra=extra_payload,
+                audit_record_id=audit_record_id,
+                audit_execution_record_id=audit_execution_record_id,
+            )
+        except Exception:
+            if audit_record_id is not None and audit_execution_record_id is not None:
+                await audit_crud.mark_execution_unknown(
+                    db,
+                    audit_record_id=audit_record_id,
+                    execution_record_id=audit_execution_record_id,
+                    claim_token=str(extra_payload["audit_binding"]["claim_token"]),
+                    error_reason=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN),
+                )
+                await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+            raise
         logger.bind(
             task_id=task.id,
             uid=uid,

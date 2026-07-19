@@ -1,5 +1,6 @@
 import json
 
+from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE,
     ERR_BACKGROUND_TASK_NOT_FOUND,
@@ -53,6 +54,9 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
                 },
                 ensure_ascii=False,
             )
+
+        if task.status == BackgroundTaskStatus.CANCELLED and task.audit_record_id is not None:
+            await update_confirmation_message_status(self.db, audit_record_id=task.audit_record_id)
 
         return json.dumps(
             {

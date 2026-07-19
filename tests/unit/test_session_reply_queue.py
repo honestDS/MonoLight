@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
@@ -248,6 +249,94 @@ async def test_recover_expired_never_retries_confirmed_tool_execution(db_session
     ]
     assert confirmed.status == SessionReplyWorkStatus.RUNNING
     assert confirmed.locked_by == "lost-worker"
+
+
+@pytest.mark.asyncio
+async def test_recover_expired_does_not_retry_foreground_work_with_active_audit_execution(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    active = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key="foreground-message:active-audit",
+    )
+    retryable = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=2,
+        dedupe_key="foreground-message:retryable",
+    )
+    active.status = SessionReplyWorkStatus.RUNNING
+    active.locked_by = "lost-worker"
+    active.lock_until = 0
+    active.execution_state = {
+        "active_audit_execution": {
+            "audit_record_id": 42,
+            "claim_token": "claim-token",
+        }
+    }
+    retryable.status = SessionReplyWorkStatus.RUNNING
+    retryable.locked_by = "lost-worker-2"
+    retryable.lock_until = 0
+    await db_session.commit()
+
+    recovered_count, terminal_claims = await crud.recover_expired(db_session)
+
+    await db_session.refresh(active)
+    await db_session.refresh(retryable)
+    assert recovered_count == 2
+    assert terminal_claims == [
+        (
+            active.id,
+            "lost-worker",
+            "审计工具执行领取后被中断，结果未知，禁止自动重试",
+        )
+    ]
+    assert active.status == SessionReplyWorkStatus.RUNNING
+    assert active.locked_by == "lost-worker"
+    assert retryable.status == SessionReplyWorkStatus.READY_FOR_LLM
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "work_type",
+    [SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY, SessionReplyWorkType.SCHEDULED_TASK_SUMMARY],
+)
+async def test_recover_expired_does_not_retry_background_or_scheduled_audit_work(db_session: AsyncSession, work_type):
+    """租约恢复发现后台或定时审计绑定时不得重新入队。"""
+    crud = CRUDSessionReplyWorkItem()
+    work = await enqueue(
+        crud,
+        db_session,
+        work_type=work_type,
+        source_id=1,
+        dedupe_key=f"{work_type.value}:active-audit",
+    )
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = "lost-worker"
+    work.lock_until = 0
+    work.execution_state = {
+        SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
+            "audit_record_id": 42,
+            "claim_token": "claim-token",
+        }
+    }
+    await db_session.commit()
+
+    recovered_count, terminal_claims = await crud.recover_expired(db_session)
+
+    await db_session.refresh(work)
+    assert recovered_count == 1
+    assert terminal_claims == [
+        (
+            work.id,
+            "lost-worker",
+            "审计工具执行领取后被中断，结果未知，禁止自动重试",
+        )
+    ]
+    assert work.status == SessionReplyWorkStatus.RUNNING
 
 
 @pytest.mark.asyncio

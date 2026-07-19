@@ -213,7 +213,7 @@ app/core/crud/
 app/core/dispatchers/
 ├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
-├── foreground.py           # 流式与非流式前台对话的共用执行流程
+├── interactive.py          # HTTP/WebSocket/队列交互式流式与非流式对话共用执行流程
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用逻辑
 └── stream.py               # 流式对话分发
@@ -225,7 +225,6 @@ app/core/dispatchers/
 app/core/utils/dispatcher/
 ├── __init__.py
 ├── append_new_user_messages.py       # 追加用户消息
-├── audit_tool_call.py                # 工具调用审计
 ├── channel_call.py                   # 模型渠道调用
 ├── fetch_and_merge_new_user_messages.py # 获取并合并新消息
 ├── handle_parallel_tool_limit.py     # 并行工具数量限制
@@ -320,7 +319,7 @@ app/core/retrieval/
 └── tokenizer.py            # 检索分词
 ```
 
-### 多语言与审计
+### 多语言
 
 ```text
 app/core/i18n/
@@ -329,9 +328,6 @@ app/core/i18n/
 ├── locale.py               # 语言解析
 ├── translator.py           # 文本翻译入口
 └── locales/                # 多语言消息
-
-app/core/middleware/
-└── auditor.py              # 工具调用安全审计
 ```
 
 ## 数据模型层：`app/models/`

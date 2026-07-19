@@ -86,6 +86,8 @@ export default {
   secondary_confirmation_hint: 'When disabled, security audits still run. High-risk operations are rejected directly, and audit errors are returned as failures.',
   audit_threshold: 'Secondary Confirmation Threshold (1-7)',
   audit_threshold_hint: 'Secondary confirmation is required when the audit score reaches this value. A higher value is more permissive.',
+  audit_confirmation_timeout_minutes: 'Confirmation Card Timeout (minutes)',
+  audit_confirmation_timeout_minutes_hint: 'The confirmation card expires after this duration. Allowed range: 1-1440 minutes. Default: 10 minutes.',
   scheduling_control: 'Scheduling & Parallel Control',
   max_parallel_tools: 'Max Parallel Tools',
   max_parallel_tools_hint: 'The max number of tools the model is allowed to call simultaneously in a single turn. Calls exceeding this limit will be intercepted by the system with an error thrown to the model.',

@@ -5,15 +5,18 @@ import uuid
 from time import monotonic
 from typing import Any
 
-from app.core.constants import ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
+from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
+from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.profile import profile_crud
 from app.core.dispatch_context import build_background_dispatch_context
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
-from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result
-from app.core.utils.dispatcher.helpers import format_exception_message
+from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result, sanitize_execution_summary, sanitize_execution_value
+from app.models.audit import AuditExecutionStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.profile import ProfileConfig
 from app.providers.database import AsyncSessionLocal
@@ -66,12 +69,52 @@ def _limit_result_content(content: Any) -> Any:
 
 
 def _build_success_result(task: BackgroundTask, raw_result: Any) -> dict[str, Any]:
-    content = _limit_result_content(_to_json_compatible(raw_result))
+    value = raw_result
+    if isinstance(raw_result, str):
+        try:
+            value = json.loads(raw_result)
+        except (TypeError, ValueError):
+            value = raw_result
+    content = _limit_result_content(sanitize_execution_value(_to_json_compatible(value)))
     return build_background_task_success_result(task.tool_name, content)
 
 
 def _build_failure_result(task: BackgroundTask, error: str) -> dict[str, Any]:
-    return build_background_task_failure_result(task.tool_name, error)
+    return build_background_task_failure_result(task.tool_name, str(sanitize_execution_value(error)))
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    if isinstance(exc, BaseBusinessException):
+        return str(sanitize_execution_value(exc.render_message()))
+    return t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)
+
+
+def _tool_result_succeeded(raw_result: Any) -> bool:
+    if isinstance(raw_result, dict):
+        payload = raw_result
+    elif isinstance(raw_result, str):
+        try:
+            payload = json.loads(raw_result)
+        except (TypeError, ValueError):
+            return True
+    else:
+        return True
+    if not isinstance(payload, dict):
+        return True
+    return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
+
+
+def _audit_binding(task: BackgroundTask) -> tuple[int, int, str] | None:
+    audit_record_id = getattr(task, "audit_record_id", None)
+    execution_record_id = getattr(task, "audit_execution_record_id", None)
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    binding = extra.get("audit_binding") if isinstance(extra.get("audit_binding"), dict) else {}
+    audit_record_id = audit_record_id or binding.get("audit_record_id")
+    execution_record_id = execution_record_id or binding.get("audit_execution_record_id")
+    claim_token = binding.get("claim_token")
+    if not isinstance(audit_record_id, int) or not isinstance(execution_record_id, int) or not isinstance(claim_token, str) or not claim_token:
+        return None
+    return audit_record_id, execution_record_id, claim_token
 
 
 def _build_profile_mismatch_error(task: BackgroundTask) -> str:
@@ -104,7 +147,7 @@ async def _renew_task_lease(task_id: int, worker_id: str, log: Any) -> bool:
             log.error(
                 t(
                     "LOG_BACKGROUND_TASK_LEASE_RENEW_FAILED",
-                    error=format_exception_message(exc),
+                    error=str(sanitize_execution_value(str(exc))),
                     retry_seconds=max(0, remaining),
                 ),
                 exc_info=True,
@@ -115,13 +158,14 @@ async def _renew_task_lease(task_id: int, worker_id: str, log: Any) -> bool:
             retry_delay = min(retry_delay * 2, BACKGROUND_TASK_LEASE_RETRY_MAX_SECONDS)
 
 
-async def _release_task_claim(task_id: int, worker_id: str, log: Any) -> None:
+async def _release_task_claim(task_id: int, worker_id: str, log: Any, expected_lock_until: int | None = None) -> None:
     try:
         async with AsyncSessionLocal() as db:
             released = await background_task_crud.release_claim(
                 db,
                 task_id=task_id,
                 worker_id=worker_id,
+                expected_lock_until=expected_lock_until,
             )
         if released:
             log.info(t("LOG_BACKGROUND_TASK_CLAIM_RELEASED"))
@@ -131,7 +175,7 @@ async def _release_task_claim(task_id: int, worker_id: str, log: Any) -> None:
         raise
     except Exception as exc:
         log.error(
-            t("LOG_BACKGROUND_TASK_CLAIM_RELEASE_FAILED", error=format_exception_message(exc)),
+            t("LOG_BACKGROUND_TASK_CLAIM_RELEASE_FAILED", error=str(sanitize_execution_value(str(exc)))),
             exc_info=True,
         )
 
@@ -167,12 +211,16 @@ async def run_background_task(task_id: int, *, worker_id: str | None = None) -> 
             if not lease_renewed:
                 execution_task.cancel()
                 await asyncio.gather(execution_task, return_exceptions=True)
-                await asyncio.shield(_release_task_claim(task_id, worker, log))
+                lock_until = getattr(task, "lock_until", None)
+                release = _release_task_claim(task_id, worker, log) if lock_until is None else _release_task_claim(task_id, worker, log, lock_until)
+                await asyncio.shield(release)
                 return
     except asyncio.CancelledError:
         execution_task.cancel()
         await asyncio.gather(execution_task, return_exceptions=True)
-        await asyncio.shield(_release_task_claim(task_id, worker, log))
+        lock_until = getattr(task, "lock_until", None)
+        release = _release_task_claim(task_id, worker, log) if lock_until is None else _release_task_claim(task_id, worker, log, lock_until)
+        await asyncio.shield(release)
         raise
     finally:
         lease_task.cancel()
@@ -186,6 +234,9 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             log.warning(t("LOG_BACKGROUND_TASK_MISSING"))
             return False
 
+        binding = _audit_binding(task)
+        execute_invoked = False
+        force_unknown = False
         try:
             profile = await profile_crud.get(db, task.profile_id)
             if not profile or profile.uid != task.uid:
@@ -214,30 +265,144 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
 
             args = dict(task.arguments or {})
             args.pop("run_in_background", None)
-            await db.commit()
+            if binding is not None:
+                audit_record_id, execution_record_id, claim_token = binding
+                extra = {
+                    **(task.extra if isinstance(task.extra, dict) else {}),
+                    "execution_started": True,
+                    "audit_binding": {
+                        **(task.extra.get("audit_binding", {}) if isinstance(task.extra, dict) and isinstance(task.extra.get("audit_binding"), dict) else {}),
+                        "audit_record_id": audit_record_id,
+                        "audit_execution_record_id": execution_record_id,
+                        "claim_token": claim_token,
+                        "execute_started": True,
+                    },
+                }
+                if not await background_task_crud.mark_execution_started(db, task_id=task_id, worker_id=worker, extra=extra):
+                    force_unknown = True
+                    raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                if not await audit_crud.mark_execution_started(db, execution_record_id=execution_record_id, claim_token=claim_token):
+                    force_unknown = True
+                    raise RuntimeError(t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+            else:
+                await db.commit()
+            execute_invoked = True
             raw_result = await instance.execute(**args)
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
                 return False
-            marked = await background_task_crud.mark_succeeded(
+            if binding is None:
+                marked = await background_task_crud.mark_succeeded(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker,
+                    result=_build_success_result(task, raw_result),
+                    auto_reply=task.auto_reply,
+                )
+                if not marked:
+                    return False
+                log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED"))
+                return True
+
+            audit_record_id, execution_record_id, claim_token = binding
+            execution_status = AuditExecutionStatus.SUCCEEDED if _tool_result_succeeded(raw_result) else AuditExecutionStatus.FAILED
+            result_summary = sanitize_execution_summary(raw_result, redact_text=True)
+            execution_finished = await audit_crud.finish_execution_attempt(
                 db,
-                task_id=task_id,
-                worker_id=worker,
-                result=_build_success_result(task, raw_result),
-                auto_reply=task.auto_reply,
+                execution_record_id=execution_record_id,
+                status=execution_status,
+                result_summary=result_summary,
+                error=None if execution_status == AuditExecutionStatus.SUCCEEDED else result_summary,
+                commit=False,
+            )
+            if not execution_finished:
+                await db.rollback()
+                await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                return False
+            task_result = _build_success_result(task, raw_result) if execution_status == AuditExecutionStatus.SUCCEEDED else _build_failure_result(task, result_summary)
+            marked = (
+                await background_task_crud.mark_succeeded(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker,
+                    result=task_result,
+                    auto_reply=task.auto_reply,
+                    commit=False,
+                )
+                if execution_status == AuditExecutionStatus.SUCCEEDED
+                else await background_task_crud.mark_failed(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker,
+                    error=result_summary,
+                    result=task_result,
+                    auto_reply=task.auto_reply,
+                    commit=False,
+                )
             )
             if not marked:
+                await db.rollback()
+                await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
                 return False
-            log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED"))
+            round_status = await audit_crud.finish_execution_round_if_complete(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+                commit=False,
+            )
+            await db.commit()
+            if round_status is not None:
+                await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+            log.info(t("LOG_BACKGROUND_TASK_SUCCEEDED") if execution_status == AuditExecutionStatus.SUCCEEDED else t("LOG_BACKGROUND_TASK_FAILED", error=result_summary))
             return True
         except Exception as exc:
+            if binding is not None and (execute_invoked or force_unknown):
+                await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                return False
             await db.refresh(task)
             if task.status == BackgroundTaskStatus.CANCELLED:
                 log.info(t("LOG_BACKGROUND_TASK_CANCELLED"))
                 return False
-            error_message = format_exception_message(exc)
+            error_message = _safe_exception_message(exc)
             log.error(t("LOG_BACKGROUND_TASK_FAILED", error=error_message), exc_info=True)
+            if binding is not None:
+                audit_record_id, execution_record_id, claim_token = binding
+                result_summary = sanitize_execution_summary(error_message, redact_text=True)
+                execution_finished = await audit_crud.finish_execution_attempt(
+                    db,
+                    execution_record_id=execution_record_id,
+                    status=AuditExecutionStatus.FAILED,
+                    result_summary=result_summary,
+                    error=result_summary,
+                    commit=False,
+                )
+                if not execution_finished:
+                    await db.rollback()
+                    await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                    return False
+                marked = await background_task_crud.mark_failed(
+                    db,
+                    task_id=task_id,
+                    worker_id=worker,
+                    error=error_message,
+                    result=_build_failure_result(task, error_message),
+                    auto_reply=task.auto_reply,
+                    commit=False,
+                )
+                if marked:
+                    await audit_crud.finish_execution_round_if_complete(
+                        db,
+                        audit_record_id=audit_record_id,
+                        claim_token=claim_token,
+                        commit=False,
+                    )
+                    await db.commit()
+                    await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+                    return True
+                await db.rollback()
+                await _mark_bound_execution_unknown(db, task, worker, t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
+                return False
             marked = await background_task_crud.mark_failed(
                 db,
                 task_id=task_id,
@@ -249,3 +414,27 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             if not marked:
                 return False
             return True
+
+
+async def _mark_bound_execution_unknown(task_db, task: BackgroundTask, worker: str, error: str) -> None:
+    binding = _audit_binding(task)
+    if binding is None:
+        return
+    audit_record_id, execution_record_id, claim_token = binding
+    await task_db.rollback()
+    await audit_crud.mark_execution_unknown(
+        task_db,
+        audit_record_id=audit_record_id,
+        execution_record_id=execution_record_id,
+        claim_token=claim_token,
+        error_reason=error,
+    )
+    await background_task_crud.mark_execution_unknown(
+        task_db,
+        task_id=task.id,
+        worker_id=worker,
+        error=error,
+        result=_build_failure_result(task, error),
+        auto_reply=task.auto_reply,
+    )
+    await update_confirmation_message_status(task_db, audit_record_id=audit_record_id)

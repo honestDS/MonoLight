@@ -7,6 +7,7 @@ from app.core.exceptions import BaseBusinessException, LLMException, ServerExcep
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
+from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -39,7 +40,7 @@ def format_exception_message(exc: Exception) -> str:
         return exc.render_message()
     logger.bind(
         exception_type=type(exc).__name__,
-        exception_message=str(exc),
+        exception_message=sanitize_execution_summary(str(exc)),
     ).opt(exception=exc).error(t("LOG_DISPATCHER_UNKNOWN_EXCEPTION"))
     return t(ERR_INTERNAL_SERVER_ERROR)
 
@@ -97,7 +98,6 @@ async def process_single_tool_with_isolated_db(
     allowed_knowledge_base_ids: list[int] | None = None,
     context_window_k: int = 4,
     allow_background_submission: bool = True,
-    audit_preapproved: bool = False,
 ) -> InternalMessage:
     dispatcher_module = import_module("app.core.dispatcher")
     async_session_local = getattr(dispatcher_module, "AsyncSessionLocal", AsyncSessionLocal)
@@ -116,7 +116,6 @@ async def process_single_tool_with_isolated_db(
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             context_window_k=context_window_k,
             allow_background_submission=allow_background_submission,
-            audit_preapproved=audit_preapproved,
         )
 
 

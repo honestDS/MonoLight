@@ -14,6 +14,7 @@ from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import AuditCleanupResult
 from app.core.crud.audit import audit_crud
+from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
 from app.core.utils.time import get_local_time
 from app.models.audit import (
@@ -24,6 +25,7 @@ from app.models.audit import (
     AuditRecord,
     AuditRecordStatus,
 )
+from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
 
 
@@ -688,6 +690,64 @@ async def test_startup_marks_interrupted_execution_unknown(audit_database, tmp_p
         assert stored.status == AuditRecordStatus.EXECUTION_UNKNOWN
         stored_execution = await audit_crud.get_execution_record(session, execution.id)
         assert stored_execution.status == AuditExecutionStatus.EXECUTION_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_startup_unknown_recovery_fails_pending_background_handoff(audit_database, tmp_path):
+    audit_root = tmp_path / "audit"
+    audit_file = audit_root / "temp_u1" / "audit_pending_handoff.json"
+    audit_file.parent.mkdir(parents=True)
+    audit_file.write_text("{}", encoding="utf-8")
+
+    async with audit_database() as session:
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.PASSED,
+            tool_details=_tool_details(snapshot, conclusion="passed"),
+            context_file_path=str(audit_file.resolve()),
+        )
+        _, token = await audit_crud.claim_passed_for_execution(session, audit_record_id=record.id)
+        detail = (await audit_crud.list_tool_details(session, record.id))[0]
+        execution = await audit_crud.create_execution_attempt(
+            session,
+            audit_record_id=record.id,
+            audit_tool_detail_id=detail.id,
+            claim_token=token,
+            execution_node="node-1",
+            new_tool_call_id="pending-handoff-call",
+        )
+        task = BackgroundTask(
+            uid="u1",
+            session_id="session-1",
+            profile_id=1,
+            tool_call_id="pending-handoff-call",
+            tool_name="execute_shell",
+            status=BackgroundTaskStatus.PENDING,
+            arguments={"command": "echo pending"},
+            auto_reply=True,
+            reply_status=BackgroundTaskReplyStatus.PENDING,
+            audit_record_id=record.id,
+            audit_execution_record_id=execution.id,
+        )
+        session.add(task)
+        await session.commit()
+
+        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+        await session.refresh(task)
+        stored_task = await background_task_crud.get(session, task.id)
+        active_tasks = await background_task_crud.list_active_user_tasks(session, uid="u1", session_id="session-1")
+        pending_replies = await background_task_crud.list_pending_replies(session)
+        stored_record = await audit_crud.get_record(session, record.id)
+        stored_execution = await audit_crud.get_execution_record(session, execution.id)
+
+    assert stored_task.status == BackgroundTaskStatus.FAILED
+    assert stored_task.reply_status == BackgroundTaskReplyStatus.PENDING
+    assert active_tasks == []
+    assert [item.id for item in pending_replies] == [task.id]
+    assert stored_record.status == AuditRecordStatus.EXECUTION_UNKNOWN
+    assert stored_execution.status == AuditExecutionStatus.EXECUTION_UNKNOWN
 
 
 @pytest.mark.asyncio

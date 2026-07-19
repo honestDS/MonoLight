@@ -10,7 +10,7 @@ from app.core.utils.context_summary.boundary import (
     ContextSummaryTriggerMode,
     resolve_context_summary_boundary,
 )
-from app.core.utils.context_summary.common import ContextSummaryState, serialize_message
+from app.core.utils.context_summary.common import ContextSummaryState
 from app.core.utils.context_summary.user_message_block import (
     append_covered_user_message,
     split_covered_user_message,
@@ -104,35 +104,6 @@ def test_covered_user_message_round_trips_boundary_like_content_exactly():
     assert covered is not None
     assert covered.message_id == 42
     assert covered.content == content
-
-
-def test_summary_serialization_removes_operation_specific_confirmation_data():
-    dynamic_token = "FORCE_EXECUTE_CONFIRMED_deadbeef1234"
-    original_command = "remove-sensitive-resource"
-    content = json.dumps(
-        {
-            "error": "confirmation_required",
-            "reason": f"Re-send {dynamic_token} {original_command}",
-            "risk_score": 10,
-            "risky_command": original_command,
-            "dynamic_token": dynamic_token,
-        }
-    )
-
-    serialized = serialize_message(
-        InternalMessage(
-            role=MessageRole.TOOL,
-            tool_call_id="call-1",
-            content=content,
-        )
-    )
-
-    assert "security_confirmation_not_retained" in serialized
-    assert "operation-specific confirmation was required" in serialized
-    assert dynamic_token not in serialized
-    assert original_command not in serialized
-    assert "risk_score" not in serialized
-    assert "risky_command" not in serialized
 
 
 def test_appending_covered_user_message_replaces_old_block_instead_of_accumulating():

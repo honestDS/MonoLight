@@ -2,12 +2,13 @@ import hashlib
 import hmac
 import json
 import math
+import os
+import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from app.core.constants import (
-    ERR_AUDIT_FILE_NOT_REGULAR,
     ERR_AUDIT_INVALID_JSON_VALUE,
     ERR_AUDIT_JSON_KEY_NOT_STRING,
     ERR_AUDIT_JSON_TYPE_UNSUPPORTED,
@@ -26,8 +27,10 @@ class FileIntegritySnapshot:
     original_path: str
     absolute_path: str
     resolved_path: str
-    size: int
-    sha256: str
+    exists: bool
+    file_type: str
+    size: int | None
+    sha256: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -274,22 +277,78 @@ def create_file_integrity_snapshot(path: str | Path, *, working_directory: str |
     if not source_path.is_absolute():
         source_path = Path(working_directory) / source_path
 
-    absolute_path = source_path.absolute()
-    resolved_path = absolute_path.resolve(strict=True)
-    if not resolved_path.is_file():
-        raise ValueError(t(ERR_AUDIT_FILE_NOT_REGULAR, path=str(absolute_path)))
+    absolute_path = Path(os.path.abspath(source_path))
+    resolved_path = absolute_path.resolve(strict=False)
+    try:
+        path_stat = absolute_path.lstat()
+    except FileNotFoundError:
+        return FileIntegritySnapshot(
+            original_path=original_path,
+            absolute_path=str(absolute_path),
+            resolved_path=str(resolved_path),
+            exists=False,
+            file_type="missing",
+            size=None,
+            sha256=None,
+        )
+
+    if stat.S_ISLNK(path_stat.st_mode):
+        file_type = "symlink"
+    elif stat.S_ISREG(path_stat.st_mode):
+        file_type = "regular_file"
+    elif stat.S_ISDIR(path_stat.st_mode):
+        file_type = "directory"
+    else:
+        file_type = "other"
+
+    if file_type not in {"regular_file", "symlink"} or not resolved_path.is_file():
+        return FileIntegritySnapshot(
+            original_path=original_path,
+            absolute_path=str(absolute_path),
+            resolved_path=str(resolved_path),
+            exists=True,
+            file_type=file_type,
+            size=None,
+            sha256=None,
+        )
 
     digest = hashlib.sha256()
-    size = 0
-    with resolved_path.open("rb") as file_handle:
-        while chunk := file_handle.read(1024 * 1024):
-            digest.update(chunk)
-            size += len(chunk)
+    try:
+        size = resolved_path.stat().st_size
+        with resolved_path.open("rb") as file_handle:
+            while chunk := file_handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        size = None
+        sha256 = None
+    else:
+        sha256 = digest.hexdigest()
 
     return FileIntegritySnapshot(
         original_path=original_path,
         absolute_path=str(absolute_path),
         resolved_path=str(resolved_path),
+        exists=True,
+        file_type=file_type,
         size=size,
-        sha256=digest.hexdigest(),
+        sha256=sha256,
     )
+
+
+def verify_file_integrity_snapshot(expected: dict[str, Any], actual: FileIntegritySnapshot) -> bool:
+    expected_absolute_path = expected.get("absolute_path")
+    expected_resolved_path = expected.get("resolved_path")
+    expected_exists = expected.get("exists")
+    expected_file_type = expected.get("file_type")
+    if not isinstance(expected_absolute_path, str) or not isinstance(expected_resolved_path, str) or not isinstance(expected_exists, bool) or not isinstance(expected_file_type, str):
+        return False
+    if expected_absolute_path != actual.absolute_path or expected_resolved_path != actual.resolved_path or expected_exists != actual.exists or expected_file_type != actual.file_type:
+        return False
+    if not expected_exists:
+        return actual.file_type == "missing" and expected.get("size") is None and expected.get("sha256") is None
+
+    expected_size = expected.get("size")
+    expected_sha256 = expected.get("sha256")
+    if not isinstance(expected_size, int) or isinstance(expected_size, bool) or not isinstance(expected_sha256, str) or not expected_sha256:
+        return False
+    return actual.size == expected_size and isinstance(actual.sha256, str) and hmac.compare_digest(actual.sha256, expected_sha256)

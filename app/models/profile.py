@@ -10,6 +10,7 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    StrictInt,
     field_validator,
     model_validator,
 )
@@ -56,6 +57,7 @@ class SecurityConfig(BaseModel):
     audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
     audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发二次确认的风险评分阈值（1-7），0 表示关闭二次确认")
+    audit_confirmation_timeout_minutes: StrictInt = PydanticField(10, ge=1, le=1440, description="审计二次确认卡片有效期（分钟）")
     audit_report_language: str = PydanticField(DEFAULT_LOCALE, description="审计报告摘要使用的语言")
 
     @field_validator("audit_report_language")
@@ -118,7 +120,7 @@ class ProfileConfig(BaseModel):
                 "rerank_channel",
                 "image_generation_channel",
             ],
-            "security": ["audit_channel_id", "audit_model_id", "audit_threshold", "audit_report_language"],
+            "security": ["audit_channel_id", "audit_model_id", "audit_threshold", "audit_confirmation_timeout_minutes", "audit_report_language"],
             "tool": [
                 "tool_timeout",
                 "image_generation_timeout",
@@ -175,6 +177,7 @@ PROFILE_EXAMPLE = {
             "audit_channel_id": 1,
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
+            "audit_confirmation_timeout_minutes": 10,
             "audit_report_language": "zh",
         },
         "tool": {

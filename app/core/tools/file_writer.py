@@ -10,6 +10,17 @@ from app.core.utils.system import get_full_system_context
 from .base import BaseExecutor
 
 
+def resolve_file_writer_target_path(file_path: str, workspace_path: str | Path) -> Path:
+    if not file_path or PurePosixPath(file_path).is_absolute() or PureWindowsPath(file_path).is_absolute():
+        raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+
+    workspace_path = Path(workspace_path).resolve(strict=False)
+    target_path = (workspace_path / file_path).resolve(strict=False)
+    if target_path == workspace_path or not target_path.is_relative_to(workspace_path):
+        raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+    return target_path
+
+
 class FileWriterExecutor(BaseExecutor):
     logger = get_logger(__name__)
 
@@ -23,14 +34,7 @@ class FileWriterExecutor(BaseExecutor):
             self.user_temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve_target_path(self, file_path: str) -> Path:
-        if not file_path or PurePosixPath(file_path).is_absolute() or PureWindowsPath(file_path).is_absolute():
-            raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
-
-        workspace_path = self.user_temp_dir.resolve(strict=True)
-        target_path = (workspace_path / file_path).resolve(strict=False)
-        if target_path == workspace_path or not target_path.is_relative_to(workspace_path):
-            raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
-        return target_path
+        return resolve_file_writer_target_path(file_path, self.user_temp_dir)
 
     async def execute(self, file_path: str, content: str, append: bool = False) -> str:
         """

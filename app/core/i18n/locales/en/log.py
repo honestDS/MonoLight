@@ -1,12 +1,6 @@
 MESSAGES = {
     "LOG_ADAPTER_WEB_UNEXPECTED_ERROR": "Unexpected error in WebChatAdapter: {error}",
     "LOG_ADAPTER_WS_UNEXPECTED_ERROR": "Unexpected error in WebSocketChatAdapter: {error}",
-    "LOG_AUDIT_EXCEPTION": "Audit exception: {error}",
-    "LOG_AUDIT_PROVIDER_DISABLED": "Audit model channel is disabled, skipping security audit",
-    "LOG_AUDIT_TOKEN_MISMATCH": "Token mismatch. Expected: {expected_token}, Got: {token}",
-    "LOG_AUDIT_TOKEN_MISMATCH_WRITE_FILE": "Token mismatch for write_file. Expected: {expected_token}, Got: {token}",
-    "LOG_AUDIT_TOKEN_VERIFIED_COMMAND": "Dynamic token verification passed for command: {command_preview}...",
-    "LOG_AUDIT_TOKEN_VERIFIED_WRITE_FILE": "Dynamic token verification passed for write_file: {path}",
     "LOG_CHANNEL_ALL_UNAVAILABLE": "All priority channel groups are unavailable, expected_usage={expected_usage}",
     "LOG_CHANNEL_CONFIG_EMPTY": "Channel config is empty or has no routing rules, expected_usage={expected_usage}",
     "LOG_CHANNEL_CURSOR_READ_FAILED": "Failed to read round-robin cursor, falling back to index 0: {error}",

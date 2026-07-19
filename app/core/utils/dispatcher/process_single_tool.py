@@ -33,7 +33,6 @@ from app.core.tools import (
     tool_runs_in_background,
     tool_schema_has_parameter,
 )
-from app.core.utils.dispatcher.audit_tool_call import audit_tool_call
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
 from app.models.message import (
@@ -74,6 +73,17 @@ def _build_background_task_queued_result(tool_name: str, task_id: int) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def get_queued_background_task_id(content: str | None) -> int | None:
+    try:
+        payload = json.loads(content or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "queued":
+        return None
+    task_id = payload.get("task_id")
+    return task_id if isinstance(task_id, int) and task_id > 0 else None
 
 
 def _build_background_task_unsupported_result(tool_name: str) -> str:
@@ -248,7 +258,6 @@ async def process_single_tool(
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
     allow_background_submission: bool = True,
-    audit_preapproved: bool = False,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -269,20 +278,7 @@ async def process_single_tool(
     elif run_in_background and not allow_background_submission:
         cmd_result = _build_background_task_unsupported_result(tool_name)
     else:
-        cmd_result = (
-            None
-            if audit_preapproved
-            else await audit_tool_call(
-                db,
-                profile,
-                cfg,
-                tool_name,
-                args,
-                messages,
-                session_id=session_id,
-                uid=uid,
-            )
-        )
+        cmd_result = None
 
     if cmd_result is None and run_in_background:
         from app.core.background_tasks.manager import background_task_manager

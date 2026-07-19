@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import case, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -54,6 +54,8 @@ _FILE_SNAPSHOT_DATABASE_FIELDS = {
     "original_path",
     "absolute_path",
     "resolved_path",
+    "exists",
+    "file_type",
     "size",
     "sha256",
     "truncated",
@@ -167,6 +169,28 @@ class CRUDAudit:
     async def get_execution_record(self, db: AsyncSession, execution_record_id: int) -> AuditExecutionRecord | None:
         result = await db.execute(select(AuditExecutionRecord).where(AuditExecutionRecord.id == execution_record_id).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def get_execution_binding_for_tool_call(self, db: AsyncSession, *, new_tool_call_id: str) -> tuple[AuditRecord, AuditExecutionRecord] | None:
+        result = await db.execute(
+            select(AuditRecord, AuditExecutionRecord)
+            .join(AuditExecutionRecord, AuditExecutionRecord.audit_record_id == AuditRecord.id)
+            .where(
+                AuditExecutionRecord.new_tool_call_id == new_tool_call_id,
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        binding = result.one_or_none()
+        return binding
+
+    async def get_running_execution_binding(self, db: AsyncSession, *, new_tool_call_id: str) -> tuple[AuditRecord, AuditExecutionRecord] | None:
+        binding = await self.get_execution_binding_for_tool_call(db, new_tool_call_id=new_tool_call_id)
+        if binding is None:
+            return None
+        record, execution = binding
+        if execution.status != AuditExecutionStatus.RUNNING or record.status != AuditRecordStatus.EXECUTING or record.execution_claim_token != execution.claim_token:
+            return None
+        return binding
 
     async def create_preparing(
         self,
@@ -603,14 +627,21 @@ class CRUDAudit:
         status: AuditExecutionStatus,
         result_summary: str | None = None,
         error: str | None = None,
+        commit: bool = True,
     ) -> bool:
         if status == AuditExecutionStatus.RUNNING:
             raise ValueError(t(ERR_AUDIT_EXECUTION_END_STATUS_INVALID))
+        record_exists = select(AuditRecord.id).where(
+            AuditRecord.id == AuditExecutionRecord.audit_record_id,
+            AuditRecord.status == AuditRecordStatus.EXECUTING,
+            AuditRecord.execution_claim_token == AuditExecutionRecord.claim_token,
+        )
         result = await db.execute(
             update(AuditExecutionRecord)
             .where(
                 AuditExecutionRecord.id == execution_record_id,
                 AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+                record_exists.exists(),
             )
             .values(
                 status=status,
@@ -620,8 +651,146 @@ class CRUDAudit:
             )
             .execution_options(synchronize_session=False)
         )
+        if commit:
+            await db.commit()
+        return (result.rowcount or 0) == 1
+
+    async def cancel_execution_attempt(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        execution_record_id: int,
+        claim_token: str,
+        error_reason: str,
+        commit: bool = True,
+    ) -> bool:
+        record_exists = select(AuditRecord.id).where(
+            AuditRecord.id == audit_record_id,
+            AuditRecord.status == AuditRecordStatus.EXECUTING,
+            AuditRecord.execution_claim_token == claim_token,
+        )
+        result = await db.execute(
+            update(AuditExecutionRecord)
+            .where(
+                AuditExecutionRecord.id == execution_record_id,
+                AuditExecutionRecord.audit_record_id == audit_record_id,
+                AuditExecutionRecord.claim_token == claim_token,
+                AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+                record_exists.exists(),
+            )
+            .values(
+                status=AuditExecutionStatus.CANCELLED,
+                error=error_reason,
+                finished_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        return (result.rowcount or 0) == 1
+
+    async def mark_execution_started(self, db: AsyncSession, *, execution_record_id: int, claim_token: str) -> bool:
+        result = await db.execute(
+            update(AuditExecutionRecord)
+            .where(
+                AuditExecutionRecord.id == execution_record_id,
+                AuditExecutionRecord.claim_token == claim_token,
+                AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+            )
+            .values(started_at=get_local_time())
+            .execution_options(synchronize_session=False)
+        )
         await db.commit()
         return (result.rowcount or 0) == 1
+
+    async def finish_execution_round_if_complete(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        claim_token: str,
+        commit: bool = True,
+    ) -> AuditRecordStatus | None:
+        execution_scope = [
+            AuditExecutionRecord.audit_record_id == audit_record_id,
+            AuditExecutionRecord.claim_token == claim_token,
+        ]
+        running_exists = (
+            select(AuditExecutionRecord.id)
+            .where(
+                *execution_scope,
+                AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+            )
+            .exists()
+        )
+        unknown_exists = (
+            select(AuditExecutionRecord.id)
+            .where(
+                *execution_scope,
+                AuditExecutionRecord.status == AuditExecutionStatus.EXECUTION_UNKNOWN,
+            )
+            .exists()
+        )
+        cancelled_exists = (
+            select(AuditExecutionRecord.id)
+            .where(
+                *execution_scope,
+                AuditExecutionRecord.status == AuditExecutionStatus.CANCELLED,
+            )
+            .exists()
+        )
+        failed_exists = (
+            select(AuditExecutionRecord.id)
+            .where(
+                *execution_scope,
+                AuditExecutionRecord.status == AuditExecutionStatus.FAILED,
+            )
+            .exists()
+        )
+        execution_count = select(func.count(AuditExecutionRecord.id)).where(*execution_scope).scalar_subquery()
+        unknown_error = select(AuditExecutionRecord.error).where(*execution_scope, AuditExecutionRecord.status == AuditExecutionStatus.EXECUTION_UNKNOWN).order_by(AuditExecutionRecord.id).limit(1).scalar_subquery()
+        failed_error = select(AuditExecutionRecord.error).where(*execution_scope, AuditExecutionRecord.status == AuditExecutionStatus.FAILED).order_by(AuditExecutionRecord.id).limit(1).scalar_subquery()
+        cancelled_error = select(AuditExecutionRecord.error).where(*execution_scope, AuditExecutionRecord.status == AuditExecutionStatus.CANCELLED).order_by(AuditExecutionRecord.id).limit(1).scalar_subquery()
+        status_expression = case(
+            (unknown_exists, AuditRecordStatus.EXECUTION_UNKNOWN.name),
+            (cancelled_exists, AuditRecordStatus.CANCELLED.name),
+            (failed_exists, AuditRecordStatus.FAILED.name),
+            else_=AuditRecordStatus.SUCCEEDED.name,
+        )
+        error_expression = case(
+            (unknown_exists, unknown_error),
+            (cancelled_exists, cancelled_error),
+            (failed_exists, failed_error),
+            else_=None,
+        )
+        now = get_local_time()
+        result = await db.execute(
+            update(AuditRecord)
+            .where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.status == AuditRecordStatus.EXECUTING,
+                AuditRecord.execution_claim_token == claim_token,
+                ~running_exists,
+                execution_count == AuditRecord.tool_count,
+            )
+            .values(
+                status=status_expression,
+                error_reason=error_expression,
+                execution_claim_token=None,
+                completed_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        status_result = await db.execute(select(AuditRecord).where(AuditRecord.id == audit_record_id).execution_options(populate_existing=True))
+        updated_record = status_result.scalars().first()
+        status = updated_record.status if updated_record is not None else None
+        if commit:
+            await db.commit()
+        return status
 
     async def finish_execution_round(
         self,
@@ -675,15 +844,20 @@ class CRUDAudit:
         audit_record_id: int,
         claim_token: str,
         error_reason: str,
+        execution_record_id: int | None = None,
+        commit: bool = True,
     ) -> bool:
         now = get_local_time()
-        await db.execute(
+        attempt_conditions = [
+            AuditExecutionRecord.audit_record_id == audit_record_id,
+            AuditExecutionRecord.claim_token == claim_token,
+            AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+        ]
+        if execution_record_id is not None:
+            attempt_conditions.append(AuditExecutionRecord.id == execution_record_id)
+        attempt_result = await db.execute(
             update(AuditExecutionRecord)
-            .where(
-                AuditExecutionRecord.audit_record_id == audit_record_id,
-                AuditExecutionRecord.claim_token == claim_token,
-                AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
-            )
+            .where(*attempt_conditions)
             .values(
                 status=AuditExecutionStatus.EXECUTION_UNKNOWN,
                 error=error_reason,
@@ -691,6 +865,30 @@ class CRUDAudit:
             )
             .execution_options(synchronize_session=False)
         )
+        if (attempt_result.rowcount or 0) != 1 and execution_record_id is not None:
+            if commit:
+                await db.rollback()
+            return False
+        if execution_record_id is not None:
+            await db.execute(
+                update(AuditExecutionRecord)
+                .where(
+                    AuditExecutionRecord.audit_record_id == audit_record_id,
+                    AuditExecutionRecord.claim_token == claim_token,
+                    AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+                    AuditExecutionRecord.id != execution_record_id,
+                )
+                .values(
+                    status=AuditExecutionStatus.EXECUTION_UNKNOWN,
+                    error=error_reason,
+                    finished_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+        elif (attempt_result.rowcount or 0) == 0:
+            if commit:
+                await db.rollback()
+            return False
         result = await db.execute(
             update(AuditRecord)
             .where(
@@ -707,8 +905,38 @@ class CRUDAudit:
             )
             .execution_options(synchronize_session=False)
         )
-        await db.commit()
+        if commit:
+            await db.commit()
         return (result.rowcount or 0) == 1
+
+    async def mark_running_executions_unknown_except(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        claim_token: str,
+        excluded_execution_record_ids: set[int],
+        error_reason: str,
+    ) -> int:
+        conditions = [
+            AuditExecutionRecord.audit_record_id == audit_record_id,
+            AuditExecutionRecord.claim_token == claim_token,
+            AuditExecutionRecord.status == AuditExecutionStatus.RUNNING,
+        ]
+        if excluded_execution_record_ids:
+            conditions.append(AuditExecutionRecord.id.not_in(excluded_execution_record_ids))
+        result = await db.execute(
+            update(AuditExecutionRecord)
+            .where(*conditions)
+            .values(
+                status=AuditExecutionStatus.EXECUTION_UNKNOWN,
+                error=error_reason,
+                finished_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        return result.rowcount or 0
 
     async def expire_pending_confirmations(self, db: AsyncSession) -> int:
         now = get_local_time()

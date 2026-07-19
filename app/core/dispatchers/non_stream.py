@@ -4,12 +4,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dispatchers.foreground import ForegroundDispatcherMixin
+from app.core.dispatchers.interactive import InteractiveDispatcherMixin
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
 from app.models.message import InternalMessage
 
 
-class NonStreamDispatcherMixin(ForegroundDispatcherMixin):
+class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
     @classmethod
     async def dispatch(
         cls,
@@ -33,7 +33,7 @@ class NonStreamDispatcherMixin(ForegroundDispatcherMixin):
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
     ):
-        return await cls._dispatch_foreground(
+        return await cls._dispatch_interactive(
             db=db,
             message=message,
             uid=uid,

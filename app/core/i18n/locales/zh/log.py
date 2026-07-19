@@ -1,12 +1,6 @@
 MESSAGES = {
     "LOG_ADAPTER_WEB_UNEXPECTED_ERROR": "WebChatAdapter 发生未预期错误: {error}",
     "LOG_ADAPTER_WS_UNEXPECTED_ERROR": "WebSocketChatAdapter 发生未预期错误: {error}",
-    "LOG_AUDIT_EXCEPTION": "安全审计异常: {error}",
-    "LOG_AUDIT_PROVIDER_DISABLED": "审计模型渠道已被禁用，跳过安全审计",
-    "LOG_AUDIT_TOKEN_MISMATCH": "Token 不匹配。期望: {expected_token}, 实际: {token}",
-    "LOG_AUDIT_TOKEN_MISMATCH_WRITE_FILE": "write_file Token 不匹配。期望: {expected_token}, 实际: {token}",
-    "LOG_AUDIT_TOKEN_VERIFIED_COMMAND": "命令动态 Token 验证通过: {command_preview}...",
-    "LOG_AUDIT_TOKEN_VERIFIED_WRITE_FILE": "write_file 动态 Token 验证通过: {path}",
     "LOG_CHANNEL_ALL_UNAVAILABLE": "所有优先级组的渠道均不可用，expected_usage={expected_usage}",
     "LOG_CHANNEL_CONFIG_EMPTY": "渠道配置为空或无路由规则，expected_usage={expected_usage}",
     "LOG_CHANNEL_CURSOR_READ_FAILED": "读取轮询游标失败，回退使用下标 0: {error}",

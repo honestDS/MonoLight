@@ -42,6 +42,8 @@ class BackgroundTaskBase(SQLModel):
     reply_lock_until: int | None = Field(default=None, index=True)
     attempt_count: int = Field(default=0, ge=0)
     extra: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    audit_record_id: int | None = Field(default=None, index=True)
+    audit_execution_record_id: int | None = Field(default=None, unique=True, index=True)
 
 
 class BackgroundTask(BackgroundTaskBase, table=True):
@@ -57,9 +59,20 @@ class BackgroundTaskCreate(BackgroundTaskBase):
     pass
 
 
-class BackgroundTaskResponse(BackgroundTaskBase):
+class BackgroundTaskResponse(SQLModel):
     id: int
+    uid: str
+    session_id: str
+    profile_id: int
+    tool_call_id: str
+    tool_name: str
+    status: BackgroundTaskStatus
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    auto_reply: bool
+    reply_status: BackgroundTaskReplyStatus
+    attempt_count: int
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, extra="ignore")

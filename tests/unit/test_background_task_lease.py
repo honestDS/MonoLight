@@ -1,25 +1,28 @@
+import sys
+
 import pytest
-from sqlalchemy import delete, update
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel
 
 from app.core.crud.background_task import background_task_crud
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.providers.database import AsyncSessionLocal, engine
+from app.providers.database import AsyncSessionLocal
 from app.providers.database.time import get_database_timestamp
 from app.schemas.background_task import BackgroundTaskResult
 
 
 @pytest.fixture(autouse=True)
-async def clean_background_task_table():
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: BackgroundTask.__table__.drop(sync_connection, checkfirst=True))
-        await connection.run_sync(lambda sync_connection: BackgroundTask.__table__.create(sync_connection))
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(BackgroundTask))
-        await db.commit()
-    yield
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(BackgroundTask))
-        await db.commit()
+async def isolated_background_task_database(tmp_path, monkeypatch):
+    test_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'background-task-lease.db'}", connect_args={"timeout": 30})
+    async with test_engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+    monkeypatch.setattr(sys.modules[__name__], "AsyncSessionLocal", session_factory)
+    try:
+        yield
+    finally:
+        await test_engine.dispose()
 
 
 async def create_task() -> BackgroundTask:

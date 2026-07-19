@@ -86,6 +86,8 @@ export default {
   secondary_confirmation_hint: '关闭后安全审计仍会执行，高风险操作会被直接拒绝，审计异常会返回失败。',
   audit_threshold: '二次确认阈值 (1-7)',
   audit_threshold_hint: '审计分数达到该值时要求二次确认；分数越高，触发越宽松。',
+  audit_confirmation_timeout_minutes: '确认卡片有效期（分钟）',
+  audit_confirmation_timeout_minutes_hint: '二次确认卡片超过该时长后失效，范围为 1-1440 分钟，默认 10 分钟。',
   scheduling_control: '调度与并行控制',
   max_parallel_tools: '最大并行数',
   max_parallel_tools_hint: '模型在单轮回复中被允许同时调用的最大工具数量，超出该限制的工具调用将被系统拦截并向模型抛出错误。',

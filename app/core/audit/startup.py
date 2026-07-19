@@ -6,7 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.audit.storage import AuditCleanupResult, cleanup_audit_storage
+from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
 from app.core.crud.audit import audit_crud
+from app.core.crud.background_task import background_task_crud
+from app.core.i18n import t
 from app.core.paths import AUDIT_DIR
 from app.models.audit import AuditRecordStatus
 
@@ -33,6 +36,7 @@ async def recover_and_cleanup_audit_data(
     expired_pending_records = await audit_crud.expire_pending_confirmations(db)
     recovered_preparing_records = await audit_crud.recover_preparing(db)
     unknown_execution_records, unknown_execution_attempts = await audit_crud.recover_interrupted(db)
+    await background_task_crud.fail_tasks_for_terminal_audits(db, error=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
     for audit_record_id, _uid, _session_id, _language in expired_records:
         await update_confirmation_message_status(db, audit_record_id=audit_record_id)
     for audit_record_id in preparing_records:

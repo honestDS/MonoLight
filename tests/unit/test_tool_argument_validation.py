@@ -14,12 +14,7 @@ def test_get_tool_required_parameters_reads_registered_schema():
 
 
 @pytest.mark.asyncio
-async def test_process_single_tool_returns_failure_for_missing_required_arguments(monkeypatch):
-    async def unexpected_audit(*_args, **_kwargs):
-        pytest.fail("缺少必填参数时不应进入工具审计")
-
-    monkeypatch.setattr(process_single_tool_module, "audit_tool_call", unexpected_audit)
-
+async def test_process_single_tool_returns_failure_for_missing_required_arguments():
     cfg = ProfileConfig.model_validate(
         {
             "tool": {

@@ -8,6 +8,7 @@ from app.core.audit.integrity import (
     create_file_integrity_snapshot,
     sha256_text,
     summarize_tool_arguments,
+    verify_file_integrity_snapshot,
     verify_persisted_tool_round,
     verify_tool_round_integrity,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "sha256_text",
     "summarize_tool_arguments",
     "validate_audit_file_path",
+    "verify_file_integrity_snapshot",
     "verify_persisted_tool_round",
     "verify_tool_round_integrity",
     "update_confirmation_message_status",

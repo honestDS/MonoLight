@@ -1,6 +1,7 @@
 import asyncio
 import json
 import socket
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
@@ -15,6 +16,7 @@ from app.core.constants import (
     ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE,
     ERR_BACKGROUND_TOO_MANY_TOOL_CALLS,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES,
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
@@ -35,6 +37,7 @@ from app.core.prompts import (
 )
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
+from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
@@ -137,7 +140,9 @@ class BackgroundDispatcherMixin:
         restrict_tools_to_background_allowlist: bool = True,
         reply_source: str = "background_task",
         final_message_dedupe_key: str | None = None,
+        audit_execution_binding_callback: Callable[[dict[str, Any] | None], Awaitable[None]] | None = None,
     ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]]]:
+        """根据历史生成后台回复，并持久化可能执行工具的审计绑定。"""
         user = await user_crud.get_by_uid(db, uid)
         username = user.username if user else "Unknown"
         cfg = await validate_profile_and_cfg(db, profile)
@@ -359,18 +364,17 @@ class BackgroundDispatcherMixin:
                 for tool_call in ai_msg.tool_calls
             ]
         else:
-            if cfg.security.audit_channel_id and cfg.security.audit_model_id:
-                audit_round = await audit_tool_round(
-                    db,
-                    cfg=cfg,
-                    tool_calls=ai_msg.tool_calls,
-                    source_assistant_message_id=ai_msg.id,
-                    uid=uid,
-                    operator_username=username,
-                    session_id=session_id,
-                    source=reply_source,
-                    language=get_current_locale(),
-                )
+            audit_round = await audit_tool_round(
+                db,
+                cfg=cfg,
+                tool_calls=ai_msg.tool_calls,
+                source_assistant_message_id=ai_msg.id,
+                uid=uid,
+                operator_username=username,
+                session_id=session_id,
+                source=reply_source,
+                language=get_current_locale(),
+            )
             if audit_round is not None and not audit_round.may_execute:
                 tool_responses = list(audit_round.tool_results)
             else:
@@ -381,6 +385,32 @@ class BackgroundDispatcherMixin:
                         audit_record_id=audit_round.audit_record_id,
                     )
                     if claimed_record is not None and audit_claim_token is not None:
+                        if audit_execution_binding_callback is not None:
+                            try:
+                                await audit_execution_binding_callback(
+                                    {
+                                        "audit_record_id": audit_round.audit_record_id,
+                                        "claim_token": audit_claim_token,
+                                    }
+                                )
+                            except asyncio.CancelledError:
+                                await audit_crud.mark_execution_unknown(
+                                    db,
+                                    audit_record_id=audit_round.audit_record_id,
+                                    claim_token=audit_claim_token,
+                                    error_reason=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
+                                )
+                                await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                                raise
+                            except Exception:
+                                await audit_crud.mark_execution_unknown(
+                                    db,
+                                    audit_record_id=audit_round.audit_record_id,
+                                    claim_token=audit_claim_token,
+                                    error_reason=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
+                                )
+                                await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                                raise
                         audit_details = await audit_crud.list_tool_details(db, audit_round.audit_record_id)
                         detail_by_call_id = {detail.original_tool_call_id: detail for detail in audit_details}
                         for tool_call in ai_msg.tool_calls:
@@ -402,6 +432,7 @@ class BackgroundDispatcherMixin:
                             audit_execution_ids[tool_call.id] = execution.id
                 claim_failed = audit_round is not None and (audit_claim_token is None or len(audit_execution_ids) != len(ai_msg.tool_calls))
                 if claim_failed:
+                    claim_closed = True
                     for execution_id in audit_execution_ids.values():
                         await audit_crud.finish_execution_attempt(
                             db,
@@ -410,14 +441,18 @@ class BackgroundDispatcherMixin:
                             error=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
                         )
                     if claimed_record is not None and claimed_record.execution_claim_token:
-                        await audit_crud.finish_execution_round(
+                        claim_closed = await audit_crud.finish_execution_round(
                             db,
                             audit_record_id=audit_round.audit_record_id,
                             claim_token=claimed_record.execution_claim_token,
                             status=AuditRecordStatus.FAILED,
                             error_reason=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED),
                         )
+                        if not claim_closed:
+                            raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
                         await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                    if audit_execution_binding_callback is not None and claim_closed:
+                        await audit_execution_binding_callback(None)
                     audit_claim_token = None
                     tool_responses = [
                         InternalMessage(
@@ -449,7 +484,6 @@ class BackgroundDispatcherMixin:
                                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                                 context_window_k=chat_params["context_window_k"],
                                 allow_background_submission=False,
-                                audit_preapproved=audit_round is not None,
                             )
                             for tool_call in ai_msg.tool_calls
                         ]
@@ -464,8 +498,8 @@ class BackgroundDispatcherMixin:
                     db,
                     execution_record_id=audit_execution_ids[tool_response.tool_call_id],
                     status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
-                    result_summary=(tool_response.content or "")[:1000],
-                    error=None if execution_succeeded else (tool_response.content or "")[:1000],
+                    result_summary=sanitize_execution_summary(tool_response.content, redact_text=True),
+                    error=None if execution_succeeded else sanitize_execution_summary(tool_response.content, redact_text=True),
                 )
             await audit_crud.finish_execution_round(
                 db,
@@ -475,6 +509,8 @@ class BackgroundDispatcherMixin:
                 error_reason=None if audit_all_succeeded else "一个或多个工具执行失败",
             )
             await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+            if audit_execution_binding_callback is not None:
+                await audit_execution_binding_callback(None)
 
         files_to_user = extract_files_to_user(tool_responses)
         persisted_tool_result_ids: list[int] = []

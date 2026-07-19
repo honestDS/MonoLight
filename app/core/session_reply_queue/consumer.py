@@ -1,14 +1,22 @@
 import asyncio
 import uuid
 
+from app.core.constants import ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN
 from app.core.crud.profile import profile_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException
+from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.log import get_logger
-from app.core.session_reply_queue.executor import execute_session_reply_work, fail_session_reply_work, mark_confirmed_execution_unknown, retry_delay_seconds
+from app.core.session_reply_queue.executor import (
+    execute_session_reply_work,
+    fail_session_reply_work,
+    mark_work_audit_execution_unknown,
+    retry_delay_seconds,
+    work_has_active_audit_execution,
+)
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.models.profile import ProfileConfig
 from app.models.session_reply_work_item import SessionReplyWorkType
@@ -119,14 +127,15 @@ class SessionReplyConsumer:
                 await asyncio.sleep(SESSION_REPLY_POLL_INTERVAL_SECONDS)
 
     async def _run_claimed(self, work_id: int, worker_id: str, attempt_count: int, max_attempts: int, language: str = "zh") -> None:
+        """执行已领取回复工作并根据活动审计状态决定失败处理方式。"""
         locale_token = set_current_locale(language)
         try:
             await execute_session_reply_work(work_id, worker_id)
         except asyncio.CancelledError:
-            await mark_confirmed_execution_unknown(
+            await mark_work_audit_execution_unknown(
                 work_id,
                 worker_id,
-                "Confirmed tool execution lease was lost; result unknown and automatic retry is forbidden",
+                t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
             )
             raise
         except Exception as exc:
@@ -138,8 +147,9 @@ class SessionReplyConsumer:
                     db,
                     work_id=work_id,
                 )
-            if work is not None and work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
-                await mark_confirmed_execution_unknown(work_id, worker_id, error)
+            has_active_audit_execution = work is not None and (work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION or work_has_active_audit_execution(work))
+            if has_active_audit_execution:
+                await mark_work_audit_execution_unknown(work_id, worker_id, error)
                 await fail_session_reply_work(work_id, worker_id, error)
             elif isinstance(exc, BaseBusinessException):
                 await fail_session_reply_work(
@@ -163,10 +173,11 @@ class SessionReplyConsumer:
             reset_current_locale(locale_token)
 
     async def _recover_expired(self) -> None:
+        """恢复过期租约并终止带活动审计绑定的回复工作。"""
         async with AsyncSessionLocal() as db:
             _recovered_count, terminal_claims = await session_reply_work_item_crud.recover_expired(db)
         for work_id, worker_id, error in terminal_claims:
-            await mark_confirmed_execution_unknown(work_id, worker_id, error)
+            await mark_work_audit_execution_unknown(work_id, worker_id, error)
             await fail_session_reply_work(work_id, worker_id, error)
 
     async def _cleanup_terminal_items_if_due(self, now: float) -> None:

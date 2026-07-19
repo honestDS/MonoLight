@@ -8,7 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.constants import ERR_SESSION_REPLY_DEDUPLICATION_FAILED
+from app.core.constants import ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN, ERR_SESSION_REPLY_DEDUPLICATION_FAILED, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession
@@ -470,54 +470,61 @@ class CRUDSessionReplyWorkItem:
             SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
             or_(SessionReplyWorkItem.lock_until.is_(None), SessionReplyWorkItem.lock_until <= now),
         ]
-        streamed_work = exists(
-            select(1).where(
-                SessionReplyStreamEvent.work_id == SessionReplyWorkItem.id,
-            )
-        )
-        terminal_result = await db.execute(
-            select(
-                SessionReplyWorkItem.id,
-                SessionReplyWorkItem.locked_by,
-                streamed_work.label("stream_started"),
-                SessionReplyWorkItem.work_type,
-            ).where(
+        expired_result = await db.execute(
+            select(SessionReplyWorkItem).where(
                 *expired_conditions,
-                or_(
-                    streamed_work,
-                    SessionReplyWorkItem.attempt_count >= SessionReplyWorkItem.max_attempts,
-                    SessionReplyWorkItem.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-                ),
                 SessionReplyWorkItem.locked_by.is_not(None),
             )
         )
-        terminal_claims = [
-            (
-                work_id,
-                worker_id,
-                ("Confirmed tool execution was interrupted; result unknown and automatic retry is forbidden" if work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION else "Stream interrupted after partial response" if stream_started else "Maximum retry attempts reached after worker interruption"),
+        expired_work = list(expired_result.scalars().all())
+        expired_work_ids = [work.id for work in expired_work if work.id is not None]
+        streamed_work_ids: set[int] = set()
+        if expired_work_ids:
+            stream_result = await db.execute(select(SessionReplyStreamEvent.work_id).where(SessionReplyStreamEvent.work_id.in_(expired_work_ids)))
+            streamed_work_ids = {work_id for work_id in stream_result.scalars().all() if work_id is not None}
+
+        terminal_claims: list[tuple[int, str, str]] = []
+        recovered_count = 0
+        for work in expired_work:
+            if work.id is None or work.locked_by is None:
+                continue
+            state = work.execution_state if isinstance(work.execution_state, dict) else {}
+            active_audit_execution = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in state
+            stream_started = work.id in streamed_work_ids
+            terminal_error = None
+            if active_audit_execution:
+                terminal_error = t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN)
+            elif work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
+                terminal_error = "Confirmed tool execution was interrupted; result unknown and automatic retry is forbidden"
+            elif stream_started:
+                terminal_error = "Stream interrupted after partial response"
+            elif work.attempt_count >= work.max_attempts:
+                terminal_error = "Maximum retry attempts reached after worker interruption"
+
+            if terminal_error is not None:
+                terminal_claims.append((work.id, work.locked_by, terminal_error))
+                continue
+
+            retry_result = await db.execute(
+                update(SessionReplyWorkItem)
+                .where(
+                    SessionReplyWorkItem.id == work.id,
+                    SessionReplyWorkItem.status == SessionReplyWorkStatus.RUNNING,
+                    SessionReplyWorkItem.locked_by == work.locked_by,
+                    or_(SessionReplyWorkItem.lock_until.is_(None), SessionReplyWorkItem.lock_until <= now),
+                    SessionReplyWorkItem.attempt_count < SessionReplyWorkItem.max_attempts,
+                )
+                .values(
+                    status=SessionReplyWorkStatus.READY_FOR_LLM,
+                    locked_by=None,
+                    lock_until=None,
+                    available_at=now,
+                    updated_at=get_local_time(),
+                )
             )
-            for work_id, worker_id, stream_started, work_type in terminal_result.all()
-            if worker_id is not None
-        ]
-        retry_result = await db.execute(
-            update(SessionReplyWorkItem)
-            .where(
-                *expired_conditions,
-                ~streamed_work,
-                SessionReplyWorkItem.attempt_count < SessionReplyWorkItem.max_attempts,
-                SessionReplyWorkItem.work_type != SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
-            )
-            .values(
-                status=SessionReplyWorkStatus.READY_FOR_LLM,
-                locked_by=None,
-                lock_until=None,
-                available_at=now,
-                updated_at=get_local_time(),
-            )
-        )
+            recovered_count += retry_result.rowcount or 0
         await db.commit()
-        return len(terminal_claims) + (retry_result.rowcount or 0), terminal_claims
+        return recovered_count + len(terminal_claims), terminal_claims
 
     async def update_claimed(
         self,

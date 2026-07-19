@@ -1,15 +1,17 @@
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import inspect, update
+from sqlalchemy import inspect, text, update
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel
 
 from app.core.crud.audit import build_audit_status_update, build_passed_execution_claim_update, build_pending_execution_claim_update
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditRecord, AuditRecordStatus
 from app.providers.database.bootstrap import ensure_migration_record_table
 from scripts import migration_20260717_add_audit_confirmation_records as audit_migration
+from scripts import migration_20260719_add_background_task_audit_binding as background_task_migration
 
 
 @pytest.mark.parametrize(
@@ -150,3 +152,30 @@ async def test_audit_migration_runs_on_sqlite(tmp_path):
         assert "ix_audit_execution_record_claim_token" in execution_indexes
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_task_binding_migration_is_idempotent_after_metadata_create_all(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'background-task-migration.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(SQLModel.metadata.create_all)
+        async with session_factory() as session:
+            await background_task_migration.migrate(session)
+            await session.commit()
+            await background_task_migration.migrate(session)
+            await session.commit()
+        async with engine.connect() as connection:
+            unique_indexes = await connection.run_sync(lambda sync_connection: [item for item in inspect(sync_connection).get_indexes("background_task") if item.get("unique") and item.get("column_names") == ["audit_execution_record_id"]])
+        assert len(unique_indexes) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
+def test_background_task_binding_unique_index_sql_compiles_for_each_database(dialect):
+    compiled = str(text("CREATE UNIQUE INDEX uq_background_task_audit_execution_record_id ON background_task (audit_execution_record_id)").compile(dialect=dialect))
+
+    assert compiled.startswith("CREATE UNIQUE INDEX")
+    assert "audit_execution_record_id" in compiled

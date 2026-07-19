@@ -1,9 +1,10 @@
 import hashlib
 import json
+import os
 
 import pytest
 
-from app.core.audit.integrity import build_tool_call_integrity_snapshot, canonical_json_dumps, create_file_integrity_snapshot
+from app.core.audit.integrity import build_tool_call_integrity_snapshot, canonical_json_dumps, create_file_integrity_snapshot, verify_file_integrity_snapshot
 from app.core.utils.dispatcher.save_message import _to_storable_content
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 
@@ -105,5 +106,73 @@ def test_file_integrity_records_absolute_path_resolved_path_size_and_hash(tmp_pa
     assert snapshot.original_path == "scripts/entry.py"
     assert snapshot.absolute_path == str(source_file.absolute())
     assert snapshot.resolved_path == str(source_file.resolve())
+    assert snapshot.exists is True
+    assert snapshot.file_type == "regular_file"
     assert snapshot.size == len(content)
     assert snapshot.sha256 == hashlib.sha256(content).hexdigest()
+
+
+def test_file_integrity_records_missing_target_without_empty_hash(tmp_path):
+    missing_file = tmp_path / "missing.txt"
+
+    missing = create_file_integrity_snapshot(missing_file, working_directory=tmp_path)
+
+    assert missing.absolute_path == str(missing_file)
+    assert missing.exists is False
+    assert missing.file_type == "missing"
+    assert missing.size is None
+    assert missing.sha256 is None
+
+    empty_file = tmp_path / "empty.txt"
+    empty_file.touch()
+    empty = create_file_integrity_snapshot(empty_file, working_directory=tmp_path)
+
+    assert empty.exists is True
+    assert empty.size == 0
+    assert empty.sha256 == hashlib.sha256(b"").hexdigest()
+    assert empty.sha256
+
+
+def test_file_integrity_recheck_accepts_missing_target_only_when_still_missing(tmp_path):
+    target = tmp_path / "append.txt"
+    expected = create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
+
+    assert verify_file_integrity_snapshot(expected, create_file_integrity_snapshot(target, working_directory=tmp_path))
+
+    target.write_text("created", encoding="utf-8")
+    assert not verify_file_integrity_snapshot(expected, create_file_integrity_snapshot(target, working_directory=tmp_path))
+
+
+@pytest.mark.parametrize("object_kind", ["directory", "symlink"])
+def test_file_integrity_recheck_rejects_created_non_file_objects(tmp_path, object_kind):
+    target = tmp_path / "append-target"
+    expected = create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
+    if object_kind == "directory":
+        target.mkdir()
+    else:
+        link_target = tmp_path / "link-target.txt"
+        link_target.write_text("target", encoding="utf-8")
+        try:
+            os.symlink(link_target, target)
+        except OSError as exc:
+            pytest.skip(f"当前系统不允许创建测试链接: {exc}")
+
+    assert not verify_file_integrity_snapshot(expected, create_file_integrity_snapshot(target, working_directory=tmp_path))
+
+
+def test_file_integrity_recheck_rejects_changed_and_replaced_existing_target(tmp_path):
+    target = tmp_path / "existing.txt"
+    target.write_text("before", encoding="utf-8")
+    expected = create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
+
+    target.write_text("after", encoding="utf-8")
+    assert not verify_file_integrity_snapshot(expected, create_file_integrity_snapshot(target, working_directory=tmp_path))
+
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("replacement", encoding="utf-8")
+    target.unlink()
+    try:
+        os.symlink(replacement, target)
+    except OSError as exc:
+        pytest.skip(f"当前系统不允许创建测试链接: {exc}")
+    assert not verify_file_integrity_snapshot(expected, create_file_integrity_snapshot(target, working_directory=tmp_path))
