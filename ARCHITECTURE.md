@@ -140,7 +140,7 @@ app/core/audit/
 ├── confirmation.py         # 确认词识别与确认消息状态更新
 ├── integrity.py            # 整轮和逐工具参数摘要及文件摘要
 ├── persistence.py          # 审计文件与数据库明细保存编排
-├── service.py              # 整轮评分、受限文件读取与确认摘要
+├── service.py              # 整轮评分、按需只读文件证据与确认摘要
 ├── startup.py              # 启动恢复及保留期清理
 └── storage.py              # 审计文件原子写入与路径核对
 ```
@@ -294,6 +294,7 @@ app/core/tools/
 ├── image_generation.py     # 图像生成
 ├── knowledge_base_query.py # 知识库查询
 ├── list_background_tasks.py # 查询后台任务
+├── read_text_file.py       # 通用只读文本文件读取
 ├── send_file_to_user.py    # 向用户发送文件
 └── shell.py                # Shell 命令执行
 ```

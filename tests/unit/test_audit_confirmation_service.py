@@ -9,15 +9,13 @@ import pytest
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, parse_confirmation_decision
 from app.core.audit.service import (
-    AUDIT_DIRECT_SCRIPT_MAX_CANDIDATES,
-    AUDIT_FILE_MAX_BYTES,
     _apply_evidence_score_floor,
     _call_auditor,
-    _collect_file_candidates,
-    _direct_script_paths,
+    _collect_append_file_snapshots,
     _file_checks_are_sufficient,
+    _file_snapshots_from_reads,
     _parse_results,
-    _read_candidate_sync,
+    _read_for_audit_sync,
     _requires_confirmation_from_evidence,
     _summarize_pending,
     audit_tool_round,
@@ -71,93 +69,6 @@ def test_audit_score_conclusion_uses_configured_confirmation_threshold(score, th
 )
 def test_evidence_score_floor_respects_disabled_confirmation(score, threshold, requires_confirmation, expected):
     assert _apply_evidence_score_floor(score, threshold, requires_confirmation=requires_confirmation) == expected
-
-
-def test_direct_script_requires_complete_read_and_model_file_check(tmp_path):
-    script = tmp_path / "entry.py"
-    script.write_text("print('ok')", encoding="utf-8")
-    tool_call = InternalToolCall(id="call-1", name="execute_shell", arguments={"command": 'python "entry.py"'})
-    _request_candidates, snapshots_by_call, candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
-    snapshots = snapshots_by_call[tool_call.id]
-    read_result = _read_candidate_sync(str(script.resolve()), candidates_by_path, {"bytes": 0, "calls": 0})
-
-    assert _requires_confirmation_from_evidence(tool_call, snapshots, [], [{"path": "entry.py", "status": "ok"}])
-    assert _requires_confirmation_from_evidence(tool_call, snapshots, [read_result], [])
-    assert not _requires_confirmation_from_evidence(tool_call, snapshots, [read_result], [{"path": "entry.py", "status": "ok"}])
-
-
-def test_direct_script_file_checks_require_structured_matching_server_evidence(tmp_path):
-    script = tmp_path / "entry.py"
-    script.write_text("print('ok')", encoding="utf-8")
-    tool_call = InternalToolCall(id="call-1", name="execute_shell", arguments={"command": 'python "entry.py"'})
-    _request_candidates, snapshots_by_call, candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
-    snapshots = snapshots_by_call[tool_call.id]
-    read_result = _read_candidate_sync(str(script.resolve()), candidates_by_path, {"bytes": 0, "calls": 0})
-    valid_check = {
-        "path": "entry.py",
-        "status": "ok",
-        "sha256": snapshots[0]["sha256"],
-        "size": snapshots[0]["size"],
-    }
-
-    assert _file_checks_are_sufficient(snapshots, [read_result], [valid_check])
-    assert not _file_checks_are_sufficient(snapshots, [read_result], ["not a check"])
-    assert not _file_checks_are_sufficient(snapshots, [read_result], [{**valid_check, "path": "other.py"}])
-    assert not _file_checks_are_sufficient(snapshots, [read_result], [{**valid_check, "status": "failed"}])
-    assert not _file_checks_are_sufficient(snapshots, [read_result], [{**valid_check, "sha256": "0" * 64}])
-
-    read_result["truncated"] = True
-    assert not _file_checks_are_sufficient(snapshots, [read_result], [valid_check])
-
-
-def test_direct_script_extraction_preserves_all_candidates_and_dynamic_metadata():
-    command = "python " + " ".join(f"script-{index}.py" for index in range(11))
-    extraction = _direct_script_paths(command)
-
-    assert extraction.unique_candidate_count == 11
-    assert len(extraction.selected_candidates) == AUDIT_DIRECT_SCRIPT_MAX_CANDIDATES
-    assert extraction.excess_candidate_count == 1
-    assert extraction.parse_failure is None
-    assert extraction.dynamic_interpreter_targets == ()
-
-    dynamic = _direct_script_paths('python "$SCRIPT"')
-    assert dynamic.dynamic_interpreter_targets == ("$SCRIPT",)
-    assert _direct_script_paths('py "$SCRIPT"').dynamic_interpreter_targets == ("$SCRIPT",)
-    assert _direct_script_paths('python3 "$SCRIPT"').dynamic_interpreter_targets == ("$SCRIPT",)
-    assert _direct_script_paths('echo "$SCRIPT"').dynamic_interpreter_targets == ()
-
-    invalid = _direct_script_paths('python "unterminated.py')
-    assert invalid.parse_failure
-
-
-@pytest.mark.parametrize(
-    ("command", "expected_targets"),
-    [
-        ('env python "$SCRIPT"', ("$SCRIPT",)),
-        ('env py "$SCRIPT"', ("$SCRIPT",)),
-        ('env python3 "$SCRIPT"', ("$SCRIPT",)),
-        ('env -i --unset=PYTHONPATH python "$SCRIPT"', ("$SCRIPT",)),
-        ('env -S "python $SCRIPT"', ("$SCRIPT",)),
-        ('sudo -u runner --preserve-env python "$SCRIPT"', ("$SCRIPT",)),
-        ('sudo -H python "$SCRIPT"', ("$SCRIPT",)),
-        ("cmd /d /s /c python %SCRIPT%", ("%SCRIPT%",)),
-        ('cmd /c "python %SCRIPT%"', ("%SCRIPT%",)),
-        ('env powershell -File "$SCRIPT"', ("$SCRIPT",)),
-        ('sudo pwsh -Command "$SCRIPT"', ("pwsh -Command",)),
-        ("cmd /c pwsh -File %SCRIPT%", ("%SCRIPT%",)),
-    ],
-)
-def test_dynamic_interpreter_targets_cover_wrappers_without_shell_expansion(tmp_path, command, expected_targets):
-    """验证跨平台包装器中的动态解释器目标进入服务端确认原因。"""
-    extraction = _direct_script_paths(command)
-    assert extraction.dynamic_interpreter_targets == expected_targets
-
-    tool_call = InternalToolCall(id="call-1", name="execute_shell", arguments={"command": command})
-    _request_candidates, _snapshots, _candidates_by_path, reasons = _collect_file_candidates([tool_call], tmp_path)
-    assert reasons[tool_call.id][0]["code"] == "dynamic_interpreter_target"
-
-    assert _direct_script_paths("echo $SCRIPT").dynamic_interpreter_targets == ()
-    assert _direct_script_paths("cmd /c echo %SCRIPT%").dynamic_interpreter_targets == ()
 
 
 def test_audit_report_language_defaults_and_rejects_unsupported_locale():
@@ -334,131 +245,43 @@ def test_batch_result_parser_requires_exact_call_mapping_and_file_results():
         )
 
 
-def test_audit_file_reader_only_reads_approved_direct_candidate(tmp_path):
-    script = tmp_path / "entry.py"
-    script.write_text("print('ok')", encoding="utf-8")
-    tool_call = InternalToolCall(
-        id="call-1",
-        name="execute_shell",
-        arguments={"command": f'python "{script}"'},
-    )
-    request_candidates, snapshots, candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
+def test_audit_file_reader_accepts_any_path_but_requires_round_tool_id(tmp_path):
+    outside_file = tmp_path.parent / "audit-anywhere.txt"
+    outside_file.write_text("unrestricted evidence", encoding="utf-8")
+    state = {"bytes": 0, "calls": 0}
 
-    assert request_candidates["call-1"][0]["resolved_path"] == str(script.resolve())
-    assert snapshots["call-1"][0]["sha256"]
-    read_state = {"bytes": 0, "calls": 0}
-    approved = _read_candidate_sync(str(script.resolve()), candidates_by_path, read_state)
-    denied = _read_candidate_sync(str(tmp_path / "other.py"), candidates_by_path, read_state)
+    result = _read_for_audit_sync(str(outside_file), "call-1", {"call-1"}, tmp_path, state)
+    invalid = _read_for_audit_sync(str(outside_file), "other-call", {"call-1"}, tmp_path, state)
 
-    assert approved["content"] == "print('ok')"
-    assert denied["status"] == "denied"
+    assert result["status"] == "ok"
+    assert result["content"] == "unrestricted evidence"
+    assert result["tool_call_id"] == "call-1"
+    assert invalid["status"] == "invalid"
+    assert state == {"bytes": len("unrestricted evidence"), "calls": 2}
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("case", "score", "threshold", "expected_status"),
-    [
-        ("eleven", 0, 5, "pending"),
-        ("eleven", 0, 0, "pending"),
-        ("dynamic", 0, 0, "pending"),
-        ("echo", 0, 0, "passed"),
-        ("eleven", 8, 0, "blocked"),
-    ],
-)
-async def test_server_confirmation_reasons_control_round_status_and_persistence(monkeypatch, tmp_path, case, score, threshold, expected_status):
-    import app.core.audit.service as service
+def test_file_checks_are_bound_to_the_actual_read_snapshot(tmp_path):
+    source = tmp_path / "entry.txt"
+    source.write_text("evidence", encoding="utf-8")
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
+    snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
+    valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated")}
 
-    commands = {
-        "eleven": "python " + " ".join(f"script-{index}.py" for index in range(11)),
-        "dynamic": 'python "$SCRIPT"',
-        "echo": 'echo "$SCRIPT"',
-    }
-    cfg = _profile_config()
-    cfg.security.audit_threshold = threshold
-    captured = {}
-
-    class FakeDb:
-        async def commit(self):
-            return None
-
-    async def no_expiration(*_args, **_kwargs):
-        return None
-
-    async def create_preparing(*_args, **_kwargs):
-        return SimpleNamespace(id=123)
-
-    async def call_auditor(*_args, **_kwargs):
-        captured["request_payload"] = _args[2]
-        return {"messages": []}, {
-            "parsed": {
-                "results": [
-                    {
-                        "tool_call_id": "call-1",
-                        "score": score,
-                        "reason": "model reason",
-                        "file_checks": [],
-                    }
-                ]
-            }
-        }
-
-    async def summarize_pending(*args, **_kwargs):
-        captured["summary_reasons"] = args[3]
-        return "Confirm command", {}
-
-    async def persist(*_args, **kwargs):
-        captured["context_payload"] = kwargs["context_payload"]
-        return True
-
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
-    monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
-
-    result = await service.audit_tool_round(
-        FakeDb(),
-        cfg=cfg,
-        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": commands[case]})],
-        source_assistant_message_id=1,
-        uid="u1",
-        operator_username="tester",
-        session_id="session-1",
-        source="web",
-        language="en",
-        working_directory=tmp_path,
-    )
-
-    assert result.status.value == expected_status
-    request_tool = captured["request_payload"]["tool_calls"][0]
-    metadata = request_tool["direct_file_candidate_metadata"]
-    if case == "eleven":
-        assert metadata["unique_candidate_count"] == 11
-        assert len(request_tool["direct_file_candidates"]) == 10
-        assert len(captured["context_payload"]["results"][0]["file_snapshots"]) == 10
-        assert captured["context_payload"]["server_confirmation_reasons"]["call-1"]
-        if expected_status == "pending":
-            assert captured["summary_reasons"]["call-1"]
-    elif case == "dynamic":
-        assert metadata["dynamic_interpreter_targets"] == ["$SCRIPT"]
-        assert captured["context_payload"]["server_confirmation_reasons"]["call-1"][0]["code"] == "dynamic_interpreter_target"
-    else:
-        assert metadata["dynamic_interpreter_targets"] == []
-        assert captured["context_payload"]["server_confirmation_reasons"] == {}
-
-    if expected_status != "passed":
-        tool_message = json.loads(result.tool_results[0].content)
-        assert "model reason" in tool_message["reason"]
+    assert _file_checks_are_sufficient(snapshots, [read], [valid_check])
+    assert not _file_checks_are_sufficient(snapshots, [read], [{**valid_check, "sha256": "0" * 64}])
+    assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), snapshots, [read], [])
+    assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [], [valid_check])
+    assert not _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [], [])
 
 
-def test_append_file_candidate_records_missing_target_and_ignores_non_append_or_outside_paths(tmp_path):
+def test_append_file_snapshot_records_missing_target_and_ignores_non_append_or_outside_paths(tmp_path):
     calls = [
         InternalToolCall(id="append", name="write_file", arguments={"file_path": "nested/new.txt", "content": "new", "append": True}),
         InternalToolCall(id="overwrite", name="write_file", arguments={"file_path": "overwrite.txt", "content": "new", "append": False}),
         InternalToolCall(id="outside", name="write_file", arguments={"file_path": "../outside.txt", "content": "new", "append": True}),
     ]
 
-    request_candidates, snapshots, _candidates_by_path, _reasons = _collect_file_candidates(calls, tmp_path)
+    snapshots = _collect_append_file_snapshots(calls, tmp_path)
 
     snapshot = snapshots["append"][0]
     assert snapshot["absolute_path"] == str((tmp_path / "nested" / "new.txt").resolve())
@@ -468,14 +291,13 @@ def test_append_file_candidate_records_missing_target_and_ignores_non_append_or_
     assert snapshot["sha256"] is None
     assert "overwrite" not in snapshots
     assert "outside" not in snapshots
-    assert request_candidates["append"][0]["absolute_path"] == snapshot["absolute_path"]
 
 
-def test_append_file_candidate_records_missing_target_before_workspace_exists(tmp_path):
+def test_append_file_snapshot_records_missing_target_before_workspace_exists(tmp_path):
     workspace = tmp_path / "temp_new_user"
     tool_call = InternalToolCall(id="append", name="write_file", arguments={"file_path": "nested/new.txt", "content": "new", "append": True})
 
-    _request_candidates, snapshots, _candidates_by_path, _reasons = _collect_file_candidates([tool_call], workspace)
+    snapshots = _collect_append_file_snapshots([tool_call], workspace)
 
     snapshot = snapshots["append"][0]
     assert workspace.exists() is False
@@ -484,7 +306,7 @@ def test_append_file_candidate_records_missing_target_before_workspace_exists(tm
     assert snapshot["file_type"] == "missing"
 
 
-def test_append_file_candidate_preserves_link_type_and_resolved_path(tmp_path):
+def test_append_file_snapshot_preserves_link_type_and_resolved_path(tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("content", encoding="utf-8")
     link = tmp_path / "link.txt"
@@ -494,7 +316,7 @@ def test_append_file_candidate_preserves_link_type_and_resolved_path(tmp_path):
         pytest.skip(f"当前系统不允许创建测试链接: {exc}")
 
     tool_call = InternalToolCall(id="call-1", name="write_file", arguments={"file_path": "link.txt", "content": "append", "append": True})
-    _request_candidates, snapshots, _candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
+    snapshots = _collect_append_file_snapshots([tool_call], tmp_path)
 
     snapshot = snapshots[tool_call.id][0]
     assert snapshot["absolute_path"] == str(link)
@@ -504,32 +326,10 @@ def test_append_file_candidate_preserves_link_type_and_resolved_path(tmp_path):
     assert snapshot["status"] == "ok"
 
 
-def test_audit_file_reader_marks_large_file_truncated(tmp_path):
-    script = tmp_path / "large.py"
-    script.write_text("x" * (AUDIT_FILE_MAX_BYTES + 1), encoding="utf-8")
-    tool_call = InternalToolCall(
-        id="call-1",
-        name="execute_shell",
-        arguments={"command": f'python "{script}"'},
-    )
-    _request_candidates, snapshots, candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
-    result = _read_candidate_sync(str(script.resolve()), candidates_by_path, {"bytes": 0, "calls": 0})
-
-    assert snapshots["call-1"][0]["truncated"] is True
-    assert result["truncated"] is True
-    assert len(result["content"]) == AUDIT_FILE_MAX_BYTES
-
-
 @pytest.mark.asyncio
-async def test_auditor_can_only_read_approved_file_through_restricted_tool(tmp_path, monkeypatch):
-    script = tmp_path / "entry.py"
-    script.write_text("print('ok')", encoding="utf-8")
-    tool_call = InternalToolCall(
-        id="call-1",
-        name="execute_shell",
-        arguments={"command": f'python "{script}"'},
-    )
-    request_candidates, _snapshots, candidates_by_path, _reasons = _collect_file_candidates([tool_call], tmp_path)
+async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(tmp_path, monkeypatch):
+    outside_file = tmp_path.parent / "audit-visible.txt"
+    outside_file.write_text("server evidence", encoding="utf-8")
     cfg = _profile_config()
     cfg.security.audit_channel_id = 1
     cfg.security.audit_model_id = "audit-model"
@@ -559,8 +359,8 @@ async def test_auditor_can_only_read_approved_file_through_restricted_tool(tmp_p
                     tool_calls=[
                         InternalToolCall(
                             id="read-1",
-                            name="read_audit_file",
-                            arguments={"path": str(script.resolve())},
+                            name="read_text_file",
+                            arguments={"path": str(outside_file), "tool_call_id": "call-1"},
                         )
                     ],
                 ),
@@ -582,21 +382,342 @@ async def test_auditor_can_only_read_approved_file_through_restricted_tool(tmp_p
         cfg,
         {
             "confirmation_threshold": 5,
+            "working_directory": str(tmp_path),
             "tool_calls": [
                 {
                     "tool_call_id": "call-1",
-                    "direct_file_candidates": request_candidates["call-1"],
+                    "turn_index": 0,
+                    "tool_name": "execute_shell",
+                    "arguments": {"command": "python dynamic_target"},
                 }
             ],
         },
-        candidates_by_path,
+        tmp_path,
     )
 
     assert len(calls) == 2
-    assert calls[0]["tools"][0]["function"]["name"] == "read_audit_file"
-    assert all(tool["function"]["name"] == "read_audit_file" for tool in calls[1]["tools"])
-    assert response_context["file_reads"][0]["content"] == "print('ok')"
+    assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
+    assert all(tool["function"]["name"] == "read_text_file" for tool in calls[1]["tools"])
+    assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)
+    assert json.loads(calls[0]["messages"][1].content)["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"}
+    assert response_context["file_reads"][0]["content"] == "server evidence"
+    assert response_context["file_reads"][0]["tool_call_id"] == "call-1"
     assert any(message["role"] == "tool" for message in request_context["messages"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol_case", ["invalid_id", "wrong_tool", "missing_id"])
+async def test_audit_round_confirms_unassociated_read_protocol_failure(monkeypatch, tmp_path, protocol_case):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    cfg.security.audit_channel_id = 1
+    cfg.security.audit_model_id = "audit-model"
+    captured = {}
+    calls = []
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    class FakeChannel:
+        is_active = True
+        base_url = "https://audit.example"
+        protocol = "openai"
+
+        def get_decrypted_api_key(self):
+            return "secret"
+
+    async def get_channel(*_args, **_kwargs):
+        return FakeChannel()
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            if protocol_case == "wrong_tool":
+                name = "unexpected_reader"
+                arguments = {"path": "missing.txt", "tool_call_id": "call-1"}
+            elif protocol_case == "missing_id":
+                name = "read_text_file"
+                arguments = {"path": "missing.txt"}
+            else:
+                name = "read_text_file"
+                arguments = {"path": "missing.txt", "tool_call_id": "other-call"}
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="read-1", name=name, arguments=arguments)],
+                ),
+                model="audit-model",
+            )
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","file_checks":[]},{"tool_call_id":"call-2","score":0,"reason":"safe","file_checks":[]}]}',
+            ),
+            model="audit-model",
+        )
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def summarize_pending(*_args, **_kwargs):
+        return "Confirm command", {}
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "channel_crud", SimpleNamespace(get=get_channel))
+    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(service.LLMClient, "generate", generate)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[
+            InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"}),
+            InternalToolCall(id="call-2", name="execute_shell", arguments={"command": "echo also-ok"}),
+        ],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "pending"
+    assert all(detail["conclusion"] == "pending" for detail in captured["tool_details"])
+    assert all(detail["server_confirmation_reasons"][-1]["code"] == "file_read_protocol_invalid" for detail in captured["tool_details"])
+
+
+def test_audit_file_reader_enforces_total_bytes_and_call_count(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("12345", encoding="utf-8")
+    second.write_text("abcdef", encoding="utf-8")
+    monkeypatch.setattr(service, "AUDIT_FILE_MAX_BYTES", 4)
+    monkeypatch.setattr(service, "AUDIT_FILE_TOTAL_BYTES", 6)
+    monkeypatch.setattr(service, "AUDIT_FILE_MAX_CALLS", 2)
+    state = {"bytes": 0, "calls": 0}
+
+    first_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state)
+    second_result = service._read_for_audit_sync(str(second), "call-1", {"call-1"}, tmp_path, state)
+    third_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state)
+
+    assert first_result["content"] == "1234"
+    assert second_result["content"] == "ab"
+    assert first_result["truncated"] is True
+    assert second_result["truncated"] is True
+    assert third_result["status"] == "limit_exceeded"
+    assert state == {"bytes": 6, "calls": 3}
+
+
+@pytest.mark.parametrize("file_kind", ["missing", "truncated", "non_utf8"])
+def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(monkeypatch, tmp_path, file_kind):
+    import app.core.audit.service as service
+    from app.core.session_reply_queue import executor as executor_module
+
+    monkeypatch.setattr(service, "AUDIT_FILE_MAX_BYTES", 4)
+    target = tmp_path / f"{file_kind}.txt"
+    if file_kind == "truncated":
+        target.write_bytes(b"0123456789")
+    elif file_kind == "non_utf8":
+        target.write_bytes(b"\xff\xfe")
+
+    read = service._read_for_audit_sync(str(target), "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
+    snapshots = service._file_snapshots_from_reads([read], {"call-1"})["call-1"]
+    assert len(snapshots) == 1
+    assert snapshots[0]["absolute_path"] == str(target)
+    if file_kind == "missing":
+        assert snapshots[0]["exists"] is False
+        assert snapshots[0]["file_type"] == "missing"
+    elif file_kind == "truncated":
+        assert snapshots[0]["status"] == "ok"
+        assert snapshots[0]["truncated"] is True
+        assert snapshots[0]["sha256"]
+    else:
+        assert snapshots[0]["status"] == "unreadable"
+        assert snapshots[0]["size"] == 2
+        assert snapshots[0]["sha256"]
+
+    details = [SimpleNamespace(file_snapshots=snapshots)]
+    assert not executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+    if file_kind == "missing":
+        target.write_text("created", encoding="utf-8")
+    elif file_kind == "truncated":
+        target.write_bytes(b"changed-data")
+    else:
+        target.write_bytes(b"\xfd\xfb")
+    assert executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+
+
+@pytest.mark.parametrize("file_type", ["regular_file", "other"])
+def test_unstable_read_failures_require_confirmation_without_persisted_snapshot(tmp_path, file_type):
+    path = tmp_path / "unreadable"
+    file_read = {
+        "tool_call_id": "call-1",
+        "original_path": str(path),
+        "absolute_path": str(path),
+        "resolved_path": str(path.resolve(strict=False)),
+        "exists": True,
+        "file_type": file_type,
+        "status": "unreadable" if file_type == "regular_file" else "not_regular",
+        "truncated": False,
+        "error": "unavailable",
+    }
+
+    snapshots = _file_snapshots_from_reads([file_read], {"call-1"})
+
+    assert snapshots == {}
+    assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [file_read], [])
+
+
+def test_append_file_snapshot_converts_integrity_errors_to_conservative_snapshot(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    def fail_snapshot(*_args, **_kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(service, "create_file_integrity_snapshot", fail_snapshot)
+    call = InternalToolCall(id="append", name="write_file", arguments={"file_path": "target.txt", "content": "new", "append": True})
+
+    snapshots = service._collect_append_file_snapshots([call], tmp_path)
+
+    snapshot = snapshots["append"][0]
+    assert snapshot["status"] == "unreadable"
+    assert snapshot["file_type"] == "unknown"
+    assert snapshot["exists"] is None
+    assert "permission denied" in snapshot["error"]
+
+
+@pytest.mark.asyncio
+async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    source = tmp_path / "evidence.txt"
+    source.write_text("review me", encoding="utf-8")
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1", "call-2"}, tmp_path, {"bytes": 0, "calls": 0})
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def call_auditor(*_args, **_kwargs):
+        return {"messages": []}, {
+            "file_reads": [read],
+            "parsed": {
+                "results": [
+                    {"tool_call_id": "call-1", "score": 0, "reason": "review me", "file_checks": []},
+                    {"tool_call_id": "call-2", "score": 0, "reason": "safe", "file_checks": []},
+                ]
+            },
+        }
+
+    async def summarize_pending(*_args, **_kwargs):
+        return "Confirm command", {}
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[
+            InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python evidence.txt"}),
+            InternalToolCall(id="call-2", name="execute_shell", arguments={"command": "echo ok"}),
+        ],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "pending"
+    first_detail, second_detail = captured["tool_details"]
+    assert first_detail["file_snapshots"][0]["sha256"] == read["sha256"]
+    assert "content" not in first_detail["file_snapshots"][0]
+    assert second_detail["file_snapshots"] == []
+    assert first_detail["server_confirmation_reasons"][0]["code"] == "file_evidence_insufficient"
+    assert "review me" not in first_detail["reason"]
+
+
+@pytest.mark.asyncio
+async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def call_auditor(*args, **_kwargs):
+        captured["request_payload"] = args[2]
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 1, "reason": "safe without a read", "file_checks": []}]}}
+
+    async def persist(*_args, **kwargs):
+        captured["tool_details"] = kwargs["tool_details"]
+        return True
+
+    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    command = 'python "$SCRIPT"'
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": command})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "passed"
+    assert captured["request_payload"]["working_directory"] == str(tmp_path.resolve())
+    assert captured["request_payload"]["tool_calls"][0]["arguments"] == {"command": command}
+    assert captured["tool_details"][0]["file_snapshots"] == []
 
 
 @pytest.mark.asyncio
@@ -635,9 +756,9 @@ async def test_pending_summary_prompt_uses_configured_report_language(monkeypatc
     reasons = {
         "call-1": [
             {
-                "code": "direct_script_candidates_exceeded",
-                "message": "The number of directly referenced scripts (11) exceeds the inspection limit (10)",
-                "details": {"candidate_count": 11, "limit": 10, "excess_count": 1},
+                "code": "file_evidence_insufficient",
+                "message": "Server-side file evidence read for this tool call was incomplete or not verified by the audit result",
+                "details": {"snapshot_count": 1, "model_file_check_count": 0, "server_file_read_count": 1},
             }
         ]
     }
