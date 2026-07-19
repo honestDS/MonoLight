@@ -140,3 +140,29 @@ async def test_failed_chat_does_not_generate_title(monkeypatch):
     assert handled is True
     assert reply_calls == [("weixin-user", "消息入队失败", "context-token")]
     assert title_calls == []
+
+
+@pytest.mark.asyncio
+async def test_unsupported_session_event_is_ignored_without_reply(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    reply_calls = []
+
+    async def reply_text(*args, **kwargs):
+        reply_calls.append((args, kwargs))
+        return True
+
+    async def reply_file_item(*args, **kwargs):
+        reply_calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(adapter, "reply_text", reply_text)
+    monkeypatch.setattr(adapter, "reply_file_item", reply_file_item)
+
+    sent = await adapter.send_session_event(
+        "owner",
+        "weixin-openclaw:weixin-user",
+        {"type": "audit_confirmation_status", "status": "pending"},
+    )
+
+    assert sent is True
+    assert reply_calls == []

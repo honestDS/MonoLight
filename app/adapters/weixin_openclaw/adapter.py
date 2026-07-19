@@ -119,7 +119,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         event_type = str(event.get("type") or "").strip()
         if event_type not in {"proactive_reply", "proactive_reply_error"}:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type).debug(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_IGNORED"))
-            return False
+            return True
 
         user_id = parse_session_user_id(session_id)
         if not user_id:
