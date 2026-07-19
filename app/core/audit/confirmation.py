@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     MSG_AUDIT_CONFIRMATION_STATUS_IM,
+    MSG_AUDIT_CONFIRMATION_SUPERSEDED,
     MSG_AUDIT_STATUS_CANCELLED,
     MSG_AUDIT_STATUS_EXECUTING,
     MSG_AUDIT_STATUS_EXECUTION_UNKNOWN,
@@ -161,3 +162,16 @@ async def expire_confirmation_by_session(db: AsyncSession, *, uid: str, session_
         if record is not None and record.id is not None:
             await update_confirmation_message_status(db, audit_record_id=record.id)
     return expired_count
+
+
+async def cancel_confirmation_by_session(db: AsyncSession, *, uid: str, session_id: str, locale: str | None = None) -> int:
+    record = await audit_crud.get_confirmation_claim(db, uid=uid, session_id=session_id)
+    cancelled_count = await audit_crud.cancel_confirmation_by_session(
+        db,
+        uid=uid,
+        session_id=session_id,
+        error_reason=t(MSG_AUDIT_CONFIRMATION_SUPERSEDED, locale=locale),
+    )
+    if cancelled_count and record is not None and record.id is not None:
+        await update_confirmation_message_status(db, audit_record_id=record.id)
+    return cancelled_count

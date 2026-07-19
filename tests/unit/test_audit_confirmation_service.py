@@ -121,7 +121,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
         captured["expires_at"] = kwargs["expires_at"]
         return True
 
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
@@ -166,7 +166,7 @@ async def test_missing_audit_configuration_fails_the_round_and_returns_one_resul
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
 
@@ -187,6 +187,63 @@ async def test_missing_audit_configuration_fails_the_round_and_returns_one_resul
     assert len(result.tool_results) == 2
     assert captured["failure_type"].value == "audit_service_failed"
     assert all(json.loads(item.content)["status"] == "audit_failed" for item in result.tool_results)
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+
+    class ExpiringRecord:
+        expired = False
+
+        @property
+        def id(self):
+            if self.expired:
+                raise RuntimeError("expired ORM record accessed")
+            return 321
+
+    record = ExpiringRecord()
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_cancellation(*_args, **_kwargs):
+        return 0
+
+    async def create_preparing(*_args, **_kwargs):
+        return record
+
+    async def call_auditor(*_args, **_kwargs):
+        return {"messages": []}, {"parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "file_checks": []}]}}
+
+    async def fail_persistence(*_args, **_kwargs):
+        record.expired = True
+        return False
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", fail_persistence)
+
+    result = await audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.audit_record_id == 321
+    assert result.status.value == "audit_failed"
+    assert json.loads(result.tool_results[0].content)["status"] == "audit_failed"
 
 
 @pytest.mark.parametrize(
@@ -483,7 +540,7 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         return True
 
     monkeypatch.setattr(service, "channel_crud", SimpleNamespace(get=get_channel))
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
@@ -662,7 +719,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
         captured.update(kwargs)
         return True
 
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
@@ -718,7 +775,7 @@ async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_
         captured["tool_details"] = kwargs["tool_details"]
         return True
 
-    monkeypatch.setattr(service, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
@@ -744,12 +801,15 @@ async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_pending_summary_prompt_uses_configured_report_language(monkeypatch):
+async def test_pending_summary_can_read_shell_script_and_uses_configured_report_language(monkeypatch, tmp_path):
     cfg = _profile_config()
     cfg.security.audit_channel_id = 1
     cfg.security.audit_model_id = "audit-model"
     cfg.security.audit_report_language = "en"
     captured = {}
+    calls = []
+    script = tmp_path / "test.py"
+    script.write_text("from pathlib import Path\nPath('important.txt').unlink()\n", encoding="utf-8")
 
     class FakeDb:
         async def commit(self):
@@ -767,9 +827,18 @@ async def test_pending_summary_prompt_uses_configured_report_language(monkeypatc
         return FakeChannel()
 
     async def generate(**kwargs):
+        calls.append(kwargs)
         captured.update(kwargs)
+        if len(calls) == 1:
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="read-1", name="read_text_file", arguments={"path": "test.py", "tool_call_id": "call-1"})],
+                ),
+                model="audit-model",
+            )
         return InternalResponse(
-            message=InternalMessage(role=MessageRole.ASSISTANT, content="Run the requested command."),
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="Run test.py, which deletes important.txt; execution is awaiting confirmation."),
             model="audit-model",
         )
 
@@ -788,16 +857,26 @@ async def test_pending_summary_prompt_uses_configured_report_language(monkeypatc
     summary, _context = await _summarize_pending(
         FakeDb(),
         cfg,
-        [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "echo ok"}}],
+        [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}],
         reasons,
+        working_directory=tmp_path,
     )
 
-    system_prompt = captured["messages"][0].content
-    assert summary == "Run the requested command."
+    system_prompt = calls[0]["messages"][0].content
+    assert summary == "Run test.py, which deletes important.txt; execution is awaiting confirmation."
+    assert len(calls) == 2
+    assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
+    tool_payload = json.loads(calls[1]["messages"][-1].content)
+    assert "Path('important.txt').unlink()" in tool_payload["content"]
     assert "locale code: en" in system_prompt
     assert "entire sentence only in that language" in system_prompt
-    assert json.loads(captured["messages"][1].content) == {
-        "tool_calls": [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "echo ok"}}],
+    assert "action, concrete target or path, intended effect" in system_prompt
+    assert "what the command or target script actually does" in system_prompt
+    assert "the script itself was not executed" in system_prompt
+    assert "never reduce this to a vague phrase" in system_prompt
+    assert json.loads(calls[0]["messages"][1].content) == {
+        "working_directory": str(tmp_path.resolve()),
+        "tool_calls": [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python test.py"}}],
         "server_confirmation_reasons": reasons,
     }
 

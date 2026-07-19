@@ -8,7 +8,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import cancel_confirmation_by_session, update_confirmation_message_status
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, summarize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
@@ -380,9 +380,10 @@ async def test_session_cancellation_removes_only_current_claim(audit_database, t
             context_file_path=str(context_file),
             expires_at=get_local_time() + timedelta(minutes=10),
         )
-        assert await audit_crud.cancel_confirmation_by_session(session, uid="u1", session_id="session-1", error_reason="session deleted") == 1
+        assert await cancel_confirmation_by_session(session, uid="u1", session_id="session-1", locale="en") == 1
         stored = await audit_crud.get_record(session, record.id)
         assert stored.status == AuditRecordStatus.CANCELLED
+        assert stored.error_reason == "The pending audit was superseded by a new tool call"
         assert await audit_crud.get_current_confirmation(session, uid="u1", session_id="session-1") is None
 
 
