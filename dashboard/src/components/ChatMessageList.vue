@@ -697,7 +697,7 @@ const getAuditExpiryLabel = (message) => {
   const confirmation = getAuditConfirmation(message)
   const status = confirmation.status || 'pending'
   if (status === 'expired') return t('chat.audit_status_expired')
-  if (status !== 'pending') return '-'
+  if (status !== 'pending') return ''
   const remainingSeconds = getAuditRemainingSeconds(message)
   if (remainingSeconds === null) return '-'
   if (remainingSeconds === 0) return t('chat.audit_status_expired')
