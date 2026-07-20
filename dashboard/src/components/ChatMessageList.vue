@@ -695,8 +695,9 @@ const formatAuditCountdown = (remainingSeconds) => {
 const isAuditConfirmationExpired = message => getAuditRemainingSeconds(message) === 0
 const getAuditExpiryLabel = (message) => {
   const confirmation = getAuditConfirmation(message)
-  const localStatus = auditDecisionStatuses.value.get(confirmation.audit_record_id)
-  if (localStatus || (confirmation.status || 'pending') !== 'pending') return t('chat.audit_status_expired')
+  const status = confirmation.status || 'pending'
+  if (status === 'expired') return t('chat.audit_status_expired')
+  if (status !== 'pending') return '-'
   const remainingSeconds = getAuditRemainingSeconds(message)
   if (remainingSeconds === null) return '-'
   if (remainingSeconds === 0) return t('chat.audit_status_expired')
