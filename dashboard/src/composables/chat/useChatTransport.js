@@ -40,6 +40,7 @@ export function useChatTransport() {
       data.type === 'proactive_reply' ||
       data.type === 'proactive_reply_error' ||
       data.type === 'audit_confirmation_status' ||
+      data.type === 'audit_tool_results_update' ||
       data.type === 'context_summary_start' ||
       data.type === 'context_summary_end' ||
       isWsErrorPayload(data)
@@ -65,6 +66,7 @@ export function useChatTransport() {
       onProactiveReply,
       onProactiveReplyError,
       onAuditConfirmationStatus,
+      onAuditToolResultsUpdate,
       onContextSummaryStart,
       onContextSummaryEnd,
       scrollToBottom,
@@ -193,6 +195,11 @@ export function useChatTransport() {
 
     if (type === 'audit_confirmation_status') {
       if (onAuditConfirmationStatus) onAuditConfirmationStatus(data)
+      return
+    }
+
+    if (type === 'audit_tool_results_update') {
+      if (onAuditToolResultsUpdate) onAuditToolResultsUpdate(data)
       return
     }
 

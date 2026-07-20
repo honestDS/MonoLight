@@ -60,7 +60,7 @@ def parse_db_messages_to_internal(raw_messages: list[Message]) -> list[InternalM
             tool_call_id = None
 
             # 直接检测：仅在类型明确为 TOOL_CALL 或 TOOL_RESULT 时尝试解析 JSON
-            if m_type == MessageType.AUDIT_CONFIRMATION:
+            if m_type in {MessageType.AUDIT_CONFIRMATION, MessageType.AUDIT_DECISION}:
                 continue
             if m_type == MessageType.BACKGROUND_TASK_RESULT:
                 parsed_history.extend(_parse_background_task_result_message(msg, content))

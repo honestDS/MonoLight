@@ -29,6 +29,50 @@ export const normalizeMessageContent = (content) => {
   return content
 }
 
+export const getMessageDbId = (message) => {
+  const dbId = message?.db_id ?? (typeof message?.id === 'number' ? message.id : null)
+  return dbId === null || dbId === undefined || dbId === '' ? null : String(dbId)
+}
+
+export const getToolResultCallId = (message) => {
+  const content = normalizeMessageContent(message?.content)
+  const isToolResultMessage = message?.type === 'tool_result' || message?.role === 'tool' || content?.role === 'tool'
+  if (!isToolResultMessage) return null
+  const toolCallId = content?.tool_call_id || message?.tool_call_id
+  return toolCallId === null || toolCallId === undefined || toolCallId === '' ? null : String(toolCallId)
+}
+
+export const findMessageReplacementIndex = (messages, incomingMessage) => {
+  const incomingDbId = getMessageDbId(incomingMessage)
+  if (incomingDbId !== null) {
+    const dbIdIndex = messages.findIndex(message => getMessageDbId(message) === incomingDbId)
+    if (dbIdIndex !== -1) return dbIdIndex
+  }
+
+  const incomingToolCallId = getToolResultCallId(incomingMessage)
+  if (incomingToolCallId === null) return -1
+  return messages.findIndex(message => getToolResultCallId(message) === incomingToolCallId)
+}
+
+export const mergeRemoteMessage = (localMessage, remoteMessage) => ({
+  ...localMessage,
+  ...remoteMessage,
+  response_id: localMessage?.response_id ?? remoteMessage?.response_id,
+  request_id: localMessage?.request_id ?? remoteMessage?.request_id,
+  work_id: localMessage?.work_id ?? remoteMessage?.work_id,
+  turn: localMessage?.turn ?? remoteMessage?.turn
+})
+
+export const mergeRemoteMessageIntoList = (messages, remoteMessage) => {
+  const message = {
+    ...remoteMessage,
+    db_id: remoteMessage?.db_id ?? remoteMessage?.id
+  }
+  const replacementIndex = findMessageReplacementIndex(messages, message)
+  if (replacementIndex === -1) return [...messages, message]
+  return messages.map((item, index) => index === replacementIndex ? mergeRemoteMessage(item, message) : item)
+}
+
 const stableStringify = (value) => {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
   if (value && typeof value === 'object') {

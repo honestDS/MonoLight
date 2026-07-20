@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import sync_expired_confirmation_messages, update_confirmation_message_status
 from app.core.audit.storage import AuditCleanupResult, cleanup_audit_storage
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
 from app.core.crud.audit import audit_crud
@@ -30,15 +30,15 @@ async def recover_and_cleanup_audit_data(
     retention_days: int,
     audit_root: str | Path = AUDIT_DIR,
 ) -> AuditStartupRecoveryResult:
-    expired_records = [(record.id, record.uid, record.session_id, record.language) for record in await audit_crud.list_expired_pending_confirmations(db) if record.id is not None]
+    expired_records = [(record.id, record.language) for record in await audit_crud.list_expired_pending_confirmations(db) if record.id is not None]
     preparing_records = [record.id for record in await audit_crud.list_records_by_status(db, AuditRecordStatus.PREPARING) if record.id is not None]
     interrupted_records = [(record.id, record.uid, record.session_id, record.language) for record in await audit_crud.list_records_by_status(db, AuditRecordStatus.EXECUTING) if record.id is not None]
     expired_pending_records = await audit_crud.expire_pending_confirmations(db)
     recovered_preparing_records = await audit_crud.recover_preparing(db)
     unknown_execution_records, unknown_execution_attempts = await audit_crud.recover_interrupted(db)
     await background_task_crud.fail_tasks_for_terminal_audits(db, error=t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN))
-    for audit_record_id, _uid, _session_id, _language in expired_records:
-        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    for audit_record_id, language in expired_records:
+        await sync_expired_confirmation_messages(db, audit_record_id=audit_record_id, locale=language)
     for audit_record_id in preparing_records:
         await update_confirmation_message_status(db, audit_record_id=audit_record_id)
     for audit_record_id, _uid, _session_id, _language in interrupted_records:

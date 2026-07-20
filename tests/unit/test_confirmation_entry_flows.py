@@ -15,8 +15,10 @@ from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.api.v1 import chat as chat_api
+from app.core.audit.confirmation import get_pending_tool_results, replace_pending_tool_result
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
@@ -197,6 +199,175 @@ async def get_tool_result_payload(db: AsyncSession, session_id: str = "session-1
 
 
 @pytest.mark.asyncio
+async def test_confirmed_tool_result_replacement_keeps_one_original_message_chain(db_session: AsyncSession):
+    source_message = Message(
+        session_id="session-1",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[
+                InternalToolCall(id="call-1", name="safe_tool", arguments={"value": 1}),
+                InternalToolCall(id="call-2", name="safe_tool", arguments={"value": 2}),
+            ],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add(source_message)
+    await db_session.flush()
+    pending_messages = []
+    for call_id in ("call-1", "call-2"):
+        pending_message = Message(
+            session_id="session-1",
+            uid="owner",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id=call_id,
+                content=json.dumps({"status": "pending", "confirmation_decision": "同意"}),
+            ).model_dump_json(exclude_none=True),
+            is_processed=True,
+        )
+        pending_messages.append(pending_message)
+        db_session.add(pending_message)
+    db_session.add(
+        Message(
+            session_id="session-1",
+            uid="owner",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.AUDIT_CONFIRMATION,
+            content="{}",
+            is_processed=True,
+        )
+    )
+    decision_message = Message(
+        session_id="session-1",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.AUDIT_DECISION,
+        content="同意",
+        is_processed=True,
+    )
+    db_session.add(decision_message)
+    await db_session.commit()
+
+    assert decision_message.type != MessageType.TEXT
+    assert parse_db_messages_to_internal([decision_message]) == []
+
+    pending_by_call_id = await get_pending_tool_results(
+        db_session,
+        uid="owner",
+        session_id="session-1",
+        source_assistant_message_id=source_message.id,
+        before_message_id=decision_message.id,
+        tool_call_ids=["call-1", "call-2"],
+    )
+    assert pending_by_call_id is not None
+    assert set(pending_by_call_id) == {"call-1", "call-2"}
+
+    await replace_pending_tool_result(
+        db_session,
+        pending_message=pending_by_call_id["call-1"],
+        original_tool_call_id="call-1",
+        content=json.dumps({"status": "success"}),
+    )
+    await replace_pending_tool_result(
+        db_session,
+        pending_message=pending_by_call_id["call-2"],
+        original_tool_call_id="call-2",
+        content=json.dumps({"status": "success"}),
+    )
+    await db_session.commit()
+
+    result = await db_session.execute(select(Message).where(Message.session_id == "session-1").where(Message.uid == "owner").where(Message.type.in_([MessageType.TOOL_CALL, MessageType.TOOL_RESULT])).order_by(Message.id.asc()))
+    stored_messages = list(result.scalars().all())
+    assert [message.type for message in stored_messages] == [
+        MessageType.TOOL_CALL,
+        MessageType.TOOL_RESULT,
+        MessageType.TOOL_RESULT,
+    ]
+    assert [message.id for message in stored_messages[1:]] == [message.id for message in pending_messages]
+    assert [InternalMessage.model_validate_json(message.content).tool_call_id for message in stored_messages[1:]] == ["call-1", "call-2"]
+    assert all(json.loads(InternalMessage.model_validate_json(message.content).content)["status"] == "success" for message in stored_messages[1:])
+    assert all(json.loads(InternalMessage.model_validate_json(message.content).content)["confirmation_decision"] == "同意" for message in stored_messages[1:])
+
+
+@pytest.mark.asyncio
+async def test_pending_tool_result_validation_rejects_missing_and_duplicate_results(db_session: AsyncSession):
+    record = await add_pending_confirmation(db_session)
+    decision_message = Message(
+        session_id="session-1",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.AUDIT_DECISION,
+        content="同意",
+        is_processed=True,
+    )
+    db_session.add(decision_message)
+    await db_session.commit()
+
+    assert (
+        await get_pending_tool_results(
+            db_session,
+            uid="owner",
+            session_id="session-1",
+            source_assistant_message_id=record.source_assistant_message_id,
+            before_message_id=decision_message.id,
+            tool_call_ids=["call-1", "call-2"],
+        )
+        is None
+    )
+
+    db_session.add(
+        Message(
+            session_id="session-1",
+            uid="owner",
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": "pending"}),
+            ).model_dump_json(exclude_none=True),
+            is_processed=True,
+        )
+    )
+    await db_session.commit()
+
+    second_decision_message = Message(
+        session_id="session-1",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="同意",
+        is_processed=True,
+    )
+    db_session.add(second_decision_message)
+    await db_session.commit()
+
+    assert (
+        await get_pending_tool_results(
+            db_session,
+            uid="owner",
+            session_id="session-1",
+            source_assistant_message_id=record.source_assistant_message_id,
+            before_message_id=second_decision_message.id,
+            tool_call_ids=["call-1"],
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("message", "attachments", "expected_status", "expected_work_type"),
     [
@@ -241,7 +412,21 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
         assert works[0].source_id == str(record.id)
     else:
         assert works[0].source_type.value == "user_message"
+    if expected_status in {AuditRecordStatus.EXECUTING, AuditRecordStatus.REJECTED}:
+        decision_result = await db_session.execute(select(Message).where(Message.session_id == "session-1", Message.type == MessageType.AUDIT_DECISION).order_by(Message.id.desc()))
+        decision_message = decision_result.scalars().first()
+        assert decision_message is not None
+        assert decision_message.content == message
+        assert parse_db_messages_to_internal([decision_message]) == []
+        tool_result_payload = await get_tool_result_payload(db_session)
+        assert tool_result_payload["confirmation_decision"] == message
+        if expected_status == AuditRecordStatus.REJECTED:
+            assert tool_result_payload["status"] == AuditRecordStatus.REJECTED.value
     if expected_status == AuditRecordStatus.CANCELLED:
+        text_result = await db_session.execute(select(Message).where(Message.session_id == "session-1", Message.type == MessageType.TEXT).order_by(Message.id.desc()))
+        text_message = text_result.scalars().first()
+        assert text_message is not None
+        assert text_message.content == message
         tool_result_payload = await get_tool_result_payload(db_session)
         assert tool_result_payload["status"] == AuditRecordStatus.CANCELLED.value
         assert tool_result_payload["confirmation_status"] == "invalid_input"
@@ -258,6 +443,33 @@ async def test_web_entry_without_pending_confirmation_treats_decision_as_normal_
     await web_chat_adapter.chat(db_session, "同意", uid="owner", session_id="session-1")
 
     works = await list_work(db_session)
+    assert len(works) == 1
+    assert works[0].work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    result = await db_session.execute(select(Message).where(Message.session_id == "session-1").order_by(Message.id.desc()))
+    assert result.scalars().first().type == MessageType.TEXT
+
+
+@pytest.mark.asyncio
+async def test_web_entry_expires_confirmation_and_tool_result_before_queuing_message(db_session, entry_dependencies, monkeypatch):
+    record = await add_pending_confirmation(db_session)
+    record.expires_at = get_local_time() - timedelta(seconds=1)
+    await db_session.commit()
+
+    async def wait_for_result(work_id):
+        return {"work_id": work_id, "choices": []}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_result", wait_for_result)
+    response = await web_chat_adapter.chat(db_session, "执行另一个操作", uid="owner", session_id="session-1")
+
+    assert response["choices"] == []
+    await refresh_record(db_session, record)
+    tool_result_payload = await get_tool_result_payload(db_session)
+    works = await list_work(db_session)
+    assert record.status == AuditRecordStatus.EXPIRED
+    assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXPIRED.value
+    assert tool_result_payload["status"] == AuditRecordStatus.EXPIRED.value
+    assert tool_result_payload["confirmation_status"] == AuditRecordStatus.EXPIRED.value
+    assert "安全审计确认已过期" in tool_result_payload["error"]
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.FOREGROUND_REPLY
 

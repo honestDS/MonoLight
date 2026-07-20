@@ -8,7 +8,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status, update_confirmation_tool_results_for_invalid_input
+from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status, update_confirmation_tool_results_for_decision, update_confirmation_tool_results_for_invalid_input
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
     ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
@@ -128,7 +128,55 @@ class SessionReplyQueueManager:
             attachments=attachments,
             has_quote=has_quote,
         )
-        if decision != ConfirmationDecision.APPROVE:
+        if decision == ConfirmationDecision.REJECT:
+            profile_id = profile.id if profile and profile.id else -1
+            decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
+            message_row = Message(
+                session_id=session_id,
+                uid=uid,
+                role=MessageRole.USER,
+                type=MessageType.AUDIT_DECISION,
+                content=decision_raw_message,
+                attachments=None,
+                profile_id=profile_id,
+                is_processed=False,
+            )
+            db.add(message_row)
+            await db.flush()
+            await audit_crud.close_pending(
+                db,
+                audit_record_id=current_confirmation.id,
+                uid=uid,
+                session_id=session_id,
+                status=AuditRecordStatus.REJECTED,
+                decision_message_id=message_row.id,
+                decision_raw_message=decision_raw_message,
+                decided_by=current_confirmation.operator_username,
+            )
+            await update_confirmation_tool_results_for_decision(
+                db,
+                audit_record_id=current_confirmation.id,
+                before_message_id=message_row.id,
+                decision=decision,
+                raw_message=decision_raw_message,
+            )
+            await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
+            initial_message, work = await self._enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=None,
+                source=source,
+                stream_requested=stream_requested,
+                context_summary_events_requested=context_summary_events_requested,
+                persisted_message_row=message_row,
+                audit_decision_response=True,
+            )
+            return initial_message, work, "rejected"
+
+        if decision is None:
             profile_id = profile.id if profile and profile.id else -1
             message_row = Message(
                 session_id=session_id,
@@ -142,36 +190,22 @@ class SessionReplyQueueManager:
             )
             db.add(message_row)
             await db.flush()
-            if decision == ConfirmationDecision.REJECT:
-                await audit_crud.close_pending(
+            invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
+            cancelled_count = await audit_crud.cancel_confirmation_by_session(
+                db,
+                uid=uid,
+                session_id=session_id,
+                error_reason=invalid_input_feedback,
+            )
+            if cancelled_count:
+                await update_confirmation_tool_results_for_invalid_input(
                     db,
                     audit_record_id=current_confirmation.id,
-                    uid=uid,
-                    session_id=session_id,
-                    status=AuditRecordStatus.REJECTED,
-                    decision_message_id=message_row.id,
-                    decision_raw_message=message,
-                    decided_by=current_confirmation.operator_username,
+                    before_message_id=message_row.id,
+                    feedback=invalid_input_feedback,
                 )
-                await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
-                submission_status = "rejected"
-            else:
-                invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
-                cancelled_count = await audit_crud.cancel_confirmation_by_session(
-                    db,
-                    uid=uid,
-                    session_id=session_id,
-                    error_reason=invalid_input_feedback,
-                )
-                if cancelled_count:
-                    await update_confirmation_tool_results_for_invalid_input(
-                        db,
-                        audit_record_id=current_confirmation.id,
-                        before_message_id=message_row.id,
-                        feedback=invalid_input_feedback,
-                    )
-                await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
-                submission_status = "cancelled_and_queued"
+            await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
+            submission_status = "cancelled_and_queued"
             initial_message, work = await self._enqueue_foreground_message(
                 db,
                 uid=uid,
@@ -187,12 +221,13 @@ class SessionReplyQueueManager:
             return initial_message, work, submission_status
 
         profile_id = profile.id if profile and profile.id else -1
+        decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
         message_row = Message(
             session_id=session_id,
             uid=uid,
             role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=_serialize_message_content(message),
+            type=MessageType.AUDIT_DECISION,
+            content=decision_raw_message,
             attachments=None,
             profile_id=profile_id,
             is_processed=True,
@@ -205,11 +240,18 @@ class SessionReplyQueueManager:
             uid=uid,
             session_id=session_id,
             decision_message_id=message_row.id,
-            decision_raw_message=message,
+            decision_raw_message=decision_raw_message,
             decided_by=current_confirmation.operator_username,
         )
         if claimed_record is None or claim_token is None:
             raise RuntimeError(t(ERR_AUDIT_CONFIRMATION_UNAVAILABLE))
+        await update_confirmation_tool_results_for_decision(
+            db,
+            audit_record_id=claimed_record.id,
+            before_message_id=message_row.id,
+            decision=decision,
+            raw_message=decision_raw_message,
+        )
         await update_confirmation_message_status(db, audit_record_id=claimed_record.id)
         work, _created = await session_reply_work_item_crud.enqueue(
             db,
@@ -300,6 +342,7 @@ class SessionReplyQueueManager:
         stream_requested: bool | None = None,
         context_summary_events_requested: bool | None = None,
         persisted_message_row: Message | None = None,
+        audit_decision_response: bool = False,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -348,6 +391,7 @@ class SessionReplyQueueManager:
                 "expose_tool_call_content": source != "weixin-openclaw",
                 "language": get_current_locale(),
                 "message_source": source,
+                "audit_decision_response": audit_decision_response,
             }
             db.add(work)
         await db.commit()
@@ -444,7 +488,17 @@ class SessionReplyQueueManager:
             return await self._load_frozen_input(db, work.input_message_ids)
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
+        bounded_contiguous: list[SessionReplyWorkItem] = []
+        for item in contiguous:
+            is_audit_decision = bool((item.execution_state or {}).get("audit_decision_response"))
+            if is_audit_decision and item.id != work.id:
+                break
+            bounded_contiguous.append(item)
+            if is_audit_decision:
+                break
+        contiguous = bounded_contiguous
         source_message_ids = [int(item.source_id) for item in contiguous]
+        message_types = [MessageType.AUDIT_DECISION] if bool((work.execution_state or {}).get("audit_decision_response")) else [MessageType.TEXT]
         message_result = await db.execute(
             select(Message)
             .where(
@@ -452,7 +506,7 @@ class SessionReplyQueueManager:
                 Message.uid == work.uid,
                 Message.session_id == work.session_id,
                 Message.role == MessageRole.USER,
-                Message.type == MessageType.TEXT,
+                Message.type.in_(message_types),
                 Message.is_processed == False,  # noqa: E712
             )
             .order_by(Message.id)
@@ -514,9 +568,19 @@ class SessionReplyQueueManager:
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY:
             return []
+        if bool((work.execution_state or {}).get("audit_decision_response")):
+            return []
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
-        additional_work = [item for item in contiguous if item.id != work.id and item.status == SessionReplyWorkStatus.READY_FOR_LLM and item.source_id]
+        additional_work: list[SessionReplyWorkItem] = []
+        for item in contiguous:
+            if item.id == work.id:
+                continue
+            if bool((item.execution_state or {}).get("audit_decision_response")):
+                break
+            if item.status != SessionReplyWorkStatus.READY_FOR_LLM or not item.source_id:
+                continue
+            additional_work.append(item)
         if not additional_work:
             return []
 

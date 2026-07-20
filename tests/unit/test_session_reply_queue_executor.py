@@ -120,6 +120,48 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rejected_foreground_reply_uses_history_without_decision_user_input(monkeypatch):
+    work = SimpleNamespace(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        dedupe_key="foreground-message:session-1:11",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        execution_state={"audit_decision_response": True},
+    )
+    captured = {}
+
+    class FakeDb:
+        async def refresh(self, instance):
+            return None
+
+    async def freeze_foreground_input(db, *, work, worker_id):
+        return "拒绝", [], [11]
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=1, uid="user-1")
+
+    async def generate_reply(db, **kwargs):
+        captured.update(kwargs)
+        return InternalMessage(role=MessageRole.ASSISTANT, content="已取消"), [InternalMessage(role=MessageRole.ASSISTANT, content="已取消")], []
+
+    monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+
+    response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
+
+    assert response["choices"][0]["message"]["content"] == "已取消"
+    assert response["history"][0]["role"] == MessageRole.ASSISTANT
+    assert response["history"][0]["content"] == "已取消"
+    assert captured["allow_tools"] is False
+    assert "extra_messages" not in captured
+    assert "submission_context" not in captured
+    assert captured["final_message_dedupe_key"] == executor_module._result_message_dedupe_key(work)
+
+
+@pytest.mark.asyncio
 async def test_foreground_executor_checkpoint_preserves_and_clears_active_audit_binding(monkeypatch):
     active_binding = {
         "audit_record_id": 42,
@@ -699,7 +741,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         id=7,
         work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
         source_id="42",
-        execution_state={"audit_claim_token": "old-token"},
+        execution_state={"audit_claim_token": "old-token", "decision_message_id": 4},
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -707,6 +749,8 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         created_at=datetime(2026, 7, 20, 0, 0, 0),
     )
     update_calls = []
+    replaced_results = []
+    pending_message = SimpleNamespace(id=2, content="pending")
 
     class FakeDb:
         async def get(self, model, item_id):
@@ -724,7 +768,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         return SimpleNamespace(id=3, uid="user-1")
 
     async def validate_profile(db, profile):
-        return SimpleNamespace()
+        return SimpleNamespace(security=SimpleNamespace(audit_channel_id=1, audit_model_id="audit-model"))
 
     async def audit_round(*args, **kwargs):
         return SimpleNamespace(may_execute=True, audit_record_id=99)
@@ -748,12 +792,6 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     async def finish_round(db, **kwargs):
         return True
 
-    async def save_assistant(*args, **kwargs):
-        return None
-
-    async def save_tool_response(*args, **kwargs):
-        return None
-
     async def generate_reply(db, **kwargs):
         return InternalMessage(role=MessageRole.ASSISTANT, content="重审完成"), [], []
 
@@ -762,6 +800,13 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
 
     async def update_confirmation(*args, **kwargs):
         return None
+
+    async def get_pending(db, **kwargs):
+        return {"original-1": pending_message}
+
+    async def replace_result(db, **kwargs):
+        replaced_results.append(kwargs)
+        return kwargs["content"]
 
     monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
     monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
@@ -776,9 +821,9 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
     monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
-    monkeypatch.setattr(executor_module, "save_assistant_message", save_assistant)
-    monkeypatch.setattr(executor_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
     monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
@@ -790,6 +835,334 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     assert update_calls[0]["values"]["source_id"] == "99"
     assert update_calls[0]["values"]["execution_state"]["audit_claim_token"] == "new-token"
     assert executor_module.get_bound_audit_execution(work) == (99, "new-token")
+    assert replaced_results[0]["original_tool_call_id"] == "original-1"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_file_reaudit_pending_replaces_original_result_without_saving_tool_chain(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="old-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        source="confirmed_tool_execution",
+        round_arguments_hash="a" * 64,
+    )
+    details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+    work = SimpleNamespace(
+        id=7,
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id="42",
+        execution_state={"audit_claim_token": "old-token", "decision_message_id": 4},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="confirmed-audit:42",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    pending_message = SimpleNamespace(id=2, content="pending")
+    replaced_results = []
+    saved_messages = []
+    memory_chains = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            return source_message
+
+    async def get_record(db, audit_record_id):
+        return record
+
+    async def list_details(db, audit_record_id):
+        return details
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace(security=SimpleNamespace(audit_channel_id=1, audit_model_id="audit-model"))
+
+    async def get_pending(db, **kwargs):
+        return {"original-1": pending_message}
+
+    async def cancel_reaudit(db, **kwargs):
+        return True
+
+    async def audit_round(*args, **kwargs):
+        return SimpleNamespace(
+            may_execute=False,
+            audit_record_id=99,
+            tool_results=(
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id="original-1",
+                    content=json.dumps({"status": "pending", "reason": "changed"}),
+                ),
+            ),
+            confirmation_payload={"audit_record_id": 99, "status": "pending"},
+        )
+
+    async def replace_result(db, **kwargs):
+        replaced_results.append(kwargs)
+        return kwargs["content"]
+
+    async def save_confirmation(*args, **kwargs):
+        saved_messages.append((args, kwargs))
+        return None
+
+    async def update_confirmation(db, *, audit_record_id):
+        return None
+
+    def dump_history(messages):
+        memory_chains.append([message.model_copy(deep=True) for message in messages])
+        return []
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
+    monkeypatch.setattr(executor_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_module, "save_message", save_confirmation)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "dump_background_proactive_history", dump_history)
+    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("pending re-audit must not execute tools"))
+
+    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+
+    assert json.loads(response["content"]) == {"audit_record_id": 99, "status": "pending"}
+    assert len(replaced_results) == 1
+    assert replaced_results[0]["pending_message"].id == 2
+    assert replaced_results[0]["original_tool_call_id"] == "original-1"
+    assert len(saved_messages) == 1
+    assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
+    assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
+
+
+@pytest.mark.asyncio
+async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_memory_chain(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(id="original-1", name="safe_tool", arguments={"value": 1}),
+            InternalToolCall(id="original-2", name="safe_tool", arguments={"value": 2}),
+        ],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    pending_messages = {
+        "original-1": SimpleNamespace(id=2, content="pending-1"),
+        "original-2": SimpleNamespace(id=3, content="pending-2"),
+    }
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="claim-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        round_arguments_hash="a" * 64,
+    )
+    details = [
+        SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64),
+        SimpleNamespace(id=12, original_tool_call_id="original-2", turn_index=1, tool_name="safe_tool", arguments_hash="c" * 64),
+    ]
+    work = SimpleNamespace(
+        source_id="42",
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="confirmed-audit:42",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    created_attempts = []
+    process_calls = []
+    replaced_results = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            assert item_id == 1
+            return source_message
+
+    async def get_record(db, audit_record_id):
+        return record
+
+    async def list_details(db, audit_record_id):
+        return details
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace()
+
+    async def get_tools(db, profile):
+        return [], None
+
+    async def create_execution(db, **kwargs):
+        created_attempts.append(kwargs)
+        return SimpleNamespace(id=100 + len(created_attempts))
+
+    async def process_tool(tool_call, db, profile, cfg, messages, username, session_id, turn, uid, **kwargs):
+        process_calls.append((tool_call.id, [message.model_copy(deep=True) for message in messages]))
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=json.dumps({"status": "success", "value": tool_call.arguments["value"]}),
+        )
+
+    async def replace_result(db, **kwargs):
+        replaced_results.append(kwargs)
+        return kwargs["content"]
+
+    async def get_pending(db, **kwargs):
+        return pending_messages
+
+    async def finish_attempt(db, **kwargs):
+        return True
+
+    async def finish_round_if_complete(db, **kwargs):
+        return AuditRecordStatus.SUCCEEDED
+
+    async def update_confirmation(db, *, audit_record_id):
+        return None
+
+    async def generate_reply(db, **kwargs):
+        return InternalMessage(role=MessageRole.ASSISTANT, content="完成"), [], []
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_module, "create_file_integrity_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    response = await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+
+    assert response["content"] == "完成"
+    assert len(created_attempts) == 2
+    fresh_ids = [call["new_tool_call_id"] for call in created_attempts]
+    assert len(set(fresh_ids)) == 2
+    assert all(fresh_id.startswith("call_") for fresh_id in fresh_ids)
+    assert [call_id for call_id, _messages in process_calls] == fresh_ids
+    assert [item["pending_message"].id for item in replaced_results] == [2, 3]
+    assert [item["original_tool_call_id"] for item in replaced_results] == ["original-1", "original-2"]
+    assert [message.role for message in process_calls[1][1]] == [MessageRole.ASSISTANT, MessageRole.TOOL]
+    assert process_calls[1][1][0].tool_calls[0].id == fresh_ids[0]
+    assert process_calls[1][1][1].tool_call_id == fresh_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_execution_does_not_run_without_complete_pending_results(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="claim-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        round_arguments_hash="a" * 64,
+    )
+    work = SimpleNamespace(
+        source_id="42",
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        dedupe_key="confirmed-audit:42",
+    )
+    invalidated = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            return source_message
+
+    async def get_record(db, audit_record_id):
+        return record
+
+    async def list_details(db, audit_record_id):
+        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def mark_invalid(db, **kwargs):
+        invalidated.append(kwargs)
+        return True
+
+    async def generate_reply(db, **kwargs):
+        return InternalMessage(role=MessageRole.ASSISTANT, content="原调用记录无效"), [], []
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace()
+
+    async def get_pending(db, **kwargs):
+        return None
+
+    async def update_confirmation(db, *, audit_record_id):
+        return None
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_source_message_invalid", mark_invalid)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("invalid pending results must not execute tools"))
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", lambda *args, **kwargs: pytest.fail("invalid pending results must not create executions"))
+
+    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+
+    assert response["content"] == "原调用记录无效"
+    assert invalidated[0]["audit_record_id"] == 42
 
 
 @pytest.mark.asyncio
@@ -846,12 +1219,6 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         complete_calls.append(kwargs)
         raise AssertionError("precheck failure must close the round as failed directly")
 
-    async def save_assistant(*args, **kwargs):
-        return None
-
-    async def save_tool_response(*args, **kwargs):
-        return None
-
     async def generate_reply(db, **kwargs):
         return InternalMessage(role=MessageRole.ASSISTANT, content="工具预检失败"), [], []
 
@@ -876,6 +1243,12 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     async def update_confirmation(*args, **kwargs):
         return None
 
+    async def replace_result(db, **kwargs):
+        return kwargs["content"]
+
+    async def get_pending(db, **kwargs):
+        return {"original-1": SimpleNamespace(id=2, content="pending")}
+
     monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
     monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
     monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
@@ -885,10 +1258,10 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "save_assistant_message", save_assistant)
-    monkeypatch.setattr(executor_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
     monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
     monkeypatch.setattr(executor_module, "prevalidate_tool_round", prevalidate)
@@ -984,17 +1357,20 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         complete_calls.append(kwargs)
         raise AssertionError("partial attempt creation must not use normal round completion")
 
-    async def save_assistant(*args, **kwargs):
-        return None
-
-    async def save_tool_response(*args, **kwargs):
-        return None
-
     async def generate_reply(db, **kwargs):
         return InternalMessage(role=MessageRole.ASSISTANT, content="工具执行未完成"), [], []
 
     async def update_confirmation(db, *, audit_record_id):
         return None
+
+    async def replace_result(db, **kwargs):
+        return kwargs["content"]
+
+    async def get_pending(db, **kwargs):
+        return {
+            "original-1": SimpleNamespace(id=2, content="pending-1"),
+            "original-2": SimpleNamespace(id=3, content="pending-2"),
+        }
 
     def verify_round(**kwargs):
         return True
@@ -1008,10 +1384,10 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "save_assistant_message", save_assistant)
-    monkeypatch.setattr(executor_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_module, "verify_persisted_tool_round", verify_round)
     monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
     monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})

@@ -598,6 +598,9 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     assert [event["type"] for event in events] == ["task_start", "content", "turn_end", "done"]
 
 
+_DEFAULT_AUDIT_RESULT = object()
+
+
 async def _run_audited_interactive_dispatch(
     monkeypatch,
     checkpoint_callback,
@@ -605,7 +608,7 @@ async def _run_audited_interactive_dispatch(
     unknown_calls_target=None,
     finish_round_result=True,
     generated_calls_target=None,
-    audit_result=None,
+    audit_result=_DEFAULT_AUDIT_RESULT,
     audit_waiter=None,
     claim_execution_success=True,
     stream_event_callback=None,
@@ -614,7 +617,10 @@ async def _run_audited_interactive_dispatch(
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
-        security=SimpleNamespace(audit_channel_id=1, audit_model_id=1),
+        security=SimpleNamespace(
+            audit_channel_id=None if audit_result is None else 1,
+            audit_model_id=None if audit_result is None else "audit-model",
+        ),
         tool=SimpleNamespace(
             max_turns=5,
             max_parallel_tools=5,
@@ -672,7 +678,7 @@ async def _run_audited_interactive_dispatch(
     async def audit_round(*args, **kwargs):
         if audit_waiter is not None:
             await audit_waiter()
-        if audit_result is not None:
+        if audit_result is not _DEFAULT_AUDIT_RESULT:
             return audit_result
         return SimpleNamespace(
             may_execute=True,
@@ -685,6 +691,8 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(id=300)
 
     async def claim_execution(db, *, audit_record_id):
+        if audit_result is None:
+            raise AssertionError("skipped audit must not create a claim")
         if not claim_execution_success:
             return None, None
         return SimpleNamespace(execution_claim_token="claim-token"), "claim-token"
@@ -693,6 +701,8 @@ async def _run_audited_interactive_dispatch(
         return [SimpleNamespace(original_tool_call_id="call-1", id=7)]
 
     async def create_execution(db, **kwargs):
+        if audit_result is None:
+            raise AssertionError("skipped audit must not create execution records")
         return SimpleNamespace(id=8)
 
     async def finish_attempt(db, **kwargs):
@@ -779,6 +789,31 @@ async def _run_audited_interactive_dispatch(
             stream_event_callback=stream_event_callback,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_without_audit_configuration_executes_tool_without_audit_binding(monkeypatch):
+    tool_calls = []
+    checkpoints = []
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(tool_call, *args, **kwargs):
+        tool_calls.append(tool_call.id)
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert tool_calls == ["call-1"]
+    assert all(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in checkpoint for checkpoint in checkpoints)
+    assert unknown_calls == []
 
 
 @pytest.mark.asyncio

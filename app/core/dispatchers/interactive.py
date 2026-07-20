@@ -481,7 +481,7 @@ class InteractiveDispatcherMixin:
                             source=session_source,
                             language=get_current_locale(),
                         )
-                        if not audit_round.may_execute:
+                        if audit_round is not None and not audit_round.may_execute:
                             persisted_tool_result_ids = []
                             for tool_result in audit_round.tool_results:
                                 stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)

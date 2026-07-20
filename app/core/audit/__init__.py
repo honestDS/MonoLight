@@ -38,8 +38,9 @@ __all__ = [
     "verify_file_integrity_snapshot",
     "verify_persisted_tool_round",
     "verify_tool_round_integrity",
+    "notify_confirmation_tool_results",
     "update_confirmation_message_status",
     "write_audit_json",
     "write_audit_json_and_associate",
 ]
-from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, parse_confirmation_decision, update_confirmation_message_status
+from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, notify_confirmation_tool_results, parse_confirmation_decision, update_confirmation_message_status

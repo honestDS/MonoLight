@@ -5,7 +5,7 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
-import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
+import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys, findMessageReplacementIndex, mergeRemoteMessage, mergeRemoteMessageIntoList } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
@@ -35,18 +35,6 @@ const getAuditConfirmationRecordId = (message) => {
   }
 }
 
-const getOpenAuditConfirmation = (messages) => messages.findLast((message) => {
-  if (message?.type !== 'audit_confirmation') return false
-  try {
-    const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
-    return ['pending', 'executing'].includes(payload?.status)
-  } catch {
-    return false
-  }
-})
-
-const hasOpenAuditConfirmation = messages => Boolean(getOpenAuditConfirmation(messages))
-
 const parseAuditConfirmationResponse = (response) => {
   const content = response?.choices?.[0]?.message?.content
   try {
@@ -73,15 +61,6 @@ const findTransientHistoryMessageIndex = (messages, historyMessage) => {
     return JSON.stringify(normalizeMessageContent(message?.content)) === JSON.stringify(historyContent)
   })
 }
-
-const mergeTransientHistoryMessage = (localMessage, historyMessage) => ({
-  ...localMessage,
-  ...historyMessage,
-  response_id: localMessage.response_id,
-  request_id: localMessage.request_id,
-  work_id: localMessage.work_id,
-  turn: localMessage.turn
-})
 
 export function useChatSession() {
   // ==================== 组合各模块 ====================
@@ -168,15 +147,21 @@ export function useChatSession() {
       if (auditRecordId) {
         const existingIndex = chatState.messages.value.findIndex(existing => getAuditConfirmationRecordId(existing) === auditRecordId)
         if (existingIndex !== -1) {
-          chatState.messages.value[existingIndex] = { ...chatState.messages.value[existingIndex], ...message }
+          chatState.messages.value[existingIndex] = mergeRemoteMessage(chatState.messages.value[existingIndex], message)
           getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
           continue
         }
       }
+      const replacementIndex = findMessageReplacementIndex(chatState.messages.value, message)
+      if (replacementIndex !== -1) {
+        chatState.messages.value[replacementIndex] = mergeRemoteMessage(chatState.messages.value[replacementIndex], message)
+        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+        continue
+      }
       const transientIndex = findTransientHistoryMessageIndex(chatState.messages.value, message)
       if (transientIndex !== -1) {
         const localMessage = chatState.messages.value[transientIndex]
-        chatState.messages.value[transientIndex] = mergeTransientHistoryMessage(localMessage, message)
+        chatState.messages.value[transientIndex] = mergeRemoteMessage(localMessage, message)
         getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
         continue
       }
@@ -203,16 +188,53 @@ export function useChatSession() {
         return false
       }
     })
+    if (messageIndex !== -1) {
+      const message = chatState.messages.value[messageIndex]
+      const currentPayload = normalizeMessageContent(message.content)
+      const incomingPayload = normalizeMessageContent(data.content)
+      const mergedPayload = {
+        ...(currentPayload && typeof currentPayload === 'object' ? currentPayload : {}),
+        ...(incomingPayload && typeof incomingPayload === 'object' ? incomingPayload : {}),
+        ...(data.status ? { status: data.status } : {})
+      }
+      chatState.messages.value[messageIndex] = mergeRemoteMessage(message, {
+        ...message,
+        id: data.message_id || message.id,
+        db_id: data.message_id || message.db_id,
+        type: 'audit_confirmation',
+        content: JSON.stringify(mergedPayload)
+      })
+    }
+
     if (messageIndex === -1) {
       void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
         console.error('Audit confirmation history merge failed:', err)
       })
-      return
     }
 
-    const message = chatState.messages.value[messageIndex]
-    const content = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || {})
-    chatState.messages.value[messageIndex] = { ...message, type: 'audit_confirmation', content }
+    if (Array.isArray(data.tool_results) || data.tool_result) {
+      applyAuditToolResultsUpdate({
+        ...data,
+        messages: Array.isArray(data.tool_results) ? data.tool_results : [data.tool_result]
+      })
+    }
+  }
+
+  const applyAuditToolResultsUpdate = (data) => {
+    if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+    const messages = Array.isArray(data.messages) ? data.messages : []
+    for (const remoteMessage of messages) {
+      if (!remoteMessage || typeof remoteMessage !== 'object') continue
+      const normalizedMessage = normalizeHistoryMessage({
+        ...remoteMessage,
+        db_id: remoteMessage.db_id ?? remoteMessage.id
+      })
+      chatState.messages.value = mergeRemoteMessageIntoList(chatState.messages.value, normalizedMessage)
+    }
+
+    void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
+      console.error('Audit tool result history merge failed:', err)
+    })
   }
 
   const pollBackgroundTasksUntilSettled = async (sessionId, intervalSeconds = 2) => {
@@ -413,12 +435,10 @@ export function useChatSession() {
         contextSummarySessionId.value = null
       }
       if (requestSessionId === sessionManager.currentSessionId.value) {
-        if (hasOpenAuditConfirmation(chatState.messages.value)) {
-          try {
-            await mergeLatestSessionHistory(requestSessionId)
-          } catch (err) {
-            console.error('Audit confirmation history refresh failed:', err)
-          }
+        try {
+          await mergeLatestSessionHistory(requestSessionId)
+        } catch (err) {
+          console.error('HTTP response history refresh failed:', err)
         }
         // 检查当前是否还有排队的请求（通过判断是否还有 thinking）
         const hasThinking = chatState.messages.value.some(m => m.role === 'thinking')
@@ -560,6 +580,7 @@ export function useChatSession() {
         })
       },
       onAuditConfirmationStatus: applyAuditConfirmationStatus,
+      onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
       onSessionId: (newSessionId) => {
         if (requestSessionId !== sessionManager.currentSessionId.value) return
         requestSessionId = newSessionId
@@ -643,6 +664,41 @@ export function useChatSession() {
           messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
           chatState.loading.value = false
           return
+        }
+
+        // 已确认工具执行通过独立 done 返回完整正文，不会再发送 content 增量事件。
+        if (!Array.isArray(completedResponse?.choices) && typeof completedResponse?.content === 'string' && completedResponse.content) {
+          const requestMessageIndex = requestIdParam
+            ? chatState.messages.value.findLastIndex(message => message.role === 'user' && message.request_id === requestIdParam)
+            : -1
+          const existingFinalIndex = chatState.messages.value.findLastIndex((message, index) =>
+            index > requestMessageIndex &&
+            message.role === 'assistant' &&
+            message.type !== 'audit_confirmation' &&
+            !isToolCall(message) &&
+            JSON.stringify(normalizeMessageContent(message.content)) === JSON.stringify(normalizeMessageContent(completedResponse.content))
+          )
+
+          if (existingFinalIndex !== -1) {
+            const existingFinal = chatState.messages.value[existingFinalIndex]
+            chatState.messages.value[existingFinalIndex] = {
+              ...existingFinal,
+              request_id: existingFinal.request_id || requestIdParam,
+              work_id: existingFinal.work_id || completedResponse.work_id || data.work_id,
+              response_id: existingFinal.response_id || completedResponse.response_id || data.response_id
+            }
+          } else {
+            messageProcessor.processAiResponse(
+              chatState.messages,
+              {
+                ...completedResponse,
+                work_id: completedResponse.work_id || data.work_id,
+                response_id: completedResponse.response_id || data.response_id
+              },
+              thinkingId,
+              requestIdParam
+            )
+          }
         }
 
         if (data.files && data.files.length > 0) {

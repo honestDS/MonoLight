@@ -1,9 +1,12 @@
+import hashlib
 import json
 from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_AUDIT_CONFIRMATION_EXPIRED,
+    ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     MSG_AUDIT_CONFIRMATION_STATUS_IM,
     MSG_AUDIT_CONFIRMATION_SUPERSEDED,
     MSG_AUDIT_STATUS_CANCELLED,
@@ -20,7 +23,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
 from app.models.audit import AuditRecordStatus
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, Message, MessageRole, MessageType
 
 
 class ConfirmationDecision(StrEnum):
@@ -30,6 +33,7 @@ class ConfirmationDecision(StrEnum):
 
 _APPROVE_WORDS = {"同意", "继续", "approve", "continue"}
 _REJECT_WORDS = {"拒绝", "reject"}
+CONFIRMATION_DECISION_FIELD = "confirmation_decision"
 _STATUS_TEXT_KEYS = {
     "executing": MSG_AUDIT_STATUS_EXECUTING,
     "rejected": MSG_AUDIT_STATUS_REJECTED,
@@ -81,12 +85,106 @@ def message_has_quote(raw_message: object) -> bool:
     return any(isinstance(item, dict) and (str(item.get("type") or "").lower() in {"quote", "reference", "reply"} or any(item.get(key) for key in quote_keys)) for item in item_list)
 
 
-async def update_confirmation_tool_results_for_invalid_input(
+async def get_pending_tool_results(
+    db: AsyncSession,
+    *,
+    uid: str,
+    session_id: str,
+    source_assistant_message_id: int,
+    before_message_id: int | None,
+    tool_call_ids: list[str],
+) -> dict[str, Message] | None:
+    if before_message_id is None or not tool_call_ids or len(set(tool_call_ids)) != len(tool_call_ids):
+        return None
+
+    messages = await message_crud.get_history_forward_by_id(
+        db,
+        session_id=session_id,
+        uid=uid,
+        after_id=source_assistant_message_id,
+        before_id=before_message_id,
+        limit=500,
+    )
+    tool_result_messages = [message for message in messages if message.type == MessageType.TOOL_RESULT]
+    if len(tool_result_messages) != len(tool_call_ids):
+        return None
+
+    expected_tool_call_ids = set(tool_call_ids)
+    pending_results: dict[str, Message] = {}
+    for message in tool_result_messages:
+        try:
+            tool_result = InternalMessage.model_validate_json(message.content or "{}")
+            result_payload = json.loads(tool_result.content or "{}")
+        except (TypeError, ValueError):
+            return None
+        tool_call_id = tool_result.tool_call_id
+        if tool_result.role != MessageRole.TOOL or not isinstance(tool_call_id, str) or tool_call_id not in expected_tool_call_ids or tool_call_id in pending_results or not isinstance(result_payload, dict) or result_payload.get("status") != AuditRecordStatus.PENDING.value:
+            return None
+        pending_results[tool_call_id] = message
+
+    if set(pending_results) != expected_tool_call_ids:
+        return None
+    return pending_results
+
+
+async def replace_pending_tool_result(
+    db: AsyncSession,
+    *,
+    pending_message: Message,
+    original_tool_call_id: str,
+    content: str | None,
+) -> str | None:
+    from app.core.tools.send_file_to_user import sanitize_files_to_user_result
+
+    sanitized_content = sanitize_files_to_user_result(content)
+    confirmation_decision = None
+    try:
+        pending_tool_result = InternalMessage.model_validate_json(pending_message.content or "{}")
+        pending_payload = json.loads(pending_tool_result.content or "{}")
+        if isinstance(pending_payload, dict):
+            decision_value = pending_payload.get(CONFIRMATION_DECISION_FIELD)
+            if isinstance(decision_value, str):
+                confirmation_decision = decision_value
+    except (TypeError, ValueError):
+        pass
+
+    if confirmation_decision is not None:
+        try:
+            result_payload = json.loads(sanitized_content or "{}")
+        except (TypeError, ValueError):
+            result_payload = None
+        if isinstance(result_payload, dict):
+            result_payload[CONFIRMATION_DECISION_FIELD] = confirmation_decision
+            sanitized_content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    stored_tool_result = InternalMessage(
+        role=MessageRole.TOOL,
+        tool_call_id=original_tool_call_id,
+        content=sanitized_content,
+    )
+    updated = await message_crud.update_content_if_matches(
+        db,
+        message_id=pending_message.id,
+        expected_content=pending_message.content,
+        content=stored_tool_result.model_dump_json(exclude_none=True),
+        message_type=MessageType.TOOL_RESULT,
+        commit=False,
+    )
+    if not updated:
+        raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+    await db.refresh(pending_message)
+    return sanitized_content
+
+
+async def _update_confirmation_tool_results(
     db: AsyncSession,
     *,
     audit_record_id: int,
-    before_message_id: int,
-    feedback: str,
+    before_message_id: int | None,
+    status: AuditRecordStatus,
+    confirmation_status: str,
+    feedback: str | None,
+    confirmation_decision: str | None = None,
 ) -> int:
     record = await audit_crud.get_record(db, audit_record_id)
     if record is None or record.source_assistant_message_id is None:
@@ -124,11 +222,11 @@ async def update_confirmation_tool_results_for_invalid_input(
             continue
         if result_payload.get("status") != AuditRecordStatus.PENDING.value:
             continue
-        result_payload.update(
-            status=AuditRecordStatus.CANCELLED.value,
-            confirmation_status="invalid_input",
-            error=feedback,
-        )
+        result_payload.update(status=status.value, confirmation_status=confirmation_status)
+        if feedback is not None:
+            result_payload["error"] = feedback
+        if confirmation_decision is not None:
+            result_payload[CONFIRMATION_DECISION_FIELD] = confirmation_decision
         tool_result.content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if await message_crud.update_content(
             db,
@@ -136,8 +234,174 @@ async def update_confirmation_tool_results_for_invalid_input(
             content=tool_result.model_dump_json(exclude_none=True),
             commit=False,
         ):
+            await db.refresh(message)
             updated_count += 1
     return updated_count
+
+
+async def update_confirmation_tool_results_for_invalid_input(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    before_message_id: int,
+    feedback: str,
+) -> int:
+    return await _update_confirmation_tool_results(
+        db,
+        audit_record_id=audit_record_id,
+        before_message_id=before_message_id,
+        status=AuditRecordStatus.CANCELLED,
+        confirmation_status="invalid_input",
+        feedback=feedback,
+    )
+
+
+async def update_confirmation_tool_results_for_decision(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    before_message_id: int,
+    decision: ConfirmationDecision,
+    raw_message: str,
+) -> int:
+    status = AuditRecordStatus.PENDING if decision == ConfirmationDecision.APPROVE else AuditRecordStatus.REJECTED
+    return await _update_confirmation_tool_results(
+        db,
+        audit_record_id=audit_record_id,
+        before_message_id=before_message_id,
+        status=status,
+        confirmation_status=decision.value,
+        feedback=None,
+        confirmation_decision=raw_message,
+    )
+
+
+async def _get_confirmation_message(db: AsyncSession, record) -> tuple[Message | None, dict | None]:
+    for candidate in await message_crud.list_by_type(
+        db,
+        uid=record.uid,
+        session_id=record.session_id,
+        message_type=MessageType.AUDIT_CONFIRMATION,
+    ):
+        try:
+            candidate_payload = json.loads(candidate.content or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(candidate_payload, dict) and str(candidate_payload.get("audit_record_id")) == str(record.id):
+            return candidate, candidate_payload
+    return None, None
+
+
+async def _get_confirmation_tool_result_events(db: AsyncSession, record) -> list[dict]:
+    if record.source_assistant_message_id is None or record.id is None:
+        return []
+
+    source_message = await message_crud.get(db, record.source_assistant_message_id)
+    if source_message is None:
+        return []
+    try:
+        source_internal = InternalMessage.model_validate_json(source_message.content or "{}")
+    except ValueError:
+        return []
+
+    tool_call_ids = [tool_call.id for tool_call in source_internal.tool_calls or []]
+    if not tool_call_ids:
+        return []
+    messages = await message_crud.get_history_forward_by_id(
+        db,
+        session_id=record.session_id,
+        uid=record.uid,
+        after_id=record.source_assistant_message_id,
+        before_id=record.decision_message_id,
+        limit=500,
+    )
+    expected_tool_call_ids = set(tool_call_ids)
+    results_by_tool_call_id: dict[str, dict] = {}
+    for message in messages:
+        if message.type != MessageType.TOOL_RESULT or message.id is None:
+            continue
+        try:
+            tool_result = InternalMessage.model_validate_json(message.content or "{}")
+        except ValueError:
+            continue
+        if tool_result.role != MessageRole.TOOL or tool_result.tool_call_id not in expected_tool_call_ids or tool_result.tool_call_id in results_by_tool_call_id:
+            continue
+        created_at = message.created_at.timestamp() if message.created_at is not None else None
+        results_by_tool_call_id[tool_result.tool_call_id] = {
+            "id": message.id,
+            "db_id": message.id,
+            "role": message.role.value if isinstance(message.role, MessageRole) else str(message.role),
+            "type": message.type.value if isinstance(message.type, MessageType) else str(message.type),
+            "content": message.content,
+            "tool_call_id": tool_result.tool_call_id,
+            "created_at": created_at,
+        }
+    return [results_by_tool_call_id[tool_call_id] for tool_call_id in tool_call_ids if tool_call_id in results_by_tool_call_id]
+
+
+def _confirmation_status_value(record) -> str:
+    return record.status.value if isinstance(record.status, AuditRecordStatus) else str(record.status)
+
+
+async def _send_confirmation_status_event(
+    record,
+    *,
+    message: Message | None,
+    status: str,
+    content: str | None,
+    event_id: str,
+) -> None:
+    event = {
+        "type": "audit_confirmation_status",
+        "source": "audit_confirmation",
+        "event_id": event_id,
+        "session_id": record.session_id,
+        "audit_record_id": record.id,
+        "message_id": message.id if message is not None else None,
+        "status": status,
+        "content": content,
+    }
+    try:
+        await send_session_event(record.uid, record.session_id, event)
+    except Exception:
+        logger.bind(uid=record.uid, session_id=record.session_id, audit_record_id=record.id, status=status).warning(
+            "Failed to broadcast audit confirmation status",
+            exc_info=True,
+        )
+
+
+async def _send_confirmation_tool_results_event(record, tool_results: list[dict]) -> None:
+    if not tool_results:
+        return
+
+    result_hash = hashlib.sha256(json.dumps(tool_results, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    event = {
+        "type": "audit_tool_results_update",
+        "source": "audit_confirmation",
+        "event_id": f"audit-tool-results:{record.id}:{result_hash}",
+        "session_id": record.session_id,
+        "audit_record_id": record.id,
+        "messages": tool_results,
+    }
+    try:
+        await send_session_event(record.uid, record.session_id, event)
+    except Exception:
+        logger.bind(uid=record.uid, session_id=record.session_id, audit_record_id=record.id).warning(
+            "Failed to broadcast audit tool result update",
+            exc_info=True,
+        )
+
+
+async def notify_confirmation_tool_results(db: AsyncSession, *, audit_record_id: int) -> bool:
+    """在工具结果已提交后，广播数据库中的最终工具结果。"""
+    record = await audit_crud.get_record(db, audit_record_id)
+    if record is None or record.id is None:
+        return False
+    tool_results = await _get_confirmation_tool_result_events(db, record)
+    if not tool_results:
+        return False
+    await _send_confirmation_tool_results_event(record, tool_results)
+    return True
 
 
 async def update_confirmation_message_status(
@@ -152,22 +416,7 @@ async def update_confirmation_message_status(
         status = record.status.value if isinstance(record.status, AuditRecordStatus) else str(record.status)
         if status == AuditRecordStatus.PREPARING.value:
             return False
-        message = None
-        payload = None
-        for candidate in await message_crud.list_by_type(
-            db,
-            uid=record.uid,
-            session_id=record.session_id,
-            message_type=MessageType.AUDIT_CONFIRMATION,
-        ):
-            try:
-                candidate_payload = json.loads(candidate.content or "{}")
-            except (TypeError, ValueError):
-                continue
-            if isinstance(candidate_payload, dict) and str(candidate_payload.get("audit_record_id")) == str(record.id):
-                message = candidate
-                payload = candidate_payload
-                break
+        message, payload = await _get_confirmation_message(db, record)
         if message is None or message.id is None or payload is None:
             return False
         if str(payload.get("status") or "") == status:
@@ -193,33 +442,47 @@ async def update_confirmation_message_status(
             await db.rollback()
             continue
 
-        event = {
-            "type": "audit_confirmation_status",
-            "source": "audit_confirmation",
-            "event_id": f"audit-confirmation:{record.id}:{status}",
-            "session_id": record.session_id,
-            "audit_record_id": record.id,
-            "message_id": message.id,
-            "status": status,
-            "content": serialized_payload,
-        }
-        try:
-            await send_session_event(record.uid, record.session_id, event)
-        except Exception:
-            logger.bind(uid=record.uid, session_id=record.session_id, audit_record_id=record.id, status=status).warning(
-                "Failed to broadcast audit confirmation status",
-                exc_info=True,
-            )
+        tool_results = await _get_confirmation_tool_result_events(db, record)
+        await _send_confirmation_status_event(
+            record,
+            message=message,
+            status=status,
+            content=serialized_payload,
+            event_id=f"audit-confirmation:{record.id}:{status}",
+        )
+        await _send_confirmation_tool_results_event(record, tool_results)
         return True
     return False
+
+
+async def sync_expired_confirmation_messages(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    locale: str | None,
+) -> None:
+    await _update_confirmation_tool_results(
+        db,
+        audit_record_id=audit_record_id,
+        before_message_id=None,
+        status=AuditRecordStatus.EXPIRED,
+        confirmation_status=AuditRecordStatus.EXPIRED.value,
+        feedback=t(ERR_AUDIT_CONFIRMATION_EXPIRED, locale=locale),
+    )
+    await db.commit()
+    await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    await db.commit()
 
 
 async def expire_confirmation_by_session(db: AsyncSession, *, uid: str, session_id: str) -> int:
     record = await audit_crud.get_confirmation_claim(db, uid=uid, session_id=session_id)
     expired_count = await audit_crud.expire_confirmation_by_session(db, uid=uid, session_id=session_id)
-    if expired_count:
-        if record is not None and record.id is not None:
-            await update_confirmation_message_status(db, audit_record_id=record.id)
+    if expired_count and record is not None and record.id is not None:
+        await sync_expired_confirmation_messages(
+            db,
+            audit_record_id=record.id,
+            locale=record.language,
+        )
     return expired_count
 
 

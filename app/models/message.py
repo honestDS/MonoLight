@@ -34,6 +34,7 @@ class MessageType(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     AUDIT_CONFIRMATION = "audit_confirmation"
+    AUDIT_DECISION = "audit_decision"
     BACKGROUND_TASK_RESULT = "background_result"
     SCHEDULED_TASK_TRIGGER = "scheduled_task_trigger"
 

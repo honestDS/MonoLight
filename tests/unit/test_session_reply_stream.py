@@ -1,10 +1,12 @@
+from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
 from app.adapters import chat_web as chat_web_module
-from app.core.exceptions import BaseBusinessException
+from app.core.constants import ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
+from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.session_reply_queue.executor import _execute_foreground
 from app.core.session_reply_queue.manager import (
     SessionReplyQueueManager,
@@ -150,6 +152,260 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+async def _collect_stream_tool_calls(monkeypatch, chunks):
+    async def generate_stream(cls, **kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(_content):
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+    )
+    return response.message.tool_calls
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_replay_on_another_index_is_assembled_once(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-X-0",
+                                "function": {"name": "execute_shell", "arguments": ""},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-X-0",
+                                "function": {"arguments": '{"command":"python test.py"}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 1,
+                                "id": "call-X-0",
+                                "function": {
+                                    "name": "execute_shell",
+                                    "arguments": '{"command":"python test.py"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    original_chunks = deepcopy(chunks)
+
+    tool_calls = await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "execute_shell"
+    assert tool_calls[0].arguments == {"command": "python test.py"}
+    assert chunks == original_chunks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_provider_ids", [True, False])
+async def test_stream_tool_calls_preserve_identical_batch_calls(monkeypatch, include_provider_ids):
+    first = {
+        "index": 0,
+        "function": {"name": "search", "arguments": '{"query":"MonoLight"}'},
+    }
+    second = {
+        "index": 1,
+        "function": {"name": "search", "arguments": '{"query":"MonoLight"}'},
+    }
+    if include_provider_ids:
+        first["id"] = "provider-call-1"
+        second["id"] = "provider-call-2"
+    chunks = [{"choices": [{"delta": {"tool_calls": [first, second]}}]}]
+
+    tool_calls = await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+    assert [tool_call.name for tool_call in tool_calls] == ["search", "search"]
+    assert [tool_call.arguments for tool_call in tool_calls] == [
+        {"query": "MonoLight"},
+        {"query": "MonoLight"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_binds_late_id_and_keeps_argument_fragments(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"name": "search", "arguments": '{"query":"'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "provider-call",
+                                "function": {"arguments": "Mono"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "provider-call",
+                                "function": {"arguments": 'Light"}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+
+    tool_calls = await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "search"
+    assert tool_calls[0].arguments == {"query": "MonoLight"}
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_keeps_identical_fragments_on_same_index(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "provider-call",
+                                "function": {"name": "search", "arguments": '{"query":"'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "same"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "same"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"}'}}]}}]},
+    ]
+
+    tool_calls = await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].arguments == {"query": "samesame"}
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_calls_with_same_id_but_different_content_stay_separate(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "reused-provider-id",
+                                "function": {"name": "search", "arguments": '{"query":"one"}'},
+                            },
+                            {
+                                "index": 1,
+                                "id": "reused-provider-id",
+                                "function": {"name": "search", "arguments": '{"query":"two"}'},
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+
+    tool_calls = await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert tool_calls is not None
+    assert len(tool_calls) == 2
+    assert [(tool_call.name, tool_call.arguments) for tool_call in tool_calls] == [
+        ("search", {"query": "one"}),
+        ("search", {"query": "two"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_calls_without_identity_in_same_delta_raise_llm_exception(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"function": {"name": "search", "arguments": "{}"}},
+                            {"function": {"name": "search", "arguments": "{}"}},
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+
+    with pytest.raises(LLMException) as exc_info:
+        await _collect_stream_tool_calls(monkeypatch, chunks)
+
+    assert exc_info.value.message == ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
 
 
 def test_normalize_tool_calls_replaces_upstream_ids_and_preserves_identical_calls():

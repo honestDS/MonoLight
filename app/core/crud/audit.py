@@ -968,10 +968,16 @@ class CRUDAudit:
         session_id: str,
     ) -> int:
         now = get_local_time()
-        claim_record_ids = select(AuditConfirmationClaim.audit_record_id).where(
-            AuditConfirmationClaim.uid == uid,
-            AuditConfirmationClaim.session_id == session_id,
+        # MySQL 禁止删除目标表时在子查询读取同表；先物化 ID，让 SQLite、MySQL、PostgreSQL 共用一致逻辑。
+        claim_record_ids_result = await db.execute(
+            select(AuditConfirmationClaim.audit_record_id).where(
+                AuditConfirmationClaim.uid == uid,
+                AuditConfirmationClaim.session_id == session_id,
+            )
         )
+        claim_record_ids = list(claim_record_ids_result.scalars().all())
+        if not claim_record_ids:
+            return 0
         result = await db.execute(
             update(AuditRecord)
             .where(
@@ -988,11 +994,15 @@ class CRUDAudit:
             )
             .execution_options(synchronize_session=False)
         )
-        expired_record_ids = select(AuditRecord.id).where(
-            AuditRecord.id.in_(claim_record_ids),
-            AuditRecord.status == AuditRecordStatus.EXPIRED,
+        expired_record_ids_result = await db.execute(
+            select(AuditRecord.id).where(
+                AuditRecord.id.in_(claim_record_ids),
+                AuditRecord.status == AuditRecordStatus.EXPIRED,
+            )
         )
-        await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id.in_(expired_record_ids)))
+        expired_record_ids = list(expired_record_ids_result.scalars().all())
+        if expired_record_ids:
+            await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id.in_(expired_record_ids)))
         await db.commit()
         return result.rowcount or 0
 

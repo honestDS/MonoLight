@@ -96,13 +96,14 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         message_id: int,
         expected_content: str | None,
         content: str,
+        message_type: MessageType = MessageType.AUDIT_CONFIRMATION,
         commit: bool = True,
     ) -> bool:
         result = await db.execute(
             update(Message)
             .where(
                 Message.id == message_id,
-                Message.type == MessageType.AUDIT_CONFIRMATION,
+                Message.type == message_type,
                 Message.content == expected_content,
             )
             .values(content=content)
@@ -189,7 +190,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
 
-        result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit))
+        result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit).execution_options(populate_existing=True))
         return result.scalars().all()
 
     async def get_history_backward_by_id(
@@ -219,7 +220,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if upper_bound is not None:
             stmt = stmt.where(Message.id < upper_bound)
 
-        result = await db.execute(stmt.order_by(Message.id.desc()).limit(limit))
+        result = await db.execute(stmt.order_by(Message.id.desc()).limit(limit).execution_options(populate_existing=True))
         return result.scalars().all()
 
     async def get_unprocessed_messages(self, db: AsyncSession, *, session_id: str, uid: str) -> list[Message]:

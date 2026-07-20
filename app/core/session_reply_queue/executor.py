@@ -8,9 +8,14 @@ from typing import Any
 
 from sqlalchemy import update
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import (
+    get_pending_tool_results,
+    notify_confirmation_tool_results,
+    replace_pending_tool_result,
+    update_confirmation_message_status,
+)
 from app.core.audit.integrity import create_file_integrity_snapshot, verify_file_integrity_snapshot, verify_persisted_tool_round
-from app.core.audit.service import audit_tool_round
+from app.core.audit.service import audit_tool_round, is_audit_configured
 from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED,
@@ -39,11 +44,9 @@ from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
-from app.core.utils.dispatcher.helpers import dump_background_proactive_history
+from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round, process_single_tool
-from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_message import save_message
-from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -339,6 +342,35 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         attachments=attachments or None,
     )
     await db.refresh(work)
+    if bool((work.execution_state or {}).get("audit_decision_response")):
+        profile = await profile_crud.get_with_relations(db, work.profile_id)
+        if profile is None or profile.uid != work.uid:
+            raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+        ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+            db,
+            uid=work.uid,
+            session_id=work.session_id,
+            profile=profile,
+            call_context="session_reply_audit_decision",
+            allow_tools=False,
+            reply_source="audit_decision",
+            final_message_dedupe_key=_result_message_dedupe_key(work),
+        )
+        content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": MessageRole.ASSISTANT,
+                        "content": content,
+                    },
+                    "finish_reason": True,
+                    "created_at": time.time(),
+                }
+            ],
+            "history": dump_output_history(turn_messages),
+            "files": files or None,
+        }
     stream_requested = bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
@@ -494,7 +526,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         source_valid = False
-    if not source_valid:
+
+    async def source_invalid_response() -> dict[str, Any]:
         if record is not None and claim_token:
             await audit_crud.mark_source_message_invalid(
                 db,
@@ -519,17 +552,25 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
         return {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
 
+    if not source_valid:
+        return await source_invalid_response()
+
     cfg = await validate_profile_and_cfg(db, profile)
     files_changed = _confirmed_file_snapshots_changed(details, working_directory=record.working_directory)
+    decision_message_id = (work.execution_state or {}).get("decision_message_id")
+    pending_tool_results = await get_pending_tool_results(
+        db,
+        uid=work.uid,
+        session_id=work.session_id,
+        source_assistant_message_id=source_message.id,
+        before_message_id=decision_message_id if isinstance(decision_message_id, int) else None,
+        tool_call_ids=[tool_call.id for tool_call in source_tool_calls],
+    )
+    if pending_tool_results is None:
+        return await source_invalid_response()
 
-    if files_changed:
-        await audit_crud.cancel_execution_for_file_reaudit(
-            db,
-            audit_record_id=audit_record_id,
-            claim_token=claim_token,
-            error_reason="命令直接引用的文件已变化，原确认失效",
-        )
-        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    reaudit_round = None
+    if files_changed and is_audit_configured(cfg):
         reaudit_round = await audit_tool_round(
             db,
             cfg=cfg,
@@ -542,19 +583,37 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             language=get_current_locale(),
             working_directory=record.working_directory,
         )
+    if reaudit_round is not None:
+        await audit_crud.cancel_execution_for_file_reaudit(
+            db,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+            error_reason="命令直接引用的文件已变化，原确认失效",
+        )
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
         if not reaudit_round.may_execute:
             messages = [source_internal]
             turn_messages = [source_internal]
+            reaudit_results_by_call_id: dict[str, InternalMessage] = {}
             for tool_result in reaudit_round.tool_results:
-                await save_tool_response(
+                tool_call_id = tool_result.tool_call_id
+                if tool_result.role != MessageRole.TOOL or not isinstance(tool_call_id, str) or tool_call_id in reaudit_results_by_call_id:
+                    raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+                reaudit_results_by_call_id[tool_call_id] = tool_result
+            if set(reaudit_results_by_call_id) != {tool_call.id for tool_call in source_tool_calls}:
+                raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+            for original_call in source_tool_calls:
+                tool_result = reaudit_results_by_call_id[original_call.id]
+                sanitized_content = await replace_pending_tool_result(
                     db,
-                    work.session_id,
-                    work.uid,
-                    profile.id,
-                    tool_result,
-                    messages,
-                    turn_messages,
+                    pending_message=pending_tool_results[original_call.id],
+                    original_tool_call_id=original_call.id,
+                    content=tool_result.content,
                 )
+                stored_tool_result = tool_result.model_copy(deep=True)
+                stored_tool_result.content = sanitized_content
+                messages.append(stored_tool_result)
+                turn_messages.append(stored_tool_result)
             if reaudit_round.confirmation_payload is not None:
                 confirmation_content = json.dumps(reaudit_round.confirmation_payload, ensure_ascii=False)
                 await save_message(
@@ -568,7 +627,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     is_processed=True,
                     dedupe_key=_result_message_dedupe_key(work),
                 )
-                await update_confirmation_message_status(db, audit_record_id=reaudit_round.audit_record_id)
+                status_updated = await update_confirmation_message_status(db, audit_record_id=reaudit_round.audit_record_id)
+                if status_updated is False:
+                    await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
                 turn_messages.append(InternalMessage(role=MessageRole.ASSISTANT, content=confirmation_content))
                 return {
                     "content": confirmation_content,
@@ -611,9 +672,25 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     detail_by_original_id = {detail.original_tool_call_id: detail for detail in details}
     confirmed_calls = [InternalToolCall(id=f"call_{uuid.uuid4().hex}", name=item.name, arguments=dict(item.arguments or {})) for item in source_tool_calls]
     confirmed_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=confirmed_calls)
-    await save_assistant_message(db, work.session_id, work.uid, profile.id, confirmed_message)
     messages = [confirmed_message]
     turn_messages = [confirmed_message]
+    replaced_tool_results = False
+
+    async def append_confirmed_tool_result(original_tool_call_id: str, tool_result: InternalMessage) -> InternalMessage:
+        nonlocal replaced_tool_results
+        sanitized_content = await replace_pending_tool_result(
+            db,
+            pending_message=pending_tool_results[original_tool_call_id],
+            original_tool_call_id=original_tool_call_id,
+            content=tool_result.content,
+        )
+        stored_tool_result = tool_result.model_copy(deep=True)
+        stored_tool_result.content = sanitized_content
+        messages.append(stored_tool_result)
+        turn_messages.append(stored_tool_result)
+        replaced_tool_results = True
+        return stored_tool_result
+
     executions_by_original_call_id = {}
     for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
         detail = detail_by_original_id[original_call.id]
@@ -642,7 +719,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 status=AuditExecutionStatus.CANCELLED,
                 error=cancellation_error,
             )
-        for confirmed_call in confirmed_calls:
+        for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
             error_content = precheck_errors.get(confirmed_call.id)
             if error_content is None:
                 error_content = json.dumps(
@@ -653,18 +730,13 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     },
                     ensure_ascii=False,
                 )
-            await save_tool_response(
-                db,
-                work.session_id,
-                work.uid,
-                profile.id,
+            await append_confirmed_tool_result(
+                original_call.id,
                 InternalMessage(
                     role=MessageRole.TOOL,
                     tool_call_id=confirmed_call.id,
                     content=error_content,
                 ),
-                messages,
-                turn_messages,
             )
         if precheck_errors or not all_attempts_created:
             round_closed = await audit_crud.finish_execution_round(
@@ -693,7 +765,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 work.uid,
                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             )
-            await save_tool_response(db, work.session_id, work.uid, profile.id, tool_result, messages, turn_messages)
+            await append_confirmed_tool_result(original_call.id, tool_result)
             try:
                 result_payload = json.loads(tool_result.content or "{}")
             except (TypeError, ValueError):
@@ -716,7 +788,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             claim_token=claim_token,
         )
     if execution_round_status is not None:
-        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+        status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+        if replaced_tool_results and status_updated is False:
+            await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
     ai_msg, final_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,

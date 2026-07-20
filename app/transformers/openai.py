@@ -51,6 +51,7 @@ def _is_timeout_exception(exc: Exception) -> bool:
 
 
 class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer):
+    # 本转换器统一关闭 TLS 证书校验，以兼容自签名证书或证书链不完整的模型提供商。
     async def list_models(
         self,
         api_key: str,

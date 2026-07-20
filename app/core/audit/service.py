@@ -1,9 +1,7 @@
 import asyncio
 import copy
 import json
-import ntpath
 import os
-import shlex
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -34,7 +32,6 @@ from app.core.constants import (
     MSG_AUDIT_CONFIRMATION_IM,
     MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK,
     MSG_AUDIT_ROUND_SKIPPED,
-    MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK,
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
 from app.core.crud.audit import audit_crud
@@ -66,14 +63,6 @@ AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_c
 }
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["required"].append("tool_call_id")
 
-_SCRIPT_FILE_EXTENSIONS = {".py", ".js", ".sh", ".ps1", ".bat", ".cmd"}
-_PYTHON_EXECUTABLES = {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
-_NODE_EXECUTABLES = {"node", "node.exe"}
-_SHELL_EXECUTABLES = {"bash", "bash.exe", "sh", "sh.exe"}
-_POWERSHELL_EXECUTABLES = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
-_DYNAMIC_SCRIPT_PATH_MARKERS = ("$", "`", "%", "*", "?", "[", "]", "{", "}")
-
-
 @dataclass(frozen=True, slots=True)
 class AuditRoundResult:
     audit_record_id: int
@@ -86,105 +75,14 @@ class AuditRoundResult:
         return self.status == AuditRecordStatus.PASSED
 
 
+def is_audit_configured(cfg: ProfileConfig) -> bool:
+    channel_id = cfg.security.audit_channel_id
+    model_id = cfg.security.audit_model_id
+    return isinstance(channel_id, int) and not isinstance(channel_id, bool) and channel_id > 0 and isinstance(model_id, str) and bool(model_id.strip())
+
+
 def _tool_payload(tool_calls: list[InternalToolCall]) -> list[dict[str, Any]]:
     return [{"id": item.id, "name": item.name, "arguments": dict(item.arguments or {})} for item in tool_calls]
-
-
-def _extract_script_execution_paths(command: str) -> tuple[str, ...]:
-    if not isinstance(command, str) or not command.strip():
-        return ()
-    lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return ()
-
-    def clean_token(token: str) -> str:
-        if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
-            return token[1:-1]
-        return token
-
-    def is_static_path(value: str | None) -> bool:
-        return bool(value and value != "-" and not value.startswith("-") and not any(marker in value for marker in _DYNAMIC_SCRIPT_PATH_MARKERS))
-
-    def first_positional(arguments: list[str], *, stop_options: set[str], value_options: set[str]) -> str | None:
-        index = 0
-        while index < len(arguments):
-            argument = arguments[index]
-            lowered = argument.lower()
-            if lowered == "--":
-                return arguments[index + 1] if index + 1 < len(arguments) else None
-            if lowered in stop_options or any(lowered.startswith(f"{option}=") for option in stop_options if option.startswith("--")):
-                return None
-            if lowered in value_options:
-                index += 2
-                continue
-            if argument.startswith("-"):
-                index += 1
-                continue
-            return argument
-        return None
-
-    segments: list[list[str]] = []
-    segment: list[str] = []
-    for raw_token in tokens:
-        token = clean_token(raw_token)
-        if token and not (set(token) - set(";&|")):
-            if token == "&" and not segment:
-                segment.append(token)
-            elif segment:
-                segments.append(segment)
-                segment = []
-            continue
-        segment.append(token)
-    if segment:
-        segments.append(segment)
-
-    paths: list[str] = []
-    for segment in segments:
-        while segment and (segment[0] == "&" or ("=" in segment[0] and not segment[0].startswith(("/", ".", "\\")))):
-            segment = segment[1:]
-        if not segment:
-            continue
-        if segment[0].lower() == "env":
-            segment = segment[1:]
-            while segment and "=" in segment[0] and not segment[0].startswith(("/", ".", "\\")):
-                segment = segment[1:]
-        if not segment:
-            continue
-
-        executable = ntpath.basename(segment[0]).lower()
-        arguments = segment[1:]
-        script_path: str | None = None
-        if executable in _PYTHON_EXECUTABLES:
-            script_path = first_positional(arguments, stop_options={"-c", "-m"}, value_options={"-w", "-x", "--check-hash-based-pycs"})
-        elif executable in _NODE_EXECUTABLES:
-            script_path = first_positional(
-                arguments,
-                stop_options={"-c", "--check", "-e", "--eval", "-p", "--print"},
-                value_options={"-r", "--require", "--loader", "--import", "--conditions"},
-            )
-        elif executable in _SHELL_EXECUTABLES:
-            script_path = first_positional(arguments, stop_options={"-c", "--command", "-s"}, value_options={"-o", "+o"})
-        elif executable in _POWERSHELL_EXECUTABLES:
-            for index, argument in enumerate(arguments):
-                lowered = argument.lower()
-                if lowered in {"-file", "-f"}:
-                    script_path = arguments[index + 1] if index + 1 < len(arguments) else None
-                    break
-                if lowered.startswith("-file:"):
-                    script_path = argument.split(":", 1)[1]
-                    break
-        else:
-            direct_path = segment[1] if executable == "call" and len(segment) > 1 else segment[0]
-            if ntpath.splitext(direct_path)[1].lower() in _SCRIPT_FILE_EXTENSIONS:
-                script_path = direct_path
-
-        if is_static_path(script_path) and script_path not in paths:
-            paths.append(script_path)
-    return tuple(paths)
 
 
 def _round_conflict_ids(tool_calls: list[InternalToolCall], working_directory: Path) -> set[str]:
@@ -344,39 +242,6 @@ def _path_aliases(value: dict[str, Any]) -> set[str]:
     return {str(value[key]) for key in ("path", "original_path", "absolute_path", "resolved_path") if value.get(key)}
 
 
-def _normalized_path_aliases(value: dict[str, Any]) -> set[str]:
-    return {os.path.normcase(os.path.normpath(alias)) for alias in _path_aliases(value)}
-
-
-def _missing_readable_script_evidence(
-    script_paths_by_tool_call: dict[str, tuple[str, ...]],
-    file_reads: list[dict[str, Any]],
-    working_directory: Path,
-) -> dict[str, list[str]]:
-    reads_by_tool_call: dict[str, list[dict[str, Any]]] = {}
-    for file_read in file_reads:
-        if isinstance(file_read, dict) and isinstance(file_read.get("tool_call_id"), str):
-            reads_by_tool_call.setdefault(file_read["tool_call_id"], []).append(file_read)
-
-    missing: dict[str, list[str]] = {}
-    for tool_call_id, script_paths in script_paths_by_tool_call.items():
-        tool_reads = reads_by_tool_call.get(tool_call_id, [])
-        for script_path in script_paths:
-            try:
-                probe = read_text_file(script_path, working_directory=working_directory, max_bytes=AUDIT_FILE_MAX_BYTES).to_dict()
-            except (OSError, RuntimeError, TypeError, ValueError):
-                continue
-            if probe.get("status") != "ok":
-                continue
-            probe_aliases = _normalized_path_aliases(probe)
-            has_corresponding_read = any(
-                read.get("status") == "ok" and isinstance(read.get("content"), str) and bool(probe_aliases & _normalized_path_aliases(read)) for read in tool_reads
-            )
-            if not has_corresponding_read:
-                missing.setdefault(tool_call_id, []).append(script_path)
-    return missing
-
-
 def _redact_file_content(value: str, file_reads: list[dict[str, Any]]) -> str:
     redacted = value
     for file_read in file_reads:
@@ -499,12 +364,6 @@ def classify_audit_score(score: int, threshold: int) -> AuditToolConclusion:
     return AuditToolConclusion.PASSED
 
 
-def _apply_evidence_score_floor(score: int, threshold: int, *, requires_confirmation: bool) -> int:
-    if threshold <= 0 or not requires_confirmation:
-        return score
-    return max(score, threshold)
-
-
 def _aggregate(conclusions: list[AuditToolConclusion]) -> AuditRecordStatus:
     if AuditToolConclusion.BLOCKED in conclusions:
         return AuditRecordStatus.BLOCKED
@@ -536,7 +395,7 @@ async def _call_auditor(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     channel_id = cfg.security.audit_channel_id
     model_id = cfg.security.audit_model_id
-    if not channel_id or not model_id:
+    if not is_audit_configured(cfg):
         raise RuntimeError(t(ERR_AUDIT_CONFIG_MISSING))
     channel = await channel_crud.get(db, channel_id)
     if channel is None or not channel.is_active:
@@ -595,10 +454,8 @@ async def _summarize_pending(
     tool_calls: list[dict[str, Any]],
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] | None = None,
     working_directory: str | Path | None = None,
-    confirmation_required: bool = True,
 ) -> tuple[str, dict[str, Any]]:
-    fallback_key = MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK if confirmation_required else MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK
-    fallback_summary = t(fallback_key, locale=cfg.security.audit_report_language)
+    fallback_summary = t(MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK, locale=cfg.security.audit_report_language)
     channel = await channel_crud.get(db, cfg.security.audit_channel_id)
     if channel is None or not channel.is_active or not cfg.security.audit_model_id:
         return fallback_summary, {"fallback": True}
@@ -608,8 +465,6 @@ async def _summarize_pending(
         "tool_calls": tool_calls,
         "server_confirmation_reasons": server_confirmation_reasons or {},
     }
-    if not confirmation_required:
-        summary_payload["confirmation_required"] = False
     messages = [
         InternalMessage(
             role=MessageRole.SYSTEM,
@@ -668,15 +523,12 @@ async def audit_tool_round(
     source: str,
     language: str,
     working_directory: str | Path | None = None,
-) -> AuditRoundResult:
+) -> AuditRoundResult | None:
+    if not is_audit_configured(cfg):
+        return None
     await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or get_user_temp_dir(os.getcwd(), uid)).resolve(strict=False)
     payload_calls = _tool_payload(tool_calls)
-    script_paths_by_tool_call = {
-        item.id: paths
-        for item in tool_calls
-        if item.name == "execute_shell" and (paths := _extract_script_execution_paths(str((item.arguments or {}).get("command", ""))))
-    }
     append_file_snapshots = await asyncio.to_thread(
         _collect_append_file_snapshots,
         tool_calls,
@@ -722,7 +574,6 @@ async def audit_tool_round(
                 "turn_index": index,
                 "tool_name": item.name,
                 "arguments": item.arguments,
-                **({"explicit_script_paths": list(script_paths_by_tool_call[item.id])} if item.id in script_paths_by_tool_call else {}),
             }
             for index, item in enumerate(tool_calls)
         ],
@@ -772,12 +623,6 @@ async def audit_tool_round(
         file_reads = response_context.get("file_reads", []) if isinstance(response_context, dict) else []
         expected_tool_call_ids = {item.id for item in tool_calls}
         read_file_snapshots = _file_snapshots_from_reads(file_reads, expected_tool_call_ids)
-        missing_script_evidence = await asyncio.to_thread(
-            _missing_readable_script_evidence,
-            script_paths_by_tool_call,
-            file_reads,
-            workdir,
-        )
         read_protocol_failures = [item for item in file_reads if not isinstance(item, dict) or item.get("status") in {"denied", "invalid"} or item.get("tool_call_id") not in expected_tool_call_ids]
         for tool_call, result in zip(tool_calls, parsed_results, strict=True):
             tool_file_reads = [item for item in file_reads if isinstance(item, dict) and item.get("tool_call_id") == tool_call.id]
@@ -788,26 +633,13 @@ async def audit_tool_round(
                 tool_file_reads,
                 result.get("file_checks", []),
             )
-            missing_script_paths = missing_script_evidence.get(tool_call.id, [])
-            requires_confirmation = bool(read_protocol_failures) or evidence_requires_confirmation or bool(missing_script_paths)
+            requires_confirmation = bool(read_protocol_failures) or evidence_requires_confirmation
             evidence_reason = _evidence_confirmation_reason(
                 tool_call,
                 read_file_snapshots.get(tool_call.id, []),
                 tool_file_reads,
                 result.get("file_checks", []),
             )
-            if missing_script_paths:
-                if evidence_reason is None:
-                    evidence_reason = {
-                        "code": "file_evidence_insufficient",
-                        "message": t(ERR_AUDIT_FILE_EVIDENCE_INSUFFICIENT),
-                        "details": {
-                            "snapshot_count": len(read_file_snapshots.get(tool_call.id, [])),
-                            "model_file_check_count": len(result.get("file_checks", [])),
-                            "server_file_read_count": len(tool_file_reads),
-                        },
-                    }
-                evidence_reason["details"]["missing_script_paths"] = missing_script_paths
             if evidence_reason is not None:
                 local_reasons.append(evidence_reason)
             if read_protocol_failures:
@@ -823,13 +655,7 @@ async def audit_tool_round(
             result["reason"] = _redact_file_content(result["reason"], tool_file_reads)
             if local_reasons:
                 result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
-            result["score"] = _apply_evidence_score_floor(
-                result["score"],
-                cfg.security.audit_threshold,
-                requires_confirmation=requires_confirmation,
-            )
             conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
-            # 阈值为 0 表示关闭二次确认，仅保留高风险阻断和审计失败状态。
             if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
                 conclusion = AuditToolConclusion.PENDING
             conclusions.append(conclusion)
@@ -845,14 +671,13 @@ async def audit_tool_round(
     intent_summary = None
     summary_context = None
     expires_at = None
-    if status == AuditRecordStatus.PENDING or (status == AuditRecordStatus.PASSED and bool(script_paths_by_tool_call)):
+    if status == AuditRecordStatus.PENDING:
         intent_summary, summary_context = await _summarize_pending(
             db,
             cfg,
             payload_calls,
             server_confirmation_reasons,
             working_directory=workdir,
-            confirmation_required=status == AuditRecordStatus.PENDING,
         )
     if status == AuditRecordStatus.PENDING:
         expires_at = get_local_time() + timedelta(seconds=cfg.security.audit_confirmation_timeout_seconds)

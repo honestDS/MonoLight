@@ -456,12 +456,12 @@ export function useMessageProcessor() {
       return
     }
 
-    const aiContent = response.choices?.[0]?.message?.content || ''
+    const aiContent = response.choices?.[0]?.message?.content ?? response.content ?? ''
     const history = response.history || []
     const responseFiles = response.files || []
-    const aiCreatedAt = response.choices?.[0]?.created_at || null
-    const role = response.choices?.[0]?.message?.role || ''
-    const finishReason = response.choices?.[0]?.finish_reason
+    const aiCreatedAt = response.choices?.[0]?.created_at || response.created_at || null
+    const role = response.choices?.[0]?.message?.role || response.role || 'assistant'
+    const finishReason = response.choices?.[0]?.finish_reason || response.finish_reason
 
     if (finishReason === 'queued') return
 
@@ -522,6 +522,9 @@ export function useMessageProcessor() {
     }
     if (workId) {
       finalAiMsg.work_id = workId
+    }
+    if (response.response_id) {
+      finalAiMsg.response_id = response.response_id
     }
 
     aiMessagesToInsert.push(finalAiMsg)

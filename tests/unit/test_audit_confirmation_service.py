@@ -9,10 +9,8 @@ import pytest
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, parse_confirmation_decision
 from app.core.audit.service import (
-    _apply_evidence_score_floor,
     _call_auditor,
     _collect_append_file_snapshots,
-    _extract_script_execution_paths,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
     _parse_results,
@@ -21,8 +19,9 @@ from app.core.audit.service import (
     _summarize_pending,
     audit_tool_round,
     classify_audit_score,
+    is_audit_configured,
 )
-from app.core.constants import MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK
+from app.core.constants import MSG_AUDIT_CONFIRMATION_IM
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
@@ -36,7 +35,10 @@ def _profile_config() -> ProfileConfig:
     return ProfileConfig.model_validate(
         {
             "channel": {},
-            "security": {},
+            "security": {
+                "audit_channel_id": 1,
+                "audit_model_id": "audit-model",
+            },
             "tool": {
                 "enabled_tools": ["execute_shell", "write_file"],
             },
@@ -62,53 +64,19 @@ def test_audit_score_conclusion_uses_configured_confirmation_threshold(score, th
     assert classify_audit_score(score, threshold) == expected
 
 
-@pytest.mark.parametrize(
-    ("score", "threshold", "requires_confirmation", "expected"),
-    [
-        (1, 5, True, 5),
-        (6, 5, True, 6),
-        (1, 5, False, 1),
-        (1, 0, True, 1),
-    ],
-)
-def test_evidence_score_floor_respects_disabled_confirmation(score, threshold, requires_confirmation, expected):
-    assert _apply_evidence_score_floor(score, threshold, requires_confirmation=requires_confirmation) == expected
-
-
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [
-        ("python task.py", ("task.py",)),
-        ("python3 -u scripts/task.py", ("scripts/task.py",)),
-        ("python -W ignore task.py", ("task.py",)),
-        (r'.venv\Scripts\python.exe "jobs\my task.py"', (r"jobs\my task.py",)),
-        ("py -3 task.py", ("task.py",)),
-        ("node app.js", ("app.js",)),
-        ("bash -x deploy.sh", ("deploy.sh",)),
-        ("sh scripts/check.sh", ("scripts/check.sh",)),
-        ('powershell -File "scripts/task.ps1"', ("scripts/task.ps1",)),
-        ("pwsh -f task.ps1", ("task.ps1",)),
-        ("./task.py && node next.js", ("./task.py", "next.js")),
-        ("task.bat", ("task.bat",)),
-        ("call task.cmd", ("task.cmd",)),
-        ("python -c \"print('ok')\"", ()),
-        ("python -m package", ()),
-        ('python "$SCRIPT"', ()),
-        ("echo task.py", ()),
-    ],
-)
-def test_script_execution_path_recognition(command, expected):
-    assert _extract_script_execution_paths(command) == expected
-
-
 def test_audit_prompt_requires_script_content_evidence():
     assert "MUST call read_text_file for every explicitly named script" in AUDIT_BATCH_PROMPT
     assert "This requirement cannot be skipped" in AUDIT_BATCH_PROMPT
-    assert "explicit_script_paths" in AUDIT_BATCH_PROMPT
+    assert "decide yourself whether it executes script code" in AUDIT_BATCH_PROMPT
+    assert "does not classify commands" in AUDIT_BATCH_PROMPT
+    assert "script_execution marker" in AUDIT_BATCH_PROMPT
     assert "credential-stealing" not in AUDIT_BATCH_PROMPT
     assert "may transmit passwords to an external destination" in AUDIT_BATCH_PROMPT
     assert "its score must not be lower than 1" in AUDIT_BATCH_PROMPT
-    assert "Script execution is not a read-only operation" not in AUDIT_BATCH_PROMPT
+    assert "Score script execution from 1 through 7 according to its actual behavior" in AUDIT_BATCH_PROMPT
+    assert "score 7 is appropriate" in AUDIT_BATCH_PROMPT
+    assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
+    assert "marked script_execution" not in AUDIT_BATCH_PROMPT
 
 
 def test_audit_report_language_defaults_and_rejects_unsupported_locale():
@@ -117,6 +85,25 @@ def test_audit_report_language_defaults_and_rejects_unsupported_locale():
 
     with pytest.raises(ValueError):
         ProfileConfig.model_validate({"security": {"audit_report_language": "unsupported"}})
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "model_id", "expected"),
+    [
+        (1, "audit-model", True),
+        (None, "audit-model", False),
+        (1, None, False),
+        (1, "   ", False),
+        (0, "audit-model", False),
+        (True, "audit-model", False),
+    ],
+)
+def test_audit_configuration_requires_positive_integer_channel_and_nonblank_model(channel_id, model_id, expected):
+    cfg = _profile_config()
+    cfg.security.audit_channel_id = channel_id
+    cfg.security.audit_model_id = model_id
+
+    assert is_audit_configured(cfg) is expected
 
 
 @pytest.mark.parametrize("timeout", [1, 86400])
@@ -226,49 +213,37 @@ def test_english_confirmation_text_uses_relative_timeout_without_absolute_timest
 
 
 @pytest.mark.asyncio
-async def test_passed_script_summary_uses_non_confirmation_i18n_fallback(monkeypatch):
-    cfg = _profile_config()
-
-    async def missing_channel(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr("app.core.audit.service.channel_crud.get", missing_channel)
-
-    summary, context = await _summarize_pending(
-        SimpleNamespace(),
-        cfg,
-        [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python task.py"}}],
-        confirmation_required=False,
-    )
-
-    assert summary == t(MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK, locale="zh")
-    assert context == {"fallback": True}
-
-
-@pytest.mark.asyncio
-async def test_missing_audit_configuration_fails_the_round_and_returns_one_result_per_tool(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("channel_id", "model_id"),
+    [
+        (None, None),
+        (1, None),
+        (None, "audit-model"),
+        (1, "   "),
+    ],
+)
+async def test_missing_audit_configuration_skips_round_without_side_effects(monkeypatch, tmp_path, channel_id, model_id):
     import app.core.audit.service as service
 
     cfg = _profile_config()
-    captured = {}
+    cfg.security.audit_channel_id = channel_id
+    cfg.security.audit_model_id = model_id
 
     class FakeDb:
         async def commit(self):
             return None
 
-    async def no_expiration(*_args, **_kwargs):
-        return None
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("unconfigured audit must not perform audit side effects")
 
-    async def create_preparing(*_args, **_kwargs):
-        return SimpleNamespace(id=123)
+    def unexpected_snapshot(*_args, **_kwargs):
+        raise AssertionError("unconfigured audit must not collect evidence")
 
-    async def persist(*_args, **kwargs):
-        captured.update(kwargs)
-        return True
-
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", unexpected_call)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
+    monkeypatch.setattr(service, "_call_auditor", unexpected_call)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
+    monkeypatch.setattr(service, "_collect_append_file_snapshots", unexpected_snapshot)
 
     result = await audit_tool_round(
         FakeDb(),
@@ -283,10 +258,77 @@ async def test_missing_audit_configuration_fails_the_round_and_returns_one_resul
         working_directory=tmp_path,
     )
 
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_case", ["channel_missing", "channel_inactive", "model_error", "invalid_response"])
+async def test_configured_audit_runtime_failures_still_persist_audit_failed(monkeypatch, tmp_path, failure_case):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    class FakeChannel:
+        is_active = True
+        base_url = "https://audit.example"
+        protocol = "openai"
+
+        def get_decrypted_api_key(self):
+            return "secret"
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def get_channel(*_args, **_kwargs):
+        if failure_case == "channel_missing":
+            return None
+        if failure_case == "channel_inactive":
+            return SimpleNamespace(is_active=False)
+        return FakeChannel()
+
+    async def generate(**_kwargs):
+        if failure_case == "model_error":
+            raise RuntimeError("audit model failed")
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="not valid json"),
+            model="audit-model",
+        )
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+    monkeypatch.setattr(service.channel_crud, "get", get_channel)
+    monkeypatch.setattr(service.LLMClient, "generate", generate)
+
+    result = await audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="echo", arguments={"value": "ok"})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result is not None
     assert result.status.value == "audit_failed"
-    assert len(result.tool_results) == 2
     assert captured["failure_type"].value == "audit_service_failed"
-    assert all(json.loads(item.content)["status"] == "audit_failed" for item in result.tool_results)
+    assert json.loads(result.tool_results[0].content)["status"] == "audit_failed"
 
 
 @pytest.mark.asyncio
@@ -665,14 +707,14 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
 
     assert result.status.value == expected_status
     assert all(detail["conclusion"] == expected_status for detail in captured["tool_details"])
-    assert all(detail["score"] == audit_threshold for detail in captured["tool_details"])
+    assert all(detail["score"] == 0 for detail in captured["tool_details"])
     assert all(detail["server_confirmation_reasons"][-1]["code"] == "file_read_protocol_invalid" for detail in captured["tool_details"])
     assert len(logs) == 2
     assert "安全审计 LLM" in logs[0] or "Security audit LLM" in logs[0]
     assert "record_id=123" in logs[0]
     assert "record_id=123" in logs[1]
     assert f"status={expected_status}" in logs[1]
-    assert f"max_score={audit_threshold}" in logs[1]
+    assert "max_score=0" in logs[1]
     assert f"summary={'Confirm command' if expected_status == 'pending' else '-'}" in logs[1]
     if audit_threshold == 0:
         assert result.tool_results == ()
@@ -801,7 +843,8 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     async def create_preparing(*_args, **_kwargs):
         return SimpleNamespace(id=123)
 
-    async def call_auditor(*_args, **_kwargs):
+    async def call_auditor(*args, **_kwargs):
+        captured["request_payload"] = args[2]
         return {"messages": []}, {
             "file_reads": [read],
             "parsed": {
@@ -847,14 +890,20 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     assert "content" not in first_detail["file_snapshots"][0]
     assert second_detail["file_snapshots"] == []
     assert first_detail["server_confirmation_reasons"][0]["code"] == "file_evidence_insufficient"
+    assert first_detail["score"] == 0
     assert "review me" not in first_detail["reason"]
 
 
 @pytest.mark.asyncio
-async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("model_score", "audit_threshold", "expected_status"),
+    [(1, 5, "passed"), (7, 5, "pending"), (8, 5, "blocked")],
+)
+async def test_service_does_not_classify_dynamic_script_command_or_change_model_score(monkeypatch, tmp_path, model_score, audit_threshold, expected_status):
     import app.core.audit.service as service
 
     cfg = _profile_config()
+    cfg.security.audit_threshold = audit_threshold
     captured = {}
 
     class FakeDb:
@@ -869,15 +918,19 @@ async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_
 
     async def call_auditor(*args, **_kwargs):
         captured["request_payload"] = args[2]
-        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 1, "reason": "safe without a read", "file_checks": []}]}}
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": model_score, "reason": "model assessed command", "file_checks": []}]}}
+
+    async def summarize_pending(*_args, **_kwargs):
+        return "Model-selected confirmation summary", {}
 
     async def persist(*_args, **kwargs):
-        captured["tool_details"] = kwargs["tool_details"]
+        captured.update(kwargs)
         return True
 
     monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
 
     command = 'python "$SCRIPT"'
@@ -894,14 +947,18 @@ async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_
         working_directory=tmp_path,
     )
 
-    assert result.status.value == "passed"
+    assert result.status.value == expected_status
+    assert (result.confirmation_payload is not None) is (expected_status == "pending")
     assert captured["request_payload"]["working_directory"] == str(tmp_path.resolve())
     assert captured["request_payload"]["tool_calls"][0]["arguments"] == {"command": command}
+    assert set(captured["request_payload"]["tool_calls"][0]) == {"tool_call_id", "turn_index", "tool_name", "arguments"}
     assert captured["tool_details"][0]["file_snapshots"] == []
+    assert captured["tool_details"][0]["score"] == model_score
+    assert captured["tool_details"][0]["conclusion"] == expected_status
 
 
 @pytest.mark.asyncio
-async def test_readable_script_without_matching_read_evidence_requires_confirmation(monkeypatch, tmp_path):
+async def test_service_does_not_infer_missing_script_evidence_from_command_text(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     cfg = _profile_config()
@@ -923,9 +980,6 @@ async def test_readable_script_without_matching_read_evidence_requires_confirmat
         captured["request_payload"] = args[2]
         return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "file_checks": []}]}}
 
-    async def summarize_pending(*_args, **_kwargs):
-        return "Run task.py", {"response": "Run task.py"}
-
     async def persist(*_args, **kwargs):
         captured.update(kwargs)
         return True
@@ -933,70 +987,6 @@ async def test_readable_script_without_matching_read_evidence_requires_confirmat
     monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
     monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
     monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
-    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
-
-    result = await service.audit_tool_round(
-        FakeDb(),
-        cfg=cfg,
-        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python task.py"})],
-        source_assistant_message_id=1,
-        uid="u1",
-        operator_username="tester",
-        session_id="session-1",
-        source="web",
-        language="en",
-        working_directory=tmp_path,
-    )
-
-    assert result.status.value == "pending"
-    assert result.confirmation_payload["type"] == "audit_confirmation"
-    assert captured["request_payload"]["tool_calls"][0]["explicit_script_paths"] == ["task.py"]
-    assert captured["tool_details"][0]["score"] == cfg.security.audit_threshold
-    reason = captured["tool_details"][0]["server_confirmation_reasons"][0]
-    assert reason["code"] == "file_evidence_insufficient"
-    assert reason["details"]["missing_script_paths"] == ["task.py"]
-
-
-@pytest.mark.asyncio
-async def test_safe_script_zero_score_is_preserved_and_summary_persisted_without_confirmation(monkeypatch, tmp_path):
-    import app.core.audit.service as service
-
-    cfg = _profile_config()
-    script = tmp_path / "task.py"
-    script.write_text("print('safe')\n", encoding="utf-8")
-    read = _read_for_audit_sync("task.py", "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
-    file_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated")}
-    captured = {}
-
-    class FakeDb:
-        async def commit(self):
-            return None
-
-    async def no_expiration(*_args, **_kwargs):
-        return None
-
-    async def create_preparing(*_args, **_kwargs):
-        return SimpleNamespace(id=124)
-
-    async def call_auditor(*_args, **_kwargs):
-        return {"messages": []}, {
-            "file_reads": [read],
-            "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe script", "file_checks": [file_check]}]},
-        }
-
-    async def summarize_pending(*_args, **kwargs):
-        assert kwargs["confirmation_required"] is False
-        return "Run the safe task.py script", {"response": "Run the safe task.py script"}
-
-    async def persist(*_args, **kwargs):
-        captured.update(kwargs)
-        return True
-
-    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
-    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
-    monkeypatch.setattr(service, "_call_auditor", call_auditor)
-    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
     monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
 
     result = await service.audit_tool_round(
@@ -1014,11 +1004,9 @@ async def test_safe_script_zero_score_is_preserved_and_summary_persisted_without
 
     assert result.status.value == "passed"
     assert result.confirmation_payload is None
-    assert result.tool_results == ()
+    assert set(captured["request_payload"]["tool_calls"][0]) == {"tool_call_id", "turn_index", "tool_name", "arguments"}
     assert captured["tool_details"][0]["score"] == 0
-    assert captured["intent_summary"] == "Run the safe task.py script"
-    assert captured["context_payload"]["summary"] == {"response": "Run the safe task.py script"}
-    assert captured["expires_at"] is None
+    assert captured["tool_details"][0]["server_confirmation_reasons"] == []
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1133,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert "locale code: en" in system_prompt
     assert "entire sentence only in that language" in system_prompt
     assert "action, concrete target or path, intended effect" in system_prompt
+    assert "does not provide a script classification" in system_prompt
     assert "what the command or target script actually does" in system_prompt
     assert "the script itself was not executed" in system_prompt
     assert "never reduce this to a vague phrase" in system_prompt

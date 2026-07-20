@@ -8,7 +8,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.audit.confirmation import cancel_confirmation_by_session, update_confirmation_message_status
+from app.core.audit.confirmation import ConfirmationDecision, cancel_confirmation_by_session, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, summarize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
@@ -26,7 +26,7 @@ from app.models.audit import (
     AuditRecordStatus,
 )
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 
 
 @pytest.fixture
@@ -86,6 +86,52 @@ async def _create_preparing(session, tmp_path, tool_count=2):
         tool_count=tool_count,
     )
     return record, snapshot
+
+
+async def _add_pending_confirmation_messages(session, record, *, include_card=True):
+    source_message = Message(
+        uid=record.uid,
+        session_id=record.session_id,
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python entry.py"})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    session.add(source_message)
+    await session.flush()
+    record.source_assistant_message_id = source_message.id
+    tool_result = Message(
+        uid=record.uid,
+        session_id=record.session_id,
+        profile_id=1,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-1",
+            content=json.dumps({"status": AuditRecordStatus.PENDING.value, "error": "waiting"}),
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    session.add(tool_result)
+    card = None
+    if include_card:
+        card = Message(
+            uid=record.uid,
+            session_id=record.session_id,
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.AUDIT_CONFIRMATION,
+            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            is_processed=True,
+        )
+        session.add(card)
+    await session.commit()
+    return tool_result, card
 
 
 def test_round_integrity_binds_order_identity_and_arguments(tmp_path):
@@ -420,6 +466,30 @@ async def test_expired_confirmation_is_closed_and_cannot_be_claimed(audit_databa
 
 
 @pytest.mark.asyncio
+async def test_session_expiration_expires_record_and_removes_claim(audit_database, tmp_path):
+    async with audit_database() as session:
+        assert await audit_crud.expire_confirmation_by_session(session, uid="missing", session_id="missing") == 0
+
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        context_file = (tmp_path / "audit_session_expired.json").resolve()
+        context_file.write_text("{}", encoding="utf-8")
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.PENDING,
+            tool_details=_tool_details(snapshot),
+            context_file_path=str(context_file),
+            expires_at=get_local_time() - timedelta(seconds=1),
+        )
+
+        assert await audit_crud.expire_confirmation_by_session(session, uid="u1", session_id="session-1") == 1
+        stored = await audit_crud.get_record(session, record.id)
+        claim_result = await session.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == record.id))
+        assert stored.status == AuditRecordStatus.EXPIRED
+        assert claim_result.scalars().first() is None
+
+
+@pytest.mark.asyncio
 async def test_confirmation_status_sync_uses_database_status_and_deduplicates_broadcast(audit_database, tmp_path, monkeypatch):
     events = []
 
@@ -472,7 +542,126 @@ async def test_confirmation_status_sync_uses_database_status_and_deduplicates_br
 
         payload = json.loads(card.content)
         assert payload["status"] == AuditRecordStatus.REJECTED.value
-        assert [event[2]["status"] for event in events] == [AuditRecordStatus.REJECTED.value]
+    assert [event[2]["status"] for event in events] == [AuditRecordStatus.REJECTED.value]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_status_event_contains_persisted_tool_result_and_is_json_serializable(audit_database, tmp_path, monkeypatch):
+    events = []
+
+    async def send_event(uid, session_id, event):
+        events.append((uid, session_id, event))
+
+    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+
+    async with audit_database() as session:
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        context_file = (tmp_path / "audit_confirmation_tool_result_event.json").resolve()
+        context_file.write_text("{}", encoding="utf-8")
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.PENDING,
+            tool_details=_tool_details(snapshot, conclusion="pending")[:1],
+            context_file_path=str(context_file),
+            expires_at=get_local_time() + timedelta(minutes=10),
+        )
+        tool_result, _card = await _add_pending_confirmation_messages(session, record, include_card=False)
+        card = Message(
+            uid="u1",
+            session_id="session-1",
+            profile_id=1,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.AUDIT_CONFIRMATION,
+            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
+            is_processed=True,
+        )
+        session.add(card)
+        await session.commit()
+
+        await audit_crud.close_pending(
+            session,
+            audit_record_id=record.id,
+            uid="u1",
+            session_id="session-1",
+            status=AuditRecordStatus.REJECTED,
+        )
+        await update_confirmation_tool_results_for_decision(
+            session,
+            audit_record_id=record.id,
+            before_message_id=tool_result.id + 1,
+            decision=ConfirmationDecision.REJECT,
+            raw_message="拒绝",
+        )
+        assert await update_confirmation_message_status(session, audit_record_id=record.id)
+        await session.refresh(tool_result)
+
+    assert len(events) == 2
+    status_events = [item[2] for item in events if item[2]["type"] == "audit_confirmation_status"]
+    result_events = [item[2] for item in events if item[2]["type"] == "audit_tool_results_update"]
+    assert len(status_events) == 1
+    assert len(result_events) == 1
+    assert "tool_results" not in status_events[0]
+    event = result_events[0]
+    json.dumps(event, ensure_ascii=False)
+    assert event["messages"] == [
+        {
+            "id": tool_result.id,
+            "db_id": tool_result.id,
+            "role": "tool",
+            "type": "tool_result",
+            "content": tool_result.content,
+            "tool_call_id": "call-1",
+            "created_at": tool_result.created_at.timestamp(),
+        }
+    ]
+    result_payload = json.loads(InternalMessage.model_validate_json(event["messages"][0]["content"]).content)
+    assert result_payload["status"] == AuditRecordStatus.REJECTED.value
+    assert result_payload["confirmation_decision"] == "拒绝"
+
+
+@pytest.mark.asyncio
+async def test_tool_result_notification_reads_result_after_status_event(audit_database, tmp_path, monkeypatch):
+    events = []
+
+    async def send_event(_uid, _session_id, event):
+        events.append(event)
+
+    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+
+    async with audit_database() as session:
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        context_file = (tmp_path / "audit_confirmation_tool_result_notification.json").resolve()
+        context_file.write_text("{}", encoding="utf-8")
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.PENDING,
+            tool_details=_tool_details(snapshot)[:1],
+            context_file_path=str(context_file),
+            expires_at=get_local_time() + timedelta(minutes=10),
+        )
+        tool_result, card = await _add_pending_confirmation_messages(session, record)
+        record.status = AuditRecordStatus.REJECTED
+        card_payload = {"audit_record_id": record.id, "status": AuditRecordStatus.REJECTED.value}
+        await message_crud.update_content(session, message_id=card.id, content=json.dumps(card_payload))
+        await message_crud.update_content(
+            session,
+            message_id=tool_result.id,
+            content=InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": AuditRecordStatus.REJECTED.value}),
+            ).model_dump_json(exclude_none=True),
+        )
+
+        assert await notify_confirmation_tool_results(session, audit_record_id=record.id)
+
+    assert len(events) == 1
+    assert events[0]["type"] == "audit_tool_results_update"
+    assert events[0]["event_id"].startswith(f"audit-tool-results:{record.id}:")
+    payload = json.loads(InternalMessage.model_validate_json(events[0]["messages"][0]["content"]).content)
+    assert payload["status"] == AuditRecordStatus.REJECTED.value
 
 
 @pytest.mark.parametrize(
@@ -637,23 +826,61 @@ async def test_startup_expiration_syncs_confirmation_card_from_final_record(audi
             context_file_path=str(context_file.resolve()),
             expires_at=get_local_time() - timedelta(seconds=1),
         )
-        card = Message(
-            uid="u1",
-            session_id="session-1",
-            profile_id=1,
-            role=MessageRole.ASSISTANT,
-            type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"audit_record_id": record.id, "status": AuditRecordStatus.PENDING.value}),
-            is_processed=True,
-        )
-        session.add(card)
-        await session.commit()
+        tool_result, card = await _add_pending_confirmation_messages(session, record)
+        assert card is not None
 
         await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
         await session.refresh(card)
+        await session.refresh(tool_result)
+        stored_record = await audit_crud.get_record(session, record.id)
+        tool_result_payload = json.loads(InternalMessage.model_validate_json(tool_result.content).content)
 
+        assert stored_record.status == AuditRecordStatus.EXPIRED
         assert json.loads(card.content)["status"] == AuditRecordStatus.EXPIRED.value
-        assert [event["status"] for event in events] == [AuditRecordStatus.EXPIRED.value]
+        assert tool_result_payload["status"] == AuditRecordStatus.EXPIRED.value
+        assert tool_result_payload["confirmation_status"] == AuditRecordStatus.EXPIRED.value
+        assert "安全审计确认已过期" in tool_result_payload["error"]
+        status_events = [event for event in events if event["type"] == "audit_confirmation_status"]
+        result_events = [event for event in events if event["type"] == "audit_tool_results_update"]
+        assert [event["status"] for event in status_events] == [AuditRecordStatus.EXPIRED.value]
+        assert len(result_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_expiration_commits_tool_result_without_confirmation_card(audit_database, tmp_path):
+    audit_root = tmp_path / "audit"
+    context_file = audit_root / "temp_u1" / "audit_no_card.json"
+    context_file.parent.mkdir(parents=True)
+    context_file.write_text("{}", encoding="utf-8")
+
+    async with audit_database() as session:
+        record, snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        record.language = "en"
+        await session.commit()
+        await audit_crud.complete_preparation(
+            session,
+            audit_record_id=record.id,
+            status=AuditRecordStatus.PENDING,
+            tool_details=_tool_details(snapshot),
+            context_file_path=str(context_file.resolve()),
+            expires_at=get_local_time() - timedelta(seconds=1),
+        )
+        tool_result, card = await _add_pending_confirmation_messages(session, record, include_card=False)
+        record_id = record.id
+        tool_result_id = tool_result.id
+        assert card is None
+
+        await recover_and_cleanup_audit_data(session, retention_days=90, audit_root=audit_root)
+
+    async with audit_database() as session:
+        stored_record = await audit_crud.get_record(session, record_id)
+        stored_tool_result = await session.get(Message, tool_result_id)
+        assert stored_record.status == AuditRecordStatus.EXPIRED
+        assert stored_tool_result is not None
+        tool_result_payload = json.loads(InternalMessage.model_validate_json(stored_tool_result.content).content)
+        assert tool_result_payload["status"] == AuditRecordStatus.EXPIRED.value
+        assert tool_result_payload["confirmation_status"] == AuditRecordStatus.EXPIRED.value
+        assert tool_result_payload["error"].startswith("The security-audit confirmation expired")
 
 
 @pytest.mark.asyncio

@@ -13,8 +13,11 @@ from app.core.background_tasks import manager as manager_module
 from app.core.background_tasks import runner as runner_module
 from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
+from app.core.dispatchers import background as background_module
+from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail
 from app.models.background_task import BackgroundTask, BackgroundTaskResponse, BackgroundTaskStatus
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.providers.database.time import get_database_timestamp
 
 
@@ -769,6 +772,90 @@ def test_tool_result_log_is_sanitized_and_truncated(monkeypatch):
     assert len(logger.messages) == 1
     assert "SECRET_VALUE" not in logger.messages[0]
     assert len(logger.messages[0]) < 2200
+
+
+@pytest.mark.asyncio
+async def test_background_without_audit_configuration_executes_tool_without_audit_binding(monkeypatch):
+    profile = SimpleNamespace(id=3)
+    cfg = SimpleNamespace(
+        channel=SimpleNamespace(chat_channel=object()),
+        security=SimpleNamespace(audit_channel_id=None, audit_model_id=None),
+        tool=SimpleNamespace(max_parallel_tools=5),
+    )
+    tool_call = InternalToolCall(
+        id="call-send",
+        name="send_file_to_user",
+        arguments={"files": [{"path": "/tmp/generated.png"}]},
+    )
+    responses = [
+        InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]), model="chat-model"),
+        InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), model="chat-model"),
+    ]
+    processed_calls = []
+
+    async def get_user(*_args, **_kwargs):
+        return SimpleNamespace(username="tester")
+
+    async def validate_profile(*_args, **_kwargs):
+        return cfg
+
+    async def get_tools(*_args, **_kwargs):
+        return (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "send_file_to_user",
+                        "description": "Send a file",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            None,
+        )
+
+    async def generate_chat(*_args, **_kwargs):
+        return responses.pop(0), None, {}, None, {"context_window_k": 128, "max_tokens": 256, "chat_timeout": 30}
+
+    async def process_tool(current_tool_call, *_args, **_kwargs):
+        processed_calls.append(current_tool_call.id)
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=current_tool_call.id, content='{"status":"success"}')
+
+    async def save_tool_response(_db, _session_id, _uid, _profile_id, tool_response, messages, turn_messages):
+        messages.append(tool_response)
+        turn_messages.append(tool_response)
+        return SimpleNamespace(id=10)
+
+    async def save(*_args, **_kwargs):
+        return None
+
+    async def fail_audit_binding(*_args, **_kwargs):
+        raise AssertionError("unconfigured background audit must not create a binding")
+
+    monkeypatch.setattr(background_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(background_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(background_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(background_module, "generate_chat_with_fallback", generate_chat)
+    monkeypatch.setattr(background_module, "process_single_tool_with_isolated_db", process_tool)
+    monkeypatch.setattr(background_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(background_module, "save_assistant_message", save)
+    monkeypatch.setattr(background_module, "prevalidate_tool_round", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(background_module, "extract_files_to_user", lambda _responses: [])
+    monkeypatch.setattr(background_module.audit_crud, "claim_passed_for_execution", fail_audit_binding)
+    monkeypatch.setattr(background_module.audit_crud, "create_execution_attempt", fail_audit_binding)
+
+    final_message, _turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
+        object(),
+        uid="user-1",
+        session_id="session-1",
+        profile=profile,
+        call_context="background_task_proactive_reply",
+        allow_tools=True,
+    )
+
+    assert final_message.content == "后台总结"
+    assert processed_calls == ["call-send"]
+    assert files == []
 
 
 async def _get_profile(_db, _profile_id):
