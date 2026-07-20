@@ -105,6 +105,7 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "MUST call read_text_file for every explicitly named script" in AUDIT_BATCH_PROMPT
     assert "This requirement cannot be skipped" in AUDIT_BATCH_PROMPT
     assert "explicit_script_paths" in AUDIT_BATCH_PROMPT
+    assert "credential-stealing" not in AUDIT_BATCH_PROMPT
     assert "may transmit passwords to an external destination" in AUDIT_BATCH_PROMPT
     assert "its score must not be lower than 1" in AUDIT_BATCH_PROMPT
     assert "Script execution is not a read-only operation" not in AUDIT_BATCH_PROMPT
