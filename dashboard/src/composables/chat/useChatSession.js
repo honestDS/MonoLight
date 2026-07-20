@@ -13,16 +13,19 @@ const t = (key, ...args) => i18n.global.t(key, ...args)
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 const normalizeHistoryMessage = (message) => {
+  const normalizedMessage = {
+    ...message,
+    db_id: message?.db_id ?? message?.id
+  }
   const content = normalizeMessageContent(message?.content)
   if (message?.type === 'background_result' && content?.type === 'background_tool_result') {
     return {
-      ...message,
-      db_id: message.db_id || message.id,
+      ...normalizedMessage,
       role: 'background_system',
       content: JSON.stringify(content)
     }
   }
-  return message
+  return normalizedMessage
 }
 
 const getAuditConfirmationRecordId = (message) => {
@@ -46,6 +49,7 @@ const parseAuditConfirmationResponse = (response) => {
 }
 
 const getLocalMessageType = (message) => {
+  if (message?.type === 'audit_decision' && message.role === 'user') return 'user'
   if (message?.type && message.type !== 'text') return message.type
   if (isToolCall(message)) return 'tool_call'
   if (isToolResult(message)) return 'tool_result'

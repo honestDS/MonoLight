@@ -43,6 +43,7 @@ from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
 from app.core.tools.file_writer import resolve_file_writer_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
 from app.core.tools.shell import ShellExecutor
+from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -62,6 +63,7 @@ AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_c
     "description": "The original tool_call_id whose assessment needs this file evidence.",
 }
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["required"].append("tool_call_id")
+
 
 @dataclass(frozen=True, slots=True)
 class AuditRoundResult:
@@ -185,6 +187,8 @@ async def _execute_audit_read_tool_call(
     original_tool_call_id = tool_call.arguments.get("tool_call_id")
     if not isinstance(requested_path, str) or not requested_path or not isinstance(original_tool_call_id, str) or not original_tool_call_id:
         return {"status": "invalid", "error": "path and tool_call_id are required"}
+    safe_args = sanitize_execution_summary(tool_call.arguments)
+    logger.bind(audit_llm_tool_call=True).info(t("LOG_AUDIT_LLM_TOOL_CALL", tool_name=tool_call.name, args=safe_args))
     return await asyncio.to_thread(
         _read_for_audit_sync,
         requested_path,

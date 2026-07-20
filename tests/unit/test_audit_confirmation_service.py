@@ -709,13 +709,17 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
     assert all(detail["conclusion"] == expected_status for detail in captured["tool_details"])
     assert all(detail["score"] == 0 for detail in captured["tool_details"])
     assert all(detail["server_confirmation_reasons"][-1]["code"] == "file_read_protocol_invalid" for detail in captured["tool_details"])
-    assert len(logs) == 2
+    expected_log_count = 3 if protocol_case == "invalid_id" else 2
+    assert len(logs) == expected_log_count
     assert "安全审计 LLM" in logs[0] or "Security audit LLM" in logs[0]
     assert "record_id=123" in logs[0]
-    assert "record_id=123" in logs[1]
-    assert f"status={expected_status}" in logs[1]
-    assert "max_score=0" in logs[1]
-    assert f"summary={'Confirm command' if expected_status == 'pending' else '-'}" in logs[1]
+    if protocol_case == "invalid_id":
+        assert "tool=read_text_file" in logs[1]
+        assert '"path": "missing.txt"' in logs[1]
+    assert "record_id=123" in logs[-1]
+    assert f"status={expected_status}" in logs[-1]
+    assert "max_score=0" in logs[-1]
+    assert f"summary={'Confirm command' if expected_status == 'pending' else '-'}" in logs[-1]
     if audit_threshold == 0:
         assert result.tool_results == ()
         assert result.confirmation_payload is None

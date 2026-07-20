@@ -34,6 +34,7 @@ MESSAGES = {
     "LOG_DISPATCHER_USER_MESSAGE": "[{username}] user message: {message}; attachments: {attachments}",
     "LOG_DISPATCHER_LLM_RESPONSE": "[{username}] turn {turn} | LLM response: {content}",
     "LOG_AUDIT_ROUND_STARTED": "Security audit LLM triggered: record_id={audit_record_id}, model={model_id}, tool_count={tool_count}, source={source}",
+    "LOG_AUDIT_LLM_TOOL_CALL": "Security audit LLM tool call: tool={tool_name}, args={args}",
     "LOG_AUDIT_ROUND_COMPLETED": "Security audit result: record_id={audit_record_id}, status={status}, max_score={max_score}, summary={summary}",
     "LOG_PROACTIVE_REPLY_GENERATION_STARTED": "Proactive reply generation started",
     "LOG_BACKGROUND_TASK_QUEUED": "Background task queued",
