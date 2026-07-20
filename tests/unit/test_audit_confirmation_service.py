@@ -21,7 +21,7 @@ from app.core.audit.service import (
     classify_audit_score,
     is_audit_configured,
 )
-from app.core.constants import MSG_AUDIT_CONFIRMATION_IM
+from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_CONFIRMATION_IM
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
@@ -959,6 +959,14 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
     assert captured["tool_details"][0]["file_snapshots"] == []
     assert captured["tool_details"][0]["score"] == model_score
     assert captured["tool_details"][0]["conclusion"] == expected_status
+    if expected_status == "blocked":
+        tool_result = json.loads(result.tool_results[0].content)
+        assert tool_result["status"] == "blocked"
+        assert tool_result["error"] == t(ERR_AUDIT_ROUND_BLOCKED)
+        assert tool_result["reason"] == "model assessed command"
+        assert "rejection_source" not in tool_result
+        assert "confirmation_status" not in tool_result
+        assert "confirmation_decision" not in tool_result
 
 
 @pytest.mark.asyncio

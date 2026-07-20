@@ -13,9 +13,11 @@ from app.core.audit.integrity import build_tool_round_integrity_snapshot, summar
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import AuditCleanupResult
+from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
 from app.core.crud.audit import audit_crud
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
+from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (
     AuditConfirmationClaim,
@@ -618,6 +620,8 @@ async def test_confirmation_status_event_contains_persisted_tool_result_and_is_j
     result_payload = json.loads(InternalMessage.model_validate_json(event["messages"][0]["content"]).content)
     assert result_payload["status"] == AuditRecordStatus.REJECTED.value
     assert result_payload["confirmation_decision"] == "拒绝"
+    assert result_payload["rejection_source"] == "user"
+    assert result_payload["error"] == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, locale="zh")
 
 
 @pytest.mark.asyncio

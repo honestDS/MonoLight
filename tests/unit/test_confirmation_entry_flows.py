@@ -16,6 +16,8 @@ from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.api.v1 import chat as chat_api
 from app.core.audit.confirmation import get_pending_tool_results, replace_pending_tool_result
+from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_WAITING_CONFIRMATION
+from app.core.i18n import t
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.message_parser import parse_db_messages_to_internal
@@ -422,6 +424,12 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
         assert tool_result_payload["confirmation_decision"] == message
         if expected_status == AuditRecordStatus.REJECTED:
             assert tool_result_payload["status"] == AuditRecordStatus.REJECTED.value
+            assert tool_result_payload["confirmation_status"] == "reject"
+            assert tool_result_payload["rejection_source"] == "user"
+            assert tool_result_payload["reason"] == "测试操作需要确认"
+            assert tool_result_payload["error"] == t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, locale="zh")
+            assert tool_result_payload["error"] != t(MSG_AUDIT_WAITING_CONFIRMATION, locale="zh")
+            assert tool_result_payload["error"] != t(ERR_AUDIT_ROUND_BLOCKED, locale="zh")
     if expected_status == AuditRecordStatus.CANCELLED:
         text_result = await db_session.execute(select(Message).where(Message.session_id == "session-1", Message.type == MessageType.TEXT).order_by(Message.id.desc()))
         text_message = text_result.scalars().first()

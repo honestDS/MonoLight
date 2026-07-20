@@ -229,6 +229,7 @@ MESSAGES = {
     "ERR_AUDIT_CONFIRMATION_UNAVAILABLE": "待确认记录已被处理或已失效",
     "ERR_AUDIT_CONFIRMATION_INVALID_INPUT": "用户未正确输入安全审计确认关键词，本轮工具调用未执行。这不是安全审计阻断结果；请重新发起操作，并在新的确认提示中仅回复“同意”或“继续”执行，回复“拒绝”取消。",
     "ERR_AUDIT_CONFIRMATION_EXPIRED": "安全审计确认已过期，本轮工具调用未执行。请重新发起操作。",
+    "ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER": "用户已拒绝执行本轮工具调用，本轮未执行；这不是安全审计自动阻止结果",
     "ERR_PERSISTED_USER_MESSAGE_MISMATCH": "预存用户消息归属不匹配",
     "MSG_MESSAGE_PLATFORM_CREATED": "消息平台创建成功",
     "MSG_MESSAGE_PLATFORM_UPDATED": "消息平台更新成功",

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_EXPIRED,
+    ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     MSG_AUDIT_CONFIRMATION_STATUS_IM,
     MSG_AUDIT_CONFIRMATION_SUPERSEDED,
@@ -34,6 +35,7 @@ class ConfirmationDecision(StrEnum):
 _APPROVE_WORDS = {"同意", "继续", "approve", "continue"}
 _REJECT_WORDS = {"拒绝", "reject"}
 CONFIRMATION_DECISION_FIELD = "confirmation_decision"
+REJECTION_SOURCE_FIELD = "rejection_source"
 _STATUS_TEXT_KEYS = {
     "executing": MSG_AUDIT_STATUS_EXECUTING,
     "rejected": MSG_AUDIT_STATUS_REJECTED,
@@ -225,6 +227,9 @@ async def _update_confirmation_tool_results(
         result_payload.update(status=status.value, confirmation_status=confirmation_status)
         if feedback is not None:
             result_payload["error"] = feedback
+        if status == AuditRecordStatus.REJECTED:
+            result_payload["error"] = t(ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, locale=record.language)
+            result_payload[REJECTION_SOURCE_FIELD] = "user"
         if confirmation_decision is not None:
             result_payload[CONFIRMATION_DECISION_FIELD] = confirmation_decision
         tool_result.content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

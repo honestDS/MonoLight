@@ -229,6 +229,7 @@ MESSAGES = {
     "ERR_AUDIT_CONFIRMATION_UNAVAILABLE": "The pending confirmation was already handled or expired",
     "ERR_AUDIT_CONFIRMATION_INVALID_INPUT": "The user did not enter a valid security-audit confirmation keyword, so this tool-call round was not executed. This is not a security-audit block. Ask the user to start the operation again, then reply only 'approve' or 'continue' to execute it, or 'reject' to cancel it.",
     "ERR_AUDIT_CONFIRMATION_EXPIRED": "The security-audit confirmation expired, so this tool-call round was not executed. Ask the user to start the operation again.",
+    "ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER": "The user rejected this tool-call round, so it was not executed. This is not an automatic security-audit block.",
     "ERR_PERSISTED_USER_MESSAGE_MISMATCH": "The persisted user message does not belong to this user and session",
     "MSG_MESSAGE_PLATFORM_CREATED": "Message platform created",
     "MSG_MESSAGE_PLATFORM_UPDATED": "Message platform updated",
