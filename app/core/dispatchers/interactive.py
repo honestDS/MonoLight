@@ -458,6 +458,18 @@ class InteractiveDispatcherMixin:
                             await save_execution_checkpoint(messages, current_turn)
                             continue
 
+                        if stream_event_callback is not None:
+                            for tool_call in ai_msg.tool_calls:
+                                await stream_event_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "name": tool_call.name,
+                                        "arguments": tool_call.arguments,
+                                        "tool_call_id": tool_call.id,
+                                        "response_id": response_id,
+                                    }
+                                )
+
                         audit_round = await audit_tool_round(
                             db,
                             cfg=cfg,
@@ -475,6 +487,17 @@ class InteractiveDispatcherMixin:
                                 stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
                                 if stored_tool_result.id is not None:
                                     persisted_tool_result_ids.append(stored_tool_result.id)
+                                if stream_event_callback is not None:
+                                    tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
+                                    await stream_event_callback(
+                                        {
+                                            "type": "tool_end",
+                                            "name": tool_call.name if tool_call else "unknown",
+                                            "result": sanitize_files_to_user_result(tool_result.content),
+                                            "tool_call_id": tool_result.tool_call_id,
+                                            "response_id": response_id,
+                                        }
+                                    )
                             if audit_round.confirmation_payload is not None:
                                 confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
                                 await save_message(
@@ -574,6 +597,16 @@ class InteractiveDispatcherMixin:
                                         )
                                         if stored_tool_result.id is not None:
                                             persisted_tool_result_ids.append(stored_tool_result.id)
+                                        if stream_event_callback is not None:
+                                            await stream_event_callback(
+                                                {
+                                                    "type": "tool_end",
+                                                    "name": tool_call.name,
+                                                    "result": sanitize_files_to_user_result(tool_result.content),
+                                                    "tool_call_id": tool_call.id,
+                                                    "response_id": response_id,
+                                                }
+                                            )
                                     if persisted_tool_result_ids:
                                         checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
                                         checkpoint_upper_id = max(persisted_tool_result_ids)
@@ -601,18 +634,6 @@ class InteractiveDispatcherMixin:
                                     await mark_claimed_audit_execution_unknown(audit_round.audit_record_id, audit_claim_token)
                                     raise AuditExecutionStatePersistenceError(cause=str(exc)) from exc
                                 raise
-
-                        if stream_event_callback is not None:
-                            for tool_call in ai_msg.tool_calls:
-                                await stream_event_callback(
-                                    {
-                                        "type": "tool_start",
-                                        "name": tool_call.name,
-                                        "arguments": tool_call.arguments,
-                                        "tool_call_id": tool_call.id,
-                                        "response_id": response_id,
-                                    }
-                                )
 
                         # 在任何工具开始前持久化完整调用意图。恢复时未落库的工具结果会被视为
                         # 执行状态未知并交给模型核实，而不会重新执行原工具。

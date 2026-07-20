@@ -92,7 +92,7 @@ export function useChatTransport() {
     // 1. 处理增量文本推送
     if (type === 'content') {
       if (onContent) {
-        onContent(data.content, data.turn, thinkingId, data.finish_reason, data.response_id, requestId)
+        onContent(data.content, data.turn, thinkingId, data.finish_reason, data.response_id, requestId, data.work_id, data.event_id)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -119,7 +119,7 @@ export function useChatTransport() {
           id: data.tool_call_id,
           name: data.name,
           arguments: data.arguments
-        }, thinkingId, data.response_id, requestId)
+        }, thinkingId, data.response_id, requestId, data.work_id)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -134,7 +134,7 @@ export function useChatTransport() {
           tool_call_id: data.tool_call_id,
           name: data.name,
           result: data.result
-        }, data.response_id, requestId)
+        }, data.response_id, requestId, data.work_id)
       }
       if (scrollToBottom) {
         scrollToBottom()

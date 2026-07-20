@@ -35,7 +35,7 @@ const getAuditConfirmationRecordId = (message) => {
   }
 }
 
-const hasOpenAuditConfirmation = (messages) => messages.some((message) => {
+const getOpenAuditConfirmation = (messages) => messages.findLast((message) => {
   if (message?.type !== 'audit_confirmation') return false
   try {
     const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
@@ -43,6 +43,44 @@ const hasOpenAuditConfirmation = (messages) => messages.some((message) => {
   } catch {
     return false
   }
+})
+
+const hasOpenAuditConfirmation = messages => Boolean(getOpenAuditConfirmation(messages))
+
+const parseAuditConfirmationResponse = (response) => {
+  const content = response?.choices?.[0]?.message?.content
+  try {
+    const payload = typeof content === 'string' ? JSON.parse(content) : content
+    return payload?.type === 'audit_confirmation' ? payload : null
+  } catch {
+    return null
+  }
+}
+
+const getLocalMessageType = (message) => {
+  if (message?.type && message.type !== 'text') return message.type
+  if (isToolCall(message)) return 'tool_call'
+  if (isToolResult(message)) return 'tool_result'
+  return message?.role || message?.type || 'message'
+}
+
+const findTransientHistoryMessageIndex = (messages, historyMessage) => {
+  const historyContent = normalizeMessageContent(historyMessage?.content)
+  const historyType = getLocalMessageType(historyMessage)
+  return messages.findIndex(message => {
+    if (message?.db_id) return false
+    if (getLocalMessageType(message) !== historyType) return false
+    return JSON.stringify(normalizeMessageContent(message?.content)) === JSON.stringify(historyContent)
+  })
+}
+
+const mergeTransientHistoryMessage = (localMessage, historyMessage) => ({
+  ...localMessage,
+  ...historyMessage,
+  response_id: localMessage.response_id,
+  request_id: localMessage.request_id,
+  work_id: localMessage.work_id,
+  turn: localMessage.turn
 })
 
 export function useChatSession() {
@@ -135,6 +173,13 @@ export function useChatSession() {
           continue
         }
       }
+      const transientIndex = findTransientHistoryMessageIndex(chatState.messages.value, message)
+      if (transientIndex !== -1) {
+        const localMessage = chatState.messages.value[transientIndex]
+        chatState.messages.value[transientIndex] = mergeTransientHistoryMessage(localMessage, message)
+        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+        continue
+      }
       const messageKeys = getMessageDedupeKeys(message)
       if ([...messageKeys].some(key => existingKeys.has(key))) continue
       newMessages.push(message)
@@ -191,6 +236,21 @@ export function useChatSession() {
 
   // ==================== 核心发送方法 ====================
 
+  const ensureSingleThinkingMessage = (newThinkingId, requestId) => {
+    const firstThinkingIndex = chatState.messages.value.findIndex(message => message.role === 'thinking')
+    if (firstThinkingIndex !== -1) {
+      for (let index = chatState.messages.value.length - 1; index > firstThinkingIndex; index--) {
+        if (chatState.messages.value[index].role === 'thinking') {
+          chatState.messages.value.splice(index, 1)
+        }
+      }
+      return chatState.messages.value[firstThinkingIndex].id
+    }
+
+    chatState.addMessage({ id: newThinkingId, role: 'thinking', content: 'Thinking...', request_id: requestId })
+    return newThinkingId
+  }
+
   /**
    * 仅用于连续发送时插入一条携带 queued 状态的消息占位，并直接发送
    */
@@ -245,17 +305,16 @@ export function useChatSession() {
     
     const userMsgId = existingMsgId || Date.now()
     
-    // 统一渲染顺序：清理之前的 thinking 占位，确保 AI 响应紧跟最新消息（与流式行为一致）
-    messageProcessor.cleanupThinkingMessage(chatState.messages)
-    
     // 如果没有现成的消息 ID（非队列来的），则添加用户消息
+    const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
     if (!existingMsgId) {
       chatState.addMessage({
         id: userMsgId,
         role: 'user',
         content: text,
         attachments: attachmentsToSent,
-        created_at: Date.now() / 1000
+        created_at: Date.now() / 1000,
+        request_id: requestId
       })
       
       chatState.inputMsg.value = ''
@@ -263,20 +322,21 @@ export function useChatSession() {
     } else {
       // 并不直接删除队列标记，而是等响应回来后再清理（为了保留视觉效果直到收到响应）
       // 由于这是 HTTP 发送逻辑的入口，我们在此将 loading 状态标记为 true。
+      const queuedMessage = chatState.messages.value.find(m => m.id === existingMsgId)
+      if (queuedMessage) queuedMessage.request_id = requestId
     }
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
-    const thinkingId = userMsgId + 1
-    chatState.addMessage({ id: thinkingId, role: 'thinking', content: 'Thinking...' })
+    const thinkingId = ensureSingleThinkingMessage(userMsgId + 1, requestId)
 
-    await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, sessionManager.currentSessionId.value)
+    await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, sessionManager.currentSessionId.value, requestId)
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, thinkingId, attachmentsToSent = [], userMsgId = null, requestSessionId = null) => {
+  const performHttpSend = async (text, thinkingId, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null) => {
     try {
       const response = await transport.httpSend({
         message: text,
@@ -314,7 +374,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, newId)
+        return performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, newId, requestId)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -325,7 +385,14 @@ export function useChatSession() {
         delete userMsg.status
       }
 
-      messageProcessor.processAiResponse(chatState.messages, response, thinkingId)
+      const auditConfirmation = parseAuditConfirmationResponse(response)
+      messageProcessor.processAiResponse(chatState.messages, response, thinkingId, requestId)
+      if (auditConfirmation) {
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+        chatState.loading.value = false
+      } else if (response.choices?.[0]?.finish_reason !== 'queued') {
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+      }
 
       if (response.has_background_tasks) {
         void pollBackgroundTasksUntilSettled(requestSessionId, response.background_task_poll_interval || 2).catch(err => {
@@ -375,11 +442,6 @@ export function useChatSession() {
     
     const userMsgId = existingMsgId || Date.now()
     
-    // 清理之前的 thinking 占位，保持只有一个 thinking 标签
-    messageProcessor.cleanupThinkingMessage(chatState.messages)
-    
-    // 使用更可靠的 ID 防止极速点击下的冲突
-    const thinkingId = `thinking_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
     // request_id 使用唯一的标识符
     const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
 
@@ -407,12 +469,11 @@ export function useChatSession() {
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
-    // 添加新的 thinking 消息
-    chatState.addMessage({ 
-      id: thinkingId, 
-      role: 'thinking', 
-      content: 'Thinking...' 
-    })
+    // 使用更可靠的 ID 防止极速点击下的冲突。
+    const thinkingId = ensureSingleThinkingMessage(
+      `thinking_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`,
+      requestId
+    )
     
     let requestSessionId = sessionManager.currentSessionId.value
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
@@ -439,17 +500,17 @@ export function useChatSession() {
           }
         })
       },
-      onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam) => {
-        if (!isCurrentRequestSession()) return
-        messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason, responseId, requestIdParam)
-      },
-      onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam) => {
-        if (!isCurrentRequestSession()) return
-        messageProcessor.processStreamToolStart(chatState.messages, toolCall, thinkingId, responseId, requestIdParam)
-      },
-      onToolEnd: (toolEnd, responseId, requestIdParam) => {
-        if (!isCurrentRequestSession()) return
-        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam)
+       onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam, workId, eventId) => {
+         if (!isCurrentRequestSession()) return
+         messageProcessor.processStreamContent(chatState.messages, text, turn, thinkingId, finishReason, responseId, requestIdParam, workId, eventId)
+       },
+       onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam, workId) => {
+         if (!isCurrentRequestSession()) return
+         messageProcessor.processStreamToolStart(chatState.messages, toolCall, thinkingId, responseId, requestIdParam, workId)
+       },
+       onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
+         if (!isCurrentRequestSession()) return
+         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
         if (contextSummarySessionId.value === requestSessionId) {
@@ -460,17 +521,16 @@ export function useChatSession() {
           chatState.messages,
           errorMessage,
           thinkingId,
+          requestIdParam,
           errorData.work_id,
           errorData.event_id
         )
-        // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败：
-        // 清除全部排队消息的视觉状态，并清理残留的 thinking 占位（含追加消息产生的占位）
+        // 同一会话仅有一个调度任务，任务异常结束意味着所有追加消息一并失败。
         chatState.messages.value.forEach(m => {
           if (m.role === 'user' && m.status === 'queued') {
             delete m.status
           }
         })
-        messageProcessor.cleanupThinkingMessage(chatState.messages)
         if (inserted) {
           ElMessage.error(errorMessage || t('chat.stream_error'))
         }
@@ -487,6 +547,7 @@ export function useChatSession() {
         const inserted = messageProcessor.processStreamError(
           chatState.messages,
           errorMessage,
+          null,
           null,
           data.work_id,
           data.event_id
@@ -527,35 +588,61 @@ export function useChatSession() {
         })
         
         // 每个 response_id 只保留一条正文；工具轮次的正文归入工具消息
-        if (eventType === 'turn_end' && data.response_id && data.content) {
-          const matchingIndexes = chatState.messages.value
-            .map((message, index) => ({ message, index }))
-            .filter(item => item.message.response_id === data.response_id && item.message.role === 'assistant')
-          const toolItem = matchingIndexes.find(item => isToolCall(item.message))
-          const plainItems = matchingIndexes.filter(item => !isToolCall(item.message))
-          const targetItem = toolItem || plainItems[0]
+        if (eventType === 'turn_end') {
+          if (data.response_id) {
+            const matchingIndexes = chatState.messages.value
+              .map((message, index) => ({ message, index }))
+              .filter(item => item.message.response_id === data.response_id && item.message.role === 'assistant')
+            const toolItem = matchingIndexes.find(item => isToolCall(item.message))
+            const plainItems = matchingIndexes.filter(item => !isToolCall(item.message))
+            const targetItem = toolItem || plainItems[0]
 
-          if (targetItem) {
-            const targetMessage = targetItem.message
-            const updatedMessage = toolItem
-              ? {
-                  ...targetMessage,
-                  content: JSON.stringify({
-                    ...normalizeMessageContent(targetMessage.content),
-                    content: data.content
-                  })
-                }
-              : { ...targetMessage, content: data.content }
-            const duplicatePlainIndexes = new Set(
-              plainItems
-                .filter(item => item.index !== targetItem.index)
-                .map(item => item.index)
-            )
-            chatState.messages.value = chatState.messages.value
-              .map((message, index) => index === targetItem.index ? updatedMessage : message)
-              .filter((_, index) => !duplicatePlainIndexes.has(index))
+            if (targetItem) {
+              const targetMessage = targetItem.message
+              const updatedMessage = data.content === undefined || data.content === null
+                ? { ...targetMessage, work_id: targetMessage.work_id || data.work_id }
+                : toolItem
+                  ? {
+                      ...targetMessage,
+                      content: JSON.stringify({
+                        ...normalizeMessageContent(targetMessage.content),
+                        content: data.content
+                      }),
+                      work_id: targetMessage.work_id || data.work_id
+                    }
+                  : { ...targetMessage, content: data.content, work_id: targetMessage.work_id || data.work_id }
+              const duplicateIndexes = new Set(
+                matchingIndexes
+                  .filter(item => item.index !== targetItem.index)
+                  .map(item => item.index)
+              )
+              chatState.messages.value = chatState.messages.value
+                .map((message, index) => index === targetItem.index ? updatedMessage : message)
+                .filter((_, index) => !duplicateIndexes.has(index))
+            }
           }
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
+        }
+
+        const completedResponse = data.response || data
+        const auditConfirmation = parseAuditConfirmationResponse(completedResponse)
+        if (auditConfirmation) {
+          const auditRecordId = String(auditConfirmation.audit_record_id || '')
+          const existingIndex = chatState.messages.value.findIndex(message => getAuditConfirmationRecordId(message) === auditRecordId)
+          if (existingIndex === -1) {
+            messageProcessor.processAiResponse(chatState.messages, completedResponse, thinkingId, requestIdParam)
+          } else {
+            const existingMessage = chatState.messages.value[existingIndex]
+            chatState.messages.value[existingIndex] = {
+              ...existingMessage,
+              type: 'audit_confirmation',
+              content: JSON.stringify(auditConfirmation),
+              request_id: existingMessage.request_id || requestIdParam
+            }
+          }
+          messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+          chatState.loading.value = false
+          return
         }
 
         if (data.files && data.files.length > 0) {
@@ -564,6 +651,10 @@ export function useChatSession() {
 
           if (data.response_id) {
             targetIdx = newMessages.findLastIndex(m => m.response_id === data.response_id && m.role === 'assistant' && !isToolCall(m))
+          }
+
+          if (targetIdx === -1 && data.work_id) {
+            targetIdx = newMessages.findLastIndex(m => m.work_id === data.work_id && m.role === 'assistant' && !isToolCall(m))
           }
 
           if (targetIdx === -1 && requestIdParam) {
@@ -578,8 +669,7 @@ export function useChatSession() {
             newMessages[targetIdx] = { ...newMessages[targetIdx], files: data.files }
             chatState.messages.value = newMessages
           } else {
-            messageProcessor.processAiResponse(chatState.messages, data, thinkingId)
-            return
+            messageProcessor.processAiResponse(chatState.messages, data.response || data, thinkingId, requestIdParam)
           }
         }
 
@@ -587,7 +677,9 @@ export function useChatSession() {
         messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
       },
       setLoading: (val) => {
-        if (isCurrentRequestSession()) chatState.loading.value = val
+        if (!isCurrentRequestSession()) return
+        if (!val && chatState.messages.value.some(message => message.role === 'thinking')) return
+        chatState.loading.value = val
       }
     }
     
@@ -607,7 +699,9 @@ export function useChatSession() {
       if (!isCurrentRequestSession()) return
       ElMessage.error(t('chat.ws_send_failed'))
       messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
-      chatState.loading.value = false
+      if (!chatState.messages.value.some(message => message.role === 'thinking')) {
+        chatState.loading.value = false
+      }
       transport.setTransportMode('http')
     }
   }

@@ -360,6 +360,18 @@ const migrateToolConfig = (toolConfig) => {
   return toolConfig
 }
 
+const migrateSecurityConfig = (securityConfig) => {
+  const normalized = { ...(securityConfig || {}) }
+  if (normalized.audit_confirmation_timeout_seconds === undefined && normalized.audit_confirmation_timeout_minutes !== undefined) {
+    const legacyMinutes = Number(normalized.audit_confirmation_timeout_minutes)
+    if (Number.isFinite(legacyMinutes)) {
+      normalized.audit_confirmation_timeout_seconds = legacyMinutes * 60
+    }
+  }
+  delete normalized.audit_confirmation_timeout_minutes
+  return normalized
+}
+
 const handleActivate = async (id) => {
   try {
     const res = await profileApi.activate(id)
@@ -396,7 +408,7 @@ const showDialog = (type, row = null) => {
         if (p.rerank_channel) Object.assign(base.channel.rerank_channel, JSON.parse(JSON.stringify(p.rerank_channel)))
         if (p.image_generation_channel) Object.assign(base.channel.image_generation_channel, JSON.parse(JSON.stringify(p.image_generation_channel)))
       }
-      if (row.configs.security) Object.assign(base.security, row.configs.security)
+      if (row.configs.security) Object.assign(base.security, migrateSecurityConfig(row.configs.security))
       if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
       if (row.configs.other) Object.assign(base.other, row.configs.other)
     }
@@ -440,6 +452,7 @@ const submitForm = async () => {
   cleanChannel(form.configs.channel.image_generation_channel)
   addAllowedFileSendDir()
   addFileSendBlockedExtension()
+  form.configs.security = migrateSecurityConfig(form.configs.security)
 
   submitting.value = true
   try {

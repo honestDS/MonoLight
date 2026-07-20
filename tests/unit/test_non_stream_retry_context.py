@@ -1,3 +1,5 @@
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -603,6 +605,11 @@ async def _run_audited_interactive_dispatch(
     unknown_calls_target=None,
     finish_round_result=True,
     generated_calls_target=None,
+    audit_result=None,
+    audit_waiter=None,
+    claim_execution_success=True,
+    stream_event_callback=None,
+    stream_dispatch=False,
 ):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
@@ -648,6 +655,9 @@ async def _run_audited_interactive_dispatch(
             generated_calls_target.append(kwargs)
         return SimpleNamespace(message=responses.pop(0))
 
+    async def generate_with_stream_callback(**kwargs):
+        return await generate(**kwargs)
+
     async def save_assistant(*args, **kwargs):
         nonlocal saved_message_id
         message = args[4]
@@ -660,6 +670,10 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(id=200)
 
     async def audit_round(*args, **kwargs):
+        if audit_waiter is not None:
+            await audit_waiter()
+        if audit_result is not None:
+            return audit_result
         return SimpleNamespace(
             may_execute=True,
             audit_record_id=42,
@@ -667,7 +681,12 @@ async def _run_audited_interactive_dispatch(
             confirmation_payload=None,
         )
 
+    async def save_confirmation_message(*args, **kwargs):
+        return SimpleNamespace(id=300)
+
     async def claim_execution(db, *, audit_record_id):
+        if not claim_execution_success:
+            return None, None
         return SimpleNamespace(execution_claim_token="claim-token"), "claim-token"
 
     async def list_details(db, audit_record_id):
@@ -717,7 +736,9 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_module, "apply_context_summary_checkpoint", _passthrough_context_summary_checkpoint)
     monkeypatch.setattr(interactive_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
     monkeypatch.setattr(interactive_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(interactive_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(interactive_module, "save_message", save_confirmation_message)
     monkeypatch.setattr(interactive_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(interactive_module, "audit_tool_round", audit_round)
     monkeypatch.setattr(interactive_module.audit_crud, "claim_passed_for_execution", claim_execution)
@@ -730,16 +751,33 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_module, "process_single_tool_with_isolated_db", process_tool)
 
-    response = await _Dispatcher.dispatch(
-        db=_Session(),
-        message="request",
-        uid="user-1",
-        session_id="session-1",
-        persisted_initial_message=InternalMessage(id=1, role=MessageRole.USER, content="request"),
-        frozen_user_message_ids=[1],
-        persisted_profile_id=1,
-        execution_checkpoint_callback=checkpoint_callback,
-    )
+    if stream_dispatch:
+        response = [
+            event
+            async for event in _StreamDispatcher.dispatch_stream(
+                db=_Session(),
+                message="request",
+                uid="user-1",
+                session_id="session-1",
+                request_id="request-1",
+                persisted_initial_message=InternalMessage(id=1, role=MessageRole.USER, content="request"),
+                frozen_user_message_ids=[1],
+                persisted_profile_id=1,
+                execution_checkpoint_callback=checkpoint_callback,
+            )
+        ]
+    else:
+        response = await _Dispatcher.dispatch(
+            db=_Session(),
+            message="request",
+            uid="user-1",
+            session_id="session-1",
+            persisted_initial_message=InternalMessage(id=1, role=MessageRole.USER, content="request"),
+            frozen_user_message_ids=[1],
+            persisted_profile_id=1,
+            execution_checkpoint_callback=checkpoint_callback,
+            stream_event_callback=stream_event_callback,
+        )
     return response, unknown_calls
 
 
@@ -829,3 +867,122 @@ async def test_interactive_keeps_active_binding_when_audit_round_finish_fails(mo
         "audit_record_id": 42,
         "claim_token": "claim-token",
     }
+
+
+@pytest.mark.asyncio
+async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(monkeypatch):
+    confirmation_payload = {
+        "type": "audit_confirmation",
+        "audit_record_id": 42,
+        "summary": "Confirm command",
+        "risk": 8,
+        "status": "pending",
+    }
+    audit_result = SimpleNamespace(
+        may_execute=False,
+        audit_record_id=42,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+            )
+        ],
+        confirmation_payload=confirmation_payload,
+    )
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(*args, **kwargs):
+        raise AssertionError("pending audit must not execute tools")
+
+    events, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=audit_result,
+        stream_dispatch=True,
+    )
+
+    assert [event["type"] for event in events] == ["task_start", "turn_end", "tool_start", "tool_end", "done"]
+    assert events[2]["tool_call_id"] == "call-1"
+    assert json.loads(events[3]["result"])["status"] == "pending"
+    assert json.loads(events[-1]["response"]["choices"][0]["message"]["content"]) == confirmation_payload
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypatch):
+    audit_started = asyncio.Event()
+    release_audit = asyncio.Event()
+    published_events = []
+    audit_result = SimpleNamespace(
+        may_execute=False,
+        audit_record_id=42,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+            )
+        ],
+        confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+    )
+
+    async def wait_during_audit():
+        audit_started.set()
+        await release_audit.wait()
+
+    async def publish_event(event):
+        published_events.append(event)
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(*args, **kwargs):
+        raise AssertionError("pending audit must not execute tools")
+
+    dispatch_task = asyncio.create_task(
+        _run_audited_interactive_dispatch(
+            monkeypatch,
+            save_checkpoint,
+            process_tool,
+            audit_result=audit_result,
+            audit_waiter=wait_during_audit,
+            stream_event_callback=publish_event,
+        )
+    )
+
+    await asyncio.wait_for(audit_started.wait(), timeout=1)
+    assert [event["type"] for event in published_events] == ["turn_end", "tool_start"]
+
+    release_audit.set()
+    response, unknown_calls = await dispatch_task
+
+    assert [event["type"] for event in published_events] == ["turn_end", "tool_start", "tool_end"]
+    assert json.loads(response["choices"][0]["message"]["content"])["type"] == "audit_confirmation"
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatch):
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(*args, **kwargs):
+        raise AssertionError("claim failure must not execute tools")
+
+    events, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        claim_execution_success=False,
+        stream_dispatch=True,
+    )
+
+    event_types = [event["type"] for event in events]
+    assert event_types == ["task_start", "turn_end", "tool_start", "tool_end", "turn_end", "done"]
+    assert json.loads(events[3]["result"])["status"] == "failed"
+    assert events[3]["tool_call_id"] == events[2]["tool_call_id"] == "call-1"
+    assert unknown_calls == []

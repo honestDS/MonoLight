@@ -84,16 +84,16 @@
             <div class="audit-confirmation-meta">
               <span>{{ $t('chat.audit_status', { status: getAuditStatusLabel(msg) }) }}</span>
               <span>{{ $t('chat.audit_risk', { score: getAuditConfirmation(msg).risk }) }}</span>
-              <span>{{ $t('chat.audit_expires_at', { time: getAuditConfirmation(msg).expires_at || '-' }) }}</span>
+              <span>{{ getAuditExpiryLabel(msg) }}</span>
             </div>
             <div class="audit-confirmation-actions">
               <el-button
                 type="primary"
-                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending'"
+                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
                 @click="submitAuditDecision(msg, 'approve')"
               >{{ $t('chat.audit_approve') }}</el-button>
               <el-button
-                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending'"
+                :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
                 @click="submitAuditDecision(msg, 'reject')"
               >{{ $t('chat.audit_reject') }}</el-button>
             </div>
@@ -268,6 +268,10 @@ const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
 const pendingAuditDecisions = ref(new Set())
 const auditDecisionStatuses = ref(new Map())
+const auditCountdownNow = ref(Date.now())
+const auditCountdownTimer = window.setInterval(() => {
+  auditCountdownNow.value = Date.now()
+}, 1000)
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
 const messagesLayoutReady = ref(false)
@@ -673,8 +677,36 @@ const getAuditConfirmation = (message) => {
   if (localStatus) return { ...payload, status: localStatus }
   return payload
 }
+const getAuditRemainingSeconds = (message) => {
+  const expiresAt = Date.parse(getAuditConfirmation(message).expires_at || '')
+  if (!Number.isFinite(expiresAt)) return null
+  return Math.max(0, Math.ceil((expiresAt - auditCountdownNow.value) / 1000))
+}
+const formatAuditCountdown = (remainingSeconds) => {
+  const days = Math.floor(remainingSeconds / 86400)
+  const hours = Math.floor((remainingSeconds % 86400) / 3600)
+  const minutes = Math.floor((remainingSeconds % 3600) / 60)
+  const seconds = remainingSeconds % 60
+  if (days > 0) return t('chat.audit_countdown_days', { days, hours, minutes, seconds })
+  if (hours > 0) return t('chat.audit_countdown_hours', { hours, minutes, seconds })
+  if (minutes > 0) return t('chat.audit_countdown_minutes', { minutes, seconds })
+  return t('chat.audit_countdown_seconds', { seconds })
+}
+const isAuditConfirmationExpired = message => getAuditRemainingSeconds(message) === 0
+const getAuditExpiryLabel = (message) => {
+  const confirmation = getAuditConfirmation(message)
+  const localStatus = auditDecisionStatuses.value.get(confirmation.audit_record_id)
+  if (localStatus || (confirmation.status || 'pending') !== 'pending') return t('chat.audit_status_expired')
+  const remainingSeconds = getAuditRemainingSeconds(message)
+  if (remainingSeconds === null) return '-'
+  if (remainingSeconds === 0) return t('chat.audit_status_expired')
+  return t('chat.audit_expires_in', { time: formatAuditCountdown(remainingSeconds) })
+}
 const isAuditDecisionPending = message => pendingAuditDecisions.value.has(getAuditConfirmation(message).audit_record_id)
-const getAuditStatusLabel = message => t(`chat.audit_status_${getAuditConfirmation(message).status || 'pending'}`)
+const getAuditStatusLabel = message => {
+  const status = getAuditConfirmation(message).status || 'pending'
+  return t(`chat.audit_status_${status === 'pending' && isAuditConfirmationExpired(message) ? 'expired' : status}`)
+}
 const submitAuditDecision = (message, decision) => {
   const auditRecordId = getAuditConfirmation(message).audit_record_id
   if (!auditRecordId || pendingAuditDecisions.value.has(auditRecordId)) return
@@ -726,6 +758,7 @@ const handleImageLoad = () => {
   scheduleUnreadVisibilityCheck()
 }
 onUnmounted(() => {
+  window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
 })
 

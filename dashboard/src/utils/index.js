@@ -43,6 +43,11 @@ export const getMessageDedupeKeys = (message) => {
   if (dbId) keys.add(`db:${dbId}`)
 
   const content = normalizeMessageContent(message?.content)
+  const messageType = message?.type || message?.role || 'message'
+  if (message?.response_id) keys.add(`response:${messageType}:${message.response_id}`)
+  if (message?.work_id && message?.turn !== undefined && message?.turn !== null) {
+    keys.add(`work_turn:${messageType}:${message.work_id}:${message.turn}`)
+  }
   const toolCalls = content?.tool_calls || message?.tool_calls || []
   for (const toolCall of toolCalls) {
     const toolCallId = toolCall?.id || toolCall?.function?.id
@@ -52,7 +57,9 @@ export const getMessageDedupeKeys = (message) => {
   const toolCallId = content?.tool_call_id || message?.tool_call_id
   if (toolCallId) keys.add(`tool_result:${toolCallId}`)
 
-  keys.add(`content:${message?.role || ''}:${stableStringify(content ?? '')}`)
+  if (keys.size === 0) {
+    keys.add(`content:${messageType}:${stableStringify(content ?? '')}`)
+  }
   return keys
 }
 

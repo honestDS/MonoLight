@@ -12,6 +12,7 @@ from app.core.audit.service import (
     _apply_evidence_score_floor,
     _call_auditor,
     _collect_append_file_snapshots,
+    _extract_script_execution_paths,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
     _parse_results,
@@ -21,7 +22,10 @@ from app.core.audit.service import (
     audit_tool_round,
     classify_audit_score,
 )
+from app.core.constants import MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK
+from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
+from app.core.prompts import AUDIT_BATCH_PROMPT
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.models.audit import AuditToolConclusion
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
@@ -71,25 +75,89 @@ def test_evidence_score_floor_respects_disabled_confirmation(score, threshold, r
     assert _apply_evidence_score_floor(score, threshold, requires_confirmation=requires_confirmation) == expected
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python task.py", ("task.py",)),
+        ("python3 -u scripts/task.py", ("scripts/task.py",)),
+        ("python -W ignore task.py", ("task.py",)),
+        (r'.venv\Scripts\python.exe "jobs\my task.py"', (r"jobs\my task.py",)),
+        ("py -3 task.py", ("task.py",)),
+        ("node app.js", ("app.js",)),
+        ("bash -x deploy.sh", ("deploy.sh",)),
+        ("sh scripts/check.sh", ("scripts/check.sh",)),
+        ('powershell -File "scripts/task.ps1"', ("scripts/task.ps1",)),
+        ("pwsh -f task.ps1", ("task.ps1",)),
+        ("./task.py && node next.js", ("./task.py", "next.js")),
+        ("task.bat", ("task.bat",)),
+        ("call task.cmd", ("task.cmd",)),
+        ("python -c \"print('ok')\"", ()),
+        ("python -m package", ()),
+        ('python "$SCRIPT"', ()),
+        ("echo task.py", ()),
+    ],
+)
+def test_script_execution_path_recognition(command, expected):
+    assert _extract_script_execution_paths(command) == expected
+
+
+def test_audit_prompt_requires_script_content_evidence():
+    assert "MUST call read_text_file for every explicitly named script" in AUDIT_BATCH_PROMPT
+    assert "This requirement cannot be skipped" in AUDIT_BATCH_PROMPT
+    assert "explicit_script_paths" in AUDIT_BATCH_PROMPT
+    assert "may transmit passwords to an external destination" in AUDIT_BATCH_PROMPT
+    assert "its score must not be lower than 1" in AUDIT_BATCH_PROMPT
+    assert "Script execution is not a read-only operation" not in AUDIT_BATCH_PROMPT
+
+
 def test_audit_report_language_defaults_and_rejects_unsupported_locale():
     assert _profile_config().security.audit_report_language == "zh"
-    assert _profile_config().security.audit_confirmation_timeout_minutes == 10
+    assert _profile_config().security.audit_confirmation_timeout_seconds == 600
 
     with pytest.raises(ValueError):
         ProfileConfig.model_validate({"security": {"audit_report_language": "unsupported"}})
 
 
-@pytest.mark.parametrize("timeout", [1, 1440])
+@pytest.mark.parametrize("timeout", [1, 86400])
 def test_audit_confirmation_timeout_accepts_configured_boundaries(timeout):
-    cfg = ProfileConfig.model_validate({"security": {"audit_confirmation_timeout_minutes": timeout}})
+    cfg = ProfileConfig.model_validate({"security": {"audit_confirmation_timeout_seconds": timeout}})
 
-    assert cfg.security.audit_confirmation_timeout_minutes == timeout
+    assert cfg.security.audit_confirmation_timeout_seconds == timeout
 
 
-@pytest.mark.parametrize("timeout", [0, 1441, 1.5, "10", True])
+@pytest.mark.parametrize("timeout", [0, 86401, 1.5, "10", True])
 def test_audit_confirmation_timeout_rejects_invalid_values(timeout):
     with pytest.raises(ValueError):
-        ProfileConfig.model_validate({"security": {"audit_confirmation_timeout_minutes": timeout}})
+        ProfileConfig.model_validate({"security": {"audit_confirmation_timeout_seconds": timeout}})
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_seconds"),
+    [
+        ({"security": {"audit_confirmation_timeout_minutes": 10}}, 600),
+        ({"audit_confirmation_timeout_minutes": 10}, 600),
+        ({"configs": {"security": {"audit_confirmation_timeout_minutes": 10}}}, 600),
+    ],
+)
+def test_legacy_confirmation_timeout_is_normalized_to_seconds(config, expected_seconds):
+    cfg = ProfileConfig.model_validate(config)
+
+    assert cfg.security.audit_confirmation_timeout_seconds == expected_seconds
+    assert "audit_confirmation_timeout_seconds" in cfg.model_dump()["security"]
+    assert "audit_confirmation_timeout_minutes" not in cfg.model_dump()["security"]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"security": {"audit_confirmation_timeout_minutes": 10, "audit_confirmation_timeout_seconds": 90}},
+        {"audit_confirmation_timeout_minutes": 10, "audit_confirmation_timeout_seconds": 90},
+    ],
+)
+def test_new_confirmation_timeout_takes_precedence_over_legacy_value(config):
+    cfg = ProfileConfig.model_validate(config)
+
+    assert cfg.security.audit_confirmation_timeout_seconds == 90
 
 
 @pytest.mark.asyncio
@@ -97,7 +165,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
     import app.core.audit.service as service
 
     cfg = _profile_config()
-    cfg.security.audit_confirmation_timeout_minutes = 25
+    cfg.security.audit_confirmation_timeout_seconds = 25
     fixed_now = datetime(2026, 7, 18, 17, 0, 0)
     captured = {}
 
@@ -142,7 +210,38 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
     )
 
     assert result.status.value == "pending"
-    assert captured["expires_at"] == fixed_now + timedelta(minutes=25)
+    expected_expires_at = fixed_now + timedelta(seconds=25)
+    assert captured["expires_at"] == expected_expires_at
+    assert result.confirmation_payload["expires_at"] == expected_expires_at.isoformat()
+    assert "25 秒后失效" in result.confirmation_payload["plain_text"]
+    assert expected_expires_at.isoformat() not in result.confirmation_payload["plain_text"]
+
+
+def test_english_confirmation_text_uses_relative_timeout_without_absolute_timestamp():
+    text = t(MSG_AUDIT_CONFIRMATION_IM, locale="en", summary="Confirm command", score=5, expires_in_seconds=600)
+
+    assert "Expires in 600 seconds" in text
+    assert "Expires:" not in text
+
+
+@pytest.mark.asyncio
+async def test_passed_script_summary_uses_non_confirmation_i18n_fallback(monkeypatch):
+    cfg = _profile_config()
+
+    async def missing_channel(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.core.audit.service.channel_crud.get", missing_channel)
+
+    summary, context = await _summarize_pending(
+        SimpleNamespace(),
+        cfg,
+        [{"id": "call-1", "name": "execute_shell", "arguments": {"command": "python task.py"}}],
+        confirmation_required=False,
+    )
+
+    assert summary == t(MSG_AUDIT_SCRIPT_SUMMARY_FALLBACK, locale="zh")
+    assert context == {"fallback": True}
 
 
 @pytest.mark.asyncio
@@ -798,6 +897,180 @@ async def test_model_can_score_dynamic_command_without_reading(monkeypatch, tmp_
     assert captured["request_payload"]["working_directory"] == str(tmp_path.resolve())
     assert captured["request_payload"]["tool_calls"][0]["arguments"] == {"command": command}
     assert captured["tool_details"][0]["file_snapshots"] == []
+
+
+@pytest.mark.asyncio
+async def test_readable_script_without_matching_read_evidence_requires_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    script = tmp_path / "task.py"
+    script.write_text("print('safe')\n", encoding="utf-8")
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def call_auditor(*args, **_kwargs):
+        captured["request_payload"] = args[2]
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe", "file_checks": []}]}}
+
+    async def summarize_pending(*_args, **_kwargs):
+        return "Run task.py", {"response": "Run task.py"}
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python task.py"})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "pending"
+    assert result.confirmation_payload["type"] == "audit_confirmation"
+    assert captured["request_payload"]["tool_calls"][0]["explicit_script_paths"] == ["task.py"]
+    assert captured["tool_details"][0]["score"] == cfg.security.audit_threshold
+    reason = captured["tool_details"][0]["server_confirmation_reasons"][0]
+    assert reason["code"] == "file_evidence_insufficient"
+    assert reason["details"]["missing_script_paths"] == ["task.py"]
+
+
+@pytest.mark.asyncio
+async def test_safe_script_zero_score_is_preserved_and_summary_persisted_without_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    script = tmp_path / "task.py"
+    script.write_text("print('safe')\n", encoding="utf-8")
+    read = _read_for_audit_sync("task.py", "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
+    file_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated")}
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=124)
+
+    async def call_auditor(*_args, **_kwargs):
+        return {"messages": []}, {
+            "file_reads": [read],
+            "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "safe script", "file_checks": [file_check]}]},
+        }
+
+    async def summarize_pending(*_args, **kwargs):
+        assert kwargs["confirmation_required"] is False
+        return "Run the safe task.py script", {"response": "Run the safe task.py script"}
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "python task.py"})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "passed"
+    assert result.confirmation_payload is None
+    assert result.tool_results == ()
+    assert captured["tool_details"][0]["score"] == 0
+    assert captured["intent_summary"] == "Run the safe task.py script"
+    assert captured["context_payload"]["summary"] == {"response": "Run the safe task.py script"}
+    assert captured["expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_zero_score_for_ordinary_command_stays_zero_without_summary_or_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_expiration(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=125)
+
+    async def call_auditor(*_args, **_kwargs):
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "call-1", "score": 0, "reason": "read only", "file_checks": []}]}}
+
+    async def summarize_pending(*_args, **_kwargs):
+        raise AssertionError("ordinary low-risk commands must not be summarized")
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "_summarize_pending", summarize_pending)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "passed"
+    assert result.confirmation_payload is None
+    assert captured["tool_details"][0]["score"] == 0
+    assert captured["intent_summary"] is None
+    assert "summary" not in captured["context_payload"]
 
 
 @pytest.mark.asyncio

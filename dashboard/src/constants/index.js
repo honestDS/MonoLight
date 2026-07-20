@@ -33,7 +33,7 @@ export const defaultProfileConfigs = () => ({
     rerank_channel: defaultChannelConfig(),
     image_generation_channel: defaultChannelConfig(),
   },
-  security: { audit_channel_id: null, audit_model_id: null, audit_threshold: 5, audit_confirmation_timeout_minutes: 10, audit_report_language: 'zh' },
+  security: { audit_channel_id: null, audit_model_id: null, audit_threshold: 5, audit_confirmation_timeout_seconds: 600, audit_report_language: 'zh' },
   tool: {
     tool_timeout: 30,
     image_generation_timeout: 60,

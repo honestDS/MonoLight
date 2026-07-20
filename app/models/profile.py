@@ -57,8 +57,23 @@ class SecurityConfig(BaseModel):
     audit_channel_id: int | None = PydanticField(None, gt=0, description="执行安全审计的渠道 ID")
     audit_model_id: str | None = PydanticField(None, description="用于审计的具体模型 ID")
     audit_threshold: int = PydanticField(5, ge=0, le=7, description="触发二次确认的风险评分阈值（1-7），0 表示关闭二次确认")
-    audit_confirmation_timeout_minutes: StrictInt = PydanticField(10, ge=1, le=1440, description="审计二次确认卡片有效期（分钟）")
+    audit_confirmation_timeout_seconds: StrictInt = PydanticField(600, ge=1, le=86400, description="审计二次确认卡片有效期（秒）")
     audit_report_language: str = PydanticField(DEFAULT_LOCALE, description="审计报告摘要使用的语言")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_confirmation_timeout(cls, data: Any) -> Any:
+        """兼容旧的分钟配置，规范化为秒配置。"""
+        if not isinstance(data, dict) or "audit_confirmation_timeout_seconds" in data or "audit_confirmation_timeout_minutes" not in data:
+            return data
+
+        normalized = dict(data)
+        legacy_value = data["audit_confirmation_timeout_minutes"]
+        if isinstance(legacy_value, int) and not isinstance(legacy_value, bool):
+            normalized["audit_confirmation_timeout_seconds"] = legacy_value * 60
+        else:
+            normalized["audit_confirmation_timeout_seconds"] = legacy_value
+        return normalized
 
     @field_validator("audit_report_language")
     @classmethod
@@ -120,7 +135,14 @@ class ProfileConfig(BaseModel):
                 "rerank_channel",
                 "image_generation_channel",
             ],
-            "security": ["audit_channel_id", "audit_model_id", "audit_threshold", "audit_confirmation_timeout_minutes", "audit_report_language"],
+            "security": [
+                "audit_channel_id",
+                "audit_model_id",
+                "audit_threshold",
+                "audit_confirmation_timeout_seconds",
+                "audit_confirmation_timeout_minutes",
+                "audit_report_language",
+            ],
             "tool": [
                 "tool_timeout",
                 "image_generation_timeout",
@@ -177,7 +199,7 @@ PROFILE_EXAMPLE = {
             "audit_channel_id": 1,
             "audit_model_id": "gemini-3-flash-preview",
             "audit_threshold": 5,
-            "audit_confirmation_timeout_minutes": 10,
+            "audit_confirmation_timeout_seconds": 600,
             "audit_report_language": "zh",
         },
         "tool": {
