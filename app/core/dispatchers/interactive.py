@@ -59,6 +59,7 @@ from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
+from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.providers.llm.client import LLMClient
@@ -304,6 +305,7 @@ class InteractiveDispatcherMixin:
                                     "timeout": chat_params["chat_timeout"],
                                 }
                                 await db.commit()
+                                attempt_started_at = get_local_time()
                                 if stream_event_callback is None:
                                     response = await LLMClient.generate(**generation_kwargs)
                                 else:
@@ -382,6 +384,7 @@ class InteractiveDispatcherMixin:
                             profile.id,
                             ai_msg,
                             dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and not new_user_msgs else None,
+                            created_at=attempt_started_at if stream_event_callback is not None else None,
                         )
                         if stream_event_callback is not None and saved_msg is not None:
                             turn_end_content = saved_msg.content

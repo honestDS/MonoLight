@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import (
     Any,
 )
@@ -51,6 +52,7 @@ async def save_message(
     profile_id: int,
     is_processed: bool = True,
     dedupe_key: str | None = None,
+    created_at: datetime | None = None,
 ) -> InternalMessage:
     # Determine attachments and final content payload
     attachments_to_save = None
@@ -71,6 +73,8 @@ async def save_message(
         "profile_id": profile_id,
         "is_processed": is_processed,
     }
+    if created_at is not None:
+        obj_in_data["created_at"] = created_at
 
     if dedupe_key is None:
         db_obj = await message_crud.create(

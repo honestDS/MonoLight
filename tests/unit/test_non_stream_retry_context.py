@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -357,6 +358,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     )
     model_requests = []
     persisted_environment_prompts = []
+    saved_created_at = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -397,7 +399,8 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
             )
         )
 
-    async def save_assistant(*args, **kwargs):
+    async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
+        saved_created_at.append(created_at)
         return SimpleNamespace(content="ok")
 
     async def fetch_additional():
@@ -465,6 +468,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
     assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
+    assert saved_created_at == [None]
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
 
 
@@ -482,6 +486,13 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     model_requests = []
     channel_call_contexts = []
     persisted_environment_prompts = []
+    attempt_started_at = iter(
+        [
+            datetime(2026, 7, 21, 6, 0, tzinfo=UTC),
+            datetime(2026, 7, 21, 6, 1, tzinfo=UTC),
+        ]
+    )
+    saved_created_at = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -528,7 +539,8 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         await kwargs["on_content"]("ok")
         return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
 
-    async def save_assistant(*args, **kwargs):
+    async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
+        saved_created_at.append(created_at)
         return SimpleNamespace(content="ok")
 
     async def set_environment_prompt(_db, message_id, environment_prompt):
@@ -575,6 +587,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         lambda **kwargs: [message.model_copy(deep=True) for message in kwargs["messages"]],
     )
     monkeypatch.setattr(interactive_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
+    monkeypatch.setattr(interactive_module, "get_local_time", lambda: next(attempt_started_at))
     monkeypatch.setattr(interactive_module, "save_assistant_message", save_assistant)
 
     events = [
@@ -595,6 +608,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
     assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
+    assert saved_created_at == [datetime(2026, 7, 21, 6, 1, tzinfo=UTC)]
     assert [event["type"] for event in events] == ["task_start", "content", "turn_end", "done"]
 
 

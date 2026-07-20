@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
@@ -19,6 +21,7 @@ async def save_assistant_message(
     profile_id: int,
     ai_msg: InternalMessage,
     dedupe_key: str | None = None,
+    created_at: datetime | None = None,
 ):
     session = await session_crud.get_by_session_id(db, session_id)
     enable_markdown = session.enable_markdown if session else False
@@ -36,6 +39,7 @@ async def save_assistant_message(
         profile_id,
         is_processed=True,
         dedupe_key=dedupe_key,
+        created_at=created_at,
     )
     ai_msg.id = saved_msg.id
     ai_msg.created_at = saved_msg.created_at

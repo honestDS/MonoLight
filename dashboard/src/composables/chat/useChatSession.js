@@ -561,6 +561,19 @@ export function useChatSession() {
       },
       onProactiveReply: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+        const workId = data.work_id
+        if (
+          data.source === 'foreground' &&
+          workId !== undefined &&
+          workId !== null &&
+          workId !== '' &&
+          chatState.messages.value.some(message =>
+            message.work_id !== undefined &&
+            message.work_id !== null &&
+            message.work_id !== '' &&
+            String(message.work_id) === String(workId)
+          )
+        ) return
         void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
           console.error('Proactive reply history merge failed:', err)
         })

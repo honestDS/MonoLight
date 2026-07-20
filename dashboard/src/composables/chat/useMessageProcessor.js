@@ -12,7 +12,7 @@ const parseBackgroundSystemMessage = (item) => {
   return null
 }
 
-const findThinkingIndex = (messages, thinkingId, requestId) => {
+const findThinkingIndex = (messages, thinkingId, requestId, allowUniqueThinkingFallback = true) => {
   if (thinkingId) {
     const thinkingIndex = messages.findIndex(message => message.id === thinkingId && message.role === 'thinking')
     if (thinkingIndex !== -1) return thinkingIndex
@@ -24,7 +24,7 @@ const findThinkingIndex = (messages, thinkingId, requestId) => {
   const thinkingIndexes = messages
     .map((message, index) => message.role === 'thinking' ? index : -1)
     .filter(index => index !== -1)
-  return thinkingIndexes.length === 1 ? thinkingIndexes[0] : -1
+  return allowUniqueThinkingFallback && thinkingIndexes.length === 1 ? thinkingIndexes[0] : -1
 }
 
 const insertBeforeThinking = (messagesRef, message, thinkingId, requestId) => {
@@ -136,6 +136,7 @@ export function useMessageProcessor() {
         message.request_id === requestId &&
         message.role === 'assistant' &&
         !isToolCall(message) &&
+        (!normalizeStableId(responseId) || !normalizeStableId(message.response_id)) &&
         (turn === undefined || turn === null || message.turn === turn)
       )
     }
@@ -227,7 +228,7 @@ export function useMessageProcessor() {
   }
 
   const removeThinkingForStream = (messagesRef, thinkingId, requestId) => {
-    const thinkingIndex = findThinkingIndex(messagesRef.value, thinkingId, requestId)
+    const thinkingIndex = findThinkingIndex(messagesRef.value, thinkingId, requestId, false)
     if (thinkingIndex !== -1) messagesRef.value.splice(thinkingIndex, 1)
   }
 

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from importlib import import_module
 
 import pytest
@@ -55,6 +56,27 @@ async def test_save_message_is_idempotent_by_dedupe_key():
     assert first.environment_prompt == "internal notice"
     assert persisted.environment_prompt == "internal notice"
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_save_message_persists_explicit_created_at():
+    created_at = datetime(2026, 7, 21, 6, 0, tzinfo=UTC)
+
+    async with AsyncSessionLocal() as db:
+        saved = await save_message(
+            db,
+            "session-1",
+            "user-1",
+            MessageRole.ASSISTANT,
+            MessageType.TEXT,
+            InternalMessage(role=MessageRole.ASSISTANT, content="reply"),
+            1,
+            created_at=created_at,
+        )
+        persisted = await db.get(Message, saved.id)
+
+    assert persisted is not None
+    assert persisted.created_at.replace(tzinfo=created_at.tzinfo) == created_at
 
 
 @pytest.mark.asyncio
