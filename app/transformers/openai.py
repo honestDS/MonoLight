@@ -65,7 +65,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         url = f"{base_url.rstrip('/')}/models"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=client_timeout,
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 async with session.get(url, headers=headers) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
@@ -131,7 +134,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         # 非流式：对整个请求设置整体超时
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=client_timeout,
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
@@ -189,7 +195,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         url = f"{self._normalize_image_base_url(base_url)}/images/generations"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=client_timeout,
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
@@ -240,7 +249,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         started_at = loop.time()
         deadline = started_at + timeout
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None),
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 resp_cm = session.post(url, headers=headers, json=payload)
                 # 等待响应头（含服务端首字前的思考时间）也纳入首字超时
                 try:
@@ -350,7 +362,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         url = f"{self._normalize_embedding_base_url(base_url)}/embeddings"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=client_timeout,
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
@@ -404,7 +419,10 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         url = f"{self._normalize_rerank_base_url(base_url)}/rerank"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with aiohttp.ClientSession(
+                timeout=client_timeout,
+                connector=aiohttp.TCPConnector(ssl=False),
+            ) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
