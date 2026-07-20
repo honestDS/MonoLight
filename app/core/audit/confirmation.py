@@ -20,7 +20,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
 from app.models.audit import AuditRecordStatus
-from app.models.message import MessageType
+from app.models.message import InternalMessage, MessageRole, MessageType
 
 
 class ConfirmationDecision(StrEnum):
@@ -79,6 +79,65 @@ def message_has_quote(raw_message: object) -> bool:
     if not isinstance(item_list, list):
         return False
     return any(isinstance(item, dict) and (str(item.get("type") or "").lower() in {"quote", "reference", "reply"} or any(item.get(key) for key in quote_keys)) for item in item_list)
+
+
+async def update_confirmation_tool_results_for_invalid_input(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    before_message_id: int,
+    feedback: str,
+) -> int:
+    record = await audit_crud.get_record(db, audit_record_id)
+    if record is None or record.source_assistant_message_id is None:
+        return 0
+
+    source_message = await message_crud.get(db, record.source_assistant_message_id)
+    if source_message is None or source_message.uid != record.uid or source_message.session_id != record.session_id or source_message.role != MessageRole.ASSISTANT or source_message.type != MessageType.TOOL_CALL:
+        return 0
+    try:
+        source_internal = InternalMessage.model_validate_json(source_message.content or "{}")
+    except ValueError:
+        return 0
+    tool_call_ids = {tool_call.id for tool_call in source_internal.tool_calls or []}
+    if not tool_call_ids:
+        return 0
+
+    messages = await message_crud.get_history_forward_by_id(
+        db,
+        session_id=record.session_id,
+        uid=record.uid,
+        after_id=record.source_assistant_message_id,
+        before_id=before_message_id,
+        limit=500,
+    )
+    updated_count = 0
+    for message in messages:
+        if message.type != MessageType.TOOL_RESULT:
+            continue
+        try:
+            tool_result = InternalMessage.model_validate_json(message.content or "{}")
+            result_payload = json.loads(tool_result.content or "{}")
+        except (TypeError, ValueError):
+            continue
+        if tool_result.tool_call_id not in tool_call_ids or not isinstance(result_payload, dict):
+            continue
+        if result_payload.get("status") != AuditRecordStatus.PENDING.value:
+            continue
+        result_payload.update(
+            status=AuditRecordStatus.CANCELLED.value,
+            confirmation_status="invalid_input",
+            error=feedback,
+        )
+        tool_result.content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if await message_crud.update_content(
+            db,
+            message_id=message.id,
+            content=tool_result.model_dump_json(exclude_none=True),
+            commit=False,
+        ):
+            updated_count += 1
+    return updated_count
 
 
 async def update_confirmation_message_status(

@@ -25,7 +25,7 @@ from app.models.audit import (
     AuditRecordStatus,
     AuditToolDetail,
 )
-from app.models.message import Message, MessageRole, MessageType
+from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.message_platform import MessagePlatformStatus
 from app.models.profile import Profile
 from app.models.session_reply_work_item import (
@@ -88,6 +88,20 @@ def entry_dependencies(monkeypatch):
 
 
 async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", session_id: str = "session-1") -> AuditRecord:
+    source_message = Message(
+        session_id=session_id,
+        uid=uid,
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo pending"})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db.add(source_message)
+    await db.flush()
     record = AuditRecord(
         uid=uid,
         operator_username="operator",
@@ -95,7 +109,7 @@ async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", sess
         source="http",
         language="zh",
         status=AuditRecordStatus.PENDING,
-        source_assistant_message_id=999,
+        source_assistant_message_id=source_message.id,
         working_directory=".",
         round_arguments_hash="round-hash",
         tool_count=1,
@@ -105,6 +119,28 @@ async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", sess
     db.add(record)
     await db.flush()
     db.add(AuditConfirmationClaim(uid=uid, session_id=session_id, audit_record_id=record.id))
+    db.add(
+        Message(
+            session_id=session_id,
+            uid=uid,
+            profile_id=1,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps(
+                    {
+                        "status": AuditRecordStatus.PENDING.value,
+                        "error": "等待用户确认",
+                        "reason": "测试操作需要确认",
+                    },
+                    ensure_ascii=False,
+                ),
+            ).model_dump_json(exclude_none=True),
+            is_processed=True,
+        )
+    )
     db.add(
         Message(
             session_id=session_id,
@@ -143,6 +179,21 @@ async def get_confirmation_payload(db: AsyncSession, session_id: str = "session-
     message = result.scalars().first()
     assert message is not None
     return json.loads(message.content)
+
+
+async def get_tool_result_payload(db: AsyncSession, session_id: str = "session-1") -> dict:
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.type == MessageType.TOOL_RESULT,
+        )
+        .order_by(Message.id.desc())
+    )
+    message = result.scalars().first()
+    assert message is not None
+    stored_message = InternalMessage.model_validate_json(message.content)
+    return json.loads(stored_message.content)
 
 
 @pytest.mark.asyncio
@@ -190,6 +241,12 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
         assert works[0].source_id == str(record.id)
     else:
         assert works[0].source_type.value == "user_message"
+    if expected_status == AuditRecordStatus.CANCELLED:
+        tool_result_payload = await get_tool_result_payload(db_session)
+        assert tool_result_payload["status"] == AuditRecordStatus.CANCELLED.value
+        assert tool_result_payload["confirmation_status"] == "invalid_input"
+        assert "用户未正确输入安全审计确认关键词" in tool_result_payload["error"]
+        assert "安全审计已阻止本轮工具调用" not in tool_result_payload["error"]
 
 
 @pytest.mark.asyncio

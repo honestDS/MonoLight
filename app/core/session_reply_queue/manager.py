@@ -8,8 +8,9 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status
+from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status, update_confirmation_tool_results_for_invalid_input
 from app.core.constants import (
+    ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
     ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_PERSISTED_USER_MESSAGE_MISMATCH,
@@ -155,12 +156,20 @@ class SessionReplyQueueManager:
                 await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
                 submission_status = "rejected"
             else:
-                await audit_crud.cancel_confirmation_by_session(
+                invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
+                cancelled_count = await audit_crud.cancel_confirmation_by_session(
                     db,
                     uid=uid,
                     session_id=session_id,
-                    error_reason="用户发送了其他消息，旧确认已取消",
+                    error_reason=invalid_input_feedback,
                 )
+                if cancelled_count:
+                    await update_confirmation_tool_results_for_invalid_input(
+                        db,
+                        audit_record_id=current_confirmation.id,
+                        before_message_id=message_row.id,
+                        feedback=invalid_input_feedback,
+                    )
                 await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
                 submission_status = "cancelled_and_queued"
             initial_message, work = await self._enqueue_foreground_message(

@@ -226,6 +226,7 @@ MESSAGES = {
     "MSG_AUDIT_ROUND_SKIPPED": "This tool was not executed because another tool prevented the whole round from running",
     "ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED": "The original tool-call record failed verification",
     "ERR_AUDIT_CONFIRMATION_UNAVAILABLE": "The pending confirmation was already handled or expired",
+    "ERR_AUDIT_CONFIRMATION_INVALID_INPUT": "The user did not enter a valid security-audit confirmation keyword, so this tool-call round was not executed. This is not a security-audit block. Ask the user to start the operation again, then reply only 'approve' or 'continue' to execute it, or 'reject' to cancel it.",
     "ERR_PERSISTED_USER_MESSAGE_MISMATCH": "The persisted user message does not belong to this user and session",
     "MSG_MESSAGE_PLATFORM_CREATED": "Message platform created",
     "MSG_MESSAGE_PLATFORM_UPDATED": "Message platform updated",
