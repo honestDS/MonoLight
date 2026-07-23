@@ -119,6 +119,7 @@
                 v-if="isImageFile(att)"
                 :src="fileApi.getDownloadUrl(att)"
                 :preview-src-list="getAttachmentImageUrls(msg)"
+                preview-teleported
                 :hide-on-click-modal="true"
                 class="msg-attachment-image"
                 @load="handleImageLoad"
@@ -171,6 +172,7 @@
                 v-else-if="part.type === 'image_url'"
                 :src="part.image_url.url"
                 :preview-src-list="[part.image_url.url]"
+                preview-teleported
                 :hide-on-click-modal="true"
                 class="msg-image"
                 @load="handleImageLoad"
@@ -185,6 +187,7 @@
                 v-if="isPreviewImage(file)"
                 :src="getSentFileUrl(file)"
                 :preview-src-list="getSentFileImageUrls(msg)"
+                preview-teleported
                 :hide-on-click-modal="true"
                 class="msg-attachment-image"
                 @load="handleImageLoad"

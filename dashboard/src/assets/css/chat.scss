@@ -365,9 +365,28 @@
         }
 
         .content {
-          background: #f0f0f0;
-          color: #909399;
-          font-style: italic;
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          overflow: hidden;
+          color: #747b85;
+          font-style: normal;
+          font-weight: 400;
+          letter-spacing: 0;
+          background: #f4f4f5;
+
+          &::before {
+            content: '';
+            width: 12px;
+            height: 12px;
+            box-sizing: border-box;
+            flex: 0 0 12px;
+            border: 2px solid #d8dce1;
+            border-top-color: #7d8792;
+            border-right-color: #7d8792;
+            border-radius: 50%;
+            animation: thinking-indicator-spin 0.85s linear infinite;
+          }
         }
       }
 
@@ -839,6 +858,16 @@
   to { transform: rotate(360deg); }
 }
 
+@keyframes thinking-indicator-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-main .message-list .message-item.thinking .content::before {
+    animation: none;
+  }
+}
+
 @keyframes skeleton-loading {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
@@ -1026,4 +1055,3 @@
     }
   }
 }
-

@@ -136,6 +136,7 @@
                       :src="file.url" 
                       fit="contain"
                       :preview-src-list="[file.url]"
+                      preview-teleported
                       :hide-on-click-modal="true"
                     />
                     <div v-else class="custom-upload-file">
