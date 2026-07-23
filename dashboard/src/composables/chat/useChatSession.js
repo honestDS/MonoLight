@@ -539,6 +539,11 @@ export function useChatSession() {
         }
       },
       onProactiveReply: (data) => {
+        if (
+          data?.source === 'foreground' &&
+          Array.isArray(data?.request_ids) &&
+          data.request_ids.some(id => String(id) === String(requestId))
+        ) return
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
         const workId = data.work_id
         if (
