@@ -148,4 +148,5 @@ class ChatCompletionRequest(BaseModel):
     message: str | list[TextPart | ImagePart | FilePart | MessagePart]
     attachments: list[str] | None = None
     session_id: str | None = None
+    request_id: str | None = None
     stream: bool | None = False

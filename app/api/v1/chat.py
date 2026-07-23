@@ -3,6 +3,7 @@ import json
 import time
 import uuid
 import weakref
+from dataclasses import dataclass, field
 
 from fastapi import (
     APIRouter,
@@ -53,7 +54,7 @@ from app.core.log import (
 from app.core.security import get_current_user
 from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_input_queued_event, session_reply_queue_manager
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig
@@ -85,6 +86,120 @@ def _event_matches_session(event: object, session_id: str | None, *, require_ses
     return event_session_id == session_id
 
 
+async def _http_event_stream(
+    db: AsyncSession,
+    message: str | None,
+    uid: str | None,
+    session_id: str,
+    attachments: list | None,
+    request_id: str | None,
+):
+    async for event in web_chat_adapter.chat_stream(
+        db=db,
+        message=message,
+        uid=uid,
+        session_id=session_id,
+        attachments=attachments,
+        request_id=request_id,
+    ):
+        yield json.dumps(event, ensure_ascii=False) + "\n"
+
+
+@dataclass
+class _WebSocketChatState:
+    active_task: asyncio.Task | None = None
+    active_tasks: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+    current_session_id: str | None = None
+    notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
+
+
+async def _cancel_websocket_chat_tasks(state: _WebSocketChatState):
+    """取消所有当前任务及子任务并等待其结束"""
+    tasks_to_await = []
+    if state.active_task and not state.active_task.done():
+        state.active_task.cancel()
+        tasks_to_await.append(state.active_task)
+
+    for task in list(state.active_tasks):
+        if not task.done():
+            task.cancel()
+            tasks_to_await.append(task)
+
+    if tasks_to_await:
+        # 等待所有任务完成取消过程，忽略 CancelledError
+        await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
+
+async def _run_websocket_chat(
+    websocket: WebSocket,
+    state: _WebSocketChatState,
+    uid: str | None,
+    message_text,
+    session_id,
+    attachments=None,
+    request_id=None,
+):
+    running_task = asyncio.current_task()
+    state.active_tasks.clear()
+    try:
+        async with AsyncSessionLocal() as db:
+            await ensure_web_session_writable(
+                db,
+                session_id=session_id,
+                uid=uid,
+            )
+            async for response in ws_chat_adapter.chat(
+                db=db,
+                message=message_text,
+                uid=uid,
+                session_id=session_id,
+                attachments=attachments,
+                request_id=request_id,
+                active_tasks=state.active_tasks,
+            ):
+                if session_id != state.current_session_id:
+                    continue
+                if not _event_matches_session(response, session_id):
+                    continue
+                await websocket.send_json(response)
+    except BaseBusinessException as exc:
+        if session_id == state.current_session_id:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": t(exc.message, **exc.kwargs),
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }
+            )
+    except RuntimeError as e:
+        # 拦截断开连接后的发送错误
+        if "websocket.send" in str(e) and "websocket.close" in str(e):
+            logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
+        else:
+            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(e)))
+    except asyncio.CancelledError:
+        logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
+        raise
+    except Exception:
+        logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
+        if session_id == state.current_session_id:
+            try:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": t(ERR_INTERNAL_SERVER_ERROR),
+                        "session_id": session_id,
+                        "request_id": request_id,
+                    }
+                )
+            except Exception:
+                pass
+    finally:
+        if state.active_task is running_task:
+            state.active_task = None
+
+
 @router.post("/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -108,19 +223,15 @@ async def chat_completions(
         ).model_dump()
 
     if request.stream:
-
-        async def event_stream():
-            async for event in web_chat_adapter.chat_stream(
-                db=db,
-                message=request.message,
-                uid=uid,
-                session_id=request.session_id,
-                attachments=request.attachments,
-            ):
-                yield json.dumps(event, ensure_ascii=False) + "\n"
-
         return StreamingResponse(
-            event_stream(),
+            _http_event_stream(
+                db,
+                request.message,
+                uid,
+                request.session_id,
+                request.attachments,
+                request.request_id,
+            ),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -132,6 +243,7 @@ async def chat_completions(
         uid=uid,
         session_id=request.session_id,
         attachments=request.attachments,
+        request_id=request.request_id,
     )
 
 
@@ -353,100 +465,19 @@ async def chat_websocket(
         log_locale_token = set_system_log_locale(settings.log_locale)
 
     # 用于追踪当前是否有正在运行的调度任务
-    active_task: asyncio.Task | None = None
-    active_tasks = weakref.WeakSet()  # 使用弱引用集合记录子任务，防止内存泄漏
-    current_session_id = None
-    notifier_queue: asyncio.Queue[dict] = asyncio.Queue()
-
-    async def cancel_all_tasks():
-        """取消所有当前任务及子任务并等待其结束"""
-        tasks_to_await = []
-        if active_task and not active_task.done():
-            active_task.cancel()
-            tasks_to_await.append(active_task)
-
-        for t_sub in list(active_tasks):
-            if not t_sub.done():
-                t_sub.cancel()
-                tasks_to_await.append(t_sub)
-
-        if tasks_to_await:
-            # 等待所有任务完成取消过程，忽略 CancelledError
-            await asyncio.gather(*tasks_to_await, return_exceptions=True)
-
-    async def run_chat(message_text, session_id, attachments=None, request_id=None):
-        nonlocal active_task
-        running_task = asyncio.current_task()
-        active_tasks.clear()
-        try:
-            async with AsyncSessionLocal() as db:
-                await ensure_web_session_writable(
-                    db,
-                    session_id=session_id,
-                    uid=uid,
-                )
-                async for response in ws_chat_adapter.chat(
-                    db=db,
-                    message=message_text,
-                    uid=uid,
-                    session_id=session_id,
-                    attachments=attachments,
-                    request_id=request_id,
-                    active_tasks=active_tasks,
-                ):
-                    if session_id != current_session_id:
-                        continue
-                    if not _event_matches_session(response, session_id):
-                        continue
-                    await websocket.send_json(response)
-        except BaseBusinessException as exc:
-            if session_id == current_session_id:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": t(exc.message, **exc.kwargs),
-                        "session_id": session_id,
-                        "request_id": request_id,
-                    }
-                )
-        except RuntimeError as e:
-            # 拦截断开连接后的发送错误
-            if "websocket.send" in str(e) and "websocket.close" in str(e):
-                logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
-            else:
-                logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(e)))
-        except asyncio.CancelledError:
-            logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
-            raise
-        except Exception:
-            logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
-            if session_id == current_session_id:
-                try:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "message": t(ERR_INTERNAL_SERVER_ERROR),
-                            "session_id": session_id,
-                            "request_id": request_id,
-                        }
-                    )
-                except Exception:
-                    pass
-        finally:
-            if active_task is running_task:
-                active_task = None
+    state = _WebSocketChatState()
 
     try:
         while True:
             receive_task = asyncio.create_task(websocket.receive_json())
-            notify_task = asyncio.create_task(notifier_queue.get())
+            notify_task = asyncio.create_task(state.notifier_queue.get())
             done, pending = await asyncio.wait({receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
             for pending_task in pending:
                 pending_task.cancel()
 
             if notify_task in done:
                 event = notify_task.result()
-                if _event_matches_session(event, current_session_id, require_session_id=True):
+                if _event_matches_session(event, state.current_session_id, require_session_id=True):
                     await websocket.send_json(event)
                 continue
 
@@ -460,7 +491,7 @@ async def chat_websocket(
             action = data.get("action")
 
             if action == "abort":
-                await cancel_all_tasks()
+                await _cancel_websocket_chat_tasks(state)
                 logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_ABORT_CANCELLED"))
                 continue
 
@@ -469,45 +500,45 @@ async def chat_websocket(
                     {
                         "type": "error",
                         "message": t(ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED),
-                        "session_id": current_session_id,
+                        "session_id": state.current_session_id,
                         "request_id": request_id,
                     }
                 )
                 continue
 
             # 会话 ID 解析与切换逻辑
-            old_session_id = current_session_id
+            old_session_id = state.current_session_id
             if not session_id:
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
-                if not active_task or active_task.done():
-                    current_session_id = str(uuid.uuid4())
+                if not state.active_task or state.active_task.done():
+                    state.current_session_id = str(uuid.uuid4())
                     await websocket.send_json(
                         {
                             "type": "session_id",
-                            "session_id": current_session_id,
+                            "session_id": state.current_session_id,
                             "request_id": request_id,
                         }
                     )
-                session_id = current_session_id
+                session_id = state.current_session_id
             else:
-                current_session_id = session_id
+                state.current_session_id = session_id
 
-            if old_session_id and old_session_id != current_session_id:
-                await session_notifier.unregister(uid, old_session_id, notifier_queue)
-            if current_session_id:
-                await session_notifier.register(uid, current_session_id, notifier_queue)
+            if old_session_id and old_session_id != state.current_session_id:
+                await session_notifier.unregister(uid, old_session_id, state.notifier_queue)
+            if state.current_session_id:
+                await session_notifier.register(uid, state.current_session_id, state.notifier_queue)
 
             # 判断是否发生了会话切换
             is_session_switched = old_session_id is not None and session_id != old_session_id
 
             # 如果当前已有任务在运行
-            if active_task and not active_task.done():
+            if state.active_task and not state.active_task.done():
                 if is_session_switched:
                     # 1. 切换会话场景：仅取消旧连接上的结果等待，持久化工作继续执行
-                    await cancel_all_tasks()
+                    await _cancel_websocket_chat_tasks(state)
 
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
-                    active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
+                    state.active_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
                     async with AsyncSessionLocal() as db:
@@ -529,7 +560,7 @@ async def chat_websocket(
                                 }
                             )
                             continue
-                        await session_reply_queue_manager.submit_user_message(
+                        _initial_message, work, submission_status = await session_reply_queue_manager.submit_user_message(
                             db,
                             uid=uid,
                             session_id=session_id,
@@ -537,15 +568,25 @@ async def chat_websocket(
                             message=message,
                             attachments=attachments,
                             source="ws",
+                            request_id=request_id,
                         )
+                        if request_id:
+                            await websocket.send_json(
+                                build_input_queued_event(
+                                    session_id,
+                                    request_id,
+                                    work.id,
+                                    submission_status,
+                                )
+                            )
                         logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
             else:
                 # 3. 无活跃任务：启动新任务
-                active_task = asyncio.create_task(run_chat(message, session_id, attachments, request_id))
+                state.active_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
 
     except WebSocketDisconnect:
         # 连接正常关闭
-        await cancel_all_tasks()
+        await _cancel_websocket_chat_tasks(state)
     except Exception:
         # 异常处理
         logger.bind(uid=uid).exception(t("LOG_CHAT_WS_EXCEPTION"))
@@ -553,7 +594,7 @@ async def chat_websocket(
             await websocket.send_json({"type": "error", "message": t(ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
-        await cancel_all_tasks()
+        await _cancel_websocket_chat_tasks(state)
         try:
             await websocket.close()
         except RuntimeError:
@@ -564,7 +605,7 @@ async def chat_websocket(
         reset_current_locale(locale_token)
 
         # 连接断开只取消本地等待，不取消已经持久化的回复工作
-        await cancel_all_tasks()
+        await _cancel_websocket_chat_tasks(state)
 
-        if current_session_id:
-            await session_notifier.unregister(uid, current_session_id, notifier_queue)
+        if state.current_session_id:
+            await session_notifier.unregister(uid, state.current_session_id, state.notifier_queue)

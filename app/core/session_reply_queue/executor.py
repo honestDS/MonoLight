@@ -3,7 +3,9 @@ import json
 import socket
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from sqlalchemy import update
@@ -39,7 +41,12 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import get_current_locale, t
 from app.core.message_platforms.notifier import send_session_event
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT, BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
-from app.core.session_reply_queue.manager import build_session_reply_work_event_id, build_session_reply_work_identity, session_reply_queue_manager
+from app.core.session_reply_queue.manager import (
+    build_session_reply_work_event_id,
+    build_session_reply_work_identity,
+    get_work_request_ids,
+    session_reply_queue_manager,
+)
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import sanitize_execution_summary
@@ -140,6 +147,7 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         "content": _response_content(response),
         "history": response.get("history", []),
         "files": response.get("files", []),
+        "request_ids": get_work_request_ids(work),
     }
     if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
         event["task_id"] = int(work.source_id)
@@ -147,6 +155,116 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
     elif work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY:
         event["trigger_message_id"] = int(work.source_id)
     return event
+
+
+@dataclass
+class _ForegroundStreamEventState:
+    work: SessionReplyWorkItem
+    next_sequence: int
+    dequeued_request_ids: set[str]
+
+
+async def _persist_foreground_stream_event(
+    stream_state: _ForegroundStreamEventState,
+    event: dict[str, Any],
+) -> None:
+    work = stream_state.work
+    persisted_event = {
+        **event,
+        "session_id": work.session_id,
+        "work_id": work.id,
+        "event_sequence_no": stream_state.next_sequence,
+    }
+    async with AsyncSessionLocal() as event_db:
+        await session_reply_stream_event_crud.publish(
+            event_db,
+            work_id=work.id,
+            sequence_no=stream_state.next_sequence,
+            event=persisted_event,
+        )
+    stream_state.next_sequence += 1
+
+
+async def _publish_foreground_stream_event(
+    db,
+    stream_state: _ForegroundStreamEventState,
+    event: dict[str, Any],
+) -> None:
+    work = stream_state.work
+    if event.get("type") == "agent_loop_start":
+        await db.refresh(work)
+        request_ids = [request_id for request_id in get_work_request_ids(work) if request_id not in stream_state.dequeued_request_ids]
+        if request_ids:
+            await _persist_foreground_stream_event(
+                stream_state,
+                {
+                    "type": "input_dequeued",
+                    "session_id": work.session_id,
+                    "work_id": work.id,
+                    "request_ids": request_ids,
+                },
+            )
+            stream_state.dequeued_request_ids.update(request_ids)
+    await _persist_foreground_stream_event(stream_state, event)
+
+
+async def _fetch_additional_foreground_user_messages(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+) -> list[InternalMessage]:
+    return await session_reply_queue_manager.absorb_contiguous_foreground_messages(
+        db,
+        work_id=work.id,
+        worker_id=worker_id,
+    )
+
+
+async def _check_foreground_work_validity(
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+) -> bool:
+    async with AsyncSessionLocal() as validity_db:
+        active_claims = await session_reply_work_item_crud.get_active_claims(
+            validity_db,
+            {work.id: worker_id},
+        )
+        session = await session_crud.get_by_session_id(
+            validity_db,
+            work.session_id,
+        )
+    return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
+
+
+async def _save_foreground_execution_checkpoint(
+    db,
+    checkpoint: dict[str, Any],
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+) -> None:
+    active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
+    active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+    state = {
+        **(work.execution_state or {}),
+        "dispatcher_checkpoint": checkpoint,
+    }
+    if active_audit_execution_present:
+        if active_audit_execution is None:
+            state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
+        else:
+            state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
+    updated = await session_reply_work_item_crud.update_claimed(
+        db,
+        work_id=work.id,
+        worker_id=worker_id,
+        values={"execution_state": state},
+    )
+    if not updated:
+        raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
+    work.execution_state = state
 
 
 async def _persist_work_audit_execution_binding(
@@ -199,6 +317,23 @@ async def _mark_audit_execution_unknown_reliably(
     return marked
 
 
+async def _mark_new_confirmed_execution_unknown_without_masking(
+    db,
+    *,
+    audit_record_id: int,
+    claim_token: str,
+) -> None:
+    try:
+        await _mark_audit_execution_unknown_reliably(
+            db,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+            error_reason=t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT),
+        )
+    except BaseException:
+        pass
+
+
 async def _persist_confirmed_work_audit_execution_binding(
     db,
     *,
@@ -207,17 +342,6 @@ async def _persist_confirmed_work_audit_execution_binding(
     audit_record_id: int,
     claim_token: str,
 ) -> None:
-    async def mark_new_execution_unknown_without_masking() -> None:
-        try:
-            await _mark_audit_execution_unknown_reliably(
-                db,
-                audit_record_id=audit_record_id,
-                claim_token=claim_token,
-                error_reason=t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT),
-            )
-        except BaseException:
-            pass
-
     state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
     state["audit_claim_token"] = claim_token
     values = {
@@ -233,13 +357,25 @@ async def _persist_confirmed_work_audit_execution_binding(
                 values=values,
             )
         except asyncio.CancelledError:
-            await mark_new_execution_unknown_without_masking()
+            await _mark_new_confirmed_execution_unknown_without_masking(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+            )
             raise
         except Exception:
-            await mark_new_execution_unknown_without_masking()
+            await _mark_new_confirmed_execution_unknown_without_masking(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+            )
             raise
         if not updated:
-            await mark_new_execution_unknown_without_masking()
+            await _mark_new_confirmed_execution_unknown_without_masking(
+                db,
+                audit_record_id=audit_record_id,
+                claim_token=claim_token,
+            )
             raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
     work.source_id = str(audit_record_id)
     work.execution_state = state
@@ -375,64 +511,11 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
         next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
-
-    async def publish_stream_event(event: dict[str, Any]) -> None:
-        nonlocal next_stream_sequence
-        persisted_event = {
-            **event,
-            "session_id": work.session_id,
-            "work_id": work.id,
-            "event_sequence_no": next_stream_sequence,
-        }
-        async with AsyncSessionLocal() as event_db:
-            await session_reply_stream_event_crud.publish(
-                event_db,
-                work_id=work.id,
-                sequence_no=next_stream_sequence,
-                event=persisted_event,
-            )
-        next_stream_sequence += 1
-
-    async def fetch_additional_user_messages() -> list[InternalMessage]:
-        return await session_reply_queue_manager.absorb_contiguous_foreground_messages(
-            db,
-            work_id=work.id,
-            worker_id=worker_id,
-        )
-
-    async def check_work_validity() -> bool:
-        async with AsyncSessionLocal() as validity_db:
-            active_claims = await session_reply_work_item_crud.get_active_claims(
-                validity_db,
-                {work.id: worker_id},
-            )
-            session = await session_crud.get_by_session_id(
-                validity_db,
-                work.session_id,
-            )
-        return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
-
-    async def save_execution_checkpoint(checkpoint: dict[str, Any]) -> None:
-        active_audit_execution_present = SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint
-        active_audit_execution = checkpoint.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
-        state = {
-            **(work.execution_state or {}),
-            "dispatcher_checkpoint": checkpoint,
-        }
-        if active_audit_execution_present:
-            if active_audit_execution is None:
-                state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY, None)
-            else:
-                state[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
-        updated = await session_reply_work_item_crud.update_claimed(
-            db,
-            work_id=work.id,
-            worker_id=worker_id,
-            values={"execution_state": state},
-        )
-        if not updated:
-            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT))
-        work.execution_state = state
+    stream_state = _ForegroundStreamEventState(
+        work=work,
+        next_sequence=next_stream_sequence,
+        dequeued_request_ids=set(),
+    )
 
     execution_state = work.execution_state or {}
     expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
@@ -452,16 +535,36 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         "frozen_user_message_ids": message_ids,
         "final_message_dedupe_key": _result_message_dedupe_key(work),
         "persisted_profile_id": work.profile_id,
-        "additional_user_messages_fetcher": fetch_additional_user_messages,
+        "additional_user_messages_fetcher": partial(
+            _fetch_additional_foreground_user_messages,
+            db,
+            work=work,
+            worker_id=worker_id,
+        ),
         "execution_resume_state": resume_state,
-        "execution_checkpoint_callback": save_execution_checkpoint,
-        "context_summary_work_validity_checker": check_work_validity,
+        "execution_checkpoint_callback": partial(
+            _save_foreground_execution_checkpoint,
+            db,
+            work=work,
+            worker_id=worker_id,
+        ),
+        "context_summary_work_validity_checker": partial(
+            _check_foreground_work_validity,
+            work=work,
+            worker_id=worker_id,
+        ),
         "expose_tool_call_content": expose_tool_call_content,
     }
     if not stream_requested:
         return await ChatDispatcher.dispatch(
             **dispatch_kwargs,
-            context_summary_lifecycle_callback=publish_stream_event if context_summary_events_requested else None,
+            context_summary_lifecycle_callback=partial(
+                _publish_foreground_stream_event,
+                db,
+                stream_state,
+            )
+            if context_summary_events_requested
+            else None,
         )
 
     response = None
@@ -476,10 +579,74 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
             raise RuntimeError(error_message)
         else:
-            await publish_stream_event(event)
+            await _publish_foreground_stream_event(db, stream_state, event)
     if not isinstance(response, dict):
         raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
     return response
+
+
+async def _source_invalid_confirmed_tool_response(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    audit_record_id: int,
+    record,
+    claim_token: str,
+    profile,
+) -> dict[str, Any]:
+    if record is not None and claim_token:
+        await audit_crud.mark_source_message_invalid(
+            db,
+            audit_record_id=audit_record_id,
+            claim_token=claim_token,
+            error_reason="原工具调用记录校验失败",
+        )
+        await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+    if profile is None:
+        raise RuntimeError(t(ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED))
+    ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+        db,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile=profile,
+        call_context="confirmed_tool_source_invalid",
+        allow_tools=False,
+        extra_messages=[InternalMessage(role=MessageRole.USER, content=AUDIT_SOURCE_MESSAGE_INVALID_PROMPT)],
+        reply_source="confirmed_tool_execution",
+        final_message_dedupe_key=_result_message_dedupe_key(work),
+    )
+    content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+    return {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
+
+
+@dataclass
+class _ConfirmedToolResultReplacementState:
+    db: Any
+    pending_tool_results: Any
+    audit_record_id: int
+    messages: list[InternalMessage]
+    turn_messages: list[InternalMessage]
+    replaced_tool_results: bool = False
+
+
+async def _append_confirmed_tool_result(
+    replacement_state: _ConfirmedToolResultReplacementState,
+    original_tool_call_id: str,
+    tool_result: InternalMessage,
+) -> InternalMessage:
+    sanitized_content = await replace_pending_tool_result(
+        replacement_state.db,
+        pending_message=replacement_state.pending_tool_results[original_tool_call_id],
+        original_tool_call_id=original_tool_call_id,
+        content=tool_result.content,
+        audit_record_id=replacement_state.audit_record_id,
+    )
+    stored_tool_result = tool_result.model_copy(deep=True)
+    stored_tool_result.content = sanitized_content
+    replacement_state.messages.append(stored_tool_result)
+    replacement_state.turn_messages.append(stored_tool_result)
+    replacement_state.replaced_tool_results = True
+    return stored_tool_result
 
 
 async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
@@ -528,33 +695,15 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     if profile is None or profile.uid != work.uid:
         source_valid = False
 
-    async def source_invalid_response() -> dict[str, Any]:
-        if record is not None and claim_token:
-            await audit_crud.mark_source_message_invalid(
-                db,
-                audit_record_id=audit_record_id,
-                claim_token=claim_token,
-                error_reason="原工具调用记录校验失败",
-            )
-            await update_confirmation_message_status(db, audit_record_id=audit_record_id)
-        if profile is None:
-            raise RuntimeError(t(ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED))
-        ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
-            db,
-            uid=work.uid,
-            session_id=work.session_id,
-            profile=profile,
-            call_context="confirmed_tool_source_invalid",
-            allow_tools=False,
-            extra_messages=[InternalMessage(role=MessageRole.USER, content=AUDIT_SOURCE_MESSAGE_INVALID_PROMPT)],
-            reply_source="confirmed_tool_execution",
-            final_message_dedupe_key=_result_message_dedupe_key(work),
-        )
-        content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-        return {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
-
     if not source_valid:
-        return await source_invalid_response()
+        return await _source_invalid_confirmed_tool_response(
+            db,
+            work=work,
+            audit_record_id=audit_record_id,
+            record=record,
+            claim_token=claim_token,
+            profile=profile,
+        )
 
     cfg = await validate_profile_and_cfg(db, profile)
     files_changed = _confirmed_file_snapshots_changed(details, working_directory=record.working_directory)
@@ -569,7 +718,14 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         audit_record_id=audit_record_id,
     )
     if pending_tool_results is None:
-        return await source_invalid_response()
+        return await _source_invalid_confirmed_tool_response(
+            db,
+            work=work,
+            audit_record_id=audit_record_id,
+            record=record,
+            claim_token=claim_token,
+            profile=profile,
+        )
 
     reaudit_round = None
     if files_changed and is_audit_configured(cfg):
@@ -677,23 +833,13 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     confirmed_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=confirmed_calls)
     messages = [confirmed_message]
     turn_messages = [confirmed_message]
-    replaced_tool_results = False
-
-    async def append_confirmed_tool_result(original_tool_call_id: str, tool_result: InternalMessage) -> InternalMessage:
-        nonlocal replaced_tool_results
-        sanitized_content = await replace_pending_tool_result(
-            db,
-            pending_message=pending_tool_results[original_tool_call_id],
-            original_tool_call_id=original_tool_call_id,
-            content=tool_result.content,
-            audit_record_id=audit_record_id,
-        )
-        stored_tool_result = tool_result.model_copy(deep=True)
-        stored_tool_result.content = sanitized_content
-        messages.append(stored_tool_result)
-        turn_messages.append(stored_tool_result)
-        replaced_tool_results = True
-        return stored_tool_result
+    replacement_state = _ConfirmedToolResultReplacementState(
+        db=db,
+        pending_tool_results=pending_tool_results,
+        audit_record_id=audit_record_id,
+        messages=messages,
+        turn_messages=turn_messages,
+    )
 
     executions_by_original_call_id = {}
     for original_call, confirmed_call in zip(source_tool_calls, confirmed_calls, strict=True):
@@ -734,7 +880,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     },
                     ensure_ascii=False,
                 )
-            await append_confirmed_tool_result(
+            await _append_confirmed_tool_result(
+                replacement_state,
                 original_call.id,
                 InternalMessage(
                     role=MessageRole.TOOL,
@@ -769,7 +916,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 work.uid,
                 allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             )
-            await append_confirmed_tool_result(original_call.id, tool_result)
+            await _append_confirmed_tool_result(replacement_state, original_call.id, tool_result)
             try:
                 result_payload = json.loads(tool_result.content or "{}")
             except (TypeError, ValueError):
@@ -793,7 +940,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         )
     if execution_round_status is not None:
         status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
-        if replaced_tool_results and status_updated is False:
+        if replacement_state.replaced_tool_results and status_updated is False:
             await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
     ai_msg, final_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
@@ -847,6 +994,21 @@ def _build_background_result_messages(task: BackgroundTask) -> list[InternalMess
     ]
 
 
+async def _persist_work_audit_execution_binding_callback(
+    binding: dict[str, Any] | None,
+    *,
+    db,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+) -> None:
+    await _persist_work_audit_execution_binding(
+        db,
+        work=work,
+        worker_id=worker_id,
+        binding=binding,
+    )
+
+
 async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
     """生成后台任务总结并绑定可恢复的审计执行状态。"""
     task = await background_task_crud.get(db, int(work.source_id))
@@ -855,15 +1017,6 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     profile = await profile_crud.get_with_relations(db, work.profile_id)
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
-
-    async def persist_audit_binding(binding: dict[str, Any] | None) -> None:
-        """更新后台任务总结工作中的审计绑定。"""
-        await _persist_work_audit_execution_binding(
-            db,
-            work=work,
-            worker_id=worker_id,
-            binding=binding,
-        )
 
     submission_context = _load_background_submission_context(task)
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
@@ -879,7 +1032,12 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         initial_fixed_upper_message_id=_last_frozen_user_message_id(submission_context),
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
-        audit_execution_binding_callback=persist_audit_binding,
+        audit_execution_binding_callback=partial(
+            _persist_work_audit_execution_binding_callback,
+            db=db,
+            work=work,
+            worker_id=worker_id,
+        ),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {
@@ -895,15 +1053,6 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
 
-    async def persist_audit_binding(binding: dict[str, Any] | None) -> None:
-        """更新定时任务总结工作中的审计绑定。"""
-        await _persist_work_audit_execution_binding(
-            db,
-            work=work,
-            worker_id=worker_id,
-            binding=binding,
-        )
-
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,
@@ -916,7 +1065,12 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
         restrict_tools_to_background_allowlist=False,
         reply_source="scheduled_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
-        audit_execution_binding_callback=persist_audit_binding,
+        audit_execution_binding_callback=partial(
+            _persist_work_audit_execution_binding_callback,
+            db=db,
+            work=work,
+            worker_id=worker_id,
+        ),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
     return {

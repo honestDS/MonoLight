@@ -739,11 +739,26 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
 
     await refresh_record(db_session, record)
     works = await list_work(db_session)
-    assert events == [{"type": "done", "session_id": "session-1", "response": {"work_id": works[0].id}, "request_id": "request-1"}]
+    assert events == [
+        {
+            "type": "input_queued",
+            "session_id": "session-1",
+            "request_id": "request-1",
+            "work_id": works[0].id,
+            "submission_status": "approved",
+        },
+        {
+            "type": "done",
+            "session_id": "session-1",
+            "response": {"work_id": works[0].id},
+            "request_id": "request-1",
+        },
+    ]
     assert record.status == AuditRecordStatus.EXECUTING
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert works[0].execution_state["request_ids"] == ["request-1"]
 
 
 @pytest.mark.asyncio
@@ -808,7 +823,15 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
-    assert websocket.sent == []
+    assert websocket.sent == [
+        {
+            "type": "input_queued",
+            "session_id": session_id,
+            "request_id": "approval-request",
+            "work_id": works[0].id,
+            "submission_status": "approved",
+        }
+    ]
 
 
 async def _noop_async(*_args, **_kwargs):

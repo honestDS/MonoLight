@@ -42,6 +42,51 @@ logger = get_logger(__name__)
 WORK_RESULT_POLL_INTERVAL_SECONDS = 0.2
 
 
+def get_work_request_ids(work: SessionReplyWorkItem) -> list[str]:
+    state = getattr(work, "execution_state", None)
+    request_ids = state.get("request_ids") if isinstance(state, dict) else None
+    if not isinstance(request_ids, list):
+        return []
+    unique_request_ids: list[str] = []
+    seen: set[str] = set()
+    for request_id in request_ids:
+        if isinstance(request_id, str) and request_id and request_id not in seen:
+            seen.add(request_id)
+            unique_request_ids.append(request_id)
+    return unique_request_ids
+
+
+def merge_work_request_ids(
+    *works: SessionReplyWorkItem,
+    request_id: str | None = None,
+) -> list[str]:
+    merged_request_ids: list[str] = []
+    seen: set[str] = set()
+    for work in works:
+        for item_request_id in get_work_request_ids(work):
+            if item_request_id not in seen:
+                seen.add(item_request_id)
+                merged_request_ids.append(item_request_id)
+    if isinstance(request_id, str) and request_id and request_id not in seen:
+        merged_request_ids.append(request_id)
+    return merged_request_ids
+
+
+def build_input_queued_event(
+    session_id: str,
+    request_id: str,
+    work_id: int | None,
+    submission_status: str,
+) -> dict[str, Any]:
+    return {
+        "type": "input_queued",
+        "session_id": session_id,
+        "request_id": request_id,
+        "work_id": work_id,
+        "submission_status": submission_status,
+    }
+
+
 def _serialize_message_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -106,6 +151,7 @@ class SessionReplyQueueManager:
         stream_requested: bool | None = None,
         context_summary_events_requested: bool | None = None,
         has_quote: bool = False,
+        request_id: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str]:
         await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
         current_confirmation = await audit_crud.get_current_confirmation(db, uid=uid, session_id=session_id)
@@ -120,6 +166,7 @@ class SessionReplyQueueManager:
                 source=source,
                 stream_requested=stream_requested,
                 context_summary_events_requested=context_summary_events_requested,
+                request_id=request_id,
             )
             return initial_message, work, "queued"
 
@@ -173,6 +220,7 @@ class SessionReplyQueueManager:
                 context_summary_events_requested=context_summary_events_requested,
                 persisted_message_row=message_row,
                 audit_decision_response=True,
+                request_id=request_id,
             )
             return initial_message, work, "rejected"
 
@@ -217,6 +265,7 @@ class SessionReplyQueueManager:
                 stream_requested=stream_requested,
                 context_summary_events_requested=context_summary_events_requested,
                 persisted_message_row=message_row,
+                request_id=request_id,
             )
             return initial_message, work, submission_status
 
@@ -273,6 +322,7 @@ class SessionReplyQueueManager:
             "expose_tool_call_content": source != "weixin-openclaw",
             "language": get_current_locale(),
             "message_source": source,
+            "request_ids": merge_work_request_ids(work, request_id=request_id),
         }
         db.add(work)
         await db.commit()
@@ -302,6 +352,7 @@ class SessionReplyQueueManager:
         stream_requested: bool | None = None,
         context_summary_events_requested: bool | None = None,
         has_quote: bool = False,
+        request_id: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         if not hasattr(db, "execute"):
             return await self._enqueue_foreground_message(
@@ -314,6 +365,7 @@ class SessionReplyQueueManager:
                 source=source,
                 stream_requested=stream_requested,
                 context_summary_events_requested=context_summary_events_requested,
+                request_id=request_id,
             )
         initial_message, work, _status = await self.submit_user_message(
             db,
@@ -326,6 +378,7 @@ class SessionReplyQueueManager:
             stream_requested=stream_requested,
             context_summary_events_requested=context_summary_events_requested,
             has_quote=has_quote,
+            request_id=request_id,
         )
         return initial_message, work
 
@@ -343,6 +396,7 @@ class SessionReplyQueueManager:
         context_summary_events_requested: bool | None = None,
         persisted_message_row: Message | None = None,
         audit_decision_response: bool = False,
+        request_id: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -393,7 +447,10 @@ class SessionReplyQueueManager:
                 "message_source": source,
                 "audit_decision_response": audit_decision_response,
             }
-            db.add(work)
+        state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
+        state["request_ids"] = merge_work_request_ids(work, request_id=request_id)
+        work.execution_state = state
+        db.add(work)
         await db.commit()
         await db.refresh(message_row)
         await db.refresh(work)
@@ -537,18 +594,20 @@ class SessionReplyQueueManager:
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
         context_summary_events_requested = any(bool((item.execution_state or {}).get("context_summary_events_requested")) for item in contiguous)
         expose_tool_call_content = all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in contiguous)
+        execution_state = {
+            **(work.execution_state or {}),
+            "stream_requested": stream_requested,
+            "context_summary_events_requested": context_summary_events_requested,
+            "expose_tool_call_content": expose_tool_call_content,
+            "request_ids": merge_work_request_ids(*contiguous),
+        }
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work.id,
             worker_id=worker_id,
             values={
                 "input_message_ids": message_ids,
-                "execution_state": {
-                    **(work.execution_state or {}),
-                    "stream_requested": stream_requested,
-                    "context_summary_events_requested": context_summary_events_requested,
-                    "expose_tool_call_content": expose_tool_call_content,
-                },
+                "execution_state": execution_state,
             },
             commit=False,
         )
@@ -556,6 +615,8 @@ class SessionReplyQueueManager:
             await db.rollback()
             raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
         await db.commit()
+        work.input_message_ids = message_ids
+        work.execution_state = execution_state
         return self._merge_messages(messages)
 
     async def absorb_contiguous_foreground_messages(
@@ -618,11 +679,18 @@ class SessionReplyQueueManager:
             )
         )
         frozen_message_ids = list(work.input_message_ids or [])
+        execution_state = {
+            **(work.execution_state or {}),
+            "request_ids": merge_work_request_ids(work, *additional_work),
+        }
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work.id,
             worker_id=worker_id,
-            values={"input_message_ids": [*frozen_message_ids, *message_ids]},
+            values={
+                "input_message_ids": [*frozen_message_ids, *message_ids],
+                "execution_state": execution_state,
+            },
             commit=False,
         )
         if not updated:
@@ -630,6 +698,8 @@ class SessionReplyQueueManager:
             return []
 
         await db.commit()
+        work.input_message_ids = [*frozen_message_ids, *message_ids]
+        work.execution_state = execution_state
         content, attachments, _ids = self._merge_messages(messages)
         combined_message = InternalMessage(
             id=message_ids[-1],
@@ -727,6 +797,7 @@ class SessionReplyQueueManager:
                         "history": response.get("history", []),
                         "files": response.get("files"),
                         "response": response,
+                        "request_ids": get_work_request_ids(work),
                     }
                     return
                 if work.status == SessionReplyWorkStatus.FAILED:
@@ -737,6 +808,7 @@ class SessionReplyQueueManager:
                         "message": error_content,
                         "session_id": work.session_id,
                         "work_id": target_work_id,
+                        "request_ids": get_work_request_ids(work),
                     }
                     return
                 if work.status == SessionReplyWorkStatus.CANCELLED:

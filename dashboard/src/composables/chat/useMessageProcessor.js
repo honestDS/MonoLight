@@ -386,8 +386,6 @@ export function useMessageProcessor() {
 
   // 处理流式下的业务错误事件
   const processStreamError = (messagesRef, errorMessage, thinkingId, requestId = null, workId = null, eventId = null) => {
-    removeThinkingMessage(messagesRef, thinkingId, requestId)
-
     const alreadyHandled = messagesRef.value.some(message =>
       message.role === 'err' && (
         (eventId && message.event_id === eventId) ||
@@ -419,10 +417,6 @@ export function useMessageProcessor() {
   // 处理完整的 AI 响应消息，WS 和 HTTP 共用
   const processAiResponse = (messagesRef, response, thinkingId, requestId = null) => {
     const workId = response.work_id
-    if (workId && messagesRef.value.some(message => message.work_id === workId)) {
-      removeThinkingMessage(messagesRef, thinkingId, requestId)
-      return
-    }
 
     const aiContent = response.choices?.[0]?.message?.content ?? response.content ?? ''
     const history = response.history || []

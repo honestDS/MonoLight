@@ -7,6 +7,7 @@ import pytest
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive as interactive_module
+from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.exceptions import LLMException
@@ -536,7 +537,6 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
         model_requests.append(kwargs)
         if kwargs["model_id"] == "model-1":
             raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
-        await kwargs["on_content"]("ok")
         return SimpleNamespace(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"))
 
     async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
@@ -572,7 +572,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     )
     monkeypatch.setattr(interactive_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(
-        interactive_module,
+        interactive_helpers_module,
         "fetch_and_merge_new_user_messages",
         fetch_new_messages,
     )
@@ -609,7 +609,14 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [datetime(2026, 7, 21, 6, 1, tzinfo=UTC)]
-    assert [event["type"] for event in events] == ["task_start", "content", "turn_end", "done"]
+    assert [event["type"] for event in events] == [
+        "task_start",
+        "agent_loop_start",
+        "agent_loop_output",
+        "content",
+        "turn_end",
+        "done",
+    ]
 
 
 _DEFAULT_AUDIT_RESULT = object()
@@ -810,8 +817,9 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_module.audit_crud, "finish_execution_round", finish_round)
     monkeypatch.setattr(interactive_module.audit_crud, "mark_execution_unknown", mark_unknown)
     monkeypatch.setattr(interactive_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(interactive_helpers_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(interactive_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
-    monkeypatch.setattr(interactive_module, "process_single_tool_with_isolated_db", process_tool)
+    monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", process_tool)
 
     if stream_dispatch:
         response = [
@@ -994,9 +1002,17 @@ async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(
         stream_dispatch=True,
     )
 
-    assert [event["type"] for event in events] == ["task_start", "turn_end", "tool_start", "tool_end", "done"]
-    assert events[2]["tool_call_id"] == "call-1"
-    assert json.loads(events[3]["result"])["status"] == "pending"
+    assert [event["type"] for event in events] == [
+        "task_start",
+        "agent_loop_start",
+        "agent_loop_output",
+        "turn_end",
+        "tool_start",
+        "tool_end",
+        "done",
+    ]
+    assert events[4]["tool_call_id"] == "call-1"
+    assert json.loads(events[5]["result"])["status"] == "pending"
     assert json.loads(events[-1]["response"]["choices"][0]["message"]["content"]) == confirmation_payload
     assert unknown_calls == []
 
@@ -1149,12 +1165,23 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     )
 
     await asyncio.wait_for(audit_started.wait(), timeout=1)
-    assert [event["type"] for event in published_events] == ["turn_end", "tool_start"]
+    assert [event["type"] for event in published_events] == [
+        "agent_loop_start",
+        "agent_loop_output",
+        "turn_end",
+        "tool_start",
+    ]
 
     release_audit.set()
     response, unknown_calls = await dispatch_task
 
-    assert [event["type"] for event in published_events] == ["turn_end", "tool_start", "tool_end"]
+    assert [event["type"] for event in published_events] == [
+        "agent_loop_start",
+        "agent_loop_output",
+        "turn_end",
+        "tool_start",
+        "tool_end",
+    ]
     assert json.loads(response["choices"][0]["message"]["content"])["type"] == "audit_confirmation"
     assert unknown_calls == []
 
@@ -1176,7 +1203,22 @@ async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatc
     )
 
     event_types = [event["type"] for event in events]
-    assert event_types == ["task_start", "turn_end", "tool_start", "tool_end", "turn_end", "done"]
-    assert json.loads(events[3]["result"])["status"] == "failed"
-    assert events[3]["tool_call_id"] == events[2]["tool_call_id"] == "call-1"
+    assert event_types == [
+        "task_start",
+        "agent_loop_start",
+        "agent_loop_output",
+        "turn_end",
+        "tool_start",
+        "tool_end",
+        "agent_loop_start",
+        "agent_loop_output",
+        "content",
+        "turn_end",
+        "done",
+    ]
+    assert events[1]["response_id"] == events[2]["response_id"]
+    assert events[6]["response_id"] == events[7]["response_id"]
+    assert events[1]["response_id"] != events[6]["response_id"]
+    assert json.loads(events[5]["result"])["status"] == "failed"
+    assert events[5]["tool_call_id"] == events[4]["tool_call_id"] == "call-1"
     assert unknown_calls == []

@@ -55,6 +55,10 @@ async def test_foreground_freeze_merges_contiguous_work_and_is_stable(db_session
     first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
     await add_message(db_session, 2, "C")
     merged = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
+    first.execution_state = {"request_ids": ["request-1", "request-shared"]}
+    merged.execution_state = {"request_ids": ["request-shared", "request-2"]}
+    db_session.add(first)
+    db_session.add(merged)
     await db_session.commit()
 
     first.status = SessionReplyWorkStatus.RUNNING
@@ -72,6 +76,8 @@ async def test_foreground_freeze_merges_contiguous_work_and_is_stable(db_session
     assert first_result == ("B\nC", [], [1, 2])
     assert second_result == first_result
     await db_session.refresh(merged)
+    await db_session.refresh(first)
+    assert first.execution_state["request_ids"] == ["request-1", "request-shared", "request-2"]
     assert merged.status == SessionReplyWorkStatus.MERGED
     assert merged.merged_into_id == first.id
     processed = list((await db_session.execute(select(Message).where(Message.id.in_([1, 2])))).scalars().all())
@@ -84,6 +90,8 @@ async def test_running_foreground_work_absorbs_later_contiguous_messages(db_sess
     manager = SessionReplyQueueManager()
     await add_message(db_session, 1, "first")
     first = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=1, dedupe_key="foreground-message:1")
+    first.execution_state = {"request_ids": ["request-1", "request-shared"]}
+    db_session.add(first)
     await db_session.commit()
 
     first.status = SessionReplyWorkStatus.RUNNING
@@ -96,6 +104,10 @@ async def test_running_foreground_work_absorbs_later_contiguous_messages(db_sess
     second = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=2, dedupe_key="foreground-message:2")
     await add_message(db_session, 3, "third")
     third = await enqueue(crud, db_session, work_type=SessionReplyWorkType.FOREGROUND_REPLY, source_id=3, dedupe_key="foreground-message:3")
+    second.execution_state = {"request_ids": ["request-2", "request-shared"]}
+    third.execution_state = {"request_ids": ["request-shared", "request-3"]}
+    db_session.add(second)
+    db_session.add(third)
     await db_session.commit()
 
     logged_messages: list[str] = []
@@ -128,6 +140,7 @@ async def test_running_foreground_work_absorbs_later_contiguous_messages(db_sess
     await db_session.refresh(second)
     await db_session.refresh(third)
     assert first.input_message_ids == [1, 2, 3]
+    assert first.execution_state["request_ids"] == ["request-1", "request-shared", "request-2", "request-3"]
     assert second.status == SessionReplyWorkStatus.MERGED
     assert second.merged_into_id == first.id
     assert third.status == SessionReplyWorkStatus.MERGED

@@ -13,7 +13,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_input_queued_event, session_reply_queue_manager
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -44,7 +44,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
         try:
             profile = await profile_crud.get_active(db, uid=uid)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            _initial_message, work, _status = await session_reply_queue_manager.submit_user_message(
+            _initial_message, work, submission_status = await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -52,7 +52,10 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 message=message,
                 attachments=attachments,
                 source="ws",
+                request_id=request_id,
             )
+            if request_id:
+                yield build_input_queued_event(session_id, request_id, work.id, submission_status)
             async for chunk in session_reply_queue_manager.wait_for_stream(work.id):
                 if request_id and isinstance(chunk, dict):
                     chunk.setdefault("request_id", request_id)

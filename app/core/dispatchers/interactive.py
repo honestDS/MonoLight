@@ -4,6 +4,7 @@ import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable, MutableSet
+from functools import partial
 from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +24,6 @@ from app.core.constants import (
     ERR_LLM_EMPTY_RESPONSE,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
-    SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.context import ContextManager
 from app.core.crud.audit import audit_crud
@@ -43,19 +43,17 @@ from app.core.utils.context_summary.common import (
 )
 from app.core.utils.dispatcher.append_new_user_messages import append_new_user_messages
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
-from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.handle_parallel_tool_limit import handle_parallel_tool_limit
 from app.core.utils.dispatcher.helpers import (
     dump_output_history,
     extract_files_to_user,
     format_exception_message,
     get_multimodal_from_entry,
-    process_single_tool_with_isolated_db,
     reassemble_multimodal_messages,
     resolve_chat_params,
 )
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
-from app.core.utils.dispatcher.markdown_instruction import append_environment_prompt_instruction, build_max_output_tokens_instruction, materialize_latest_user_environment_prompt
+from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
@@ -69,22 +67,27 @@ from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
+from .interactive_helpers import (
+    _AdditionalUserMessagesContext,
+    _AgentLoopStreamState,
+    _emit_agent_loop_output,
+    _execute_isolated_tool_call,
+    _ExecutionCheckpointState,
+    _fetch_additional_user_messages,
+    _find_tool_call_by_id,
+    _handle_stream_content,
+    _mark_claimed_audit_execution_unknown,
+    _ParallelToolExecutionContext,
+    _save_execution_checkpoint,
+    _tool_result_succeeded,
+)
+
 logger = get_logger(__name__)
 
 
 class AuditExecutionStatePersistenceError(ServerException):
     def __init__(self, cause: str) -> None:
         super().__init__(message=ERR_AUDIT_EXECUTION_CLAIM_FAILED, cause=cause)
-
-
-def _tool_result_succeeded(content: str | None) -> bool:
-    try:
-        payload = json.loads(content or "{}")
-    except (TypeError, ValueError):
-        return True
-    if not isinstance(payload, dict):
-        return True
-    return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
 
 
 class InteractiveDispatcherMixin:
@@ -127,62 +130,32 @@ class InteractiveDispatcherMixin:
             initial_msg = persisted_initial_message or await save_initial_message(db, session_id, uid, profile, message, attachments, source=session_source)
 
             queue_managed = persisted_initial_message is not None
-
-            async def fetch_additional_user_messages(max_tokens: int) -> list[InternalMessage]:
-                if additional_user_messages_fetcher is not None:
-                    new_messages = await additional_user_messages_fetcher()
-                elif queue_managed:
-                    return []
-                else:
-                    new_messages = await fetch_and_merge_new_user_messages(db, session_id, uid)
-                max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
-                for new_message in new_messages:
-                    append_environment_prompt_instruction(new_message, max_tokens_instruction)
-                return new_messages
+            additional_user_messages_context = _AdditionalUserMessagesContext(
+                db=db,
+                session_id=session_id,
+                uid=uid,
+                queue_managed=queue_managed,
+                fetcher=additional_user_messages_fetcher,
+            )
 
             final_ai_content = ""
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
             is_first_iter = execution_resume_state is None
-            checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-            checkpoint_upper_id = min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
+            checkpoint_state = _ExecutionCheckpointState(
+                callback=execution_checkpoint_callback,
+                turn_messages=turn_messages,
+                files_to_user=files_to_user,
+                mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                upper_message_id=min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id,
+            )
             if execution_resume_state is not None:
                 saved_checkpoint_mode = execution_resume_state.get("context_summary_trigger_mode")
                 saved_checkpoint_upper_id = execution_resume_state.get("context_summary_fixed_upper_message_id")
                 if saved_checkpoint_mode in ContextSummaryTriggerMode._value2member_map_:
-                    checkpoint_mode = ContextSummaryTriggerMode(saved_checkpoint_mode)
+                    checkpoint_state.mode = ContextSummaryTriggerMode(saved_checkpoint_mode)
                 if isinstance(saved_checkpoint_upper_id, int):
-                    checkpoint_upper_id = saved_checkpoint_upper_id
-
-            async def save_execution_checkpoint(
-                messages: list[InternalMessage],
-                current_turn: int,
-                *,
-                active_audit_execution: dict[str, Any] | None = None,
-                update_active_audit_execution: bool = False,
-            ) -> None:
-                if execution_checkpoint_callback is None:
-                    return
-                checkpoint = {
-                    "messages": [item.model_dump(mode="json") for item in messages],
-                    "turn_messages": [item.model_dump(mode="json") for item in turn_messages],
-                    "files_to_user": files_to_user,
-                    "current_turn": current_turn,
-                    "context_summary_trigger_mode": checkpoint_mode.value,
-                    "context_summary_fixed_upper_message_id": checkpoint_upper_id,
-                }
-                if update_active_audit_execution:
-                    checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
-                await execution_checkpoint_callback(checkpoint)
-
-            async def mark_claimed_audit_execution_unknown(audit_record_id: int, claim_token: str) -> None:
-                await audit_crud.mark_execution_unknown(
-                    db,
-                    audit_record_id=audit_record_id,
-                    claim_token=claim_token,
-                    error_reason=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN),
-                )
-                await update_confirmation_message_status(db, audit_record_id=audit_record_id)
+                    checkpoint_state.upper_message_id = saved_checkpoint_upper_id
 
             while True:
                 try:
@@ -239,7 +212,7 @@ class InteractiveDispatcherMixin:
                     max_turns = cfg.tool.max_turns
 
                     while current_turn <= max_turns:
-                        new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                        new_user_msgs = await _fetch_additional_user_messages(additional_user_messages_context, chat_params["max_tokens"])
                         if new_user_msgs:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
@@ -248,8 +221,8 @@ class InteractiveDispatcherMixin:
                                 default=None,
                             )
                             if fixed_user_upper_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                checkpoint_upper_id = fixed_user_upper_id
+                                checkpoint_state.mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_state.upper_message_id = fixed_user_upper_id
 
                         current_turn += 1
 
@@ -263,11 +236,19 @@ class InteractiveDispatcherMixin:
 
                         response_id = str(uuid.uuid4())
                         excluded_priorities: set[int] = set()
+                        emitted_agent_loop_start = False
+                        stream_state = _AgentLoopStreamState(
+                            callback=stream_event_callback,
+                            current_turn=current_turn,
+                            response_id=response_id,
+                            expose_tool_call_content=expose_tool_call_content,
+                        )
+
                         while True:
-                            emitted_stream_content = False
-                            buffered_content_chunks: list[str] = []
+                            stream_state.emitted_stream_content = False
+                            stream_state.buffered_content_chunks.clear()
                             try:
-                                if checkpoint_upper_id is not None:
+                                if checkpoint_state.upper_message_id is not None:
                                     messages = await apply_context_summary_checkpoint(
                                         db,
                                         session_id=session_id,
@@ -275,8 +256,8 @@ class InteractiveDispatcherMixin:
                                         profile=profile,
                                         cfg=cfg,
                                         messages=messages,
-                                        trigger_mode=checkpoint_mode,
-                                        fixed_upper_message_id=checkpoint_upper_id,
+                                        trigger_mode=checkpoint_state.mode,
+                                        fixed_upper_message_id=checkpoint_state.upper_message_id,
                                         context_window_k=chat_params["context_window_k"],
                                         max_tokens=chat_params["max_tokens"],
                                         tools=current_tools,
@@ -313,32 +294,37 @@ class InteractiveDispatcherMixin:
                                 if stream_event_callback is None:
                                     response = await LLMClient.generate(**generation_kwargs)
                                 else:
-
-                                    async def on_content(content: str) -> None:
-                                        nonlocal emitted_stream_content
-                                        if not expose_tool_call_content:
-                                            buffered_content_chunks.append(content)
-                                        else:
-                                            await stream_event_callback(
-                                                {
-                                                    "type": "content",
-                                                    "content": content,
-                                                    "turn": current_turn,
-                                                    "response_id": response_id,
-                                                }
-                                            )
-                                            emitted_stream_content = True
+                                    if not emitted_agent_loop_start:
+                                        await stream_event_callback(
+                                            {
+                                                "type": "agent_loop_start",
+                                                "turn": current_turn,
+                                                "response_id": response_id,
+                                            }
+                                        )
+                                        emitted_agent_loop_start = True
 
                                     response = await LLMClient.generate_with_stream_callback(
                                         **generation_kwargs,
-                                        on_content=on_content,
+                                        on_content=partial(_handle_stream_content, stream_state),
                                     )
                                 # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
                                 ai_msg = response.message
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                await _emit_agent_loop_output(stream_state)
+                                if stream_event_callback is not None and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content:
+                                    await stream_event_callback(
+                                        {
+                                            "type": "content",
+                                            "content": ai_msg.content,
+                                            "turn": current_turn,
+                                            "response_id": response_id,
+                                        }
+                                    )
+                                    stream_state.emitted_stream_content = True
                                 if not expose_tool_call_content and not ai_msg.tool_calls:
-                                    for content_chunk in buffered_content_chunks:
+                                    for content_chunk in stream_state.buffered_content_chunks:
                                         await stream_event_callback(
                                             {
                                                 "type": "content",
@@ -352,7 +338,7 @@ class InteractiveDispatcherMixin:
                                 raise
                             except LLMException as exc:
                                 # 已推送内容后不可切换渠道重试，否则前端会拼接两个渠道的部分回复
-                                if emitted_stream_content:
+                                if stream_state.emitted_stream_content:
                                     raise
                                 # 仅捕获 LLM 调用相关异常（连接失败/超时/状态码错误/空响应等）做降级，
                                 # 组装、协议转换或代码缺陷类异常向上抛出，避免掩盖真实问题
@@ -380,7 +366,7 @@ class InteractiveDispatcherMixin:
                         messages.append(ai_msg)
                         turn_messages.append(ai_msg)
 
-                        new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"]) if not ai_msg.tool_calls else []
+                        new_user_msgs = await _fetch_additional_user_messages(additional_user_messages_context, chat_params["max_tokens"]) if not ai_msg.tool_calls else []
                         saved_msg = await save_assistant_message(
                             db,
                             session_id,
@@ -414,19 +400,19 @@ class InteractiveDispatcherMixin:
                                 default=None,
                             )
                             if fixed_user_upper_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                checkpoint_upper_id = fixed_user_upper_id
+                                checkpoint_state.mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                checkpoint_state.upper_message_id = fixed_user_upper_id
 
                             current_turn = 0
-                            await save_execution_checkpoint(messages, current_turn)
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
                         if len(ai_msg.tool_calls) > cfg.tool.max_parallel_tools:
                             fixed_tool_upper_id = await handle_parallel_tool_limit(db, session_id, uid, profile, cfg, ai_msg, messages, turn_messages)
                             if fixed_tool_upper_id is not None:
-                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                checkpoint_upper_id = fixed_tool_upper_id
-                            await save_execution_checkpoint(messages, current_turn)
+                                checkpoint_state.mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_state.upper_message_id = fixed_tool_upper_id
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
                         precheck_errors = prevalidate_tool_round(ai_msg.tool_calls, cfg, tool_schemas=tools)
@@ -460,9 +446,9 @@ class InteractiveDispatcherMixin:
                                 if stored_tool_result.id is not None:
                                     persisted_tool_result_ids.append(stored_tool_result.id)
                             if persisted_tool_result_ids:
-                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                checkpoint_upper_id = max(persisted_tool_result_ids)
-                            await save_execution_checkpoint(messages, current_turn)
+                                checkpoint_state.mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_state.upper_message_id = max(persisted_tool_result_ids)
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
                         if stream_event_callback is not None:
@@ -491,7 +477,7 @@ class InteractiveDispatcherMixin:
                         if audit_round is not None and not audit_round.may_execute:
                             persisted_tool_result_ids = []
                             if audit_round.confirmation_payload is not None:
-                                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                                new_user_msgs = await _fetch_additional_user_messages(additional_user_messages_context, chat_params["max_tokens"])
                                 if new_user_msgs:
                                     stored_tool_results = await persist_cancelled_pending_audit_results(
                                         db,
@@ -505,7 +491,7 @@ class InteractiveDispatcherMixin:
                                         messages.append(stored_tool_result)
                                         turn_messages.append(stored_tool_result)
                                         if stream_event_callback is not None:
-                                            tool_call = next((item for item in ai_msg.tool_calls if item.id == stored_tool_result.tool_call_id), None)
+                                            tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
                                             await stream_event_callback(
                                                 {
                                                     "type": "tool_end",
@@ -521,10 +507,10 @@ class InteractiveDispatcherMixin:
                                         default=None,
                                     )
                                     if fixed_user_upper_id is not None:
-                                        checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                        checkpoint_upper_id = fixed_user_upper_id
+                                        checkpoint_state.mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                        checkpoint_state.upper_message_id = fixed_user_upper_id
                                     current_turn = 0
-                                    await save_execution_checkpoint(messages, current_turn)
+                                    await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                     continue
                                 stored_tool_results, _confirmation_message = await persist_pending_confirmation_bundle(
                                     db,
@@ -536,7 +522,7 @@ class InteractiveDispatcherMixin:
                                     confirmation_payload=audit_round.confirmation_payload,
                                     dedupe_key=final_message_dedupe_key,
                                 )
-                                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                                new_user_msgs = await _fetch_additional_user_messages(additional_user_messages_context, chat_params["max_tokens"])
                                 if new_user_msgs:
                                     stored_tool_results = await supersede_persisted_pending_confirmation_bundle(
                                         db,
@@ -549,7 +535,7 @@ class InteractiveDispatcherMixin:
                                         messages.append(stored_tool_result)
                                         turn_messages.append(stored_tool_result)
                                         if stream_event_callback is not None:
-                                            tool_call = next((item for item in ai_msg.tool_calls if item.id == stored_tool_result.tool_call_id), None)
+                                            tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
                                             await stream_event_callback(
                                                 {
                                                     "type": "tool_end",
@@ -565,10 +551,10 @@ class InteractiveDispatcherMixin:
                                         default=None,
                                     )
                                     if fixed_user_upper_id is not None:
-                                        checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
-                                        checkpoint_upper_id = fixed_user_upper_id
+                                        checkpoint_state.mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                        checkpoint_state.upper_message_id = fixed_user_upper_id
                                     current_turn = 0
-                                    await save_execution_checkpoint(messages, current_turn)
+                                    await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                     continue
                                 for tool_result, stored_tool_result in zip(audit_round.tool_results, stored_tool_results, strict=True):
                                     messages.append(stored_tool_result)
@@ -576,7 +562,7 @@ class InteractiveDispatcherMixin:
                                     if stored_tool_result.id is not None:
                                         persisted_tool_result_ids.append(stored_tool_result.id)
                                     if stream_event_callback is not None:
-                                        tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
+                                        tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_result.tool_call_id)
                                         await stream_event_callback(
                                             {
                                                 "type": "tool_end",
@@ -592,7 +578,7 @@ class InteractiveDispatcherMixin:
                                     if stored_tool_result.id is not None:
                                         persisted_tool_result_ids.append(stored_tool_result.id)
                                     if stream_event_callback is not None:
-                                        tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
+                                        tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_result.tool_call_id)
                                         await stream_event_callback(
                                             {
                                                 "type": "tool_end",
@@ -612,9 +598,9 @@ class InteractiveDispatcherMixin:
                                     files=files_to_user or None,
                                 ).model_dump()
                             if persisted_tool_result_ids:
-                                checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                checkpoint_upper_id = max(persisted_tool_result_ids)
-                            await save_execution_checkpoint(messages, current_turn)
+                                checkpoint_state.mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                checkpoint_state.upper_message_id = max(persisted_tool_result_ids)
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
                         audit_claim_token = None
@@ -701,17 +687,18 @@ class InteractiveDispatcherMixin:
                                                 }
                                             )
                                     if persisted_tool_result_ids:
-                                        checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                                        checkpoint_upper_id = max(persisted_tool_result_ids)
-                                    await save_execution_checkpoint(messages, current_turn)
+                                        checkpoint_state.mode = ContextSummaryTriggerMode.TOOL_RESULT
+                                        checkpoint_state.upper_message_id = max(persisted_tool_result_ids)
+                                    await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                     continue
 
-                                if execution_checkpoint_callback is not None:
+                                if checkpoint_state.callback is not None:
                                     audit_execution_checkpoint_state = {
                                         "audit_record_id": audit_round.audit_record_id,
                                         "claim_token": audit_claim_token,
                                     }
-                                    await save_execution_checkpoint(
+                                    await _save_execution_checkpoint(
+                                        checkpoint_state,
                                         messages,
                                         current_turn,
                                         active_audit_execution=audit_execution_checkpoint_state,
@@ -719,48 +706,33 @@ class InteractiveDispatcherMixin:
                                     )
                             except asyncio.CancelledError:
                                 if audit_claim_token is not None:
-                                    await mark_claimed_audit_execution_unknown(audit_round.audit_record_id, audit_claim_token)
+                                    await _mark_claimed_audit_execution_unknown(db, audit_round.audit_record_id, audit_claim_token)
                                     raise AuditExecutionStatePersistenceError(cause=t(ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN))
                                 raise
                             except Exception as exc:
                                 if audit_claim_token is not None:
-                                    await mark_claimed_audit_execution_unknown(audit_round.audit_record_id, audit_claim_token)
+                                    await _mark_claimed_audit_execution_unknown(db, audit_round.audit_record_id, audit_claim_token)
                                     raise AuditExecutionStatePersistenceError(cause=str(exc)) from exc
                                 raise
 
                         # 在任何工具开始前持久化完整调用意图。恢复时未落库的工具结果会被视为
                         # 执行状态未知并交给模型核实，而不会重新执行原工具。
-                        await save_execution_checkpoint(messages, current_turn)
+                        await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
 
-                        sem = asyncio.Semaphore(cfg.tool.executor_max_workers)
-
-                        async def wrapped_tool_call(tc):
-                            async with sem:
-                                task = asyncio.create_task(
-                                    process_single_tool_with_isolated_db(
-                                        tc,
-                                        profile,
-                                        cfg,
-                                        messages,
-                                        username,
-                                        session_id,
-                                        current_turn,
-                                        uid,
-                                        allowed_knowledge_base_ids=allowed_knowledge_base_ids,
-                                        context_window_k=chat_params["context_window_k"],
-                                    )
-                                )
-
-                                if active_tasks is not None:
-                                    active_tasks.add(task)
-
-                                try:
-                                    return await task
-                                finally:
-                                    if active_tasks is not None:
-                                        active_tasks.discard(task)
-
-                        tasks = [asyncio.create_task(wrapped_tool_call(tc)) for tc in ai_msg.tool_calls]
+                        parallel_tool_context = _ParallelToolExecutionContext(
+                            semaphore=asyncio.Semaphore(cfg.tool.executor_max_workers),
+                            active_tasks=active_tasks,
+                            profile=profile,
+                            cfg=cfg,
+                            messages=messages,
+                            username=username,
+                            session_id=session_id,
+                            current_turn=current_turn,
+                            uid=uid,
+                            allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                            context_window_k=chat_params["context_window_k"],
+                        )
+                        tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in ai_msg.tool_calls]
                         persisted_tool_result_ids: list[int] = []
                         try:
                             for completed_task in asyncio.as_completed(tasks):
@@ -788,16 +760,17 @@ class InteractiveDispatcherMixin:
                                 if stored_tool_res.id is not None:
                                     persisted_tool_result_ids.append(stored_tool_res.id)
                                 if audit_execution_checkpoint_state is not None and get_queued_background_task_id(tool_res.content) is not None:
-                                    await save_execution_checkpoint(
+                                    await _save_execution_checkpoint(
+                                        checkpoint_state,
                                         messages,
                                         current_turn,
                                         active_audit_execution=audit_execution_checkpoint_state,
                                         update_active_audit_execution=True,
                                     )
                                 else:
-                                    await save_execution_checkpoint(messages, current_turn)
+                                    await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                 if stream_event_callback is not None:
-                                    tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_res.tool_call_id), None)
+                                    tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_res.tool_call_id)
                                     await stream_event_callback(
                                         {
                                             "type": "tool_end",
@@ -831,8 +804,9 @@ class InteractiveDispatcherMixin:
                                 if not legacy_round_finished:
                                     raise AuditExecutionStatePersistenceError(cause=t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
                                 execution_round_status = AuditRecordStatus.SUCCEEDED if audit_all_succeeded else AuditRecordStatus.FAILED
-                            if execution_round_status is not None and execution_checkpoint_callback is not None:
-                                await save_execution_checkpoint(
+                            if execution_round_status is not None and checkpoint_state.callback is not None:
+                                await _save_execution_checkpoint(
+                                    checkpoint_state,
                                     messages,
                                     current_turn,
                                     active_audit_execution=None,
@@ -842,16 +816,16 @@ class InteractiveDispatcherMixin:
                                 await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
 
                         if persisted_tool_result_ids:
-                            checkpoint_mode = ContextSummaryTriggerMode.TOOL_RESULT
-                            checkpoint_upper_id = max(persisted_tool_result_ids)
-                            await save_execution_checkpoint(messages, current_turn)
+                            checkpoint_state.mode = ContextSummaryTriggerMode.TOOL_RESULT
+                            checkpoint_state.upper_message_id = max(persisted_tool_result_ids)
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
 
                 finally:
                     is_first_iter = False
 
                 if queue_managed:
                     break
-                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                new_user_msgs = await _fetch_additional_user_messages(additional_user_messages_context, chat_params["max_tokens"])
                 if not new_user_msgs:
                     break
 

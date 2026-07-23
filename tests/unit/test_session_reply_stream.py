@@ -553,11 +553,13 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
         message="测试",
         attachments=None,
         source=source,
+        request_id="request-1",
     )
 
     assert queued_work.execution_state["stream_requested"] is stream_requested
     assert queued_work.execution_state["context_summary_events_requested"] is context_summary_events_requested
     assert queued_work.execution_state["expose_tool_call_content"] is expose_tool_call_content
+    assert queued_work.execution_state["request_ids"] == ["request-1"]
     assert enqueue_calls[0]["dedupe_key"] == build_foreground_message_dedupe_key("session-1", 11)
 
 
@@ -615,6 +617,7 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
 
     assert queued_work.execution_state["stream_requested"] is False
     assert queued_work.execution_state["context_summary_events_requested"] is True
+    assert queued_work.execution_state["request_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -651,11 +654,20 @@ async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
             message="test",
             uid="user-1",
             session_id="session-1",
+            request_id="request-1",
         )
     ]
 
     assert captured_kwargs["stream_requested"] is True
     assert captured_kwargs["context_summary_events_requested"] is True
+    assert captured_kwargs["request_id"] == "request-1"
+    assert events[0] == {
+        "type": "input_queued",
+        "session_id": "session-1",
+        "request_id": "request-1",
+        "work_id": 9,
+        "submission_status": "queued",
+    }
     assert events[-1]["type"] == "done"
 
 
@@ -722,7 +734,8 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
                 "response": {
                     "history": [{"role": "assistant", "content": "你好"}],
                     "files": None,
-                }
+                },
+                "request_ids": ["request-1", "request-2"],
             },
             error=None,
         ),
@@ -787,6 +800,7 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
     assert [event["type"] for event in yielded] == ["content", "content", "done"]
     assert "".join(event["content"] for event in yielded if event["type"] == "content") == "你好"
     assert yielded[-1]["history"] == [{"role": "assistant", "content": "你好"}]
+    assert yielded[-1]["request_ids"] == ["request-1", "request-2"]
 
 
 @pytest.mark.asyncio
@@ -796,7 +810,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
         id=7,
         session_id="session-1",
         status=SessionReplyWorkStatus.FAILED,
-        execution_state={},
+        execution_state={"request_ids": ["request-1", "request-2"]},
         error="timeout",
         result_message_id=9,
         dedupe_key="foreground-message:session-1:11",
@@ -839,6 +853,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
     assert yielded[0]["message"] == "等待对话模型首字响应超时（60.0 秒）"
     assert yielded[0]["event_id"].startswith("session-reply-work:")
     assert yielded[0]["event_id"].endswith(":error")
+    assert yielded[0]["request_ids"] == ["request-1", "request-2"]
 
 
 @pytest.mark.asyncio
@@ -853,6 +868,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         execution_state={
             "stream_requested": True,
             "expose_tool_call_content": False,
+            "request_ids": ["request-1"],
         },
     )
     published: list[tuple[int, dict]] = []
@@ -884,7 +900,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     async def dispatch_stream(**kwargs):
         dispatch_kwargs.update(kwargs)
         yield {
-            "type": "task_start",
+            "type": "agent_loop_start",
             "session_id": "session-1",
         }
         yield {
@@ -894,12 +910,17 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
             "tool_call_id": "call-1",
             "response_id": "response-turn-1",
         }
+        work.execution_state["request_ids"].append("request-2")
         yield {
             "type": "tool_end",
             "name": "search",
             "result": '{"status":"success"}',
             "tool_call_id": "call-1",
             "response_id": "response-turn-1",
+        }
+        yield {
+            "type": "agent_loop_start",
+            "session_id": "session-1",
         }
         yield {
             "type": "content",
@@ -936,15 +957,20 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
 
     assert result == {"history": [], "files": None}
     assert dispatch_kwargs["expose_tool_call_content"] is False
-    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4]
+    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7]
     assert [event["type"] for _sequence_no, event in published] == [
-        "task_start",
+        "input_dequeued",
+        "agent_loop_start",
         "tool_start",
         "tool_end",
+        "input_dequeued",
+        "agent_loop_start",
         "content",
     ]
-    assert published[1][1]["response_id"] == "response-turn-1"
-    assert published[2][1]["tool_call_id"] == "call-1"
-    assert published[3][1]["response_id"] == "response-turn-2"
+    assert published[0][1]["request_ids"] == ["request-1"]
+    assert published[2][1]["response_id"] == "response-turn-1"
+    assert published[3][1]["tool_call_id"] == "call-1"
+    assert published[4][1]["request_ids"] == ["request-2"]
+    assert published[6][1]["response_id"] == "response-turn-2"
     assert all(event["session_id"] == "session-1" for _sequence_no, event in published)
     assert all(event["work_id"] == 7 for _sequence_no, event in published)

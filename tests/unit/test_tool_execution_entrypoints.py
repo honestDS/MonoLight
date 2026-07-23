@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 
+from app.core.dispatchers import interactive as interactive_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.dispatchers.interactive import InteractiveDispatcherMixin
 from app.core.dispatchers.non_stream import NonStreamDispatcherMixin
@@ -22,8 +23,9 @@ def test_interactive_stream_and_non_stream_share_audited_execution_entrypoint():
         interactive_source,
         "prevalidate_tool_round(",
         "audit_tool_round(",
-        "process_single_tool_with_isolated_db(",
+        "_execute_isolated_tool_call(",
     )
+    assert "process_single_tool_with_isolated_db(" in inspect.getsource(interactive_module._execute_isolated_tool_call)
 
     assert "_dispatch_interactive(" in inspect.getsource(NonStreamDispatcherMixin.dispatch)
     assert "_run_dispatch(" in inspect.getsource(StreamDispatcherMixin.dispatch_stream)

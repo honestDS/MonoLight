@@ -4,7 +4,6 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
-import { clearThinkingRequestCallbacks } from './thinkingTracker.mjs'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -15,6 +14,22 @@ const isWsErrorPayload = (data) => {
   const choice = Array.isArray(data?.choices) ? data.choices[0] : null
   return choice?.message?.role === 'err'
 }
+
+const lifecycleEventTypes = new Set([
+  'input_queued',
+  'input_dequeued',
+  'agent_loop_start',
+  'agent_loop_output',
+  'done',
+  'error',
+  'proactive_reply'
+])
+
+const hasIdentity = value => value !== undefined && value !== null && value !== ''
+
+const getEventRequestIds = data => Array.isArray(data?.request_ids)
+  ? data.request_ids.filter(requestId => requestId !== undefined && requestId !== null && requestId !== '')
+  : []
 
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
@@ -32,13 +47,15 @@ export function useChatTransport() {
 
   // 注册唯一持久的消息分发器，支持多请求并行分发
   wsManager.onMessage((data) => {
-    const requestId = data.request_id || 'default'
+    const requestId = hasIdentity(data.request_id)
+      ? data.request_id
+      : getEventRequestIds(data).find(eventRequestId => callbacksMap.has(eventRequestId)) || 'default'
     const callbacks = callbacksMap.get(requestId)
     if (callbacks) {
       if (data.session_id && callbacks.sessionId && data.session_id !== callbacks.sessionId) return
       handleWsMessage(data, callbacks)
     } else if (
-      data.type === 'proactive_reply' ||
+      lifecycleEventTypes.has(data.type) ||
       data.type === 'proactive_reply_error' ||
       data.type === 'audit_confirmation_status' ||
       data.type === 'audit_tool_results_update' ||
@@ -70,10 +87,13 @@ export function useChatTransport() {
       onAuditToolResultsUpdate,
       onContextSummaryStart,
       onContextSummaryEnd,
+      onInputQueued,
+      onInputDequeued,
+      onAgentLoopStart,
+      onAgentLoopOutput,
+      onWorkFinished,
       scrollToBottom,
       setLoading,
-      thinkingId,
-      relatedRequestIds,
       requestId: currentRequestId
     } = options
 
@@ -81,7 +101,7 @@ export function useChatTransport() {
     if (data.type === 'pong' || data.type === 'ping') return
 
     const type = data.type
-    const requestId = data.request_id || currentRequestId
+    const requestId = hasIdentity(data.request_id) ? data.request_id : currentRequestId
 
     if (type === 'context_summary_start') {
       if (onContextSummaryStart) onContextSummaryStart(data)
@@ -93,10 +113,34 @@ export function useChatTransport() {
       return
     }
 
+    if (type === 'input_queued') {
+      if (onInputQueued) onInputQueued(data)
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
+    if (type === 'input_dequeued') {
+      if (onInputDequeued) onInputDequeued(data)
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
+    if (type === 'agent_loop_start') {
+      if (onAgentLoopStart) onAgentLoopStart(data)
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
+    if (type === 'agent_loop_output') {
+      if (onAgentLoopOutput) onAgentLoopOutput(data)
+      if (scrollToBottom) scrollToBottom()
+      return
+    }
+
     // 1. 处理增量文本推送
     if (type === 'content') {
       if (onContent) {
-        onContent(data.content, data.turn, thinkingId, data.finish_reason, data.response_id, requestId, data.work_id, data.event_id)
+        onContent(data.content, data.turn, null, data.finish_reason, data.response_id, requestId, data.work_id, data.event_id)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -108,7 +152,7 @@ export function useChatTransport() {
     if (type === 'turn_end') {
       if (onComplete) {
         // 调用基于 response_id 的覆盖逻辑
-        onComplete(data, thinkingId, requestId, 'turn_end')
+        onComplete(data, null, requestId, 'turn_end')
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -123,7 +167,7 @@ export function useChatTransport() {
           id: data.tool_call_id,
           name: data.name,
           arguments: data.arguments
-        }, thinkingId, data.response_id, requestId, data.work_id)
+        }, null, data.response_id, requestId, data.work_id)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -148,10 +192,11 @@ export function useChatTransport() {
 
     // 4. 处理对话结束
     if (type === 'done') {
-      clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
+      if (onWorkFinished) onWorkFinished(data)
       if (onComplete) {
-        onComplete(data, thinkingId, requestId)
+        onComplete(data, null, requestId)
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (setLoading) {
         setLoading(false)
       }
@@ -170,11 +215,13 @@ export function useChatTransport() {
     }
 
     if (type === 'proactive_reply') {
+      if (onWorkFinished) onWorkFinished(data)
       if (onProactiveReply) {
         onProactiveReply(data)
       } else if (onComplete) {
-        onComplete(data, thinkingId, requestId, 'proactive_reply')
+        onComplete(data, null, requestId, 'proactive_reply')
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (scrollToBottom) {
         scrollToBottom()
       }
@@ -185,7 +232,7 @@ export function useChatTransport() {
       if (onProactiveReplyError) {
         onProactiveReplyError(data)
       } else if (onError) {
-        onError(resolveErrorMessage(data, 'Background proactive reply failed'), thinkingId, requestId, data)
+        onError(resolveErrorMessage(data, 'Background proactive reply failed'), null, requestId, data)
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -215,10 +262,11 @@ export function useChatTransport() {
     if (type === 'error' || data.error || data.detail) {
       const errorMessage = resolveErrorMessage(data, t('chat.stream_error'))
       console.error('WebSocket业务错误:', errorMessage)
-      clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
+      if (onWorkFinished) onWorkFinished(data)
       if (onError) {
-        onError(errorMessage, thinkingId, requestId, data)
+        onError(errorMessage, null, requestId, data)
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (setLoading) {
         setLoading(false)
       }
@@ -234,15 +282,17 @@ export function useChatTransport() {
       const finishReason = choice.finish_reason
 
       if (choice.message?.role === 'err') {
-        clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
-        if (onError) onError(content, thinkingId, requestId, data)
+        if (onWorkFinished) onWorkFinished(data)
+        if (onError) onError(content, null, requestId, data)
+        getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
         if (setLoading) setLoading(false)
         return
       }
 
       if (finishReason) {
-        clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
-        if (onComplete) onComplete(data, thinkingId, requestId)
+        if (onWorkFinished) onWorkFinished(data)
+        if (onComplete) onComplete(data, null, requestId)
+        getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
         if (setLoading) setLoading(false)
         if (scrollToBottom) scrollToBottom()
       }
@@ -259,17 +309,19 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, callbacks = {} }) => {
+  const httpSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
+    const finalCallbacks = { ...callbacks, requestId, sessionId }
     const payload = {
       message,
       session_id: sessionId || null,
-      attachments: attachments || null
+      attachments: attachments || null,
+      request_id: requestId
     }
     if (!sessionId) {
       const res = await chatApi.completions({ ...payload, stream: false })
       return res.data
     }
-    return chatApi.completionsStream(payload, event => handleWsMessage(event, callbacks))
+    return chatApi.completionsStream(payload, event => handleWsMessage(event, finalCallbacks))
   }
 
   const wsSend = async ({ message, sessionId, attachments, requestId, callbacks = {} }) => {
