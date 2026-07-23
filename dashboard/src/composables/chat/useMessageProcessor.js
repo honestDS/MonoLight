@@ -2,6 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
+import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.mjs'
 
 const parseBackgroundSystemMessage = (item) => {
   if (item?.type !== 'background_result' && item?.role !== 'system') return null
@@ -12,27 +13,8 @@ const parseBackgroundSystemMessage = (item) => {
   return null
 }
 
-const findThinkingIndex = (messages, thinkingId, requestId, allowUniqueThinkingFallback = true) => {
-  if (thinkingId) {
-    const thinkingIndex = messages.findIndex(message => message.id === thinkingId && message.role === 'thinking')
-    if (thinkingIndex !== -1) return thinkingIndex
-  }
-  if (requestId) {
-    const requestThinkingIndex = messages.findLastIndex(message => message.role === 'thinking' && message.request_id === requestId)
-    if (requestThinkingIndex !== -1) return requestThinkingIndex
-  }
-  const thinkingIndexes = messages
-    .map((message, index) => message.role === 'thinking' ? index : -1)
-    .filter(index => index !== -1)
-  return allowUniqueThinkingFallback && thinkingIndexes.length === 1 ? thinkingIndexes[0] : -1
-}
-
-const insertBeforeThinking = (messagesRef, message, thinkingId, requestId) => {
-  const thinkingIndex = findThinkingIndex(messagesRef.value, thinkingId, requestId)
-  if (thinkingIndex === -1) return false
-  messagesRef.value.splice(thinkingIndex, 0, message)
-  return true
-}
+const insertBeforeThinking = (messagesRef, message, thinkingId, requestId) =>
+  insertMessageBeforeThinking(messagesRef.value, message, thinkingId, requestId)
 
 const findToolCallIndex = (messages, toolCallId) => {
   if (!toolCallId) return -1
@@ -152,7 +134,6 @@ export function useMessageProcessor() {
         turn: targetMsg.turn ?? turn
       }
       removeMessageIndexes(messagesRef, matchingMessages.filter(item => item.index !== targetIdx).map(item => item.index))
-      removeThinkingForStream(messagesRef, thinkingId, requestId)
       return
     }
 
@@ -179,7 +160,6 @@ export function useMessageProcessor() {
         turn: targetItem.message.turn ?? turn
       }
       removeMessageIndexes(messagesRef, matchingToolMessages.slice(1).map(item => item.index))
-      removeThinkingForStream(messagesRef, thinkingId, requestId)
       return
     }
 
@@ -194,7 +174,7 @@ export function useMessageProcessor() {
       created_at: Date.now() / 1000
     }
 
-    if (replaceThinkingForStream(messagesRef, newMsg, thinkingId, requestId)) return
+    if (insertBeforeThinking(messagesRef, newMsg, thinkingId, requestId)) return
 
     // 2. 跨 Turn 增入：如果是新一轮的 Turn（responseId 变化），且由于没有 Thinking 占位符，
     // 我们应该将新消息插入到当前请求最新的一条相关消息（如 Tool 结果）之后，而不是去抢占其他请求的占位符
@@ -225,19 +205,6 @@ export function useMessageProcessor() {
     }
 
     messagesRef.value.push(newMsg)
-  }
-
-  const removeThinkingForStream = (messagesRef, thinkingId, requestId) => {
-    const thinkingIndex = findThinkingIndex(messagesRef.value, thinkingId, requestId, false)
-    if (thinkingIndex !== -1) messagesRef.value.splice(thinkingIndex, 1)
-  }
-
-  const replaceThinkingForStream = (messagesRef, message, thinkingId, requestId) => {
-    const thinkingIndex = findThinkingIndex(messagesRef.value, thinkingId, requestId)
-    if (thinkingIndex === -1) return false
-    const thinkingMessage = messagesRef.value[thinkingIndex]
-    messagesRef.value[thinkingIndex] = { ...message, id: thinkingMessage.id }
-    return true
   }
 
   // 处理流式下的工具调用开始，推送 tool_call 占位
@@ -419,7 +386,7 @@ export function useMessageProcessor() {
 
   // 处理流式下的业务错误事件
   const processStreamError = (messagesRef, errorMessage, thinkingId, requestId = null, workId = null, eventId = null) => {
-    removeThinkingMessage(messagesRef, thinkingId)
+    removeThinkingMessage(messagesRef, thinkingId, requestId)
 
     const alreadyHandled = messagesRef.value.some(message =>
       message.role === 'err' && (
@@ -453,7 +420,7 @@ export function useMessageProcessor() {
   const processAiResponse = (messagesRef, response, thinkingId, requestId = null) => {
     const workId = response.work_id
     if (workId && messagesRef.value.some(message => message.work_id === workId)) {
-      removeThinkingMessage(messagesRef, thinkingId)
+      removeThinkingMessage(messagesRef, thinkingId, requestId)
       return
     }
 
@@ -580,12 +547,8 @@ export function useMessageProcessor() {
   }
 
   // 移除 thinking 占位符消息
-  const removeThinkingMessage = (messagesRef, thinkingId) => {
-    const thinkingIndex = messagesRef.value.findIndex(m => m.id === thinkingId && m.role === 'thinking')
-    if (thinkingIndex !== -1) {
-      messagesRef.value.splice(thinkingIndex, 1)
-    }
-  }
+  const removeThinkingMessage = (messagesRef, thinkingId, requestId = null) =>
+    removeThinkingMessageByIdentity(messagesRef.value, thinkingId, requestId)
 
   // 按 thinking 位置插入 AI 消息
   const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId, requestId = null) => {

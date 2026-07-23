@@ -726,6 +726,7 @@ async def audit_tool_round(
         failure_type=failure_type,
         error_reason=error_reason,
         expires_at=expires_at,
+        create_confirmation_claim=status != AuditRecordStatus.PENDING,
     )
     if not persisted:
         status = AuditRecordStatus.AUDIT_FAILED

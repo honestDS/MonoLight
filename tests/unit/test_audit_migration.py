@@ -12,6 +12,7 @@ from app.models.audit import AuditRecord, AuditRecordStatus
 from app.providers.database.bootstrap import ensure_migration_record_table
 from scripts import migration_20260717_add_audit_confirmation_records as audit_migration
 from scripts import migration_20260719_add_background_task_audit_binding as background_task_migration
+from scripts import migration_20260724_add_audit_tool_result_versions as audit_tool_result_version_migration
 
 
 @pytest.mark.parametrize(
@@ -169,6 +170,31 @@ async def test_background_task_binding_migration_is_idempotent_after_metadata_cr
         async with engine.connect() as connection:
             unique_indexes = await connection.run_sync(lambda sync_connection: [item for item in inspect(sync_connection).get_indexes("background_task") if item.get("unique") and item.get("column_names") == ["audit_execution_record_id"]])
         assert len(unique_indexes) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_audit_tool_result_version_migration_is_idempotent_after_metadata_create_all(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'audit-tool-result-version-migration.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(SQLModel.metadata.create_all)
+        async with session_factory() as session:
+            await audit_tool_result_version_migration.migrate(session)
+            await session.commit()
+            await audit_tool_result_version_migration.migrate(session)
+            await session.commit()
+        async with engine.connect() as connection:
+            table_names, indexes = await connection.run_sync(
+                lambda sync_connection: (
+                    set(inspect(sync_connection).get_table_names()),
+                    {item["name"] for item in inspect(sync_connection).get_indexes("audit_tool_result_version")},
+                )
+            )
+        assert "audit_tool_result_version" in table_names
+        assert "ix_audit_tool_result_version_audit_record_id" in indexes
     finally:
         await engine.dispose()
 

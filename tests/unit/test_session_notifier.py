@@ -47,8 +47,10 @@ async def test_database_event_is_delivered_to_each_notifier_instance():
         await first_notifier.stop()
         await second_notifier.stop()
 
-    assert first_received == event
-    assert second_received == event
+    assert {key: value for key, value in first_received.items() if key != "event_sequence_no"} == event
+    assert {key: value for key, value in second_received.items() if key != "event_sequence_no"} == event
+    assert first_received["event_sequence_no"] == second_received["event_sequence_no"]
+    assert first_received["event_sequence_no"] > 0
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,7 @@ async def persist_context_summary(
     uid: str,
     expected_message_id: int | None,
     expected_revision: int,
+    expected_content_revision: int,
     summary: str,
     message_id: int,
 ) -> bool:
@@ -102,6 +103,7 @@ async def persist_context_summary(
             uid=uid,
             expected_message_id=expected_message_id,
             expected_revision=expected_revision,
+            expected_content_revision=expected_content_revision,
             summary=summary,
             message_id=message_id,
         )
@@ -125,6 +127,7 @@ async def get_context_summary_state(
         content=session.context_summary,
         message_id=session.context_summary_message_id,
         revision=session.context_summary_revision,
+        content_revision=session.context_content_revision,
     )
 
 
@@ -216,6 +219,16 @@ async def _ensure_context_summary(
 ) -> ContextSummaryState:
     await ensure_context_summary_work_valid(work_validity_checker)
     state = await get_context_summary_state(db, session_id=session_id, uid=uid)
+
+    async def combined_work_validity_checker() -> bool:
+        if work_validity_checker is not None and not await work_validity_checker():
+            return False
+        if not isinstance(db, AsyncSession):
+            return True
+        async with AsyncSessionLocal() as validity_db:
+            current_session = await session_crud.get_by_session_id(validity_db, session_id)
+        return current_session is not None and current_session.uid == uid and current_session.context_content_revision == state.content_revision and current_session.context_summary_revision == state.revision and current_session.context_summary_message_id == state.message_id
+
     if (trigger_mode is None) != (fixed_upper_message_id is None):
         raise ValueError(t(ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED))
 
@@ -245,6 +258,7 @@ async def _ensure_context_summary(
         frozen_user_message_ids=frozen_user_message_ids,
         target_message_id=boundary.target_message_id if boundary is not None else None,
         model_excluded_message_ids=model_excluded_message_ids,
+        content_revision=state.content_revision,
     )
     history_tokens, history_message_count = await measure_snapshot_history(
         db,
@@ -253,7 +267,7 @@ async def _ensure_context_summary(
         snapshot=snapshot,
         use_request_token_text=fixed_request_messages is not None,
     )
-    await ensure_context_summary_work_valid(work_validity_checker)
+    await ensure_context_summary_work_valid(combined_work_validity_checker)
     threshold_percent = cfg.other.context_summary_threshold_percent
     request_usage = None
     if fixed_request_messages is not None:
@@ -378,7 +392,7 @@ async def _ensure_context_summary(
             existing_summary=existing_model_summary,
             existing_summary_revision=state.revision,
             safety_margin_tokens=safety_margin_tokens,
-            work_validity_checker=work_validity_checker,
+            work_validity_checker=combined_work_validity_checker,
         )
         candidate_summary = generated.content
         summarized_message_count = generated.message_count
@@ -442,7 +456,7 @@ async def _ensure_context_summary(
             break
 
         refinement_attempts += 1
-        await ensure_context_summary_work_valid(work_validity_checker)
+        await ensure_context_summary_work_valid(combined_work_validity_checker)
         previous_summary_tokens = final_usage["summary_tokens"]
         if completed_stage is not None:
             from app.core.utils.context_summary.reduction import (
@@ -457,7 +471,7 @@ async def _ensure_context_summary(
                     lower_stage=completed_stage,
                     safety_margin_tokens=safety_margin_tokens,
                     refinement_index=refinement_attempts,
-                    work_validity_checker=work_validity_checker,
+                    work_validity_checker=combined_work_validity_checker,
                 )
             except Exception as exc:
                 if contains_context_summary_work_invalid(exc):
@@ -483,7 +497,7 @@ async def _ensure_context_summary(
                 safety_margin_tokens=safety_margin_tokens,
                 uid=uid,
                 session_id=session_id,
-                work_validity_checker=work_validity_checker,
+                work_validity_checker=combined_work_validity_checker,
             )
             if not compressed:
                 await release_db_session(db)
@@ -543,12 +557,13 @@ async def _ensure_context_summary(
         summary_tokens=estimate_tokens(candidate_summary),
     ).debug("Context summary generated:\n{summary}", summary=candidate_summary)
 
-    await ensure_context_summary_work_valid(work_validity_checker)
+    await ensure_context_summary_work_valid(combined_work_validity_checker)
     updated = await persist_context_summary(
         session_id=session_id,
         uid=uid,
         expected_message_id=state.message_id,
         expected_revision=state.revision,
+        expected_content_revision=state.content_revision,
         summary=candidate_summary,
         message_id=target_message_id,
     )
@@ -558,6 +573,7 @@ async def _ensure_context_summary(
         content=candidate_summary,
         message_id=target_message_id,
         revision=state.revision + 1,
+        content_revision=state.content_revision,
     )
 
 

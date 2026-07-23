@@ -253,6 +253,7 @@ class CRUDAudit:
         failure_type: AuditFailureType | None = None,
         error_reason: str | None = None,
         expires_at: datetime | None = None,
+        create_confirmation_claim: bool = True,
     ) -> bool:
         if status not in _PREPARATION_STATUSES:
             raise ValueError(t(ERR_AUDIT_PREPARATION_STATUS_INVALID))
@@ -334,7 +335,7 @@ class CRUDAudit:
             await db.rollback()
             return False
         db.add_all(detail_models)
-        if status == AuditRecordStatus.PENDING:
+        if status == AuditRecordStatus.PENDING and create_confirmation_claim:
             db.add(
                 AuditConfirmationClaim(
                     uid=record.uid,
@@ -344,6 +345,48 @@ class CRUDAudit:
             )
         await db.flush()
         await db.commit()
+        return True
+
+    async def activate_confirmation_claim(
+        self,
+        db: AsyncSession,
+        *,
+        audit_record_id: int,
+        uid: str,
+        session_id: str,
+        commit: bool = True,
+    ) -> bool:
+        record_result = await db.execute(
+            select(AuditRecord.id).where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.uid == uid,
+                AuditRecord.session_id == session_id,
+                AuditRecord.status == AuditRecordStatus.PENDING,
+            )
+        )
+        if record_result.scalar_one_or_none() is None:
+            return False
+
+        claim_result = await db.execute(
+            select(AuditConfirmationClaim.id).where(
+                AuditConfirmationClaim.audit_record_id == audit_record_id,
+                AuditConfirmationClaim.uid == uid,
+                AuditConfirmationClaim.session_id == session_id,
+            )
+        )
+        if claim_result.scalar_one_or_none() is not None:
+            return True
+
+        db.add(
+            AuditConfirmationClaim(
+                uid=uid,
+                session_id=session_id,
+                audit_record_id=audit_record_id,
+            )
+        )
+        await db.flush()
+        if commit:
+            await db.commit()
         return True
 
     async def mark_persistence_failed(self, db: AsyncSession, *, audit_record_id: int, error_reason: str) -> bool:
@@ -361,6 +404,27 @@ class CRUDAudit:
                 error_reason=error_reason,
                 updated_at=now,
                 completed_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        return (result.rowcount or 0) == 1
+
+    async def mark_pending_persistence_failed(self, db: AsyncSession, *, audit_record_id: int, error_reason: str) -> bool:
+        await db.rollback()
+        now = get_local_time()
+        result = await db.execute(
+            update(AuditRecord)
+            .where(
+                AuditRecord.id == audit_record_id,
+                AuditRecord.status == AuditRecordStatus.PENDING,
+            )
+            .values(
+                status=AuditRecordStatus.AUDIT_FAILED,
+                failure_type=AuditFailureType.AUDIT_PERSISTENCE_FAILED,
+                error_reason=error_reason,
+                completed_at=now,
+                updated_at=now,
             )
             .execution_options(synchronize_session=False)
         )
@@ -465,6 +529,7 @@ class CRUDAudit:
         decision_raw_message: str | None = None,
         decided_by: str | None = None,
         error_reason: str | None = None,
+        commit: bool = True,
     ) -> bool:
         if status not in {AuditRecordStatus.REJECTED, AuditRecordStatus.CANCELLED, AuditRecordStatus.EXPIRED}:
             raise ValueError(t(ERR_AUDIT_PENDING_CLOSE_STATUS_INVALID))
@@ -496,7 +561,10 @@ class CRUDAudit:
             await db.rollback()
             return False
         await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return True
 
     async def cancel_confirmation_by_session(self, db: AsyncSession, *, uid: str, session_id: str, error_reason: str, commit: bool = True) -> int:

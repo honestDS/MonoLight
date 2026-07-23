@@ -123,6 +123,7 @@ async def iter_completed_lower_stage_fragments(
                 page.stage.model_id,
                 page.stage.expected_summary_message_id,
                 page.stage.expected_summary_revision,
+                page.stage.expected_content_revision,
                 page.stage.snapshot_max_message_id,
                 page.stage.persistent_summary_target_id,
                 page.stage.expected_fragment_count,

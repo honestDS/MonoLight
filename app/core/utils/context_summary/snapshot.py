@@ -21,6 +21,7 @@ class ContextSummarySnapshot:
     frozen_user_message_ids: tuple[int, ...]
     recent_messages: tuple[InternalMessage, ...]
     model_excluded_message_ids: tuple[int, ...] = ()
+    content_revision: int = 0
 
     @property
     def has_persistent_history(self) -> bool:
@@ -39,6 +40,7 @@ async def build_context_summary_snapshot(
     target_message_id: int | None = None,
     model_excluded_message_ids: list[int] | tuple[int, ...] | None = None,
     page_size: int = CONTEXT_SUMMARY_SCAN_PAGE_SIZE,
+    content_revision: int = 0,
 ) -> ContextSummarySnapshot:
     normalized_frozen_ids = tuple(frozen_user_message_ids or ())
     normalized_excluded_ids = tuple(model_excluded_message_ids or ())
@@ -102,6 +104,7 @@ async def build_context_summary_snapshot(
         frozen_user_message_ids=normalized_frozen_ids,
         recent_messages=recent_messages,
         model_excluded_message_ids=normalized_excluded_ids,
+        content_revision=content_revision,
     )
 
 

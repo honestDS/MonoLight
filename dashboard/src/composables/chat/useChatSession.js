@@ -5,6 +5,8 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
+import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.mjs'
+import { ensureActiveThinkingMessage } from './thinkingTracker.mjs'
 import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys, findMessageReplacementIndex, mergeRemoteMessage, mergeRemoteMessageIntoList } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
@@ -74,7 +76,10 @@ export function useChatSession() {
   
   // 新增附件状态
   const attachments = ref([])
-  const contextSummarySessionId = ref(null)
+  const contextSummaryWorkKeys = ref(new Set())
+  const contextSummaryRequestKeys = new Map()
+  const sessionEventSequenceBySession = new Map()
+  const activeWsRequestIds = new Set()
   const initialHistoryLoaded = ref(true)
   
   // 默认 Markdown 开关状态（用于未选择会话时）
@@ -82,9 +87,7 @@ export function useChatSession() {
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
-  const isContextSummarizing = computed(
-    () => Boolean(sessionManager.currentSessionId.value) && contextSummarySessionId.value === sessionManager.currentSessionId.value
-  )
+  const isContextSummarizing = computed(() => contextSummaryWorkKeys.value.size > 0)
   
   // 3. 通信层
   const transport = useChatTransport()
@@ -180,6 +183,7 @@ export function useChatSession() {
   }
 
   const applyAuditConfirmationStatus = (data) => {
+    if (shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
     const auditRecordId = String(data.audit_record_id || '')
     const messageIndex = chatState.messages.value.findIndex((message) => {
@@ -220,11 +224,12 @@ export function useChatSession() {
       applyAuditToolResultsUpdate({
         ...data,
         messages: Array.isArray(data.tool_results) ? data.tool_results : [data.tool_result]
-      })
+      }, { skipSequenceGuard: true })
     }
   }
 
-  const applyAuditToolResultsUpdate = (data) => {
+  const applyAuditToolResultsUpdate = (data, { skipSequenceGuard = false } = {}) => {
+    if (!skipSequenceGuard && shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
     const messages = Array.isArray(data.messages) ? data.messages : []
     for (const remoteMessage of messages) {
@@ -261,21 +266,6 @@ export function useChatSession() {
   }
 
   // ==================== 核心发送方法 ====================
-
-  const ensureSingleThinkingMessage = (newThinkingId, requestId) => {
-    const firstThinkingIndex = chatState.messages.value.findIndex(message => message.role === 'thinking')
-    if (firstThinkingIndex !== -1) {
-      for (let index = chatState.messages.value.length - 1; index > firstThinkingIndex; index--) {
-        if (chatState.messages.value[index].role === 'thinking') {
-          chatState.messages.value.splice(index, 1)
-        }
-      }
-      return chatState.messages.value[firstThinkingIndex].id
-    }
-
-    chatState.addMessage({ id: newThinkingId, role: 'thinking', content: 'Thinking...', request_id: requestId })
-    return newThinkingId
-  }
 
   /**
    * 仅用于连续发送时插入一条携带 queued 状态的消息占位，并直接发送
@@ -354,7 +344,7 @@ export function useChatSession() {
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
-    const thinkingId = ensureSingleThinkingMessage(userMsgId + 1, requestId)
+    const thinkingId = ensureActiveThinkingMessage(chatState.messages.value, userMsgId + 1, requestId)
 
     await performHttpSend(text, thinkingId, attachmentsToSent, userMsgId, sessionManager.currentSessionId.value, requestId)
   }
@@ -369,14 +359,16 @@ export function useChatSession() {
         sessionId: requestSessionId,
         attachments: attachmentsToSent,
         callbacks: {
-          onContextSummaryStart: () => {
+          onContextSummaryStart: (data) => {
             if (requestSessionId === sessionManager.currentSessionId.value) {
-              contextSummarySessionId.value = requestSessionId
+              if (!shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
+                startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
+              }
             }
           },
-          onContextSummaryEnd: () => {
-            if (contextSummarySessionId.value === requestSessionId) {
-              contextSummarySessionId.value = null
+          onContextSummaryEnd: (data) => {
+            if (requestSessionId === sessionManager.currentSessionId.value && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
+              endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
             }
           }
         }
@@ -414,10 +406,10 @@ export function useChatSession() {
       const auditConfirmation = parseAuditConfirmationResponse(response)
       messageProcessor.processAiResponse(chatState.messages, response, thinkingId, requestId)
       if (auditConfirmation) {
-        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestId)
         chatState.loading.value = false
       } else if (response.choices?.[0]?.finish_reason !== 'queued') {
-        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestId)
       }
 
       if (response.has_background_tasks) {
@@ -432,12 +424,10 @@ export function useChatSession() {
       if (userMsg && userMsg.status === 'queued') {
         delete userMsg.status
       }
-      messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+      messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestId)
       ElMessage.error(err.message || t('chat.send_failed'))
     } finally {
-      if (contextSummarySessionId.value === requestSessionId) {
-        contextSummarySessionId.value = null
-      }
+      clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
       if (requestSessionId === sessionManager.currentSessionId.value) {
         try {
           await mergeLatestSessionHistory(requestSessionId)
@@ -468,6 +458,7 @@ export function useChatSession() {
     
     // request_id 使用唯一的标识符
     const requestId = `req_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`
+    activeWsRequestIds.add(requestId)
 
     // 如果没有现成的消息 ID（非队列来的），则添加用户消息
     if (!existingMsgId) {
@@ -494,9 +485,11 @@ export function useChatSession() {
     nextTick(() => chatState.scrollToBottom())
 
     // 使用更可靠的 ID 防止极速点击下的冲突。
-    const thinkingId = ensureSingleThinkingMessage(
+    const thinkingId = ensureActiveThinkingMessage(
+      chatState.messages.value,
       `thinking_${userMsgId}_${Math.random().toString(36).substr(2, 4)}`,
-      requestId
+      requestId,
+      activeWsRequestIds
     )
     
     let requestSessionId = sessionManager.currentSessionId.value
@@ -505,14 +498,15 @@ export function useChatSession() {
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
     const callbacks = {
       thinkingId,
-      onContextSummaryStart: () => {
-        if (isCurrentRequestSession()) {
-          contextSummarySessionId.value = requestSessionId
+      relatedRequestIds: activeWsRequestIds,
+      onContextSummaryStart: (data) => {
+        if (isCurrentRequestSession() && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
+          startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
       },
-      onContextSummaryEnd: () => {
-        if (contextSummarySessionId.value === requestSessionId) {
-          contextSummarySessionId.value = null
+      onContextSummaryEnd: (data) => {
+        if (isCurrentRequestSession() && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
+          endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
       },
       onTaskStart: () => {
@@ -537,15 +531,13 @@ export function useChatSession() {
          messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
-        if (contextSummarySessionId.value === requestSessionId) {
-          contextSummarySessionId.value = null
-        }
+        clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
         if (!isCurrentRequestSession()) return
         const inserted = messageProcessor.processStreamError(
           chatState.messages,
           errorMessage,
           thinkingId,
-          requestIdParam,
+          requestIdParam || requestId,
           errorData.work_id,
           errorData.event_id
         )
@@ -558,6 +550,7 @@ export function useChatSession() {
         if (inserted) {
           ElMessage.error(errorMessage || t('chat.stream_error'))
         }
+        activeWsRequestIds.clear()
       },
       onProactiveReply: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
@@ -614,8 +607,8 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newSessionId, text)
       },
       onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
-        if (eventType !== 'turn_end' && contextSummarySessionId.value === requestSessionId) {
-          contextSummarySessionId.value = null
+        if (eventType !== 'turn_end') {
+          clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
         }
         if (!isCurrentRequestSession()) return
         if (data.session_id && data.session_id !== requestSessionId) return
@@ -662,6 +655,8 @@ export function useChatSession() {
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
 
+        activeWsRequestIds.clear()
+
         const completedResponse = data.response || data
         const auditConfirmation = parseAuditConfirmationResponse(completedResponse)
         if (auditConfirmation) {
@@ -678,7 +673,7 @@ export function useChatSession() {
               request_id: existingMessage.request_id || requestIdParam
             }
           }
-          messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+          messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestIdParam || requestId)
           chatState.loading.value = false
           return
         }
@@ -747,7 +742,7 @@ export function useChatSession() {
         }
 
         // 流式正文和工具消息已经按事件逐条渲染，结束事件只负责清理占位符。
-        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+        messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestIdParam || requestId)
       },
       setLoading: (val) => {
         if (!isCurrentRequestSession()) return
@@ -766,12 +761,11 @@ export function useChatSession() {
       })
     } catch (e) {
       console.error('WebSocket发送失败:', e)
-      if (contextSummarySessionId.value === requestSessionId) {
-        contextSummarySessionId.value = null
-      }
+      clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
+      activeWsRequestIds.delete(requestId)
       if (!isCurrentRequestSession()) return
       ElMessage.error(t('chat.ws_send_failed'))
-      messageProcessor.removeThinkingMessage(chatState.messages, thinkingId)
+      messageProcessor.removeThinkingMessage(chatState.messages, thinkingId, requestId)
       if (!chatState.messages.value.some(message => message.role === 'thinking')) {
         chatState.loading.value = false
       }
@@ -783,7 +777,8 @@ export function useChatSession() {
   
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
-    contextSummarySessionId.value = null
+    clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    activeWsRequestIds.clear()
     initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()
@@ -796,7 +791,8 @@ export function useChatSession() {
    * 新建会话
    */
   const createNewSession = () => {    
-    contextSummarySessionId.value = null
+    clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    activeWsRequestIds.clear()
     initialHistoryLoaded.value = true
     transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)

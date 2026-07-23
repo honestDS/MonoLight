@@ -161,6 +161,7 @@ async def test_ensure_context_summary_triggers_persists_boundary_and_uses_isolat
             "uid": "user-1",
             "expected_message_id": None,
             "expected_revision": 0,
+            "expected_content_revision": 0,
             "summary": "compressed history",
             "message_id": 4,
         }

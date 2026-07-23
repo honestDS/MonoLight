@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
+import { clearThinkingRequestCallbacks } from './thinkingTracker.mjs'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -72,6 +73,7 @@ export function useChatTransport() {
       scrollToBottom,
       setLoading,
       thinkingId,
+      relatedRequestIds,
       requestId: currentRequestId
     } = options
 
@@ -146,6 +148,7 @@ export function useChatTransport() {
 
     // 4. 处理对话结束
     if (type === 'done') {
+      clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
       if (onComplete) {
         onComplete(data, thinkingId, requestId)
       }
@@ -154,9 +157,6 @@ export function useChatTransport() {
       }
       if (scrollToBottom) {
         scrollToBottom()
-      }
-      if (requestId) {
-        callbacksMap.delete(requestId)
       }
       return
     }
@@ -215,14 +215,12 @@ export function useChatTransport() {
     if (type === 'error' || data.error || data.detail) {
       const errorMessage = resolveErrorMessage(data, t('chat.stream_error'))
       console.error('WebSocket业务错误:', errorMessage)
+      clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
       if (onError) {
         onError(errorMessage, thinkingId, requestId, data)
       }
       if (setLoading) {
         setLoading(false)
-      }
-      if (requestId) {
-        callbacksMap.delete(requestId)
       }
       return
     }
@@ -236,17 +234,17 @@ export function useChatTransport() {
       const finishReason = choice.finish_reason
 
       if (choice.message?.role === 'err') {
+        clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
         if (onError) onError(content, thinkingId, requestId, data)
         if (setLoading) setLoading(false)
-        if (requestId) callbacksMap.delete(requestId)
         return
       }
 
       if (finishReason) {
+        clearThinkingRequestCallbacks(callbacksMap, requestId, thinkingId, relatedRequestIds)
         if (onComplete) onComplete(data, thinkingId, requestId)
         if (setLoading) setLoading(false)
         if (scrollToBottom) scrollToBottom()
-        if (requestId) callbacksMap.delete(requestId)
       }
     }
   }

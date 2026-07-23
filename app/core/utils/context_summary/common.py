@@ -35,6 +35,7 @@ class ContextSummaryState:
     content: str | None
     message_id: int | None
     revision: int = field(default=0, compare=False, repr=False)
+    content_revision: int = field(default=0, compare=False, repr=False)
 
     def as_message(self) -> InternalMessage | None:
         if not self.content or self.message_id is None:

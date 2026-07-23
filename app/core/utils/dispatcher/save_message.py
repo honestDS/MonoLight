@@ -53,6 +53,10 @@ async def save_message(
     is_processed: bool = True,
     dedupe_key: str | None = None,
     created_at: datetime | None = None,
+    audit_record_id: int | None = None,
+    audit_tool_call_id: str | None = None,
+    content_revision: int = 0,
+    commit: bool = True,
 ) -> InternalMessage:
     # Determine attachments and final content payload
     attachments_to_save = None
@@ -72,6 +76,9 @@ async def save_message(
         "attachments": attachments_to_save,
         "profile_id": profile_id,
         "is_processed": is_processed,
+        "audit_record_id": audit_record_id,
+        "audit_tool_call_id": audit_tool_call_id,
+        "content_revision": content_revision,
     }
     if created_at is not None:
         obj_in_data["created_at"] = created_at
@@ -80,12 +87,14 @@ async def save_message(
         db_obj = await message_crud.create(
             db,
             obj_in=obj_in_data,
+            commit=commit,
         )
     else:
         db_obj = await message_crud.create_idempotent(
             db,
             obj_in=obj_in_data,
             dedupe_key=dedupe_key,
+            commit=commit,
         )
     return InternalMessage(
         id=db_obj.id,

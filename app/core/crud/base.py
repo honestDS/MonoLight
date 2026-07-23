@@ -37,6 +37,7 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
         *,
         obj_in: CreateSchemaType | dict[str, Any],
         update_dict: dict[str, Any] = None,
+        commit: bool = True,
     ) -> ModelType:
         if isinstance(obj_in, dict):
             obj_in_data = obj_in
@@ -47,7 +48,10 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
             obj_in_data.update(update_dict)
         db_obj = self.model.model_validate(obj_in_data)
         db.add(db_obj)
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(db_obj)
         return db_obj
 

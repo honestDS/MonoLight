@@ -23,6 +23,7 @@ async def persist_prepared_audit_round(
     error_reason: str | None = None,
     expires_at: datetime | None = None,
     audit_root: str | Path = AUDIT_DIR,
+    create_confirmation_claim: bool = True,
 ) -> bool:
     try:
         context_file_path = await write_audit_json(
@@ -41,6 +42,7 @@ async def persist_prepared_audit_round(
             failure_type=failure_type,
             error_reason=error_reason,
             expires_at=expires_at,
+            create_confirmation_claim=create_confirmation_claim,
         )
         if completed:
             return True

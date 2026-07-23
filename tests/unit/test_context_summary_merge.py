@@ -37,6 +37,7 @@ def _stage(
         model_id="summary-model",
         expected_summary_message_id=None,
         expected_summary_revision=0,
+        expected_content_revision=0,
         snapshot_max_message_id=expected_fragment_count * 10 + 20,
         expected_fragment_count=expected_fragment_count,
         persistent_summary_target_id=expected_fragment_count * 10,

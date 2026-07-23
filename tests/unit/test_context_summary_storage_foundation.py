@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncGenerator
 from importlib import import_module
 
@@ -5,10 +6,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 
 from app.core.crud.message import message_crud
 from app.core.crud.session import session_crud
+from app.models.audit import AuditToolResultVersion
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
@@ -26,6 +28,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                     ChatSession.__table__,
                     ContextSummaryStage.__table__,
                     ContextSummaryFragment.__table__,
+                    AuditToolResultVersion.__table__,
                 ],
             )
         )
@@ -55,6 +58,7 @@ async def test_context_summary_update_compares_boundary_and_revision_atomically(
         uid="user-1",
         expected_message_id=8,
         expected_revision=3,
+        expected_content_revision=0,
         summary="first candidate",
         message_id=12,
     )
@@ -66,6 +70,7 @@ async def test_context_summary_update_compares_boundary_and_revision_atomically(
         uid="user-1",
         expected_message_id=12,
         expected_revision=3,
+        expected_content_revision=0,
         summary="stale candidate",
         message_id=12,
     )
@@ -76,6 +81,72 @@ async def test_context_summary_update_compares_boundary_and_revision_atomically(
     assert stale_same_boundary_updated is False
     assert session.context_summary == "first candidate"
     assert session.context_summary_message_id == 12
+    assert session.context_summary_revision == 4
+
+
+@pytest.mark.asyncio
+async def test_tool_result_version_invalidates_summary_and_preserves_previous_content(db_session: AsyncSession):
+    message = Message(
+        id=10,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content='{"role":"tool","tool_call_id":"call-1","content":"{\\"status\\":\\"pending\\"}"}',
+        audit_record_id=20,
+        audit_tool_call_id="call-1",
+        content_revision=0,
+        is_processed=True,
+    )
+    session = ChatSession(
+        session_id="session-1",
+        uid="user-1",
+        context_summary="old summary",
+        context_summary_message_id=8,
+        context_summary_revision=3,
+        context_content_revision=1,
+    )
+    db_session.add_all(
+        [
+            message,
+            session,
+            AuditToolResultVersion(
+                uid="user-1",
+                session_id="session-1",
+                audit_record_id=20,
+                source_assistant_message_id=9,
+                original_tool_call_id="call-1",
+                message_id=10,
+                version_no=0,
+                content=message.content,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    from app.core.crud.audit_tool_result_version import audit_tool_result_version_crud
+
+    await audit_tool_result_version_crud.append_version(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        audit_record_id=20,
+        source_assistant_message_id=9,
+        original_tool_call_id="call-1",
+        message_id=10,
+        content='{"role":"tool","tool_call_id":"call-1","content":"{\\"status\\":\\"succeeded\\"}"}',
+    )
+
+    await db_session.refresh(message)
+    await db_session.refresh(session)
+    versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == 20).order_by(AuditToolResultVersion.version_no))).scalars().all())
+    assert len(versions) == 2
+    assert json.loads(versions[0].content)["content"] == '{"status":"pending"}'
+    assert json.loads(message.content)["content"] == '{"status":"succeeded"}'
+    assert session.context_summary is None
+    assert session.context_summary_message_id is None
+    assert session.context_content_revision == 2
     assert session.context_summary_revision == 4
 
 

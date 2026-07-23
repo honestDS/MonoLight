@@ -15,8 +15,20 @@ from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.api.v1 import chat as chat_api
-from app.core.audit.confirmation import get_pending_tool_results, replace_pending_tool_result
-from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER, ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_WAITING_CONFIRMATION
+from app.core.audit.confirmation import (
+    get_pending_tool_results,
+    persist_pending_confirmation_bundle,
+    replace_pending_tool_result,
+    supersede_persisted_pending_confirmation_bundle,
+)
+from app.core.constants import (
+    ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER,
+    ERR_AUDIT_ROUND_BLOCKED,
+    MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE,
+    MSG_AUDIT_CONFIRMATION_SUPERSEDED,
+    MSG_AUDIT_WAITING_CONFIRMATION,
+)
+from app.core.crud.audit import audit_crud
 from app.core.i18n import t
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager
@@ -28,10 +40,12 @@ from app.models.audit import (
     AuditRecord,
     AuditRecordStatus,
     AuditToolDetail,
+    AuditToolResultVersion,
 )
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
 from app.models.message_platform import MessagePlatformStatus
 from app.models.profile import Profile
+from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplyWorkItem,
@@ -48,6 +62,8 @@ async def db_session() -> AsyncSession:
         AuditToolDetail.__table__,
         AuditConfirmationClaim.__table__,
         AuditExecutionRecord.__table__,
+        AuditToolResultVersion.__table__,
+        ChatSession.__table__,
         SessionReplySequence.__table__,
         SessionReplyWorkItem.__table__,
     ]
@@ -367,6 +383,226 @@ async def test_pending_tool_result_validation_rejects_missing_and_duplicate_resu
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_pending_confirmation_becomes_visible_with_structured_results_atomically(db_session: AsyncSession):
+    source_message = Message(
+        session_id="session-1",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-atomic", name="safe_tool", arguments={"value": 1})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add(source_message)
+    await db_session.flush()
+    record = AuditRecord(
+        uid="owner",
+        operator_username="operator",
+        session_id="session-1",
+        source="http",
+        language="zh",
+        status=AuditRecordStatus.PENDING,
+        source_assistant_message_id=source_message.id,
+        working_directory=".",
+        round_arguments_hash="atomic-round",
+        tool_count=1,
+        expires_at=get_local_time() + timedelta(hours=1),
+    )
+    db_session.add_all([record, ChatSession(session_id="session-1", uid="owner", profile_id=1)])
+    await db_session.commit()
+
+    assert await audit_crud.get_current_confirmation(db_session, uid="owner", session_id="session-1") is None
+
+    stored_results, _card = await persist_pending_confirmation_bundle(
+        db_session,
+        audit_record_id=record.id,
+        uid="owner",
+        session_id="session-1",
+        profile_id=1,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-atomic",
+                content=json.dumps({"status": "pending"}),
+            )
+        ],
+        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        dedupe_key=None,
+    )
+
+    current = await audit_crud.get_current_confirmation(db_session, uid="owner", session_id="session-1")
+    assert current is not None
+    assert [item.tool_call_id for item in stored_results] == ["call-atomic"]
+    pending = await get_pending_tool_results(
+        db_session,
+        uid="owner",
+        session_id="session-1",
+        source_assistant_message_id=source_message.id,
+        before_message_id=source_message.id,
+        tool_call_ids=["call-atomic"],
+        audit_record_id=record.id,
+    )
+    assert pending is not None
+    assert set(pending) == {"call-atomic"}
+
+    await replace_pending_tool_result(
+        db_session,
+        pending_message=pending["call-atomic"],
+        original_tool_call_id="call-atomic",
+        content=json.dumps({"status": "succeeded"}),
+        audit_record_id=record.id,
+    )
+    await db_session.commit()
+    versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id).order_by(AuditToolResultVersion.version_no))).scalars().all())
+    assert [version.version_no for version in versions] == [0, 1]
+    assert json.loads(InternalMessage.model_validate_json(versions[0].content).content)["status"] == "pending"
+    assert json.loads(InternalMessage.model_validate_json(versions[1].content).content)["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_superseding_persisted_pending_bundle_cancels_structured_results(db_session: AsyncSession):
+    source_message = Message(
+        session_id="session-superseded",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-superseded", name="safe_tool", arguments={})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add(source_message)
+    await db_session.flush()
+    record = AuditRecord(
+        uid="owner",
+        operator_username="operator",
+        session_id="session-superseded",
+        source="http",
+        language="zh",
+        status=AuditRecordStatus.PENDING,
+        source_assistant_message_id=source_message.id,
+        working_directory=".",
+        round_arguments_hash="superseded-round",
+        tool_count=1,
+        expires_at=get_local_time() + timedelta(hours=1),
+    )
+    db_session.add_all([record, ChatSession(session_id="session-superseded", uid="owner", profile_id=1)])
+    await db_session.commit()
+
+    await persist_pending_confirmation_bundle(
+        db_session,
+        audit_record_id=record.id,
+        uid="owner",
+        session_id="session-superseded",
+        profile_id=1,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-superseded",
+                content=json.dumps({"status": "pending"}),
+            )
+        ],
+        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        dedupe_key=None,
+    )
+
+    cancelled_results = await supersede_persisted_pending_confirmation_bundle(
+        db_session,
+        audit_record_id=record.id,
+        uid="owner",
+        session_id="session-superseded",
+    )
+
+    await db_session.refresh(record)
+    current_confirmation = await audit_crud.get_current_confirmation(
+        db_session,
+        uid="owner",
+        session_id="session-superseded",
+    )
+    claims = list((await db_session.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == record.id))).scalars().all())
+    versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id).order_by(AuditToolResultVersion.version_no))).scalars().all())
+
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert current_confirmation is None
+    assert claims == []
+    assert len(cancelled_results) == 1
+    cancelled_payload = json.loads(cancelled_results[0].content)
+    assert cancelled_payload["status"] == AuditRecordStatus.CANCELLED.value
+    assert cancelled_payload["confirmation_status"] == "superseded"
+    assert cancelled_payload["error"] == t(MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE, locale="zh")
+    assert cancelled_payload["error"] != t(MSG_AUDIT_CONFIRMATION_SUPERSEDED, locale="zh")
+    assert t(MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE, locale="en") == "The pending operation was cancelled because a new user message was received. Re-evaluate it using the latest user message."
+    assert [version.version_no for version in versions] == [0, 1]
+    assert [json.loads(InternalMessage.model_validate_json(version.content).content)["status"] for version in versions] == [
+        AuditRecordStatus.PENDING.value,
+        AuditRecordStatus.CANCELLED.value,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_confirmation_bundle_rolls_back_all_rows_when_activation_fails(db_session: AsyncSession, monkeypatch):
+    source_message = Message(
+        session_id="session-failure",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-failure", name="safe_tool", arguments={})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add(source_message)
+    await db_session.flush()
+    record = AuditRecord(
+        uid="owner",
+        operator_username="operator",
+        session_id="session-failure",
+        source="http",
+        language="zh",
+        status=AuditRecordStatus.PENDING,
+        source_assistant_message_id=source_message.id,
+        working_directory=".",
+        round_arguments_hash="failure-round",
+        tool_count=1,
+        expires_at=get_local_time() + timedelta(hours=1),
+    )
+    db_session.add_all([record, ChatSession(session_id="session-failure", uid="owner", profile_id=1)])
+    await db_session.commit()
+
+    async def fail_activation(*_args, **_kwargs):
+        raise RuntimeError("injected activation failure")
+
+    monkeypatch.setattr(audit_crud, "activate_confirmation_claim", fail_activation)
+    with pytest.raises(RuntimeError, match="injected activation failure"):
+        await persist_pending_confirmation_bundle(
+            db_session,
+            audit_record_id=record.id,
+            uid="owner",
+            session_id="session-failure",
+            profile_id=1,
+            tool_results=[InternalMessage(role=MessageRole.TOOL, tool_call_id="call-failure", content=json.dumps({"status": "pending"}))],
+            confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+            dedupe_key=None,
+        )
+
+    await db_session.refresh(record)
+    stored_messages = list((await db_session.execute(select(Message).where(Message.session_id == "session-failure").order_by(Message.id))).scalars().all())
+    stored_versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id))).scalars().all())
+    stored_claims = list((await db_session.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == record.id))).scalars().all())
+    assert record.status == AuditRecordStatus.AUDIT_FAILED
+    assert [message.type for message in stored_messages] == [MessageType.TOOL_CALL]
+    assert stored_versions == []
+    assert stored_claims == []
 
 
 @pytest.mark.asyncio

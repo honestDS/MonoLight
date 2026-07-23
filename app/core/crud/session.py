@@ -31,10 +31,11 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         uid: str,
         expected_message_id: int | None,
         expected_revision: int,
+        expected_content_revision: int = 0,
         summary: str,
         message_id: int,
     ) -> bool:
-        stmt = update(ChatSession).where(ChatSession.session_id == session_id).where(ChatSession.uid == uid).where(ChatSession.context_summary_revision == expected_revision)
+        stmt = update(ChatSession).where(ChatSession.session_id == session_id).where(ChatSession.uid == uid).where(ChatSession.context_summary_revision == expected_revision).where(ChatSession.context_content_revision == expected_content_revision)
         if expected_message_id is None:
             stmt = stmt.where(ChatSession.context_summary_message_id.is_(None))
         else:
@@ -48,6 +49,33 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             )
         )
         await db.flush()
+        return (result.rowcount or 0) == 1
+
+    async def bump_context_content_revision(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        uid: str,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.session_id == session_id,
+                ChatSession.uid == uid,
+            )
+            .values(
+                context_summary=None,
+                context_summary_message_id=None,
+                context_summary_revision=ChatSession.context_summary_revision + 1,
+                context_content_revision=ChatSession.context_content_revision + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return (result.rowcount or 0) == 1
 
     async def delete_by_session(

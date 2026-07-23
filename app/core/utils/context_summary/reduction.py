@@ -169,6 +169,7 @@ async def create_reduction_stage(
         safety_margin_tokens=model.safety_margin_tokens,
         expected_summary_message_id=lower_stage.expected_summary_message_id,
         expected_summary_revision=lower_stage.expected_summary_revision,
+        expected_content_revision=lower_stage.expected_content_revision,
         snapshot_max_message_id=lower_stage.snapshot_max_message_id,
         persistent_summary_target_id=lower_stage.persistent_summary_target_id,
         expected_fragment_count=expected_fragment_count,

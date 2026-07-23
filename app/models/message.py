@@ -101,6 +101,9 @@ class Message(MessageBase, table=True):
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
     dedupe_key: str | None = Field(default=None, unique=True, max_length=64)
+    audit_record_id: int | None = Field(default=None, index=True)
+    audit_tool_call_id: str | None = Field(default=None, index=True, max_length=100)
+    content_revision: int = Field(default=0, ge=0)
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

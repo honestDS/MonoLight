@@ -44,6 +44,7 @@ class ContextSummaryStage(SQLModel, table=True):
     safety_margin_tokens: int = Field(ge=0)
     expected_summary_message_id: int | None = Field(default=None)
     expected_summary_revision: int = Field(ge=0)
+    expected_content_revision: int = Field(default=0, ge=0)
     snapshot_max_message_id: int = Field(ge=1)
     persistent_summary_target_id: int = Field(ge=1)
     expected_fragment_count: int = Field(ge=1)

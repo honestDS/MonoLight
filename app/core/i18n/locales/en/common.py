@@ -204,6 +204,7 @@ MESSAGES = {
     "MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK": "Run tool operations that require confirmation",
     "MSG_AUDIT_CONFIRMATION_IM": "Confirmation required\nAction: {summary}\nRisk score: {score}\nExpires in {expires_in_seconds} seconds\nReply only “approve” or “continue” to run it, or “reject” to cancel.",
     "MSG_AUDIT_CONFIRMATION_STATUS_IM": "Confirmation status updated\nAction: {summary}\nStatus: {status}",
+    "MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE": "The pending operation was cancelled because a new user message was received. Re-evaluate it using the latest user message.",
     "MSG_AUDIT_CONFIRMATION_SUPERSEDED": "The pending audit was superseded by a new tool call",
     "MSG_AUDIT_STATUS_EXECUTING": "Executing",
     "MSG_AUDIT_STATUS_REJECTED": "Rejected",

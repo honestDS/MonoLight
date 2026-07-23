@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import persist_pending_confirmation_bundle, update_confirmation_message_status
 from app.core.audit.service import audit_tool_round
 from app.core.constants import (
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
@@ -55,11 +55,10 @@ from app.core.utils.dispatcher.markdown_instruction import materialize_latest_us
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
-from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -514,29 +513,34 @@ class BackgroundDispatcherMixin:
 
         files_to_user = extract_files_to_user(tool_responses)
         persisted_tool_result_ids: list[int] = []
-        for tool_response in tool_responses:
-            stored_tool_response = await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
-            if stored_tool_response is not None and stored_tool_response.id is not None:
-                persisted_tool_result_ids.append(stored_tool_response.id)
+        confirmation_message = None
+        if audit_round is not None and audit_round.confirmation_payload is not None:
+            stored_tool_responses, confirmation_message = await persist_pending_confirmation_bundle(
+                db,
+                audit_record_id=audit_round.audit_record_id,
+                uid=uid,
+                session_id=session_id,
+                profile_id=profile.id,
+                tool_results=tool_responses,
+                confirmation_payload=audit_round.confirmation_payload,
+                dedupe_key=final_message_dedupe_key,
+            )
+            messages.extend(stored_tool_responses)
+            turn_messages.extend(stored_tool_responses)
+            for stored_tool_response in stored_tool_responses:
+                if stored_tool_response.id is not None:
+                    persisted_tool_result_ids.append(stored_tool_response.id)
+        else:
+            for tool_response in tool_responses:
+                stored_tool_response = await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
+                if stored_tool_response is not None and stored_tool_response.id is not None:
+                    persisted_tool_result_ids.append(stored_tool_response.id)
 
         if audit_round is not None and audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
-            await save_message(
-                db,
-                session_id,
-                uid,
-                MessageRole.ASSISTANT,
-                MessageType.AUDIT_CONFIRMATION,
-                audit_round.confirmation_payload,
-                profile.id,
-                is_processed=True,
-                dedupe_key=final_message_dedupe_key,
-            )
             await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
-            confirmation_message = InternalMessage(
-                role=MessageRole.ASSISTANT,
-                content=confirmation_content,
-            )
+            if confirmation_message is None:
+                confirmation_message = InternalMessage(role=MessageRole.ASSISTANT, content=confirmation_content)
             turn_messages.append(confirmation_message)
             return confirmation_message, turn_messages, []
 

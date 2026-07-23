@@ -382,6 +382,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             **event,
             "session_id": work.session_id,
             "work_id": work.id,
+            "event_sequence_no": next_stream_sequence,
         }
         async with AsyncSessionLocal() as event_db:
             await session_reply_stream_event_crud.publish(
@@ -565,6 +566,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         source_assistant_message_id=source_message.id,
         before_message_id=decision_message_id if isinstance(decision_message_id, int) else None,
         tool_call_ids=[tool_call.id for tool_call in source_tool_calls],
+        audit_record_id=audit_record_id,
     )
     if pending_tool_results is None:
         return await source_invalid_response()
@@ -609,6 +611,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     pending_message=pending_tool_results[original_call.id],
                     original_tool_call_id=original_call.id,
                     content=tool_result.content,
+                    audit_record_id=reaudit_round.audit_record_id,
                 )
                 stored_tool_result = tool_result.model_copy(deep=True)
                 stored_tool_result.content = sanitized_content
@@ -683,6 +686,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             pending_message=pending_tool_results[original_tool_call_id],
             original_tool_call_id=original_tool_call_id,
             content=tool_result.content,
+            audit_record_id=audit_record_id,
         )
         stored_tool_result = tool_result.model_copy(deep=True)
         stored_tool_result.content = sanitized_content

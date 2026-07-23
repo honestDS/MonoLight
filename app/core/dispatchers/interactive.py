@@ -8,7 +8,12 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.confirmation import update_confirmation_message_status
+from app.core.audit.confirmation import (
+    persist_cancelled_pending_audit_results,
+    persist_pending_confirmation_bundle,
+    supersede_persisted_pending_confirmation_bundle,
+    update_confirmation_message_status,
+)
 from app.core.audit.service import audit_tool_round
 from app.core.channel_router import select_channel
 from app.core.constants import (
@@ -55,13 +60,12 @@ from app.core.utils.dispatcher.prepare_messages import prepare_messages
 from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
-from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
-from app.models.message import InternalMessage, MessageRole, MessageType
+from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
@@ -486,34 +490,120 @@ class InteractiveDispatcherMixin:
                         )
                         if audit_round is not None and not audit_round.may_execute:
                             persisted_tool_result_ids = []
-                            for tool_result in audit_round.tool_results:
-                                stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
-                                if stored_tool_result.id is not None:
-                                    persisted_tool_result_ids.append(stored_tool_result.id)
-                                if stream_event_callback is not None:
-                                    tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
-                                    await stream_event_callback(
-                                        {
-                                            "type": "tool_end",
-                                            "name": tool_call.name if tool_call else "unknown",
-                                            "result": sanitize_files_to_user_result(tool_result.content),
-                                            "tool_call_id": tool_result.tool_call_id,
-                                            "response_id": response_id,
-                                        }
-                                    )
                             if audit_round.confirmation_payload is not None:
-                                confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
-                                await save_message(
+                                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                                if new_user_msgs:
+                                    stored_tool_results = await persist_cancelled_pending_audit_results(
+                                        db,
+                                        audit_record_id=audit_round.audit_record_id,
+                                        uid=uid,
+                                        session_id=session_id,
+                                        profile_id=profile.id,
+                                        tool_results=audit_round.tool_results,
+                                    )
+                                    for stored_tool_result in stored_tool_results:
+                                        messages.append(stored_tool_result)
+                                        turn_messages.append(stored_tool_result)
+                                        if stream_event_callback is not None:
+                                            tool_call = next((item for item in ai_msg.tool_calls if item.id == stored_tool_result.tool_call_id), None)
+                                            await stream_event_callback(
+                                                {
+                                                    "type": "tool_end",
+                                                    "name": tool_call.name if tool_call else "unknown",
+                                                    "result": sanitize_files_to_user_result(stored_tool_result.content),
+                                                    "tool_call_id": stored_tool_result.tool_call_id,
+                                                    "response_id": response_id,
+                                                }
+                                            )
+                                    append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                                    fixed_user_upper_id = max(
+                                        (item.id for item in new_user_msgs if item.id is not None),
+                                        default=None,
+                                    )
+                                    if fixed_user_upper_id is not None:
+                                        checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                        checkpoint_upper_id = fixed_user_upper_id
+                                    current_turn = 0
+                                    await save_execution_checkpoint(messages, current_turn)
+                                    continue
+                                stored_tool_results, _confirmation_message = await persist_pending_confirmation_bundle(
                                     db,
-                                    session_id,
-                                    uid,
-                                    MessageRole.ASSISTANT,
-                                    MessageType.AUDIT_CONFIRMATION,
-                                    audit_round.confirmation_payload,
-                                    profile.id,
-                                    is_processed=True,
+                                    audit_record_id=audit_round.audit_record_id,
+                                    uid=uid,
+                                    session_id=session_id,
+                                    profile_id=profile.id,
+                                    tool_results=audit_round.tool_results,
+                                    confirmation_payload=audit_round.confirmation_payload,
                                     dedupe_key=final_message_dedupe_key,
                                 )
+                                new_user_msgs = await fetch_additional_user_messages(chat_params["max_tokens"])
+                                if new_user_msgs:
+                                    stored_tool_results = await supersede_persisted_pending_confirmation_bundle(
+                                        db,
+                                        audit_record_id=audit_round.audit_record_id,
+                                        uid=uid,
+                                        session_id=session_id,
+                                    )
+                                    await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
+                                    for stored_tool_result in stored_tool_results:
+                                        messages.append(stored_tool_result)
+                                        turn_messages.append(stored_tool_result)
+                                        if stream_event_callback is not None:
+                                            tool_call = next((item for item in ai_msg.tool_calls if item.id == stored_tool_result.tool_call_id), None)
+                                            await stream_event_callback(
+                                                {
+                                                    "type": "tool_end",
+                                                    "name": tool_call.name if tool_call else "unknown",
+                                                    "result": sanitize_files_to_user_result(stored_tool_result.content),
+                                                    "tool_call_id": stored_tool_result.tool_call_id,
+                                                    "response_id": response_id,
+                                                }
+                                            )
+                                    append_new_user_messages(cfg, messages, new_user_msgs, img_understanding, audio_understanding, video_understanding)
+                                    fixed_user_upper_id = max(
+                                        (item.id for item in new_user_msgs if item.id is not None),
+                                        default=None,
+                                    )
+                                    if fixed_user_upper_id is not None:
+                                        checkpoint_mode = ContextSummaryTriggerMode.USER_MESSAGE
+                                        checkpoint_upper_id = fixed_user_upper_id
+                                    current_turn = 0
+                                    await save_execution_checkpoint(messages, current_turn)
+                                    continue
+                                for tool_result, stored_tool_result in zip(audit_round.tool_results, stored_tool_results, strict=True):
+                                    messages.append(stored_tool_result)
+                                    turn_messages.append(stored_tool_result)
+                                    if stored_tool_result.id is not None:
+                                        persisted_tool_result_ids.append(stored_tool_result.id)
+                                    if stream_event_callback is not None:
+                                        tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
+                                        await stream_event_callback(
+                                            {
+                                                "type": "tool_end",
+                                                "name": tool_call.name if tool_call else "unknown",
+                                                "result": sanitize_files_to_user_result(tool_result.content),
+                                                "tool_call_id": tool_result.tool_call_id,
+                                                "response_id": response_id,
+                                            }
+                                        )
+                            else:
+                                for tool_result in audit_round.tool_results:
+                                    stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
+                                    if stored_tool_result.id is not None:
+                                        persisted_tool_result_ids.append(stored_tool_result.id)
+                                    if stream_event_callback is not None:
+                                        tool_call = next((item for item in ai_msg.tool_calls if item.id == tool_result.tool_call_id), None)
+                                        await stream_event_callback(
+                                            {
+                                                "type": "tool_end",
+                                                "name": tool_call.name if tool_call else "unknown",
+                                                "result": sanitize_files_to_user_result(tool_result.content),
+                                                "tool_call_id": tool_result.tool_call_id,
+                                                "response_id": response_id,
+                                            }
+                                        )
+                            if audit_round.confirmation_payload is not None:
+                                confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
                                 await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
                                 final_ai_content = confirmation_content
                                 return LLMResponse(

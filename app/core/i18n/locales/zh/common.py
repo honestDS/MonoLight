@@ -204,6 +204,7 @@ MESSAGES = {
     "MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK": "请求执行需要确认的工具操作",
     "MSG_AUDIT_CONFIRMATION_IM": "操作需要确认\n\n内容: {summary}\n\n风险评分: {score}\n\n{expires_in_seconds} 秒后失效\n仅回复“同意”或“继续”可执行，回复“拒绝”可取消。",
     "MSG_AUDIT_CONFIRMATION_STATUS_IM": "操作确认状态已更新\n\n内容: {summary}\n\n状态: {status}",
+    "MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE": "待确认操作因收到新的用户消息而取消，请根据最新用户消息重新判断",
     "MSG_AUDIT_CONFIRMATION_SUPERSEDED": "待确认审计已被新的工具调用替代",
     "MSG_AUDIT_STATUS_EXECUTING": "执行中",
     "MSG_AUDIT_STATUS_REJECTED": "已拒绝",

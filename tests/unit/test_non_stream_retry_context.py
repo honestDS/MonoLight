@@ -627,6 +627,9 @@ async def _run_audited_interactive_dispatch(
     claim_execution_success=True,
     stream_event_callback=None,
     stream_dispatch=False,
+    additional_user_messages_fetcher=None,
+    persist_pending_confirmation_bundle_handler=None,
+    supersede_pending_confirmation_bundle_handler=None,
 ):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
@@ -672,7 +675,12 @@ async def _run_audited_interactive_dispatch(
 
     async def generate(**kwargs):
         if generated_calls_target is not None:
-            generated_calls_target.append(kwargs)
+            generated_calls_target.append(
+                {
+                    **kwargs,
+                    "messages": [message.model_copy(deep=True) for message in kwargs["messages"]],
+                }
+            )
         return SimpleNamespace(message=responses.pop(0))
 
     async def generate_with_stream_callback(**kwargs):
@@ -701,8 +709,24 @@ async def _run_audited_interactive_dispatch(
             confirmation_payload=None,
         )
 
-    async def save_confirmation_message(*args, **kwargs):
-        return SimpleNamespace(id=300)
+    async def persist_confirmation_bundle(
+        db,
+        *,
+        tool_results,
+        confirmation_payload,
+        **kwargs,
+    ):
+        stored_results = []
+        for index, tool_result in enumerate(tool_results, start=1):
+            stored_result = tool_result.model_copy(deep=True)
+            stored_result.id = 200 + index
+            stored_results.append(stored_result)
+        confirmation_message = InternalMessage(
+            id=300,
+            role=MessageRole.ASSISTANT,
+            content=json.dumps(confirmation_payload, ensure_ascii=False),
+        )
+        return stored_results, confirmation_message
 
     async def claim_execution(db, *, audit_record_id):
         if audit_result is None:
@@ -756,13 +780,27 @@ async def _run_audited_interactive_dispatch(
     async def prepare_messages(*args, **kwargs):
         return [InternalMessage(role=MessageRole.USER, content="request")]
 
+    async def materialize_environment_prompt(db, session_id, messages, max_tokens):
+        return messages
+
     monkeypatch.setattr(interactive_module, "prepare_messages", prepare_messages)
     monkeypatch.setattr(interactive_module, "apply_context_summary_checkpoint", _passthrough_context_summary_checkpoint)
+    monkeypatch.setattr(interactive_module, "materialize_latest_user_environment_prompt", materialize_environment_prompt)
     monkeypatch.setattr(interactive_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
     monkeypatch.setattr(interactive_module.LLMClient, "generate", generate)
     monkeypatch.setattr(interactive_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
     monkeypatch.setattr(interactive_module, "save_assistant_message", save_assistant)
-    monkeypatch.setattr(interactive_module, "save_message", save_confirmation_message)
+    monkeypatch.setattr(
+        interactive_module,
+        "persist_pending_confirmation_bundle",
+        persist_pending_confirmation_bundle_handler or persist_confirmation_bundle,
+    )
+    if supersede_pending_confirmation_bundle_handler is not None:
+        monkeypatch.setattr(
+            interactive_module,
+            "supersede_persisted_pending_confirmation_bundle",
+            supersede_pending_confirmation_bundle_handler,
+        )
     monkeypatch.setattr(interactive_module, "save_tool_response", save_tool_response)
     monkeypatch.setattr(interactive_module, "audit_tool_round", audit_round)
     monkeypatch.setattr(interactive_module.audit_crud, "claim_passed_for_execution", claim_execution)
@@ -788,6 +826,7 @@ async def _run_audited_interactive_dispatch(
                 frozen_user_message_ids=[1],
                 persisted_profile_id=1,
                 execution_checkpoint_callback=checkpoint_callback,
+                additional_user_messages_fetcher=additional_user_messages_fetcher,
             )
         ]
     else:
@@ -801,6 +840,7 @@ async def _run_audited_interactive_dispatch(
             persisted_profile_id=1,
             execution_checkpoint_callback=checkpoint_callback,
             stream_event_callback=stream_event_callback,
+            additional_user_messages_fetcher=additional_user_messages_fetcher,
         )
     return response, unknown_calls
 
@@ -958,6 +998,111 @@ async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(
     assert events[2]["tool_call_id"] == "call-1"
     assert json.loads(events[3]["result"])["status"] == "pending"
     assert json.loads(events[-1]["response"]["choices"][0]["message"]["content"]) == confirmation_payload
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_audit_bundle_is_superseded_when_message_arrives_after_persistence(monkeypatch):
+    confirmation_payload = {
+        "type": "audit_confirmation",
+        "audit_record_id": 42,
+        "summary": "Confirm command",
+        "risk": 8,
+        "status": "pending",
+    }
+    audit_result = SimpleNamespace(
+        may_execute=False,
+        audit_record_id=42,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+            )
+        ],
+        confirmation_payload=confirmation_payload,
+    )
+    fetch_results = iter(
+        [
+            [],
+            [],
+            [InternalMessage(id=2, role=MessageRole.USER, content="continue without confirmation")],
+            [],
+            [],
+        ]
+    )
+    fetch_count = 0
+    lifecycle = []
+    checkpoints = []
+    generated_calls = []
+    tool_calls = []
+
+    async def fetch_additional_messages():
+        nonlocal fetch_count
+        fetch_count += 1
+        return next(fetch_results)
+
+    async def persist_confirmation_bundle(db, *, tool_results, confirmation_payload, **kwargs):
+        lifecycle.append("persisted")
+        stored_results = []
+        for index, tool_result in enumerate(tool_results, start=1):
+            stored_tool_result = tool_result.model_copy(deep=True)
+            stored_tool_result.id = 200 + index
+            stored_results.append(stored_tool_result)
+        return stored_results, InternalMessage(
+            id=300,
+            role=MessageRole.ASSISTANT,
+            content=json.dumps(confirmation_payload, ensure_ascii=False),
+        )
+
+    async def supersede_confirmation_bundle(db, *, audit_record_id, uid, session_id):
+        lifecycle.append("superseded")
+        assert (audit_record_id, uid, session_id) == (42, "user-1", "session-1")
+        return [
+            InternalMessage(
+                id=201,
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps(
+                    {
+                        "status": "cancelled",
+                        "confirmation_status": "superseded",
+                        "tool_name": "execute_shell",
+                    }
+                ),
+            )
+        ]
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(tool_call, *args, **kwargs):
+        tool_calls.append(tool_call.id)
+        raise AssertionError("superseded pending audit must not execute tools")
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=audit_result,
+        generated_calls_target=generated_calls,
+        additional_user_messages_fetcher=fetch_additional_messages,
+        persist_pending_confirmation_bundle_handler=persist_confirmation_bundle,
+        supersede_pending_confirmation_bundle_handler=supersede_confirmation_bundle,
+    )
+
+    assert fetch_count == 5
+    assert lifecycle == ["persisted", "superseded"]
+    assert len(generated_calls) == 2
+    assert any(message.role == MessageRole.USER and "continue without confirmation" in str(message.content) for message in generated_calls[1]["messages"])
+    cancelled_result = next(message for message in generated_calls[1]["messages"] if message.role == MessageRole.TOOL)
+    cancelled_payload = json.loads(cancelled_result.content)
+    assert cancelled_payload["status"] == "cancelled"
+    assert cancelled_payload["confirmation_status"] == "superseded"
+    assert checkpoints[-1]["current_turn"] == 0
+    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 2
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert tool_calls == []
     assert unknown_calls == []
 
 

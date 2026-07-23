@@ -110,7 +110,7 @@ class SessionNotifier:
                     if item.id is None:
                         continue
                     self._last_event_id = item.id
-                    await self._notify_local(item.uid, item.session_id, item.event)
+                    await self._notify_local(item.uid, item.session_id, item.event, event_sequence_no=item.id)
                 if events:
                     continue
             except asyncio.CancelledError:
@@ -130,13 +130,17 @@ class SessionNotifier:
             await session_event_crud.cleanup_expired(db)
         self._next_cleanup_at = loop_time + SESSION_EVENT_CLEANUP_INTERVAL_SECONDS
 
-    async def _notify_local(self, uid: str, session_id: str, event: dict[str, Any]) -> None:
+    async def _notify_local(self, uid: str, session_id: str, event: dict[str, Any], *, event_sequence_no: int) -> None:
         async with self._lock:
             queues = list(self._queues.get((uid, session_id), set()))
 
+        outbound_event = {
+            **event,
+            "event_sequence_no": event_sequence_no,
+        }
         for queue in queues:
             try:
-                queue.put_nowait(event)
+                queue.put_nowait(outbound_event)
             except Exception:
                 logger.bind(uid=uid, session_id=session_id).warning("Failed to enqueue proactive session event", exc_info=True)
 

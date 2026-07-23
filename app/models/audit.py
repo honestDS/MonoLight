@@ -114,6 +114,29 @@ class AuditToolDetail(SQLModel, table=True):
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
 
 
+class AuditToolResultVersion(SQLModel, table=True):
+    __tablename__ = "audit_tool_result_version"
+    __table_args__ = (
+        UniqueConstraint(
+            "audit_record_id",
+            "original_tool_call_id",
+            "version_no",
+            name="uq_audit_tool_result_version_record_call_version",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(index=True, max_length=100)
+    session_id: str = Field(index=True, max_length=100)
+    audit_record_id: int = Field(index=True)
+    source_assistant_message_id: int = Field(index=True)
+    original_tool_call_id: str = Field(index=True, max_length=100)
+    message_id: int = Field(index=True)
+    version_no: int = Field(ge=0)
+    content: str = Field(sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))
+
+
 class AuditConfirmationClaim(SQLModel, table=True):
     __tablename__ = "audit_confirmation_claim"
     __table_args__ = (

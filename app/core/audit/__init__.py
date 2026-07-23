@@ -34,13 +34,25 @@ __all__ = [
     "persist_prepared_audit_round",
     "sha256_text",
     "summarize_tool_arguments",
+    "supersede_persisted_pending_confirmation_bundle",
     "validate_audit_file_path",
     "verify_file_integrity_snapshot",
     "verify_persisted_tool_round",
     "verify_tool_round_integrity",
     "notify_confirmation_tool_results",
+    "persist_cancelled_pending_audit_results",
+    "persist_pending_confirmation_bundle",
     "update_confirmation_message_status",
     "write_audit_json",
     "write_audit_json_and_associate",
 ]
-from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, notify_confirmation_tool_results, parse_confirmation_decision, update_confirmation_message_status
+from app.core.audit.confirmation import (
+    ConfirmationDecision,
+    message_has_quote,
+    notify_confirmation_tool_results,
+    parse_confirmation_decision,
+    persist_cancelled_pending_audit_results,
+    persist_pending_confirmation_bundle,
+    supersede_persisted_pending_confirmation_bundle,
+    update_confirmation_message_status,
+)
