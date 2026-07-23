@@ -1144,9 +1144,13 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert "Path('important.txt').unlink()" in tool_payload["content"]
     assert "locale code: en" in system_prompt
     assert "entire sentence only in that language" in system_prompt
+    assert "awaiting user confirmation and has not started execution" in system_prompt
+    assert "No writes, deletions, sends, external requests, commands, or other target side effects from this round have occurred" in system_prompt
+    assert "will execute only after confirmation" in system_prompt
+    assert "Do not describe the target file, system, or external object as created" in system_prompt
     assert "action, concrete target or path, intended effect" in system_prompt
     assert "does not provide a script classification" in system_prompt
-    assert "what the command or target script actually does" in system_prompt
+    assert "what the command or target script would do after confirmation" in system_prompt
     assert "the script itself was not executed" in system_prompt
     assert "never reduce this to a vague phrase" in system_prompt
     assert json.loads(calls[0]["messages"][1].content) == {
