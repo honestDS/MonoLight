@@ -54,7 +54,7 @@ from app.core.log import (
 from app.core.security import get_current_user
 from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import build_input_queued_event, session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig
@@ -570,7 +570,7 @@ async def chat_websocket(
                             source="ws",
                             request_id=request_id,
                         )
-                        if request_id:
+                        if request_id and is_submission_queued(submission_status):
                             await websocket.send_json(
                                 build_input_queued_event(
                                     session_id,

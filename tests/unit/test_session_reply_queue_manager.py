@@ -24,6 +24,38 @@ pytest_plugins = ("tests.unit.session_reply_queue_fixture",)
 
 
 @pytest.mark.asyncio
+async def test_has_nonterminal_predecessor_detects_prior_same_session_work(db_session: AsyncSession):
+    crud = CRUDSessionReplyWorkItem()
+    first = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=1,
+        dedupe_key="foreground-message:1",
+    )
+    await db_session.commit()
+
+    assert await crud.has_nonterminal_predecessor(db_session, first) is False
+
+    second = await enqueue(
+        crud,
+        db_session,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_id=2,
+        dedupe_key="foreground-message:2",
+    )
+    await db_session.commit()
+
+    assert await crud.has_nonterminal_predecessor(db_session, second) is True
+
+    first.status = SessionReplyWorkStatus.SUCCEEDED
+    db_session.add(first)
+    await db_session.commit()
+
+    assert await crud.has_nonterminal_predecessor(db_session, second) is False
+
+
+@pytest.mark.asyncio
 async def test_foreground_freeze_merges_only_until_background_work(db_session: AsyncSession):
     crud = CRUDSessionReplyWorkItem()
     manager = SessionReplyQueueManager()

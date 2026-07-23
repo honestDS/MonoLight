@@ -13,7 +13,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_notifier import session_notifier
-from app.core.session_reply_queue.manager import build_input_queued_event, session_reply_queue_manager
+from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.models.message import MessageRole
 from app.schemas.response import (
     FinishReason,
@@ -54,7 +54,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 source="ws",
                 request_id=request_id,
             )
-            if request_id:
+            if request_id and is_submission_queued(submission_status):
                 yield build_input_queued_event(session_id, request_id, work.id, submission_status)
             async for chunk in session_reply_queue_manager.wait_for_stream(work.id):
                 if request_id and isinstance(chunk, dict):

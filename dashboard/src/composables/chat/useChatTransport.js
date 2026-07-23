@@ -20,6 +20,10 @@ const lifecycleEventTypes = new Set([
   'input_dequeued',
   'agent_loop_start',
   'agent_loop_output',
+  'content',
+  'turn_end',
+  'tool_start',
+  'tool_end',
   'done',
   'error',
   'proactive_reply'
@@ -221,7 +225,6 @@ export function useChatTransport() {
       } else if (onComplete) {
         onComplete(data, null, requestId, 'proactive_reply')
       }
-      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (scrollToBottom) {
         scrollToBottom()
       }

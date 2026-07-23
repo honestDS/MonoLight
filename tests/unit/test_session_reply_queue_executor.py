@@ -258,6 +258,7 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
     update_calls = []
     terminal_calls = []
     llm_calls = []
+    call_order = []
 
     class FakeSession:
         async def commit(self) -> None:
@@ -286,10 +287,12 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
 
     async def mark_terminal(db, **kwargs):
         terminal_calls.append(kwargs)
+        call_order.append("terminal")
         return True
 
     async def send_event(uid: str, session_id: str, event: dict):
         sent_events.append((uid, session_id, event))
+        call_order.append("event")
 
     monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
@@ -309,6 +312,138 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
     assert sent_events[0][2]["event_id"] != "session-reply-work:7:event"
     assert terminal_calls[0]["status"] == SessionReplyWorkStatus.SUCCEEDED
     assert terminal_calls[0]["result_message_id"] == 9
+    assert terminal_calls[0]["event_sent"] is True
+    assert call_order.index("event") < call_order.index("terminal")
+
+
+@pytest.mark.asyncio
+async def test_executor_does_not_mark_terminal_when_event_delivery_fails(monkeypatch):
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by="worker-1",
+    )
+    persisted_result = SimpleNamespace(
+        id=9,
+        uid=work.uid,
+        session_id=work.session_id,
+        profile_id=work.profile_id,
+        content="saved response",
+        created_at=work.created_at + timedelta(seconds=1),
+    )
+    terminal_calls = []
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_work(db, work_id: int):
+        return work
+
+    async def get_result(db, dedupe_key: str):
+        return persisted_result
+
+    async def update_claimed(db, **kwargs):
+        return True
+
+    async def mark_terminal(db, **kwargs):
+        terminal_calls.append(kwargs)
+        return True
+
+    async def send_event(uid: str, session_id: str, event: dict):
+        raise RuntimeError("event delivery failed")
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_module.message_crud, "get_by_dedupe_key", get_result)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+
+    with pytest.raises(RuntimeError, match="event delivery failed"):
+        await executor_module.execute_session_reply_work(work_id=7, worker_id="worker-1")
+
+    assert terminal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_fail_executor_sends_event_before_marking_terminal(monkeypatch):
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by="worker-1",
+    )
+    call_order = []
+    terminal_calls = []
+    sent_events = []
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_work(db, work_id: int):
+        return work
+
+    async def save_error_message(*args, **kwargs):
+        return SimpleNamespace(id=9)
+
+    async def mark_terminal(db, **kwargs):
+        terminal_calls.append(kwargs)
+        call_order.append("terminal")
+        return True
+
+    async def send_event(uid: str, session_id: str, event: dict):
+        sent_events.append((uid, session_id, event))
+        call_order.append("event")
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_module, "save_message", save_error_message)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+
+    await executor_module.fail_session_reply_work(
+        work_id=7,
+        worker_id="worker-1",
+        error="internal error",
+        user_error="user error",
+    )
+
+    assert sent_events[0][2]["type"] == "proactive_reply_error"
+    assert call_order.index("event") < call_order.index("terminal")
+    assert terminal_calls[0]["status"] == SessionReplyWorkStatus.FAILED
+    assert terminal_calls[0]["error"] == "internal error"
+    assert terminal_calls[0]["event_sent"] is True
 
 
 @pytest.mark.asyncio

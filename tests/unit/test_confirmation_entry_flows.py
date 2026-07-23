@@ -741,13 +741,6 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
     works = await list_work(db_session)
     assert events == [
         {
-            "type": "input_queued",
-            "session_id": "session-1",
-            "request_id": "request-1",
-            "work_id": works[0].id,
-            "submission_status": "approved",
-        },
-        {
             "type": "done",
             "session_id": "session-1",
             "response": {"work_id": works[0].id},
@@ -823,15 +816,7 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
-    assert websocket.sent == [
-        {
-            "type": "input_queued",
-            "session_id": session_id,
-            "request_id": "approval-request",
-            "work_id": works[0].id,
-            "submission_status": "approved",
-        }
-    ]
+    assert websocket.sent == []
 
 
 async def _noop_async(*_args, **_kwargs):

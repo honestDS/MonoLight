@@ -16,6 +16,7 @@ from app.core.log import get_logger
 from app.core.session_reply_queue.manager import (
     build_input_queued_event,
     build_session_reply_work_event_id,
+    is_submission_queued,
     session_reply_queue_manager,
 )
 from app.core.utils.session import ensure_web_session_writable
@@ -79,7 +80,7 @@ class WebChatAdapter(BaseChatAdapter):
                 context_summary_events_requested=True,
                 request_id=request_id,
             )
-            if request_id:
+            if request_id and is_submission_queued(submission_status):
                 yield build_input_queued_event(session_id, request_id, work.id, submission_status)
             async for event in session_reply_queue_manager.wait_for_stream(work.id):
                 if event.get("type") == "done":

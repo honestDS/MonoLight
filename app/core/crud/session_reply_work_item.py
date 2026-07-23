@@ -119,6 +119,25 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return work, True
 
+    async def has_nonterminal_predecessor(
+        self,
+        db: AsyncSession,
+        work: SessionReplyWorkItem,
+    ) -> bool:
+        if work.id is None or work.sequence_no is None:
+            return False
+        result = await db.execute(
+            select(SessionReplyWorkItem.id)
+            .where(
+                SessionReplyWorkItem.uid == work.uid,
+                SessionReplyWorkItem.session_id == work.session_id,
+                SessionReplyWorkItem.sequence_no < work.sequence_no,
+                SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
+            )
+            .limit(1)
+        )
+        return result.scalar() is not None
+
     async def claim_next(
         self,
         db: AsyncSession,

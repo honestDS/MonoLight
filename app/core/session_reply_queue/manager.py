@@ -72,6 +72,10 @@ def merge_work_request_ids(
     return merged_request_ids
 
 
+def is_submission_queued(submission_status: str) -> bool:
+    return submission_status == "queued" or submission_status.endswith("_and_queued")
+
+
 def build_input_queued_event(
     session_id: str,
     request_id: str,
@@ -168,7 +172,12 @@ class SessionReplyQueueManager:
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
             )
-            return initial_message, work, "queued"
+            submission_status = await self._resolve_submission_status(
+                db,
+                work,
+                immediate_status="accepted",
+            )
+            return initial_message, work, submission_status
 
         decision = parse_confirmation_decision(
             message,
@@ -222,7 +231,12 @@ class SessionReplyQueueManager:
                 audit_decision_response=True,
                 request_id=request_id,
             )
-            return initial_message, work, "rejected"
+            submission_status = await self._resolve_submission_status(
+                db,
+                work,
+                immediate_status="rejected",
+            )
+            return initial_message, work, submission_status
 
         if decision is None:
             profile_id = profile.id if profile and profile.id else -1
@@ -253,7 +267,6 @@ class SessionReplyQueueManager:
                     feedback=invalid_input_feedback,
                 )
             await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
-            submission_status = "cancelled_and_queued"
             initial_message, work = await self._enqueue_foreground_message(
                 db,
                 uid=uid,
@@ -266,6 +279,11 @@ class SessionReplyQueueManager:
                 context_summary_events_requested=context_summary_events_requested,
                 persisted_message_row=message_row,
                 request_id=request_id,
+            )
+            submission_status = await self._resolve_submission_status(
+                db,
+                work,
+                immediate_status="cancelled",
             )
             return initial_message, work, submission_status
 
@@ -336,8 +354,25 @@ class SessionReplyQueueManager:
                 created_at=message_row.created_at.timestamp(),
             ),
             work,
-            "approved",
+            await self._resolve_submission_status(
+                db,
+                work,
+                immediate_status="approved",
+            ),
         )
+
+    async def _resolve_submission_status(
+        self,
+        db: AsyncSession,
+        work: SessionReplyWorkItem,
+        *,
+        immediate_status: str,
+    ) -> str:
+        if not await session_reply_work_item_crud.has_nonterminal_predecessor(db, work):
+            return immediate_status
+        if immediate_status == "accepted":
+            return "queued"
+        return f"{immediate_status}_and_queued"
 
     async def enqueue_foreground_message(
         self,
