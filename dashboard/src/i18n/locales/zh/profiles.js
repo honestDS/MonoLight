@@ -41,7 +41,7 @@ export default {
   context_window: '上下文限制 K',
   context_window_hint: '限制上下文最大 Token 数（单位：K Tokens）',
   chat_timeout: '对话超时(秒)',
-  chat_timeout_hint: '对话模型调用超时时间。流式对话下该超时仅作用于首字生成阶段，开始输出后不再判定超时，避免长回答被中途切断。',
+  chat_timeout_hint: '对话模型调用超时时间。流式对话从请求发起开始计时，每次收到有效输出后重新计时；首个输出或相邻两次输出的等待超过该时长时判定超时。',
   auto_detect: '自动检测',
   kb_query_top_k: '知识库返回数量',
   kb_query_top_k_hint: '对话时调用知识库工具最终返回给模型的片段数量。启用 Reranker 时，需确保下方"候选数量 K"大于该值，精排才会生效。',

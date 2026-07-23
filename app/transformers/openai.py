@@ -16,6 +16,7 @@ from app.core.constants import (
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_FIRST_CHAR_TIMEOUT,
+    ERR_LLM_STREAM_TIMEOUT,
     ERR_PROFILE_EMBEDDING_CALL_FAILED,
     ERR_PROFILE_RERANK_CALL_FAILED,
     ERR_RERANK_FORMAT_ERROR,
@@ -243,40 +244,37 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        # 首字超时覆盖建立连接、等待响应头和首个有效内容块。
-        # 首字之后不再判定超时，避免长回答被中途切断。
-        # 空行、keep-alive 与 role-only 空块不视为首字。
+        # 流响应超时覆盖建立连接、等待响应头、首个有效输出及后续有效输出间隔。
+        # 仅成功解析且包含有效负载的数据块会重置超时截止时间。
+        # 空行、keep-alive、无法解析的数据及无有效负载的占位块均不重置。
         loop = asyncio.get_event_loop()
-        started_at = loop.time()
-        deadline = started_at + timeout
+        deadline = loop.time() + timeout
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=None),
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
                 resp_cm = session.post(url, headers=headers, json=payload)
-                # 等待响应头（含服务端首字前的思考时间）也纳入首字超时
+                # 等待响应头（含服务端首次有效输出前的思考时间）也纳入流响应超时
                 try:
                     resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
                 except TimeoutError:
-                    raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
+                    raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
                 try:
                     if resp.status != 200:
                         txt = await resp.text()
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
 
                     buffer = ""
-                    first_content_yielded = False
                     chunk_iter = resp.content.iter_any().__aiter__()
                     while True:
                         try:
-                            timeout_val = max(deadline - loop.time(), 0.001) if not first_content_yielded else None
-                            if timeout_val is not None:
-                                line = await asyncio.wait_for(chunk_iter.__anext__(), timeout=timeout_val)
-                            else:
-                                line = await chunk_iter.__anext__()
+                            line = await asyncio.wait_for(
+                                chunk_iter.__anext__(),
+                                timeout=max(deadline - loop.time(), 0.001),
+                            )
                         except TimeoutError:
-                            raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout)
+                            raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
                         except StopAsyncIteration:
                             break
 
@@ -300,8 +298,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                                 except Exception as json_err:
                                     logger.bind(model_id=model_id, base_url=base_url).warning(t("LOG_OPENAI_SSE_PARSE_FAILED", raw_line=raw_line, error=str(json_err)))
                                     continue
-                                if not first_content_yielded and self._stream_chunk_has_payload(parsed):
-                                    first_content_yielded = True
+                                if self._stream_chunk_has_payload(parsed):
+                                    deadline = loop.time() + timeout
                                 yield parsed
                         if done:
                             break
@@ -312,15 +310,15 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         except Exception as e:
             logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
             if _is_timeout_exception(e):
-                raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
+                raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout) from e
             raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
     @staticmethod
     def _stream_chunk_has_payload(parsed: dict[str, Any]) -> bool:
         """判断流式数据块是否包含实质负载（非空文本、推理内容或工具调用）。
 
-        用于首字超时判定：role-only 空块、keep-alive 等占位块不视为实质负载，
-        以免在模型真正输出前提前解除首字超时。
+        用于重置覆盖首个有效输出及后续有效输出间隔的流响应超时：role-only 空块、
+        usage-only 或 finish-only 块等不视为实质负载，不会重置超时截止时间。
         """
         try:
             delta = parsed["choices"][0].get("delta") or {}

@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "No valid model channel config or API Key detected. Please check in admin panel and activate a Profile with valid keys.",
     "ERR_LLM_EMPTY_RESPONSE": "Large model returned an empty response, please try sending the instruction again or check the model configuration",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "Timeout waiting for the dialog model's first character response ({timeout} seconds)",
+    "ERR_LLM_STREAM_TIMEOUT": "Dialog model stream response timed out ({timeout} seconds)",
     "ERR_API_KEY_CRYPTO_FAILED": "API Key encryption/decryption failed: {reason}",
     "ERR_API_KEY_CRYPTO_KEY_MISSING": "API Key encryption/decryption failed: MONOLIGH_ENCRYPTION_KEY is not configured or is empty",
     "ERR_API_KEY_CRYPTO_KEY_INVALID": "API Key encryption/decryption failed: MONOLIGH_ENCRYPTION_KEY must be a 64-character hexadecimal string",

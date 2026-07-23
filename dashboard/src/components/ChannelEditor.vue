@@ -10,6 +10,9 @@
             controls-position="right"
           />
         </el-form-item>
+        <div class="channel-hints chat-timeout-hint">
+          <div class="channel-hint-item text-muted">{{ $t('profiles.chat_timeout_hint') }}</div>
+        </div>
       </div>
       <template v-else-if="usage === 'RERANK'">
         <div class="channel-editor-config-item">

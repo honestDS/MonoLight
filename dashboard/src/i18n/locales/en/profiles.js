@@ -41,7 +41,7 @@ export default {
   context_window: 'Context Window K',
   context_window_hint: 'Limit max context tokens (Unit: K Tokens)',
   chat_timeout: 'Chat Timeout (s)',
-  chat_timeout_hint: 'Chat model timeout. In streaming, this timeout only applies to first token generation.',
+  chat_timeout_hint: 'Chat model call timeout. For streaming chats, the timer starts when the request is initiated and resets after each valid output. If the first output or the interval between two consecutive outputs exceeds this duration, the chat is considered timed out.',
   auto_detect: 'Auto Detect',
   kb_query_top_k: 'KB Query Top K',
   kb_query_top_k_hint: 'Number of chunks returned by knowledge base tool. If Reranker is enabled, "Candidate K" must be greater than this value.',

@@ -7,6 +7,7 @@ MESSAGES = {
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "未检测到有效的模型渠道配置或 API Key。请在管理后台检查并激活一个包含有效密钥的 Profile。",
     "ERR_LLM_EMPTY_RESPONSE": "大模型返回了空的响应内容，请尝试重新发送指令或检查模型侧配置",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "等待对话模型首字响应超时（{timeout} 秒）",
+    "ERR_LLM_STREAM_TIMEOUT": "等待对话模型流响应超时（{timeout} 秒）",
     "ERR_API_KEY_CRYPTO_FAILED": "API Key 加解密失败：{reason}",
     "ERR_API_KEY_CRYPTO_KEY_MISSING": "API Key 加解密失败：未配置 MONOLIGH_ENCRYPTION_KEY 或其值为空",
     "ERR_API_KEY_CRYPTO_KEY_INVALID": "API Key 加解密失败：MONOLIGH_ENCRYPTION_KEY 必须是 64 位十六进制字符串",
