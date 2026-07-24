@@ -2,7 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
-import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.mjs'
+import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 
 const parseBackgroundSystemMessage = (item) => {
   if (item?.type !== 'background_result' && item?.role !== 'system') return null
@@ -31,6 +31,22 @@ const getToolMessageDedupeKeys = (message) => {
 }
 
 const normalizeStableId = value => value === undefined || value === null || value === '' ? null : String(value)
+
+const findLastRelatedStreamMessageIndex = (messages, workId, requestId) => {
+  const stableWorkId = normalizeStableId(workId)
+  if (stableWorkId) {
+    const workMessageIdx = messages.findLastIndex(message =>
+      message.role !== 'thinking' && normalizeStableId(message.work_id) === stableWorkId
+    )
+    if (workMessageIdx !== -1) return workMessageIdx
+  }
+
+  const stableRequestId = normalizeStableId(requestId)
+  if (!stableRequestId) return -1
+  return messages.findLastIndex(message =>
+    message.role !== 'thinking' && normalizeStableId(message.request_id) === stableRequestId
+  )
+}
 
 const matchesStreamIdentity = (message, responseId, workId, turn, requestId) => {
   const messageResponseId = normalizeStableId(message?.response_id)
@@ -176,32 +192,10 @@ export function useMessageProcessor() {
 
     if (insertBeforeThinking(messagesRef, newMsg, thinkingId, requestId)) return
 
-    // 2. 跨 Turn 增入：如果是新一轮的 Turn（responseId 变化），且由于没有 Thinking 占位符，
-    // 我们应该将新消息插入到当前请求最新的一条相关消息（如 Tool 结果）之后，而不是去抢占其他请求的占位符
-    if (requestId) {
-      // 寻找该请求的最后一条消息位置，以便将新 Turn 消息插入到它后面
-      let lastRelatedIdx = -1
-      for (let i = messagesRef.value.length - 1; i >= 0; i--) {
-        const m = messagesRef.value[i]
-        if (m.role !== 'thinking' && (m.request_id === requestId || (m.role === 'tool' && m.id && String(m.id).includes(requestId)))) {
-          lastRelatedIdx = i
-          break
-        }
-      }
-      
-      if (lastRelatedIdx !== -1) {
-        messagesRef.value.splice(lastRelatedIdx + 1, 0, {
-          id: `assistant_${Date.now()}`,
-          role: 'assistant',
-          content: text,
-          turn: turn,
-          response_id: responseId,
-          request_id: requestId,
-          work_id: workId,
-          created_at: Date.now() / 1000
-        })
-        return
-      }
+    const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
+    if (lastRelatedIdx !== -1) {
+      messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+      return
     }
 
     messagesRef.value.push(newMsg)
@@ -306,26 +300,12 @@ export function useMessageProcessor() {
 
     if (insertBeforeThinking(messagesRef, newMsg, thinkingId, requestId)) return
 
-    // 1. 跨 Turn 新建：如果后续正文已经先到达，工具调用必须插在正文之前
-    if (requestId) {
-      let lastRelatedIdx = -1
-      for (let i = messagesRef.value.length - 1; i >= 0; i--) {
-        if (messagesRef.value[i].role !== 'thinking' && messagesRef.value[i].request_id === requestId) {
-          lastRelatedIdx = i
-          break
-        }
-      }
-      if (lastRelatedIdx !== -1) {
-        const lastRelatedMessage = messagesRef.value[lastRelatedIdx]
-        const insertAt = lastRelatedMessage.role === 'assistant' && !isToolCall(lastRelatedMessage)
-          ? lastRelatedIdx
-          : lastRelatedIdx + 1
-        messagesRef.value.splice(insertAt, 0, newMsg)
-        return
-      }
+    const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
+    if (lastRelatedIdx !== -1) {
+      messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+      return
     }
 
-    // 2. 兜底追加
     messagesRef.value.push(newMsg)
   }
 
@@ -381,6 +361,11 @@ export function useMessageProcessor() {
     }
 
     if (insertBeforeThinking(messagesRef, newMsg, null, requestId)) return
+    const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
+    if (lastRelatedIdx !== -1) {
+      messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+      return
+    }
     messagesRef.value.push(newMsg)
   }
 
@@ -403,12 +388,10 @@ export function useMessageProcessor() {
       ...(workId ? { work_id: workId } : {}),
       ...(eventId ? { event_id: eventId } : {})
     }
-    if (requestId) {
-      const lastRelatedIdx = messagesRef.value.findLastIndex(message => message.request_id === requestId)
-      if (lastRelatedIdx !== -1) {
-        messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
-        return true
-      }
+    const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
+    if (lastRelatedIdx !== -1) {
+      messagesRef.value.splice(lastRelatedIdx + 1, 0, newMsg)
+      return true
     }
     messagesRef.value.push(newMsg)
     return true
@@ -490,7 +473,7 @@ export function useMessageProcessor() {
     }
 
     aiMessagesToInsert.push(finalAiMsg)
-    _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId, requestId)
+    _insertAiMessagesByThinking(messagesRef, aiMessagesToInsert, thinkingId, requestId, workId)
   }
 
   // 处理工具调用消息
@@ -545,7 +528,7 @@ export function useMessageProcessor() {
     removeThinkingMessageByIdentity(messagesRef.value, thinkingId, requestId)
 
   // 按 thinking 位置插入 AI 消息
-  const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId, requestId = null) => {
+  const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId, requestId = null, workId = null) => {
     if (!aiMessages || aiMessages.length === 0) return
     const existingKeys = new Set(messagesRef.value.flatMap(getToolMessageDedupeKeys))
     const dedupedMessages = []
@@ -565,15 +548,13 @@ export function useMessageProcessor() {
 
     if (insertAt !== -1) {
       messagesRef.value.splice(insertAt, 0, ...dedupedMessages)
-    } else if (requestId) {
-      const lastRelatedIdx = messagesRef.value.findLastIndex(message => message.request_id === requestId && message.role !== 'thinking')
+    } else {
+      const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
       if (lastRelatedIdx !== -1) {
         messagesRef.value.splice(lastRelatedIdx + 1, 0, ...dedupedMessages)
       } else {
         messagesRef.value.push(...dedupedMessages)
       }
-    } else {
-      messagesRef.value.push(...dedupedMessages)
     }
   }
 

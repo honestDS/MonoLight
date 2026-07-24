@@ -30,17 +30,23 @@ export const markInputQueued = (messages, event) => {
 
 export const markInputsDequeued = (messages, event) => {
   const requestIds = getRequestIds(event)
+  const workId = normalizeIdentity(event?.work_id)
   if (requestIds.size === 0) return messages
 
   return messages.map(message => {
     if (
       message?.role !== 'user' ||
-      message.status !== 'queued' ||
-      !requestIds.has(message.request_id)
+      ![...requestIds].some(requestId => sameIdentity(message.request_id, requestId))
     ) return message
 
-    const { status, ...messageWithoutStatus } = message
-    return messageWithoutStatus
+    const shouldClearStatus = message.status === 'queued'
+    const shouldUpdateWorkId = workId && !sameIdentity(message.work_id, event.work_id)
+    if (!shouldClearStatus && !shouldUpdateWorkId) return message
+
+    const nextMessage = { ...message }
+    if (shouldClearStatus) delete nextMessage.status
+    if (shouldUpdateWorkId) nextMessage.work_id = event.work_id
+    return nextMessage
   })
 }
 

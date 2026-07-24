@@ -7,7 +7,7 @@ import {
   endContextSummaryWork,
   shouldIgnoreExternalSessionEvent,
   startContextSummaryWork
-} from '../src/composables/chat/contextSummaryTracker.mjs'
+} from '../src/composables/chat/contextSummaryTracker.js'
 
 test('keeps independent summary work active when another work ends', () => {
   const activeKeys = new Set()

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { clearThinkingRequestCallbacks, ensureActiveThinkingMessage, findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from '../src/composables/chat/thinkingTracker.mjs'
+import { clearThinkingRequestCallbacks, ensureActiveThinkingMessage, findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from '../src/composables/chat/thinkingTracker.js'
 
 test('creates an active Thinking message for the first request', () => {
   const messages = []

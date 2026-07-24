@@ -6,7 +6,7 @@ import {
   markInputsDequeued,
   startAgentLoop,
   stopAgentLoop
-} from '../src/composables/chat/workLifecycleTracker.mjs'
+} from '../src/composables/chat/workLifecycleTracker.js'
 
 const userMessage = requestId => ({
   id: `user_${requestId}`,
