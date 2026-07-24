@@ -8,7 +8,15 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.audit.confirmation import ConfirmationDecision, expire_confirmation_by_session, parse_confirmation_decision, update_confirmation_message_status, update_confirmation_tool_results_for_decision, update_confirmation_tool_results_for_invalid_input
+from app.core.audit.confirmation import (
+    ConfirmationDecision,
+    broadcast_pending_confirmation_cancellation,
+    cancel_persisted_pending_confirmation_bundle,
+    expire_confirmation_by_session,
+    parse_confirmation_decision,
+    update_confirmation_message_status,
+    update_confirmation_tool_results_for_decision,
+)
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
     ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
@@ -27,6 +35,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.audit import AuditRecordStatus
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
 from app.models.profile import Profile
@@ -251,35 +260,39 @@ class SessionReplyQueueManager:
                 is_processed=False,
             )
             db.add(message_row)
-            await db.flush()
-            invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
-            cancelled_count = await audit_crud.cancel_confirmation_by_session(
-                db,
-                uid=uid,
-                session_id=session_id,
-                error_reason=invalid_input_feedback,
-            )
-            if cancelled_count:
-                await update_confirmation_tool_results_for_invalid_input(
+            try:
+                await db.flush()
+                invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
+                cancellation = await cancel_persisted_pending_confirmation_bundle(
                     db,
                     audit_record_id=current_confirmation.id,
-                    before_message_id=message_row.id,
+                    uid=uid,
+                    session_id=session_id,
                     feedback=invalid_input_feedback,
+                    confirmation_status="invalid_input",
+                    commit=False,
                 )
-            await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
-            initial_message, work = await self._enqueue_foreground_message(
-                db,
-                uid=uid,
-                session_id=session_id,
-                profile=profile,
-                message=message,
-                attachments=attachments,
-                source=source,
-                stream_requested=stream_requested,
-                context_summary_events_requested=context_summary_events_requested,
-                persisted_message_row=message_row,
-                request_id=request_id,
-            )
+                initial_message, work = await self._enqueue_foreground_message(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    profile=profile,
+                    message=message,
+                    attachments=attachments,
+                    source=source,
+                    stream_requested=stream_requested,
+                    context_summary_events_requested=context_summary_events_requested,
+                    persisted_message_row=message_row,
+                    request_id=request_id,
+                    commit=False,
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            await db.refresh(message_row)
+            await db.refresh(work)
+            await broadcast_pending_confirmation_cancellation(db, cancellation=cancellation)
             submission_status = await self._resolve_submission_status(
                 db,
                 work,
@@ -432,6 +445,7 @@ class SessionReplyQueueManager:
         persisted_message_row: Message | None = None,
         audit_decision_response: bool = False,
         request_id: str | None = None,
+        commit: bool = True,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -486,9 +500,12 @@ class SessionReplyQueueManager:
         state["request_ids"] = merge_work_request_ids(work, request_id=request_id)
         work.execution_state = state
         db.add(work)
-        await db.commit()
-        await db.refresh(message_row)
-        await db.refresh(work)
+        if commit:
+            await db.commit()
+            await db.refresh(message_row)
+            await db.refresh(work)
+        else:
+            await db.flush()
         return (
             InternalMessage(
                 id=message_row.id,
@@ -660,12 +677,12 @@ class SessionReplyQueueManager:
         *,
         work_id: int,
         worker_id: str,
-    ) -> list[InternalMessage]:
+    ) -> UserInputBatch | None:
         work = await session_reply_work_item_crud.get(db, work_id)
         if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY:
-            return []
+            return None
         if bool((work.execution_state or {}).get("audit_decision_response")):
-            return []
+            return None
 
         contiguous = await session_reply_work_item_crud.list_contiguous_foreground(db, work=work)
         additional_work: list[SessionReplyWorkItem] = []
@@ -678,13 +695,13 @@ class SessionReplyQueueManager:
                 continue
             additional_work.append(item)
         if not additional_work:
-            return []
+            return None
 
-        source_message_ids = [int(item.source_id) for item in additional_work]
+        source_work_message_ids = [int(item.source_id) for item in additional_work]
         message_result = await db.execute(
             select(Message)
             .where(
-                Message.id.in_(source_message_ids),
+                Message.id.in_(source_work_message_ids),
                 Message.uid == work.uid,
                 Message.session_id == work.session_id,
                 Message.role == MessageRole.USER,
@@ -696,7 +713,7 @@ class SessionReplyQueueManager:
         messages = list(message_result.scalars().all())
         message_ids = [message.id for message in messages if message.id is not None]
         if not message_ids:
-            return []
+            return None
 
         await db.execute(update(Message).where(Message.id.in_(message_ids)).values(is_processed=True))
         merged_work_ids = [item.id for item in additional_work if item.id is not None]
@@ -730,14 +747,15 @@ class SessionReplyQueueManager:
         )
         if not updated:
             await db.rollback()
-            return []
+            return None
 
         await db.commit()
         work.input_message_ids = [*frozen_message_ids, *message_ids]
         work.execution_state = execution_state
         content, attachments, _ids = self._merge_messages(messages)
+        source_message_ids = tuple(dict.fromkeys(message_ids))
         combined_message = InternalMessage(
-            id=message_ids[-1],
+            id=source_message_ids[-1],
             role=MessageRole.USER,
             content=content or None,
             attachments=attachments or None,
@@ -755,7 +773,10 @@ class SessionReplyQueueManager:
             )
         )
         await append_user_runtime_instructions(db, work.session_id, combined_message)
-        return [combined_message]
+        return UserInputBatch(
+            messages=(combined_message,),
+            source_message_ids=source_message_ids,
+        )
 
     async def _load_frozen_input(self, db: AsyncSession, message_ids: list[int]) -> tuple[str, list[str], list[int]]:
         result = await db.execute(select(Message).where(Message.id.in_(message_ids)).order_by(Message.id))

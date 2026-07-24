@@ -1,15 +1,11 @@
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-)
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.message import (
-    message_crud,
-)
+from app.core.constants import ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED
+from app.core.crud.message import message_crud
+from app.core.i18n import t
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
-from app.models.message import (
-    InternalMessage,
-    MessageRole,
-)
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
+from app.models.message import InternalMessage, MessageRole
 
 
 async def fetch_and_merge_new_user_messages(
@@ -17,7 +13,7 @@ async def fetch_and_merge_new_user_messages(
     session_id: str,
     uid: str,
     max_tokens: int = 0,
-) -> list[InternalMessage]:
+) -> UserInputBatch | None:
     """
     检索并合并未处理的新产生用户消息
     """
@@ -28,13 +24,16 @@ async def fetch_and_merge_new_user_messages(
         if message.role == MessageRole.USER:
             user_messages.append(message)
     if not user_messages:
-        return []
+        return None
 
-    # 获取数据库记录的ID集合以便更新
-    message_ids = []
+    source_message_ids: list[int] = []
+    seen_message_ids: set[int] = set()
     for message in user_messages:
-        if message.id is not None:
-            message_ids.append(message.id)
+        if message.id is None:
+            raise ValueError(t(ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED))
+        if message.id not in seen_message_ids:
+            seen_message_ids.add(message.id)
+            source_message_ids.append(message.id)
 
     # 合并内容与附件
     merged_content = []
@@ -53,10 +52,13 @@ async def fetch_and_merge_new_user_messages(
 
     # 返回合并后的单条 InternalMessage
     combined_message = InternalMessage(
-        id=message_ids[-1] if message_ids else None,  # 使用最后一条的 ID
+        id=source_message_ids[-1],
         role=MessageRole.USER,
         content="\n".join(merged_content) if merged_content else None,
         attachments=list(dict.fromkeys(merged_attachments)) if merged_attachments else None,
     )
     await append_user_runtime_instructions(db, session_id, combined_message, max_tokens)
-    return [combined_message]
+    return UserInputBatch(
+        messages=(combined_message,),
+        source_message_ids=tuple(source_message_ids),
+    )

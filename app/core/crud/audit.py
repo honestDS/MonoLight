@@ -558,7 +558,8 @@ class CRUDAudit:
             conditions.extend([AuditRecord.expires_at.is_not(None), AuditRecord.expires_at <= now])
         result = await db.execute(update(AuditRecord).where(*conditions).values(**values).execution_options(synchronize_session=False))
         if (result.rowcount or 0) != 1:
-            await db.rollback()
+            if commit:
+                await db.rollback()
             return False
         await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))
         if commit:

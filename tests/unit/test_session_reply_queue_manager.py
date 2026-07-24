@@ -166,6 +166,9 @@ async def test_running_foreground_work_absorbs_later_contiguous_messages(db_sess
     assert len(additional_messages) == 1
     assert additional_messages[0].content == "second\nthird"
     assert additional_messages[0].id == 3
+    assert additional_messages.source_message_ids == (2, 3)
+    assert additional_messages.summary_boundary_message_id == 2
+    assert additional_messages.latest_message_id == 3
     assert len(logged_messages) == 1
     assert "second\nthird" in logged_messages[0]
     await db_session.refresh(first)

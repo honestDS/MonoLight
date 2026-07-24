@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import (
     InternalMessage,
@@ -10,7 +12,7 @@ from app.models.profile import (
 def append_new_user_messages(
     cfg: ProfileConfig,
     messages: list[InternalMessage],
-    new_user_msgs: list[InternalMessage],
+    new_user_msgs: Sequence[InternalMessage],
     image_understanding: bool = False,
     audio_understanding: bool = False,
     video_understanding: bool = False,

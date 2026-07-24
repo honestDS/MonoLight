@@ -315,3 +315,43 @@ async def test_checkpoint_uses_fixed_upper_and_preserves_messages_after_new_summ
     ]
     assert "新累计总结" in result[1].content
     assert result[-1].id == 4
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_physical_message(
+    monkeypatch,
+):
+    captured = {}
+
+    async def ensure_summary(_db, **kwargs):
+        captured.update(kwargs)
+        return ContextSummaryState(content="旧总结", message_id=2)
+
+    monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    merged_content = "追加A\n追加B"
+    result = await checkpoint_module.apply_context_summary_checkpoint(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=object(),
+        cfg=object(),
+        messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="系统提示"),
+            InternalMessage(id=1, role=MessageRole.USER, content="旧请求"),
+            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="旧回复"),
+            InternalMessage(id=4, role=MessageRole.USER, content=merged_content),
+        ],
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=3,
+        context_window_k=8,
+        max_tokens=512,
+        tools=None,
+    )
+
+    assert captured["fixed_upper_message_id"] == 3
+    assert [message.content for message in captured["fixed_request_messages"]] == ["系统提示", merged_content]
+    assert [message.id for message in captured["fixed_request_messages"]] == [None, 4]
+    assert [message.id for message in result] == [None, None, 4]
+    assert "旧总结" in result[1].content
+    assert result[-1].content == merged_content
+    assert all(message.content != "追加A" for message in result)

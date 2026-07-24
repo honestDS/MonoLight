@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel, select
 from starlette.websockets import WebSocketDisconnect
 
+import app.core.session_reply_queue.manager as session_reply_queue_manager_module
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawMessage
 from app.api.v1 import chat as chat_api
+from app.core.audit import confirmation
 from app.core.audit.confirmation import (
     get_pending_tool_results,
     persist_pending_confirmation_bundle,
@@ -548,6 +550,90 @@ async def test_superseding_persisted_pending_bundle_cancels_structured_results(d
 
 
 @pytest.mark.asyncio
+async def test_new_tool_call_cancellation_invalidates_summary_and_versions_pending_results(db_session: AsyncSession):
+    source_message = Message(
+        session_id="session-new-tool-call",
+        uid="owner",
+        profile_id=1,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=InternalMessage(
+            role=MessageRole.ASSISTANT,
+            tool_calls=[InternalToolCall(id="call-new-tool", name="safe_tool", arguments={})],
+        ).model_dump_json(exclude_none=True),
+        is_processed=True,
+    )
+    db_session.add(source_message)
+    await db_session.flush()
+    record = AuditRecord(
+        uid="owner",
+        operator_username="operator",
+        session_id="session-new-tool-call",
+        source="http",
+        language="en",
+        status=AuditRecordStatus.PENDING,
+        source_assistant_message_id=source_message.id,
+        working_directory=".",
+        round_arguments_hash="new-tool-call-round",
+        tool_count=1,
+        expires_at=get_local_time() + timedelta(hours=1),
+    )
+    session = ChatSession(session_id="session-new-tool-call", uid="owner", profile_id=1)
+    db_session.add_all([record, session])
+    await db_session.commit()
+
+    stored_results, _card = await persist_pending_confirmation_bundle(
+        db_session,
+        audit_record_id=record.id,
+        uid="owner",
+        session_id="session-new-tool-call",
+        profile_id=1,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-new-tool",
+                content=json.dumps({"status": AuditRecordStatus.PENDING.value}),
+            )
+        ],
+        confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
+        dedupe_key=None,
+    )
+    assert stored_results[0].id is not None
+
+    session.context_summary = "包含待确认操作的旧总结"
+    session.context_summary_message_id = stored_results[0].id
+    session.context_summary_revision = 5
+    session.context_content_revision = 11
+    db_session.add(session)
+    await db_session.commit()
+
+    cancelled = await confirmation.cancel_confirmation_by_session(
+        db_session,
+        uid="owner",
+        session_id="session-new-tool-call",
+        locale="en",
+    )
+
+    await db_session.refresh(record)
+    await db_session.refresh(session)
+    tool_result_payload = await get_tool_result_payload(db_session, "session-new-tool-call")
+    versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id).order_by(AuditToolResultVersion.version_no))).scalars().all())
+
+    assert cancelled == 1
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert tool_result_payload["status"] == AuditRecordStatus.CANCELLED.value
+    assert tool_result_payload["confirmation_status"] == "superseded"
+    assert tool_result_payload["error"] == t(MSG_AUDIT_CONFIRMATION_SUPERSEDED, locale="en")
+    assert [json.loads(InternalMessage.model_validate_json(version.content).content)["status"] for version in versions] == [
+        AuditRecordStatus.PENDING.value,
+        AuditRecordStatus.CANCELLED.value,
+    ]
+    assert session.context_summary is None
+    assert session.context_summary_message_id is None
+    assert session.context_content_revision == 12
+
+
+@pytest.mark.asyncio
 async def test_pending_confirmation_bundle_rolls_back_all_rows_when_activation_fails(db_session: AsyncSession, monkeypatch):
     source_message = Message(
         session_id="session-failure",
@@ -676,6 +762,99 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
         assert tool_result_payload["confirmation_status"] == "invalid_input"
         assert "用户未正确输入安全审计确认关键词" in tool_result_payload["error"]
         assert "安全审计已阻止本轮工具调用" not in tool_result_payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_confirmation_input_rolls_back_bundle_when_work_enqueue_fails(db_session: AsyncSession, monkeypatch):
+    record = await add_pending_confirmation(db_session)
+    events: list[dict] = []
+
+    async def no_expiration(*_args, **_kwargs):
+        return 0
+
+    async def send_event(_uid, _session_id, event):
+        events.append(event)
+
+    async def fail_enqueue(*_args, **_kwargs):
+        raise RuntimeError("injected work enqueue failure")
+
+    monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(session_reply_queue_manager, "_enqueue_foreground_message", fail_enqueue)
+    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+
+    with pytest.raises(RuntimeError, match="injected work enqueue failure"):
+        await session_reply_queue_manager.submit_user_message(
+            db_session,
+            uid="owner",
+            session_id="session-1",
+            profile=Profile(id=1, uid="owner", name="test", configs={}),
+            message="继续做别的事",
+            attachments=None,
+            source="http",
+        )
+
+    await db_session.refresh(record)
+    claims = list((await db_session.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == record.id))).scalars().all())
+    text_messages = list((await db_session.execute(select(Message).where(Message.session_id == "session-1", Message.type == MessageType.TEXT))).scalars().all())
+
+    assert record.status == AuditRecordStatus.PENDING
+    assert claims
+    assert text_messages == []
+    assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.PENDING.value
+    assert (await get_tool_result_payload(db_session))["status"] == AuditRecordStatus.PENDING.value
+    assert await list_work(db_session) == []
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_confirmation_input_commits_bundle_before_broadcast(db_session: AsyncSession, monkeypatch):
+    record = await add_pending_confirmation(db_session)
+    events: list[dict] = []
+    commit_count = 0
+    original_commit = db_session.commit
+    original_broadcast = session_reply_queue_manager_module.broadcast_pending_confirmation_cancellation
+
+    async def no_expiration(*_args, **_kwargs):
+        return 0
+
+    async def counted_commit():
+        nonlocal commit_count
+        commit_count += 1
+        await original_commit()
+
+    async def send_event(_uid, _session_id, event):
+        events.append(event)
+
+    async def broadcast_after_commit(db, *, cancellation):
+        assert commit_count == 1
+        await original_broadcast(db, cancellation=cancellation)
+
+    monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
+    monkeypatch.setattr(db_session, "commit", counted_commit)
+    monkeypatch.setattr(session_reply_queue_manager_module, "broadcast_pending_confirmation_cancellation", broadcast_after_commit)
+    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+
+    initial_message, work, status = await session_reply_queue_manager.submit_user_message(
+        db_session,
+        uid="owner",
+        session_id="session-1",
+        profile=Profile(id=1, uid="owner", name="test", configs={}),
+        message="继续做别的事",
+        attachments=None,
+        source="http",
+    )
+
+    await db_session.refresh(record)
+    works = await list_work(db_session)
+
+    assert commit_count == 1
+    assert status == "cancelled"
+    assert initial_message.id is not None
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.CANCELLED.value
+    assert (await get_tool_result_payload(db_session))["status"] == AuditRecordStatus.CANCELLED.value
+    assert [item.id for item in works] == [work.id]
+    assert [event["type"] for event in events] == ["audit_confirmation_status", "audit_tool_results_update"]
 
 
 @pytest.mark.asyncio

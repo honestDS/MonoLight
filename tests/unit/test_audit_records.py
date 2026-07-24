@@ -8,7 +8,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.audit.confirmation import ConfirmationDecision, cancel_confirmation_by_session, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
+from app.core.audit.confirmation import ConfirmationDecision, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, summarize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
@@ -428,11 +428,49 @@ async def test_session_cancellation_removes_only_current_claim(audit_database, t
             context_file_path=str(context_file),
             expires_at=get_local_time() + timedelta(minutes=10),
         )
-        assert await cancel_confirmation_by_session(session, uid="u1", session_id="session-1", locale="en") == 1
+        assert (
+            await audit_crud.cancel_confirmation_by_session(
+                session,
+                uid="u1",
+                session_id="session-1",
+                error_reason="The pending audit was superseded by a new tool call",
+            )
+            == 1
+        )
         stored = await audit_crud.get_record(session, record.id)
         assert stored.status == AuditRecordStatus.CANCELLED
         assert stored.error_reason == "The pending audit was superseded by a new tool call"
         assert await audit_crud.get_current_confirmation(session, uid="u1", session_id="session-1") is None
+
+
+@pytest.mark.asyncio
+async def test_close_pending_without_commit_keeps_outer_writes_on_condition_failure(audit_database, tmp_path):
+    async with audit_database() as session:
+        record, _snapshot = await _create_preparing(session, tmp_path, tool_count=1)
+        marker = Message(
+            uid="u1",
+            session_id="session-1",
+            profile_id=1,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="outer transaction marker",
+            is_processed=False,
+        )
+        session.add(marker)
+        await session.flush()
+
+        assert not await audit_crud.close_pending(
+            session,
+            audit_record_id=record.id,
+            uid="u1",
+            session_id="session-1",
+            status=AuditRecordStatus.CANCELLED,
+            commit=False,
+        )
+        await session.commit()
+
+        assert marker.id is not None
+        assert await session.get(Message, marker.id) is not None
 
 
 @pytest.mark.asyncio

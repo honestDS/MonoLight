@@ -185,7 +185,7 @@ class BackgroundDispatcherMixin:
                 )
             if extra_messages:
                 messages.extend(message.model_copy(deep=True) for message in extra_messages)
-            if initial_trigger_mode is not None and initial_fixed_upper_message_id is not None:
+            if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -193,7 +193,7 @@ class BackgroundDispatcherMixin:
                     profile=profile,
                     cfg=cfg,
                     messages=messages,
-                    trigger_mode=initial_trigger_mode,
+                    trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
                     fixed_upper_message_id=initial_fixed_upper_message_id,
                     context_window_k=chat_params["context_window_k"],
                     max_tokens=chat_params["max_tokens"],
@@ -512,7 +512,6 @@ class BackgroundDispatcherMixin:
                 await audit_execution_binding_callback(None)
 
         files_to_user = extract_files_to_user(tool_responses)
-        persisted_tool_result_ids: list[int] = []
         confirmation_message = None
         if audit_round is not None and audit_round.confirmation_payload is not None:
             stored_tool_responses, confirmation_message = await persist_pending_confirmation_bundle(
@@ -527,14 +526,9 @@ class BackgroundDispatcherMixin:
             )
             messages.extend(stored_tool_responses)
             turn_messages.extend(stored_tool_responses)
-            for stored_tool_response in stored_tool_responses:
-                if stored_tool_response.id is not None:
-                    persisted_tool_result_ids.append(stored_tool_response.id)
         else:
             for tool_response in tool_responses:
-                stored_tool_response = await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
-                if stored_tool_response is not None and stored_tool_response.id is not None:
-                    persisted_tool_result_ids.append(stored_tool_response.id)
+                await save_tool_response(db, session_id, uid, profile.id, tool_response, messages, turn_messages)
 
         if audit_round is not None and audit_round.confirmation_payload is not None:
             confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
@@ -546,7 +540,7 @@ class BackgroundDispatcherMixin:
 
         async def build_final_request(final_chat_params):
             nonlocal messages
-            if persisted_tool_result_ids:
+            if initial_trigger_mode == ContextSummaryTriggerMode.USER_MESSAGE and isinstance(initial_fixed_upper_message_id, int) and not isinstance(initial_fixed_upper_message_id, bool) and initial_fixed_upper_message_id > 0:
                 messages = await apply_context_summary_checkpoint(
                     db,
                     session_id=session_id,
@@ -554,8 +548,8 @@ class BackgroundDispatcherMixin:
                     profile=profile,
                     cfg=cfg,
                     messages=messages,
-                    trigger_mode=ContextSummaryTriggerMode.TOOL_RESULT,
-                    fixed_upper_message_id=max(persisted_tool_result_ids),
+                    trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+                    fixed_upper_message_id=initial_fixed_upper_message_id,
                     context_window_k=final_chat_params["context_window_k"],
                     max_tokens=final_chat_params["max_tokens"],
                     tools=None,

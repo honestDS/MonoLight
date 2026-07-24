@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
+    ERR_VALUE_MUST_BE_POSITIVE,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
 from app.core.crud.audit import audit_crud
@@ -20,6 +21,7 @@ from app.core.utils.dispatcher.markdown_instruction import (
     append_environment_prompt_instruction,
     build_max_output_tokens_instruction,
 )
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage
 
 
@@ -39,27 +41,53 @@ class _AdditionalUserMessagesContext:
     session_id: str
     uid: str
     queue_managed: bool
-    fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None
+    fetcher: Callable[[], Awaitable[UserInputBatch | list[InternalMessage] | None]] | None
+
+
+def _normalize_additional_user_messages(
+    user_messages: UserInputBatch | list[InternalMessage] | None,
+) -> UserInputBatch | None:
+    if isinstance(user_messages, UserInputBatch):
+        return user_messages
+    if not user_messages:
+        return None
+
+    source_message_ids: list[int] = []
+    seen_message_ids: set[int] = set()
+    for message in user_messages:
+        message_id = message.id
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+            raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="message_id"))
+        if message_id not in seen_message_ids:
+            seen_message_ids.add(message_id)
+            source_message_ids.append(message_id)
+    return UserInputBatch(
+        messages=tuple(user_messages),
+        source_message_ids=tuple(source_message_ids),
+    )
 
 
 async def _fetch_additional_user_messages(
     context: _AdditionalUserMessagesContext,
     max_tokens: int,
-) -> list[InternalMessage]:
+) -> UserInputBatch | None:
     if context.fetcher is not None:
-        new_messages = await context.fetcher()
+        new_user_batch = await context.fetcher()
     elif context.queue_managed:
-        return []
+        return None
     else:
-        new_messages = await fetch_and_merge_new_user_messages(
+        new_user_batch = await fetch_and_merge_new_user_messages(
             context.db,
             context.session_id,
             context.uid,
         )
+    new_user_batch = _normalize_additional_user_messages(new_user_batch)
+    if new_user_batch is None:
+        return None
     max_tokens_instruction = build_max_output_tokens_instruction(max_tokens)
-    for new_message in new_messages:
+    for new_message in new_user_batch.messages:
         append_environment_prompt_instruction(new_message, max_tokens_instruction)
-    return new_messages
+    return new_user_batch
 
 
 @dataclass
@@ -67,7 +95,6 @@ class _ExecutionCheckpointState:
     callback: Callable[[dict[str, Any]], Awaitable[None]] | None
     turn_messages: list[InternalMessage]
     files_to_user: list[str]
-    mode: ContextSummaryTriggerMode
     upper_message_id: int | None
 
 
@@ -86,7 +113,7 @@ async def _save_execution_checkpoint(
         "turn_messages": [item.model_dump(mode="json") for item in state.turn_messages],
         "files_to_user": state.files_to_user,
         "current_turn": current_turn,
-        "context_summary_trigger_mode": state.mode.value,
+        "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
         "context_summary_fixed_upper_message_id": state.upper_message_id,
     }
     if update_active_audit_execution:
@@ -163,6 +190,7 @@ class _ParallelToolExecutionContext:
     uid: str
     allowed_knowledge_base_ids: list[int]
     context_window_k: int
+    context_summary_boundary_message_id: int | None
 
 
 async def _execute_isolated_tool_call(
@@ -182,6 +210,7 @@ async def _execute_isolated_tool_call(
                 context.uid,
                 allowed_knowledge_base_ids=context.allowed_knowledge_base_ids,
                 context_window_k=context.context_window_k,
+                context_summary_boundary_message_id=context.context_summary_boundary_message_id,
             )
         )
         if context.active_tasks is not None:

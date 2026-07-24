@@ -54,6 +54,7 @@ from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round, process_single_tool
 from app.core.utils.dispatcher.save_message import save_message
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
@@ -213,7 +214,7 @@ async def _fetch_additional_foreground_user_messages(
     *,
     work: SessionReplyWorkItem,
     worker_id: str,
-) -> list[InternalMessage]:
+) -> UserInputBatch | None:
     return await session_reply_queue_manager.absorb_contiguous_foreground_messages(
         db,
         work_id=work.id,
@@ -966,7 +967,7 @@ def _load_background_submission_context(task: BackgroundTask) -> list[InternalMe
     return [InternalMessage.model_validate(message) for message in raw_context if isinstance(message, dict)]
 
 
-def _last_frozen_user_message_id(messages: list[InternalMessage] | None) -> int | None:
+def _fallback_last_frozen_user_message_id(messages: list[InternalMessage] | None) -> int | None:
     if not messages:
         return None
     return max(
@@ -1019,6 +1020,9 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         raise RuntimeError(t(ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE))
 
     submission_context = _load_background_submission_context(task)
+    extra = task.extra if isinstance(task.extra, dict) else {}
+    stored_boundary_message_id = extra.get("context_summary_user_boundary_message_id")
+    initial_fixed_upper_message_id = stored_boundary_message_id if (isinstance(stored_boundary_message_id, int) and not isinstance(stored_boundary_message_id, bool) and stored_boundary_message_id > 0) else _fallback_last_frozen_user_message_id(submission_context)
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
         uid=work.uid,
@@ -1029,7 +1033,7 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         extra_messages=_build_background_result_messages(task) if submission_context is not None else None,
         submission_context=submission_context,
         initial_trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
-        initial_fixed_upper_message_id=_last_frozen_user_message_id(submission_context),
+        initial_fixed_upper_message_id=initial_fixed_upper_message_id,
         reply_source="background_task",
         final_message_dedupe_key=_result_message_dedupe_key(work),
         audit_execution_binding_callback=partial(

@@ -61,6 +61,7 @@ class BackgroundTaskManager:
         allowed_knowledge_base_ids: list[int] | None = None,
         source: str = "llm_tool_call",
         messages: list[InternalMessage] | None = None,
+        context_summary_boundary_message_id: int | None = None,
     ) -> BackgroundTask:
         audit_record_id = None
         audit_execution_record_id = None
@@ -69,6 +70,8 @@ class BackgroundTaskManager:
             "source": source,
             "submission_context": _build_submission_context(messages or [], tool_call_id),
         }
+        if isinstance(context_summary_boundary_message_id, int) and not isinstance(context_summary_boundary_message_id, bool) and context_summary_boundary_message_id > 0:
+            extra_payload["context_summary_user_boundary_message_id"] = context_summary_boundary_message_id
         if hasattr(db, "execute"):
             binding = await audit_crud.get_execution_binding_for_tool_call(db, new_tool_call_id=tool_call_id)
             if binding is not None:

@@ -10,6 +10,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage
 
 logger = get_logger(__name__)
@@ -114,7 +115,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
         persisted_profile_id: int | None = None,
         context_summary_lifecycle_callback: Callable[[dict[str, object]], Awaitable[None]] | None = None,
         context_summary_events_requested: bool = False,
-        additional_user_messages_fetcher: Callable[[], Awaitable[list[InternalMessage]]] | None = None,
+        additional_user_messages_fetcher: Callable[[], Awaitable[UserInputBatch | list[InternalMessage] | None]] | None = None,
         execution_resume_state: dict[str, Any] | None = None,
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -24,6 +25,7 @@ from app.core.constants import (
 from app.core.crud.audit import audit_crud
 from app.core.crud.audit_tool_result_version import audit_tool_result_version_crud
 from app.core.crud.message import message_crud
+from app.core.crud.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event
@@ -52,6 +54,26 @@ _STATUS_TEXT_KEYS = {
 }
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ConfirmationStatusUpdate:
+    record: Any
+    message_id: int
+    status: str
+    content: str
+
+
+@dataclass(frozen=True)
+class ConfirmationMessageProjection:
+    record: Any
+    status_update: ConfirmationStatusUpdate | None
+
+
+@dataclass(frozen=True)
+class PendingConfirmationCancellation:
+    tool_results: list[InternalMessage]
+    status_update: ConfirmationStatusUpdate | None
 
 
 async def persist_pending_confirmation_bundle(
@@ -408,6 +430,12 @@ async def replace_pending_tool_result(
         )
         if not updated:
             raise RuntimeError(t(ERR_AUDIT_EXECUTION_CLAIM_FAILED))
+        await session_crud.bump_context_content_revision(
+            db,
+            session_id=pending_message.session_id,
+            uid=pending_message.uid,
+            commit=False,
+        )
     await db.refresh(pending_message)
     return sanitized_content
 
@@ -505,7 +533,123 @@ async def _update_confirmation_tool_results(
         ):
             await db.refresh(message)
             updated_count += 1
+    if not structured and updated_count:
+        await session_crud.bump_context_content_revision(
+            db,
+            session_id=record.session_id,
+            uid=record.uid,
+            commit=False,
+        )
     return updated_count
+
+
+async def _get_cancelled_structured_tool_results(
+    db: AsyncSession,
+    *,
+    record,
+) -> list[InternalMessage]:
+    if record.id is None:
+        raise LookupError(record.id)
+    stored_messages = await _get_structured_tool_result_messages(
+        db,
+        uid=record.uid,
+        session_id=record.session_id,
+        audit_record_id=record.id,
+    )
+    if not stored_messages:
+        return []
+    if len(stored_messages) != record.tool_count:
+        raise LookupError(record.id)
+
+    tool_results: list[InternalMessage] = []
+    tool_call_ids: set[str] = set()
+    for stored_message in stored_messages:
+        tool_result = InternalMessage.model_validate_json(stored_message.content or "{}")
+        if tool_result.role != MessageRole.TOOL:
+            raise ValueError(record.id)
+        if not isinstance(tool_result.tool_call_id, str) or not tool_result.tool_call_id or tool_result.tool_call_id != stored_message.audit_tool_call_id or tool_result.tool_call_id in tool_call_ids:
+            raise ValueError(record.id)
+        if not isinstance(tool_result.content, str):
+            raise ValueError(record.id)
+        try:
+            result_payload = json.loads(tool_result.content)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(record.id) from exc
+        if not isinstance(result_payload, dict) or result_payload.get("status") != AuditRecordStatus.CANCELLED.value:
+            raise ValueError(record.id)
+
+        tool_call_ids.add(tool_result.tool_call_id)
+        tool_result.id = stored_message.id
+        tool_result.created_at = stored_message.created_at
+        tool_results.append(tool_result)
+    return tool_results
+
+
+async def cancel_persisted_pending_confirmation_bundle(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    uid: str,
+    session_id: str,
+    feedback: str,
+    confirmation_status: str,
+    commit: bool = True,
+) -> PendingConfirmationCancellation:
+    """原子取消已持久化的待确认审计，并同步工具结果和确认卡片。
+
+    ``commit=False`` 时由调用方提交整个外层事务，并在成功后调用
+    ``broadcast_pending_confirmation_cancellation``。
+    """
+    try:
+        record = await audit_crud.get_record(db, audit_record_id)
+        if record is None or record.uid != uid or record.session_id != session_id:
+            raise LookupError(audit_record_id)
+
+        closed = False
+        if record.status == AuditRecordStatus.PENDING:
+            closed = await audit_crud.close_pending(
+                db,
+                audit_record_id=audit_record_id,
+                uid=uid,
+                session_id=session_id,
+                status=AuditRecordStatus.CANCELLED,
+                error_reason=feedback,
+                commit=False,
+            )
+            if closed:
+                await _update_confirmation_tool_results(
+                    db,
+                    audit_record_id=audit_record_id,
+                    before_message_id=None,
+                    status=AuditRecordStatus.CANCELLED,
+                    confirmation_status=confirmation_status,
+                    feedback=feedback,
+                )
+            record = await audit_crud.get_record(db, audit_record_id)
+
+        if record is None or record.uid != uid or record.session_id != session_id or record.status != AuditRecordStatus.CANCELLED:
+            raise LookupError(audit_record_id)
+        tool_results = await _get_cancelled_structured_tool_results(db, record=record)
+        projection = await _sync_confirmation_message_status_projection(
+            db,
+            audit_record_id=audit_record_id,
+            commit=False,
+        )
+        if projection is None:
+            raise LookupError(audit_record_id)
+        cancellation = PendingConfirmationCancellation(
+            tool_results=tool_results,
+            status_update=projection.status_update,
+        )
+        if commit:
+            await db.commit()
+    except Exception:
+        if commit:
+            await db.rollback()
+        raise
+    if commit:
+        await broadcast_pending_confirmation_cancellation(db, cancellation=cancellation)
+    return cancellation
 
 
 async def supersede_persisted_pending_confirmation_bundle(
@@ -515,92 +659,18 @@ async def supersede_persisted_pending_confirmation_bundle(
     uid: str,
     session_id: str,
 ) -> list[InternalMessage]:
-    """将已持久化但尚未处理的确认结果取消，并返回当前结构化投影。"""
-    try:
-        record = await audit_crud.get_record(db, audit_record_id)
-        if record is None or record.uid != uid or record.session_id != session_id:
-            raise LookupError(audit_record_id)
-
-        if record.status == AuditRecordStatus.PENDING:
-            cancellation_reason = t(MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE, locale=record.language)
-            closed = await audit_crud.close_pending(
-                db,
-                audit_record_id=audit_record_id,
-                uid=uid,
-                session_id=session_id,
-                status=AuditRecordStatus.CANCELLED,
-                error_reason=cancellation_reason,
-                commit=False,
-            )
-            if closed:
-                await _update_confirmation_tool_results(
-                    db,
-                    audit_record_id=audit_record_id,
-                    before_message_id=None,
-                    status=AuditRecordStatus.CANCELLED,
-                    confirmation_status="superseded",
-                    feedback=cancellation_reason,
-                )
-                await db.commit()
-                record = await audit_crud.get_record(db, audit_record_id)
-            else:
-                # close_pending 在条件竞争失败时回滚，重新读取最终状态。
-                record = await audit_crud.get_record(db, audit_record_id)
-
-        if record is None or record.uid != uid or record.session_id != session_id or record.status != AuditRecordStatus.CANCELLED:
-            raise LookupError(audit_record_id)
-
-        stored_messages = await _get_structured_tool_result_messages(
-            db,
-            uid=uid,
-            session_id=session_id,
-            audit_record_id=audit_record_id,
-        )
-        if len(stored_messages) != record.tool_count:
-            raise LookupError(audit_record_id)
-
-        tool_results: list[InternalMessage] = []
-        tool_call_ids: set[str] = set()
-        for stored_message in stored_messages:
-            tool_result = InternalMessage.model_validate_json(stored_message.content or "{}")
-            if tool_result.role != MessageRole.TOOL:
-                raise ValueError(audit_record_id)
-            if not isinstance(tool_result.tool_call_id, str) or not tool_result.tool_call_id or tool_result.tool_call_id != stored_message.audit_tool_call_id or tool_result.tool_call_id in tool_call_ids:
-                raise ValueError(audit_record_id)
-            if not isinstance(tool_result.content, str):
-                raise ValueError(audit_record_id)
-            try:
-                result_payload = json.loads(tool_result.content)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(audit_record_id) from exc
-            if not isinstance(result_payload, dict) or result_payload.get("status") != AuditRecordStatus.CANCELLED.value:
-                raise ValueError(audit_record_id)
-
-            tool_call_ids.add(tool_result.tool_call_id)
-            tool_result.id = stored_message.id
-            tool_result.created_at = stored_message.created_at
-            tool_results.append(tool_result)
-        return tool_results
-    except Exception:
-        await db.rollback()
-        raise
-
-
-async def update_confirmation_tool_results_for_invalid_input(
-    db: AsyncSession,
-    *,
-    audit_record_id: int,
-    before_message_id: int,
-    feedback: str,
-) -> int:
-    return await _update_confirmation_tool_results(
+    record = await audit_crud.get_record(db, audit_record_id)
+    if record is None or record.uid != uid or record.session_id != session_id:
+        raise LookupError(audit_record_id)
+    cancellation = await cancel_persisted_pending_confirmation_bundle(
         db,
         audit_record_id=audit_record_id,
-        before_message_id=before_message_id,
-        status=AuditRecordStatus.CANCELLED,
-        confirmation_status="invalid_input",
-        feedback=feedback,
+        uid=uid,
+        session_id=session_id,
+        feedback=t(MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE, locale=record.language),
+        confirmation_status="superseded",
     )
+    return cancellation.tool_results
 
 
 async def update_confirmation_tool_results_for_decision(
@@ -706,7 +776,7 @@ def _confirmation_status_value(record) -> str:
 async def _send_confirmation_status_event(
     record,
     *,
-    message: Message | None,
+    message_id: int | None,
     status: str,
     content: str | None,
     event_id: str,
@@ -717,7 +787,7 @@ async def _send_confirmation_status_event(
         "event_id": event_id,
         "session_id": record.session_id,
         "audit_record_id": record.id,
-        "message_id": message.id if message is not None else None,
+        "message_id": message_id,
         "status": status,
         "content": content,
     }
@@ -764,23 +834,40 @@ async def notify_confirmation_tool_results(db: AsyncSession, *, audit_record_id:
     return True
 
 
-async def update_confirmation_message_status(
+async def _broadcast_confirmation_status_update(
+    db: AsyncSession,
+    *,
+    status_update: ConfirmationStatusUpdate,
+) -> None:
+    await _send_confirmation_status_event(
+        status_update.record,
+        message_id=status_update.message_id,
+        status=status_update.status,
+        content=status_update.content,
+        event_id=f"audit-confirmation:{status_update.record.id}:{status_update.status}",
+    )
+    tool_results = await _get_confirmation_tool_result_events(db, status_update.record)
+    await _send_confirmation_tool_results_event(status_update.record, tool_results)
+
+
+async def _sync_confirmation_message_status_projection(
     db: AsyncSession,
     *,
     audit_record_id: int,
-) -> bool:
+    commit: bool,
+) -> ConfirmationMessageProjection | None:
     for _ in range(3):
         record = await audit_crud.get_record(db, audit_record_id)
         if record is None or record.id is None:
-            return False
+            return None
         status = record.status.value if isinstance(record.status, AuditRecordStatus) else str(record.status)
         if status == AuditRecordStatus.PREPARING.value:
-            return False
+            return None
         message, payload = await _get_confirmation_message(db, record)
         if message is None or message.id is None or payload is None:
-            return False
+            return None
         if str(payload.get("status") or "") == status:
-            return False
+            return ConfirmationMessageProjection(record=record, status_update=None)
 
         payload["status"] = status
         status_key = _STATUS_TEXT_KEYS.get(status)
@@ -797,22 +884,53 @@ async def update_confirmation_message_status(
             message_id=message.id,
             expected_content=message.content,
             content=serialized_payload,
+            commit=False,
         )
         if not updated:
-            await db.rollback()
             continue
 
-        tool_results = await _get_confirmation_tool_result_events(db, record)
-        await _send_confirmation_status_event(
-            record,
-            message=message,
-            status=status,
-            content=serialized_payload,
-            event_id=f"audit-confirmation:{record.id}:{status}",
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return ConfirmationMessageProjection(
+            record=record,
+            status_update=ConfirmationStatusUpdate(
+                record=record,
+                message_id=message.id,
+                status=status,
+                content=serialized_payload,
+            ),
         )
-        await _send_confirmation_tool_results_event(record, tool_results)
-        return True
-    return False
+    return None
+
+
+async def update_confirmation_message_status(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    commit: bool = True,
+) -> bool:
+    projection = await _sync_confirmation_message_status_projection(
+        db,
+        audit_record_id=audit_record_id,
+        commit=commit,
+    )
+    if projection is None or projection.status_update is None:
+        return False
+    if commit:
+        await _broadcast_confirmation_status_update(db, status_update=projection.status_update)
+    return True
+
+
+async def broadcast_pending_confirmation_cancellation(
+    db: AsyncSession,
+    *,
+    cancellation: PendingConfirmationCancellation,
+) -> None:
+    """广播已提交的取消投影。"""
+    if cancellation.status_update is not None:
+        await _broadcast_confirmation_status_update(db, status_update=cancellation.status_update)
 
 
 async def sync_expired_confirmation_messages(
@@ -848,12 +966,14 @@ async def expire_confirmation_by_session(db: AsyncSession, *, uid: str, session_
 
 async def cancel_confirmation_by_session(db: AsyncSession, *, uid: str, session_id: str, locale: str | None = None) -> int:
     record = await audit_crud.get_confirmation_claim(db, uid=uid, session_id=session_id)
-    cancelled_count = await audit_crud.cancel_confirmation_by_session(
+    if record is None or record.id is None:
+        return 0
+    await cancel_persisted_pending_confirmation_bundle(
         db,
+        audit_record_id=record.id,
         uid=uid,
         session_id=session_id,
-        error_reason=t(MSG_AUDIT_CONFIRMATION_SUPERSEDED, locale=locale),
+        feedback=t(MSG_AUDIT_CONFIRMATION_SUPERSEDED, locale=locale),
+        confirmation_status="superseded",
     )
-    if cancelled_count and record is not None and record.id is not None:
-        await update_confirmation_message_status(db, audit_record_id=record.id)
-    return cancelled_count
+    return 1

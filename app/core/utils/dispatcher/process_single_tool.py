@@ -258,6 +258,8 @@ async def process_single_tool(
     active_tasks: set[asyncio.Task] | None = None,
     context_window_k: int = 4,
     allow_background_submission: bool = True,
+    *,
+    context_summary_boundary_message_id: int | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -294,6 +296,7 @@ async def process_single_tool(
             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
             source="llm_tool_call",
             messages=messages,
+            context_summary_boundary_message_id=context_summary_boundary_message_id,
         )
         cmd_result = _build_background_task_queued_result(tool_name, task.id)
 
