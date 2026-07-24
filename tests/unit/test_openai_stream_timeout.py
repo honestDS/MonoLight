@@ -162,6 +162,30 @@ async def test_stream_timeout_after_first_content_preserves_first_chunk(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_stream_parses_chinese_character_split_across_raw_byte_chunks(monkeypatch):
+    payload = {"choices": [{"delta": {"content": "中"}}]}
+    sse_chunk = f"data: {json.dumps(payload, ensure_ascii=False)}\n".encode()
+    character = "中".encode()
+    split_at = sse_chunk.index(character)
+    response_context = _FakeResponseContext(
+        _FakeResponse(
+            [
+                (0, sse_chunk[: split_at + 1]),
+                (0, sse_chunk[split_at + 1 : split_at + 2]),
+                (0, sse_chunk[split_at + 2 :]),
+                (0, b"data: [DONE]\n"),
+            ]
+        )
+    )
+    _patch_http(monkeypatch, response_context)
+
+    chunks = await _collect_stream(openai_module.OpenAITransformer())
+
+    assert chunks == [payload]
+    assert response_context.exited is True
+
+
+@pytest.mark.asyncio
 async def test_stream_timeout_while_waiting_for_response_headers(monkeypatch):
     response_context = _FakeResponseContext(_FakeResponse([]), header_delay=0.12)
     _patch_http(monkeypatch, response_context)

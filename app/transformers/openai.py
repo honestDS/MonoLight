@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import json
 import socket
 from collections.abc import AsyncGenerator
@@ -267,6 +268,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
 
                     buffer = ""
                     chunk_iter = resp.content.iter_any().__aiter__()
+                    decoder = codecs.getincrementaldecoder("utf-8")()
                     while True:
                         try:
                             line = await asyncio.wait_for(
@@ -276,10 +278,11 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                         except TimeoutError:
                             raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
                         except StopAsyncIteration:
+                            buffer += decoder.decode(b"", final=True)
                             break
 
-                        # 使用 iter_any() 获取任意大小的非阻塞原始字节块，避免阻塞
-                        chunks = line.decode("utf-8")
+                        # iter_any() 返回任意大小的原始字节块，使用增量解码器保留跨块 UTF-8 字符。
+                        chunks = decoder.decode(line)
                         buffer += chunks
 
                         done = False
