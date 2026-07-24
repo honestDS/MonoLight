@@ -271,13 +271,19 @@ SHELL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "execute_shell",
-        "description": "Execute shell commands. Python inline commands that start with python/python3/py and use -c are automatically executed without a shell to avoid cross-platform escaping issues.",
+        "description": (
+            "Execute a single non-interactive shell command and return its output. "
+            "Do not use interactive programs (for example: vim, less, more, top, htop, nano, ipython, bpython, python -i, notepad, textedit, open, start, explorer, sqlite3, mysql, psql, gdb, lldb, man, woman, most, pg, watch, tail -f, less +F, journalctl -f), "
+            "and do not use commands that spawn long-running or GUI child processes (for example: editors, file managers, browsers, image viewers, terminal emulators, IDEs, or any command that waits for user input before exiting). "
+            "This tool runs with stdin closed, and interactive or child processes can block the shell until timeout. "
+            "For local file operations, use the dedicated file or knowledge-base tools instead."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute. For Python code, use a normal command starting with python -c; the tool automatically bypasses shell escaping for supported inline Python commands.",
+                    "description": "Single non-interactive shell command. Do not pass interactive commands, GUI launchers, or commands that wait for user input; only use commands that exit on their own.",
                 },
             },
             "required": ["command"],
