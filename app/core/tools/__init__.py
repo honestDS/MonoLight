@@ -70,6 +70,11 @@ TOOL_EXECUTOR_MAP = {
 }
 
 
+def tool_requires_audit(tool_name: str) -> bool:
+    executor_class = TOOL_EXECUTOR_MAP.get(tool_name)
+    return bool(executor_class is not None and executor_class.requires_audit)
+
+
 def get_registered_tool_names():
     registered_tool_names = []
     for schema in CONFIGURABLE_TOOL_SCHEMAS:

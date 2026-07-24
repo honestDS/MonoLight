@@ -21,7 +21,7 @@ from app.core.audit.service import (
     classify_audit_score,
     is_audit_configured,
 )
-from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_CONFIRMATION_IM
+from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
@@ -248,7 +248,10 @@ async def test_missing_audit_configuration_skips_round_without_side_effects(monk
     result = await audit_tool_round(
         FakeDb(),
         cfg=cfg,
-        tool_calls=[InternalToolCall(id="call-1", name="echo", arguments={"value": "ok"}), InternalToolCall(id="call-2", name="echo", arguments={"value": "ok"})],
+        tool_calls=[
+            InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"}),
+            InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "result.txt", "content": "ok"}),
+        ],
         source_assistant_message_id=1,
         uid="u1",
         operator_username="tester",
@@ -259,6 +262,105 @@ async def test_missing_audit_configuration_skips_round_without_side_effects(monk
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_configured_audit_skips_safe_tool_round_without_side_effects(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("safe tools must not perform audit side effects")
+
+    def unexpected_snapshot(*_args, **_kwargs):
+        raise AssertionError("safe tools must not collect audit evidence")
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", unexpected_call)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", unexpected_call)
+    monkeypatch.setattr(service, "_call_auditor", unexpected_call)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", unexpected_call)
+    monkeypatch.setattr(service, "_collect_append_file_snapshots", unexpected_snapshot)
+    monkeypatch.setattr(service, "build_tool_round_integrity_snapshot", unexpected_snapshot)
+
+    result = await audit_tool_round(
+        FakeDb(),
+        cfg=_profile_config(),
+        tool_calls=[
+            InternalToolCall(id="call-1", name="list_background_tasks", arguments={}),
+            InternalToolCall(id="call-2", name="firecrawl_search", arguments={"query": "Monoligh"}),
+        ],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mixed_tool_round_audits_only_declared_calls_and_persists_full_round(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_cancellation(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **kwargs):
+        captured["tool_count"] = kwargs["tool_count"]
+        return SimpleNamespace(id=123)
+
+    async def call_auditor(*args, **_kwargs):
+        captured["request_payload"] = args[2]
+        return {"messages": []}, {"file_reads": [], "parsed": {"results": [{"tool_call_id": "risk-call", "score": 0, "reason": "safe", "file_checks": []}]}}
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", call_auditor)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await audit_tool_round(
+        FakeDb(),
+        cfg=cfg,
+        tool_calls=[
+            InternalToolCall(id="safe-call", name="list_background_tasks", arguments={}),
+            InternalToolCall(id="risk-call", name="execute_shell", arguments={"command": "echo ok"}),
+        ],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "passed"
+    assert captured["tool_count"] == 2
+    assert [item["tool_call_id"] for item in captured["request_payload"]["tool_calls"]] == ["risk-call"]
+    assert [item["turn_index"] for item in captured["request_payload"]["tool_calls"]] == [1]
+    assert [item["original_tool_call_id"] for item in captured["tool_details"]] == ["safe-call", "risk-call"]
+    assert captured["tool_details"][0]["conclusion"] == "passed"
+    assert captured["tool_details"][0]["score"] == 0
+    assert captured["tool_details"][0]["reason"] == t(MSG_AUDIT_ROUND_SKIPPED)
+    assert [item["name"] for item in captured["context_payload"]["tool_calls"]] == ["list_background_tasks", "execute_shell"]
+    assert captured["context_payload"]["audited_tool_call_ids"] == ["risk-call"]
 
 
 @pytest.mark.asyncio
@@ -315,7 +417,7 @@ async def test_configured_audit_runtime_failures_still_persist_audit_failed(monk
     result = await audit_tool_round(
         FakeDb(),
         cfg=cfg,
-        tool_calls=[InternalToolCall(id="call-1", name="echo", arguments={"value": "ok"})],
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo ok"})],
         source_assistant_message_id=1,
         uid="u1",
         operator_username="tester",

@@ -170,6 +170,8 @@ sanitize_files_to_user_result = summarize_files_to_user_result
 
 
 class SendFileToUserExecutor(BaseExecutor):
+    requires_audit = False
+
     def _get_tool_config(self) -> Any:
         return getattr(self.cfg, "tool", None)
 

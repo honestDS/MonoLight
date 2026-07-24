@@ -40,6 +40,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.prompts import AUDIT_BATCH_PROMPT, AUDIT_SUMMARY_PROMPT
+from app.core.tools import tool_requires_audit
 from app.core.tools.file_writer import resolve_file_writer_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
 from app.core.tools.shell import ShellExecutor
@@ -530,12 +531,17 @@ async def audit_tool_round(
 ) -> AuditRoundResult | None:
     if not is_audit_configured(cfg):
         return None
+    audited_tool_calls = [item for item in tool_calls if tool_requires_audit(item.name)]
+    if not audited_tool_calls:
+        return None
+    audited_tool_call_ids = [item.id for item in audited_tool_calls]
+    audited_tool_call_id_set = set(audited_tool_call_ids)
     await cancel_confirmation_by_session(db, uid=uid, session_id=session_id, locale=cfg.security.audit_report_language)
     workdir = Path(working_directory or get_user_temp_dir(os.getcwd(), uid)).resolve(strict=False)
     payload_calls = _tool_payload(tool_calls)
     append_file_snapshots = await asyncio.to_thread(
         _collect_append_file_snapshots,
-        tool_calls,
+        audited_tool_calls,
         workdir,
     )
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] = {}
@@ -580,6 +586,7 @@ async def audit_tool_round(
                 "arguments": item.arguments,
             }
             for index, item in enumerate(tool_calls)
+            if item.id in audited_tool_call_id_set
         ],
     }
     failure_type = None
@@ -589,30 +596,32 @@ async def audit_tool_round(
     file_reads: list[dict[str, Any]] = []
     read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
     try:
-        conflict_ids = _round_conflict_ids(tool_calls, workdir)
+        conflict_ids = _round_conflict_ids(audited_tool_calls, workdir)
         if conflict_ids:
             response_context = {"local_block": "same-round file write conflict"}
-            parsed_results = [
+            audited_results = [
                 {
                     "tool_call_id": call.id,
                     "score": 10 if call.id in conflict_ids else 0,
                     "reason": t(ERR_AUDIT_ROUND_FILE_CONFLICT) if call.id in conflict_ids else t(MSG_AUDIT_ROUND_SKIPPED),
+                    "file_checks": [],
                 }
-                for call in tool_calls
+                for call in audited_tool_calls
             ]
         else:
-            for item in tool_calls:
+            for item in audited_tool_calls:
                 if item.name == "execute_shell":
                     blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
                     if blacklisted:
                         response_context = {"local_block": blacklisted}
-                        parsed_results = [
+                        audited_results = [
                             {
                                 "tool_call_id": call.id,
                                 "score": 10 if call.id == item.id else 0,
                                 "reason": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted) if call.id == item.id else t(MSG_AUDIT_ROUND_SKIPPED),
+                                "file_checks": [],
                             }
-                            for call in tool_calls
+                            for call in audited_tool_calls
                         ]
                         break
             else:
@@ -622,13 +631,29 @@ async def audit_tool_round(
                     request_payload,
                     workdir,
                 )
-                parsed_results = _parse_results(response_context["parsed"], [item.id for item in tool_calls])
+                audited_results = _parse_results(response_context["parsed"], audited_tool_call_ids)
+        audited_results_by_id = {item["tool_call_id"]: item for item in audited_results}
+        parsed_results = [
+            audited_results_by_id.get(
+                tool_call.id,
+                {
+                    "tool_call_id": tool_call.id,
+                    "score": 0,
+                    "reason": t(MSG_AUDIT_ROUND_SKIPPED),
+                    "file_checks": [],
+                },
+            )
+            for tool_call in tool_calls
+        ]
         conclusions = []
         file_reads = response_context.get("file_reads", []) if isinstance(response_context, dict) else []
-        expected_tool_call_ids = {item.id for item in tool_calls}
+        expected_tool_call_ids = audited_tool_call_id_set
         read_file_snapshots = _file_snapshots_from_reads(file_reads, expected_tool_call_ids)
         read_protocol_failures = [item for item in file_reads if not isinstance(item, dict) or item.get("status") in {"denied", "invalid"} or item.get("tool_call_id") not in expected_tool_call_ids]
         for tool_call, result in zip(tool_calls, parsed_results, strict=True):
+            if tool_call.id not in audited_tool_call_id_set:
+                conclusions.append(AuditToolConclusion.PASSED)
+                continue
             tool_file_reads = [item for item in file_reads if isinstance(item, dict) and item.get("tool_call_id") == tool_call.id]
             local_reasons = list(server_confirmation_reasons.get(tool_call.id, []))
             evidence_requires_confirmation = _requires_confirmation_from_evidence(
@@ -679,7 +704,7 @@ async def audit_tool_round(
         intent_summary, summary_context = await _summarize_pending(
             db,
             cfg,
-            payload_calls,
+            _tool_payload(audited_tool_calls),
             server_confirmation_reasons,
             working_directory=workdir,
         )
@@ -708,6 +733,7 @@ async def audit_tool_round(
         "source_assistant_message_id": source_assistant_message_id,
         "round_arguments_hash": snapshot.round_sha256,
         "tool_calls": payload_calls,
+        "audited_tool_call_ids": audited_tool_call_ids,
         "server_confirmation_reasons": server_confirmation_reasons,
         "scoring_request": request_context,
         "scoring_response": response_context,

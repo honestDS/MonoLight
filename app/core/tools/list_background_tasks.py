@@ -39,6 +39,8 @@ LIST_BACKGROUND_TASKS_TOOL_SCHEMA = {
 
 
 class ListBackgroundTasksExecutor(BaseExecutor):
+    requires_audit = False
+
     async def execute(self, session_id: str | None = None, page: int = 1, size: int = 20) -> str:
         if self.db is None:
             return json.dumps(

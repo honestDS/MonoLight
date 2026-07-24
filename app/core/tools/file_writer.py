@@ -22,6 +22,7 @@ def resolve_file_writer_target_path(file_path: str, workspace_path: str | Path) 
 
 
 class FileWriterExecutor(BaseExecutor):
+    requires_audit = True
     logger = get_logger(__name__)
 
     def __init__(self, project_root: str, uid: str = "default"):

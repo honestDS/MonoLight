@@ -22,6 +22,7 @@ from .base import BaseExecutor
 
 
 class ShellExecutor(BaseExecutor):
+    requires_audit = True
     logger = get_logger(__name__)
     COMMAND_BLACKLIST = [
         "powershell",
@@ -283,7 +284,7 @@ SHELL_TOOL_SCHEMA = {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Single non-interactive shell command. Do not pass interactive commands, GUI launchers, or commands that wait for user input; only use commands that exit on their own.",
+                    "description": "Single non-interactive shell command. Do not pass interactive commands, GUI launchers, or commands that wait for user input; only use commands that exit on their own. A simple Python -c command automatically bypasses shell escaping.",
                 },
             },
             "required": ["command"],

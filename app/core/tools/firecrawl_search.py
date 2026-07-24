@@ -10,6 +10,8 @@ from .base import BaseExecutor
 
 
 class FirecrawlSearchExecutor(BaseExecutor):
+    requires_audit = False
+
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
         self._app = None

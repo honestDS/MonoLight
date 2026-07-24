@@ -26,6 +26,8 @@ KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA = {
 
 
 class KnowledgeBaseQueryExecutor(BaseExecutor):
+    requires_audit = False
+
     async def execute(self, **kwargs) -> str:
         kb_id = kwargs.get("knowledge_base_id")
         query = kwargs.get("query")

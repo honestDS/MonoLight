@@ -3,13 +3,15 @@ import asyncio
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.dispatch_context import DispatchContext
 from app.core.log import get_logger
 
 
 class BaseExecutor(abc.ABC):
+    requires_audit: ClassVar[bool]
+
     def __init__(self, project_root: str, uid: str = "default"):
         self.project_root = Path(project_root)
         self.uid = uid

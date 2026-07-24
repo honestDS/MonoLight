@@ -1,6 +1,5 @@
 import json
 
-from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.constants import (
     ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE,
     ERR_BACKGROUND_TASK_NOT_FOUND,
@@ -34,6 +33,8 @@ CANCEL_BACKGROUND_TASK_TOOL_SCHEMA = {
 
 
 class CancelBackgroundTaskExecutor(BaseExecutor):
+    requires_audit = False
+
     async def execute(self, task_id: int) -> str:
         if self.db is None:
             return json.dumps(
@@ -56,6 +57,9 @@ class CancelBackgroundTaskExecutor(BaseExecutor):
             )
 
         if task.status == BackgroundTaskStatus.CANCELLED and task.audit_record_id is not None:
+            # Avoid a tool registration and audit initialization dependency cycle.
+            from app.core.audit.confirmation import update_confirmation_message_status
+
             await update_confirmation_message_status(self.db, audit_record_id=task.audit_record_id)
 
         return json.dumps(

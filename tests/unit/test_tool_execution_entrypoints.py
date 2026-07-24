@@ -7,6 +7,7 @@ from app.core.dispatchers.interactive import InteractiveDispatcherMixin
 from app.core.dispatchers.non_stream import NonStreamDispatcherMixin
 from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.session_reply_queue import executor as executor_module
+from app.core.tools import TOOL_EXECUTOR_MAP, tool_requires_audit
 from app.core.utils.dispatcher import helpers as dispatcher_helpers
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 
@@ -14,6 +15,13 @@ from app.core.utils.dispatcher import process_single_tool as process_single_tool
 def _assert_source_order(source: str, *markers: str) -> None:
     positions = [source.index(marker) for marker in markers]
     assert positions == sorted(positions)
+
+
+def test_registered_tools_explicitly_declare_audit_requirement():
+    assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
+    assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == {"execute_shell", "write_file"}
+    assert all(not tool_requires_audit(tool_name) for tool_name in TOOL_EXECUTOR_MAP if tool_name not in {"execute_shell", "write_file"})
+    assert tool_requires_audit("unknown_tool") is False
 
 
 def test_interactive_stream_and_non_stream_share_audited_execution_entrypoint():

@@ -64,6 +64,8 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
 
 
 class ImageGenerationExecutor(BaseExecutor):
+    requires_audit = False
+
     def _get_channel_config(self) -> ChannelConfig | None:
         channel_group = getattr(self.cfg, "channel", None)
         if not channel_group:

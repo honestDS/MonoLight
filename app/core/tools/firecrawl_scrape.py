@@ -19,6 +19,8 @@ def normalize_formats(formats: list[str]) -> list[str]:
 
 
 class FirecrawlScrapeExecutor(BaseExecutor):
+    requires_audit = False
+
     def __init__(self, project_root: str, uid: str = "default"):
         super().__init__(project_root, uid)
         self._app = None
