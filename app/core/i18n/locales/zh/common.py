@@ -117,6 +117,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_ALREADY_FINISHED": "后台任务已结束",
     "MSG_BACKGROUND_TASK_QUEUED": "工具 {tool_name} 已加入后台任务队列，完成后会主动回复",
     "MSG_TOOL_FILE_SEND_SUCCESS": "文件发送成功，文件将随助手回复一并展示，请勿重复输出下载链接或文件元数据",
+    "MSG_TOOL_FILE_SEND_FAILED": "文件发送失败，请检查文件路径和参数",
     "ERR_TOOL_NOT_ENABLED": "工具 {tool_name} 未在当前配置中启用",
     "ERR_TOOL_NOT_REGISTERED": "工具 {tool_name} 未注册",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "工具 {tool_name} 不支持后台执行",

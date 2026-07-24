@@ -117,6 +117,7 @@ MESSAGES = {
     "MSG_BACKGROUND_TASK_ALREADY_FINISHED": "Background task is already finished",
     "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task and will reply proactively after completion.",
     "MSG_TOOL_FILE_SEND_SUCCESS": "File sending succeeded. The sent files will be automatically appended after your assistant reply in the chat UI. Do not repeat file download links or file metadata in your text response.",
+    "MSG_TOOL_FILE_SEND_FAILED": "File sending failed. Please check the file paths and parameters.",
     "ERR_TOOL_NOT_ENABLED": "Tool {tool_name} is not enabled in the active profile",
     "ERR_TOOL_NOT_REGISTERED": "Tool {tool_name} is not registered",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "Tool {tool_name} does not support background execution",

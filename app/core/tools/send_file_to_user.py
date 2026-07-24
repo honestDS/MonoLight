@@ -22,8 +22,8 @@ from app.core.constants import (
     ERR_FILE_TOKEN_PAYLOAD_INVALID,
     ERR_FILE_TOKEN_SIGNATURE_INVALID,
     ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED,
-    ERR_GENERIC_ERROR,
     MSG_FILE_COUNT_TRUNCATED,
+    MSG_TOOL_FILE_SEND_FAILED,
     MSG_TOOL_FILE_SEND_SUCCESS,
 )
 from app.core.crypto import _get_encryption_key
@@ -154,7 +154,7 @@ def summarize_files_to_user_result(content: str | None) -> str | None:
     if success:
         message = t(MSG_TOOL_FILE_SEND_SUCCESS)
     else:
-        message = t(ERR_GENERIC_ERROR)
+        message = t(MSG_TOOL_FILE_SEND_FAILED)
 
     return json.dumps(
         {
@@ -291,7 +291,7 @@ SEND_FILE_TO_USER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "send_file_to_user",
-        "description": "Send existing local files to the user. Provide one or more absolute file paths. The tool validates paths and returns safe downloadable file metadata without exposing real server paths.",
+        "description": "Send existing local files to the user. Provide one or more absolute file paths. All paths must be absolute. The tool validates paths and returns safe downloadable file metadata without exposing real server paths.",
         "parameters": {
             "type": "object",
             "properties": {
