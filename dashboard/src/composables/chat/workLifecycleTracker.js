@@ -55,9 +55,7 @@ export const startAgentLoop = (messages, event) => {
   const responseId = normalizeIdentity(event?.response_id)
   if (!workId || !responseId) return messages
 
-  const existingMarker = messages.find(message =>
-    isThinkingForWork(message, workId) && sameIdentity(message.response_id, responseId)
-  )
+  const existingMarker = messages.find(message => isThinkingForWork(message, workId))
   const existingMarkerFields = { ...(existingMarker || {}) }
   delete existingMarkerFields.request_id
   delete existingMarkerFields.request_ids

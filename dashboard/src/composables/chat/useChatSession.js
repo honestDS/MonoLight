@@ -6,7 +6,7 @@ import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { useMessageProcessor } from './useMessageProcessor'
 import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.js'
-import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop, stopAgentLoop } from './workLifecycleTracker.js'
+import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop } from './workLifecycleTracker.js'
 import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys, findMessageReplacementIndex, mergeRemoteMessage, mergeRemoteMessageIntoList } from '../../utils'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
@@ -119,7 +119,6 @@ export function useChatSession() {
     onInputQueued: event => applyLifecycleEvent(markInputQueued, event, isCurrentRequestSession),
     onInputDequeued: event => applyLifecycleEvent(markInputsDequeued, event, isCurrentRequestSession),
     onAgentLoopStart: event => applyLifecycleEvent(startAgentLoop, event, isCurrentRequestSession),
-    onAgentLoopOutput: event => applyLifecycleEvent(stopAgentLoop, event, isCurrentRequestSession),
     onWorkFinished: event => applyLifecycleEvent(finishWorkLifecycle, event, isCurrentRequestSession)
   })
 
