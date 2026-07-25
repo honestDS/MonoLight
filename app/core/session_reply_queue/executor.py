@@ -150,6 +150,8 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         "files": response.get("files", []),
         "request_ids": get_work_request_ids(work),
     }
+    if response.get("llm_request_metadata") is not None:
+        event["llm_request_metadata"] = response["llm_request_metadata"]
     if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
         event["task_id"] = int(work.source_id)
         event["background_task_id"] = int(work.source_id)
@@ -177,12 +179,22 @@ async def _persist_foreground_stream_event(
         "event_sequence_no": stream_state.next_sequence,
     }
     async with AsyncSessionLocal() as event_db:
+        if persisted_event["type"] == "llm_request_metadata":
+            await session_crud.update_llm_request_metadata(
+                event_db,
+                session_id=work.session_id,
+                uid=work.uid,
+                metadata=persisted_event,
+                commit=False,
+            )
         await session_reply_stream_event_crud.publish(
             event_db,
             work_id=work.id,
             sequence_no=stream_state.next_sequence,
             event=persisted_event,
+            commit=False,
         )
+        await event_db.commit()
     stream_state.next_sequence += 1
 
 
@@ -470,6 +482,33 @@ def _confirmed_file_snapshots_changed(details: list[Any], *, working_directory: 
     return False
 
 
+async def _generate_reply_with_request_metadata(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    **kwargs: Any,
+) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]], dict[str, Any] | None]:
+    latest_request_metadata = None
+
+    async def persist_request_metadata(metadata: dict[str, Any]) -> None:
+        nonlocal latest_request_metadata
+        await session_crud.update_llm_request_metadata(
+            db,
+            session_id=work.session_id,
+            uid=work.uid,
+            metadata=metadata,
+            commit=False,
+        )
+        latest_request_metadata = dict(metadata)
+
+    ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+        db,
+        **kwargs,
+        request_metadata_callback=persist_request_metadata,
+    )
+    return ai_msg, turn_messages, files, latest_request_metadata
+
+
 async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
     content, attachments, message_ids = await session_reply_queue_manager.freeze_foreground_input(db, work=work, worker_id=worker_id)
     initial_message = InternalMessage(
@@ -483,8 +522,9 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         profile = await profile_crud.get_with_relations(db, work.profile_id)
         if profile is None or profile.uid != work.uid:
             raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-        ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+        ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
             db,
+            work=work,
             uid=work.uid,
             session_id=work.session_id,
             profile=profile,
@@ -494,7 +534,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             final_message_dedupe_key=_result_message_dedupe_key(work),
         )
         content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-        return {
+        response = {
             "choices": [
                 {
                     "message": {
@@ -508,6 +548,9 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             "history": dump_output_history(turn_messages),
             "files": files or None,
         }
+        if llm_request_metadata is not None:
+            response["llm_request_metadata"] = llm_request_metadata
+        return response
     stream_requested = bool((work.execution_state or {}).get("stream_requested"))
     context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
     async with AsyncSessionLocal() as event_db:
@@ -557,7 +600,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         "expose_tool_call_content": expose_tool_call_content,
     }
     if not stream_requested:
-        return await ChatDispatcher.dispatch(
+        response = await ChatDispatcher.dispatch(
             **dispatch_kwargs,
             context_summary_lifecycle_callback=partial(
                 _publish_foreground_stream_event,
@@ -567,6 +610,14 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             if context_summary_events_requested
             else None,
         )
+        await session_crud.update_llm_request_metadata(
+            db,
+            session_id=work.session_id,
+            uid=work.uid,
+            metadata=response.get("llm_request_metadata"),
+            commit=False,
+        )
+        return response
 
     response = None
     async for event in ChatDispatcher.dispatch_stream(
@@ -605,8 +656,9 @@ async def _source_invalid_confirmed_tool_response(
         await update_confirmation_message_status(db, audit_record_id=audit_record_id)
     if profile is None:
         raise RuntimeError(t(ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED))
-    ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
         db,
+        work=work,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -617,7 +669,10 @@ async def _source_invalid_confirmed_tool_response(
         final_message_dedupe_key=_result_message_dedupe_key(work),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-    return {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
+    response = {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
+    if llm_request_metadata is not None:
+        response["llm_request_metadata"] = llm_request_metadata
+    return response
 
 
 @dataclass
@@ -796,8 +851,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                     "history": dump_background_proactive_history(turn_messages),
                     "files": [],
                 }
-            ai_msg, final_messages, files = await ChatDispatcher._generate_reply_from_history(
+            ai_msg, final_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
                 db,
+                work=work,
                 uid=work.uid,
                 session_id=work.session_id,
                 profile=profile,
@@ -807,11 +863,14 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 final_message_dedupe_key=_result_message_dedupe_key(work),
             )
             content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-            return {
+            response = {
                 "content": content,
                 "history": dump_background_proactive_history([*turn_messages, *final_messages]),
                 "files": files,
             }
+            if llm_request_metadata is not None:
+                response["llm_request_metadata"] = llm_request_metadata
+            return response
         record, claim_token = await audit_crud.claim_passed_for_execution(
             db,
             audit_record_id=reaudit_round.audit_record_id,
@@ -943,8 +1002,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
         if replacement_state.replaced_tool_results and status_updated is False:
             await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
-    ai_msg, final_messages, files = await ChatDispatcher._generate_reply_from_history(
+    ai_msg, final_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
         db,
+        work=work,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -954,7 +1014,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         final_message_dedupe_key=_result_message_dedupe_key(work),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-    return {"content": content, "history": dump_background_proactive_history([*turn_messages, *final_messages]), "files": files}
+    response = {"content": content, "history": dump_background_proactive_history([*turn_messages, *final_messages]), "files": files}
+    if llm_request_metadata is not None:
+        response["llm_request_metadata"] = llm_request_metadata
+    return response
 
 
 def _load_background_submission_context(task: BackgroundTask) -> list[InternalMessage] | None:

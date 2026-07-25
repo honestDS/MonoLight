@@ -397,7 +397,8 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="ok",
-            )
+            ),
+            usage={"prompt_tokens": 777, "completion_tokens": 10, "total_tokens": 787},
         )
 
     async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
@@ -471,6 +472,9 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [None]
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
+    assert response["llm_request_metadata"]["input_tokens"] == 777
+    assert response["llm_request_metadata"]["context_window_tokens"] == 4096
+    assert response["llm_request_metadata"]["max_output_tokens"] == 256
 
 
 @pytest.mark.asyncio
@@ -611,12 +615,17 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     assert saved_created_at == [datetime(2026, 7, 21, 6, 1, tzinfo=UTC)]
     assert [event["type"] for event in events] == [
         "task_start",
+        "llm_request_metadata",
         "agent_loop_start",
+        "llm_request_metadata",
         "agent_loop_output",
         "content",
         "turn_end",
         "done",
     ]
+    metadata_events = [event for event in events if event["type"] == "llm_request_metadata"]
+    assert [event["max_output_tokens"] for event in metadata_events] == [1024, 256]
+    assert metadata_events[0]["response_id"] == metadata_events[1]["response_id"]
 
 
 _DEFAULT_AUDIT_RESULT = object()
@@ -1004,6 +1013,7 @@ async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(
 
     assert [event["type"] for event in events] == [
         "task_start",
+        "llm_request_metadata",
         "agent_loop_start",
         "agent_loop_output",
         "turn_end",
@@ -1011,8 +1021,8 @@ async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(
         "tool_end",
         "done",
     ]
-    assert events[4]["tool_call_id"] == "call-1"
-    assert json.loads(events[5]["result"])["status"] == "pending"
+    assert events[5]["tool_call_id"] == "call-1"
+    assert json.loads(events[6]["result"])["status"] == "pending"
     assert json.loads(events[-1]["response"]["choices"][0]["message"]["content"]) == confirmation_payload
     assert unknown_calls == []
 
@@ -1166,6 +1176,7 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
 
     await asyncio.wait_for(audit_started.wait(), timeout=1)
     assert [event["type"] for event in published_events] == [
+        "llm_request_metadata",
         "agent_loop_start",
         "agent_loop_output",
         "turn_end",
@@ -1176,6 +1187,7 @@ async def test_pending_audit_publishes_tool_start_before_audit_finishes(monkeypa
     response, unknown_calls = await dispatch_task
 
     assert [event["type"] for event in published_events] == [
+        "llm_request_metadata",
         "agent_loop_start",
         "agent_loop_output",
         "turn_end",
@@ -1205,20 +1217,22 @@ async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatc
     event_types = [event["type"] for event in events]
     assert event_types == [
         "task_start",
+        "llm_request_metadata",
         "agent_loop_start",
         "agent_loop_output",
         "turn_end",
         "tool_start",
         "tool_end",
+        "llm_request_metadata",
         "agent_loop_start",
         "agent_loop_output",
         "content",
         "turn_end",
         "done",
     ]
-    assert events[1]["response_id"] == events[2]["response_id"]
-    assert events[6]["response_id"] == events[7]["response_id"]
-    assert events[1]["response_id"] != events[6]["response_id"]
-    assert json.loads(events[5]["result"])["status"] == "failed"
-    assert events[5]["tool_call_id"] == events[4]["tool_call_id"] == "call-1"
+    assert events[1]["response_id"] == events[2]["response_id"] == events[3]["response_id"]
+    assert events[7]["response_id"] == events[8]["response_id"] == events[9]["response_id"]
+    assert events[1]["response_id"] != events[7]["response_id"]
+    assert json.loads(events[6]["result"])["status"] == "failed"
+    assert events[6]["tool_call_id"] == events[5]["tool_call_id"] == "call-1"
     assert unknown_calls == []

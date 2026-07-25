@@ -25,14 +25,14 @@ from app.transformers.openai import OpenAITransformer
 logger = get_logger(__name__)
 
 
-def _estimate_request_context_tokens(
+def estimate_request_context_tokens(
     messages: list[InternalMessage],
     tools: list[dict[str, Any]] | None,
 ) -> int:
     message_payload = [
         message.model_dump(
             mode="json",
-            exclude={"id", "attachments", "created_at"},
+            exclude={"id", "attachments", "created_at", "environment_prompt"},
             exclude_none=True,
         )
         for message in messages
@@ -44,6 +44,7 @@ def _estimate_request_context_tokens(
         },
         ensure_ascii=False,
         separators=(",", ":"),
+        default=str,
     )
     return estimate_tokens(serialized_context)
 
@@ -56,6 +57,7 @@ def _log_request_context(
     tools: list[dict[str, Any]] | None,
     max_tokens: int,
     streaming: bool,
+    request_context_tokens: int | None = None,
 ) -> None:
     role_counts: dict[str, int] = {}
     for message in messages:
@@ -63,7 +65,7 @@ def _log_request_context(
         role_counts[role] = role_counts.get(role, 0) + 1
     message_count = len(messages)
     tool_count = len(tools or [])
-    estimated_context_tokens = _estimate_request_context_tokens(messages, tools)
+    estimated_context_tokens = request_context_tokens if isinstance(request_context_tokens, int) and not isinstance(request_context_tokens, bool) and request_context_tokens >= 0 else estimate_request_context_tokens(messages, tools)
     logger.bind(
         model_id=model_id,
         protocol=protocol,
@@ -324,6 +326,7 @@ class LLMClient:
         tool_choice: str = "auto",
         protocol: str = "openai",
         timeout: float = 60.0,
+        request_context_tokens: int | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
@@ -337,6 +340,7 @@ class LLMClient:
             tools=tools,
             max_tokens=max_tokens,
             streaming=True,
+            request_context_tokens=request_context_tokens,
         )
         async for chunk in transformer.generate_stream(
             api_key=api_key,
@@ -366,6 +370,7 @@ class LLMClient:
         tool_choice: str = "auto",
         protocol: str = "openai",
         timeout: float = 60.0,
+        request_context_tokens: int | None = None,
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
@@ -388,6 +393,7 @@ class LLMClient:
             tool_choice=tool_choice,
             protocol=protocol,
             timeout=timeout,
+            request_context_tokens=request_context_tokens,
             **kwargs,
         ):
             if isinstance(chunk.get("model"), str):
@@ -429,6 +435,7 @@ class LLMClient:
         tool_choice: str = "auto",
         protocol: str = "openai",
         timeout: float = 60.0,
+        request_context_tokens: int | None = None,
         **kwargs,
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
@@ -442,6 +449,7 @@ class LLMClient:
             tools=tools,
             max_tokens=max_tokens,
             streaming=False,
+            request_context_tokens=request_context_tokens,
         )
         raw_response = await transformer.generate(
             api_key=api_key,

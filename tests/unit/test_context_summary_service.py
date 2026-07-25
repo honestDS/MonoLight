@@ -15,6 +15,7 @@ from app.core.utils.context_summary.common import (
     ContextSummaryWorkInvalidError,
 )
 from app.core.utils.context_summary.model_call import CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
+from app.models.message import InternalMessage, MessageRole
 from tests.unit.context_summary_service_test_support import (
     _patch_summary_dependencies,
     _patch_token_counter,
@@ -249,6 +250,45 @@ async def test_context_summary_triggers_only_after_configured_threshold(monkeypa
         {"type": "context_summary_start"},
         {"type": "context_summary_end"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_context_summary_threshold_uses_previous_provider_plus_new_override(monkeypatch):
+    selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
+    bound_fields = {}
+
+    class CapturingLogger:
+        def bind(self, **kwargs):
+            bound_fields.update(kwargs)
+            return self
+
+        def debug(self, _message, **_kwargs):
+            return None
+
+    monkeypatch.setattr(service_module, "logger", CapturingLogger())
+
+    state = await service_module.ensure_context_summary(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=SimpleNamespace(id=9),
+        cfg=_summary_cfg(50),
+        before_id=10,
+        current_message="",
+        context_window_k=1,
+        max_tokens=24,
+        reserved_tokens=0,
+        safety_margin_tokens=0,
+        fixed_request_messages=[InternalMessage(role=MessageRole.SYSTEM, content="system")],
+        required_input_tokens_override=100,
+    )
+
+    assert state == ContextSummaryState(content=None, message_id=None)
+    assert bound_fields["required_tokens"] == 100
+    assert bound_fields["required_tokens_source"] == "previous_provider_plus_new"
+    assert selected_calls == []
+    assert update_calls == []
+    assert generated_calls == []
 
 
 @pytest.mark.asyncio

@@ -214,6 +214,7 @@ async def _ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
+    required_input_tokens_override: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle: ContextSummaryLifecycle,
 ) -> ContextSummaryState:
@@ -270,6 +271,7 @@ async def _ensure_context_summary(
     await ensure_context_summary_work_valid(combined_work_validity_checker)
     threshold_percent = cfg.other.context_summary_threshold_percent
     request_usage = None
+    required_tokens_source = "full_estimate"
     if fixed_request_messages is not None:
         summary_message = state.as_message()
         summary_tokens = estimate_tokens(message_token_text(summary_message)) if summary_message is not None else 0
@@ -298,6 +300,9 @@ async def _ensure_context_summary(
             "threshold_percent": threshold_percent,
             "history_message_count": history_message_count,
         }
+        if isinstance(required_input_tokens_override, int) and not isinstance(required_input_tokens_override, bool) and required_input_tokens_override > 0:
+            usage["required_tokens"] = required_input_tokens_override
+            required_tokens_source = "previous_provider_plus_new"
     else:
         usage = calc_token_usage(
             messages=[],
@@ -332,6 +337,7 @@ async def _ensure_context_summary(
         summary_trigger_tokens=usage["summary_trigger_tokens"],
         compression_goal_tokens=usage["compression_goal_tokens"],
         required_tokens=usage["required_tokens"],
+        required_tokens_source=required_tokens_source,
         reserved_tokens=reserved_tokens,
         summary_tokens=usage["summary_tokens"],
         history_tokens=usage["history_tokens"],
@@ -595,6 +601,7 @@ async def ensure_context_summary(
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
     fixed_request_messages: list[InternalMessage] | None = None,
+    required_input_tokens_override: int | None = None,
     work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
     lifecycle_event_callback: ContextSummaryLifecycleCallback | None = None,
 ) -> ContextSummaryState:
@@ -617,6 +624,7 @@ async def ensure_context_summary(
             trigger_mode=trigger_mode,
             fixed_upper_message_id=fixed_upper_message_id,
             fixed_request_messages=fixed_request_messages,
+            required_input_tokens_override=required_input_tokens_override,
             work_validity_checker=work_validity_checker,
             lifecycle=lifecycle,
         )

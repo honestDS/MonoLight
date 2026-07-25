@@ -1,3 +1,5 @@
+from typing import Any
+
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -71,6 +73,68 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 context_content_revision=ChatSession.context_content_revision + 1,
             )
             .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
+    async def update_llm_request_metadata(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        metadata: dict[str, Any],
+        commit: bool = True,
+    ) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+
+        required_int_fields = ("input_tokens", "context_window_tokens", "max_output_tokens")
+        persisted_metadata = {field: metadata.get(field) for field in required_int_fields}
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in persisted_metadata.values()):
+            return False
+
+        optional_int_fields = (
+            "request_message_min_id",
+            "request_message_max_id",
+            "context_summary_revision",
+            "context_content_revision",
+            "system_tokens",
+            "tools_tokens",
+        )
+        for field in optional_int_fields:
+            if field not in metadata:
+                continue
+            value = metadata[field]
+            minimum = 1 if field in {"request_message_min_id", "request_message_max_id"} else 0
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                return False
+            persisted_metadata[field] = value
+
+        for field in ("model_id", "protocol"):
+            if field not in metadata:
+                continue
+            value = metadata[field]
+            if not isinstance(value, str) or not value.strip():
+                return False
+            persisted_metadata[field] = value
+
+        if "input_tokens_source" in metadata:
+            input_tokens_source = metadata["input_tokens_source"]
+            if not isinstance(input_tokens_source, str) or input_tokens_source not in {"estimated", "provider"}:
+                return False
+            persisted_metadata["input_tokens_source"] = input_tokens_source
+
+        result = await db.execute(
+            update(ChatSession)
+            .where(
+                ChatSession.session_id == session_id,
+                ChatSession.uid == uid,
+            )
+            .values(llm_request_metadata=persisted_metadata)
         )
         if commit:
             await db.commit()

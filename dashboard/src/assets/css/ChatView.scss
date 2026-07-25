@@ -22,6 +22,64 @@
   position: relative;
 }
 
+.llm-request-metadata {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  color: #606266;
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #dcdfe6;
+}
+
+.llm-request-metadata-item {
+  display: inline-flex;
+  flex: 1 1 130px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 100%;
+  min-width: min(130px, 100%);
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.llm-request-metadata-item strong {
+  min-width: 0;
+  color: #303133;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.chat-main .message-list {
+  padding: 72px 0 20px;
+}
+
+.chat-main .history-loading-indicator {
+  top: 72px;
+}
+
+@media (max-width: 420px) {
+  .chat-main .message-list {
+    padding: 92px 0 20px;
+  }
+
+  .chat-main .history-loading-indicator {
+    top: 92px;
+  }
+}
+
 .context-summary-notice {
   position: absolute;
   bottom: 14px;

@@ -14,6 +14,7 @@ from app.models.audit import AuditToolResultVersion
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
+from app.models.user import User
 
 
 @pytest_asyncio.fixture
@@ -29,6 +30,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                     ContextSummaryStage.__table__,
                     ContextSummaryFragment.__table__,
                     AuditToolResultVersion.__table__,
+                    User.__table__,
                 ],
             )
         )
@@ -148,6 +150,130 @@ async def test_tool_result_version_invalidates_summary_and_preserves_previous_co
     assert session.context_summary_message_id is None
     assert session.context_content_revision == 2
     assert session.context_summary_revision == 4
+
+
+@pytest.mark.asyncio
+async def test_llm_request_metadata_update_persists_supported_baseline_fields(db_session: AsyncSession):
+    session = ChatSession(session_id="session-1", uid="user-1")
+    db_session.add(session)
+    await db_session.commit()
+
+    updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "type": "llm_request_metadata",
+            "turn": 2,
+            "response_id": "response-1",
+            "input_tokens": 123,
+            "input_tokens_source": "provider",
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "request_message_min_id": 10,
+            "request_message_max_id": 20,
+            "model_id": "grok-4.5",
+            "protocol": "openai",
+            "context_summary_revision": 2,
+            "context_content_revision": 3,
+            "system_tokens": 50,
+            "tools_tokens": 60,
+        },
+    )
+    await db_session.refresh(session)
+
+    assert updated is True
+    assert session.llm_request_metadata == {
+        "input_tokens": 123,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+        "request_message_min_id": 10,
+        "request_message_max_id": 20,
+        "context_summary_revision": 2,
+        "context_content_revision": 3,
+        "system_tokens": 50,
+        "tools_tokens": 60,
+        "model_id": "grok-4.5",
+        "protocol": "openai",
+        "input_tokens_source": "provider",
+    }
+
+    invalid_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": True,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+        },
+    )
+    await db_session.refresh(session)
+
+    assert invalid_updated is False
+    assert session.llm_request_metadata == {
+        "input_tokens": 123,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+        "request_message_min_id": 10,
+        "request_message_max_id": 20,
+        "context_summary_revision": 2,
+        "context_content_revision": 3,
+        "system_tokens": 50,
+        "tools_tokens": 60,
+        "model_id": "grok-4.5",
+        "protocol": "openai",
+        "input_tokens_source": "provider",
+    }
+
+
+@pytest.mark.asyncio
+async def test_user_sessions_include_llm_request_metadata(db_session: AsyncSession):
+    db_session.add(User(uid="user-1", username="alice"))
+    db_session.add(
+        ChatSession(
+            session_id="session-1",
+            uid="user-1",
+            title="Session 1",
+            llm_request_metadata={
+                "input_tokens": 321,
+                "context_window_tokens": 8192,
+                "max_output_tokens": 1024,
+            },
+        )
+    )
+    db_session.add_all(
+        [
+            Message(
+                session_id="session-1",
+                uid="user-1",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="hello",
+                profile_id=1,
+            ),
+            Message(
+                session_id="session-1",
+                uid="user-1",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="hi",
+                profile_id=1,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    sessions = await message_crud.get_user_sessions(db_session, uid="user-1")
+
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "session-1"
+    assert sessions[0].username == "alice"
+    assert sessions[0].llm_request_metadata == {
+        "input_tokens": 321,
+        "context_window_tokens": 8192,
+        "max_output_tokens": 1024,
+    }
 
 
 async def _seed_messages(db: AsyncSession) -> None:
@@ -319,6 +445,34 @@ async def test_context_summary_storage_migration_upgrades_legacy_schema():
         }
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_llm_request_metadata_migration_upgrades_legacy_schema():
+    migration = import_module("scripts.migration_20260725_add_chat_session_llm_request_metadata")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE chat_session (
+                    session_id VARCHAR(100) NOT NULL PRIMARY KEY,
+                    uid VARCHAR(100) NOT NULL
+                )
+                """
+            )
+        )
+        await migration.migrate(session)
+        await migration.migrate(session)
+        await session.commit()
+
+        columns = await session.execute(text("PRAGMA table_info(chat_session)"))
+        column_names = {str(row[1]) for row in columns.fetchall()}
+
+    await engine.dispose()
+    assert "llm_request_metadata" in column_names
 
 
 def test_context_summary_storage_models_use_stable_work_and_stage_identity():

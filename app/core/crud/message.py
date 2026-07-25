@@ -261,25 +261,31 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.scalars().all()
 
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
+        activity_stmt = select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_active"),
+            Message.uid.label("uid"),
+        )
+        if not is_admin:
+            activity_stmt = activity_stmt.where(Message.uid == uid)
+        session_activity = activity_stmt.group_by(Message.session_id, Message.uid).subquery()
+
         stmt = (
             select(
-                Message.session_id,
-                func.max(Message.created_at).label("last_active"),
-                Message.uid,
+                session_activity.c.session_id,
+                session_activity.c.last_active,
+                session_activity.c.uid,
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
                 ChatSession.source,
                 ChatSession.created_at,
+                ChatSession.llm_request_metadata,
             )
-            .join(User, Message.uid == User.uid)
-            .join(ChatSession, Message.session_id == ChatSession.session_id, isouter=True)
+            .join(User, session_activity.c.uid == User.uid)
+            .join(ChatSession, session_activity.c.session_id == ChatSession.session_id, isouter=True)
+            .order_by(desc(session_activity.c.last_active))
         )
-
-        if not is_admin:
-            stmt = stmt.where(Message.uid == uid)
-
-        stmt = stmt.group_by(Message.session_id, Message.uid, User.username, ChatSession.title, ChatSession.enable_markdown, ChatSession.source, ChatSession.created_at).order_by(desc("last_active"))
         result = await db.execute(stmt)
         return result.all()
 

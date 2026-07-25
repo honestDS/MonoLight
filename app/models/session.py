@@ -1,5 +1,7 @@
 from datetime import datetime
+from typing import Any
 
+from sqlalchemy import JSON
 from sqlmodel import Column, DateTime, Field, SQLModel
 
 from app.core.utils.time import get_local_time
@@ -29,6 +31,7 @@ class ChatSession(SQLModel, table=True):
     context_summary_message_id: int | None = Field(default=None, index=True)
     context_summary_revision: int = Field(default=0, ge=0)
     context_content_revision: int = Field(default=0, ge=0)
+    llm_request_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

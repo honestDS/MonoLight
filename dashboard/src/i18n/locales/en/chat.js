@@ -1,6 +1,10 @@
 export default {
   sessions_title: 'Sessions',
   context_summarizing: 'Compressing conversation context…',
+  llm_request_metadata_label: 'LLM request token information',
+  input_tokens: 'Input tokens',
+  context_limit: 'Context limit',
+  max_output: 'Max output',
   session_prefix: 'Session: {id}',
   session_created_at: 'Created',
   session_last_active: 'Active',

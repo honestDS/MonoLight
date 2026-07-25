@@ -28,6 +28,7 @@ from app.core.constants import (
 from app.core.context import ContextManager
 from app.core.crud.audit import audit_crud
 from app.core.crud.profile import profile_crud
+from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import get_current_locale, t
@@ -62,10 +63,11 @@ from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
+from app.core.utils.request_token_baseline import build_request_token_baseline, estimate_incremental_input_tokens
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
-from app.providers.llm.client import LLMClient
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
 from .interactive_helpers import (
@@ -140,6 +142,7 @@ class InteractiveDispatcherMixin:
             )
 
             final_ai_content = ""
+            latest_llm_request_metadata: dict[str, Any] | None = None
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
             is_first_iter = execution_resume_state is None
@@ -255,6 +258,9 @@ class InteractiveDispatcherMixin:
                                         tools=current_tools,
                                         work_validity_checker=context_summary_work_validity_checker,
                                         lifecycle_event_callback=context_summary_lifecycle_callback,
+                                        model_id=model_entry["model_id"],
+                                        protocol=getattr(chat_channel_obj, "protocol", "openai"),
+                                        previous_llm_request_metadata=(latest_llm_request_metadata if isinstance(latest_llm_request_metadata, dict) and latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                                     )
                                 request_messages = ContextManager.trim_messages_for_model_request(
                                     messages=await materialize_latest_user_environment_prompt(
@@ -269,18 +275,59 @@ class InteractiveDispatcherMixin:
                                     max_tokens=chat_params["max_tokens"],
                                     tools=current_tools,
                                 )
+                                model_id = model_entry["model_id"]
+                                protocol = getattr(chat_channel_obj, "protocol", "openai")
                                 generation_kwargs = {
                                     "api_key": chat_channel_obj.get_decrypted_api_key(),
                                     "base_url": chat_channel_obj.base_url,
-                                    "model_id": model_entry["model_id"],
+                                    "model_id": model_id,
                                     "messages": request_messages,
                                     "temperature": chat_params["temperature"],
                                     "top_p": chat_params["top_p"],
                                     "max_tokens": chat_params["max_tokens"],
                                     "tools": current_tools,
-                                    "protocol": getattr(chat_channel_obj, "protocol", "openai"),
+                                    "protocol": protocol,
                                     "timeout": chat_params["chat_timeout"],
                                 }
+                                previous_in_memory_llm_request_metadata = latest_llm_request_metadata
+                                session = None
+                                if hasattr(db, "execute"):
+                                    session = await session_crud.get_by_session_id(db, session_id)
+                                    if session is not None:
+                                        await db.refresh(session)
+                                context_summary_revision = session.context_summary_revision if session is not None else 0
+                                context_content_revision = session.context_content_revision if session is not None else 0
+                                previous_llm_request_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else session.llm_request_metadata if session is not None else None
+                                incremental_input_tokens = estimate_incremental_input_tokens(
+                                    request_messages,
+                                    current_tools,
+                                    previous_llm_request_metadata,
+                                    model_id=model_id,
+                                    protocol=protocol,
+                                    context_summary_revision=context_summary_revision,
+                                    context_content_revision=context_content_revision,
+                                )
+                                estimated_input_tokens = incremental_input_tokens if incremental_input_tokens is not None else estimate_request_context_tokens(request_messages, current_tools)
+                                generation_kwargs["request_context_tokens"] = estimated_input_tokens
+                                latest_llm_request_metadata = {
+                                    "type": "llm_request_metadata",
+                                    "turn": current_turn,
+                                    "response_id": response_id,
+                                    "input_tokens": estimated_input_tokens,
+                                    "input_tokens_source": "estimated",
+                                    "context_window_tokens": max(1, int(chat_params["context_window_k"]) * 1024),
+                                    "max_output_tokens": max(0, int(chat_params["max_tokens"])),
+                                    **build_request_token_baseline(
+                                        request_messages,
+                                        current_tools,
+                                        model_id=model_id,
+                                        protocol=protocol,
+                                        context_summary_revision=context_summary_revision,
+                                        context_content_revision=context_content_revision,
+                                    ),
+                                }
+                                if stream_event_callback is not None:
+                                    await stream_event_callback(dict(latest_llm_request_metadata))
                                 await db.commit()
                                 attempt_started_at = get_local_time()
                                 if stream_event_callback is None:
@@ -300,6 +347,14 @@ class InteractiveDispatcherMixin:
                                         **generation_kwargs,
                                         on_content=partial(_handle_stream_content, stream_state),
                                     )
+                                response_usage = getattr(response, "usage", None)
+                                prompt_tokens = response_usage.get("prompt_tokens") if isinstance(response_usage, dict) else None
+                                if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens > 0:
+                                    metadata_changed = latest_llm_request_metadata["input_tokens"] != prompt_tokens or latest_llm_request_metadata["input_tokens_source"] != "provider"
+                                    latest_llm_request_metadata["input_tokens"] = prompt_tokens
+                                    latest_llm_request_metadata["input_tokens_source"] = "provider"
+                                    if metadata_changed and stream_event_callback is not None:
+                                        await stream_event_callback(dict(latest_llm_request_metadata))
                                 # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
                                 ai_msg = response.message
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
@@ -551,11 +606,14 @@ class InteractiveDispatcherMixin:
                                 confirmation_content = json.dumps(audit_round.confirmation_payload, ensure_ascii=False)
                                 await update_confirmation_message_status(db, audit_record_id=audit_round.audit_record_id)
                                 final_ai_content = confirmation_content
-                                return LLMResponse(
+                                response = LLMResponse(
                                     choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=confirmation_content), finish_reason=True, created_at=time.time())],
                                     history=dump_output_history(turn_messages),
                                     files=files_to_user or None,
                                 ).model_dump()
+                                if latest_llm_request_metadata is not None:
+                                    response["llm_request_metadata"] = latest_llm_request_metadata
+                                return response
                             await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
@@ -775,7 +833,7 @@ class InteractiveDispatcherMixin:
                     break
                 checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
 
-            return LLMResponse(
+            response = LLMResponse(
                 choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
                 history=dump_output_history(
                     turn_messages,
@@ -783,6 +841,9 @@ class InteractiveDispatcherMixin:
                 ),
                 files=files_to_user or None,
             ).model_dump()
+            if latest_llm_request_metadata is not None:
+                response["llm_request_metadata"] = latest_llm_request_metadata
+            return response
 
         except BaseBusinessException:
             raise

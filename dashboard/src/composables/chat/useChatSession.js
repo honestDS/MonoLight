@@ -50,6 +50,20 @@ const parseAuditConfirmationResponse = (response) => {
   }
 }
 
+const normalizeLlmRequestMetadata = (metadata) => {
+  const tokenFields = ['input_tokens', 'context_window_tokens', 'max_output_tokens']
+  if (!tokenFields.every(field => Number.isFinite(metadata?.[field]) && metadata[field] >= 0)) return null
+
+  const normalizedMetadata = {
+    input_tokens: Math.trunc(metadata.input_tokens),
+    context_window_tokens: Math.trunc(metadata.context_window_tokens),
+    max_output_tokens: Math.trunc(metadata.max_output_tokens)
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'response_id')) normalizedMetadata.response_id = metadata.response_id
+  if (Object.prototype.hasOwnProperty.call(metadata, 'turn')) normalizedMetadata.turn = metadata.turn
+  return normalizedMetadata
+}
+
 const getLocalMessageType = (message) => {
   if (message?.type === 'audit_decision' && message.role === 'user') return 'user'
   if (message?.type && message.type !== 'text') return message.type
@@ -78,6 +92,7 @@ export function useChatSession() {
   const attachments = ref([])
   const contextSummaryWorkKeys = ref(new Set())
   const contextSummaryRequestKeys = new Map()
+  const llmRequestMetadataBySession = ref(new Map())
   const sessionEventSequenceBySession = new Map()
   const initialHistoryLoaded = ref(true)
   
@@ -87,22 +102,27 @@ export function useChatSession() {
   // 2. 会话管理
   const sessionManager = useSessionManager()
   const isContextSummarizing = computed(() => contextSummaryWorkKeys.value.size > 0)
-  
-  // 3. 通信层
-  const transport = useChatTransport()
-  
-  // 4. 消息处理
-  const messageProcessor = useMessageProcessor()
-
   const currentSession = computed(() =>
     sessionManager.sessions.value.find(
       session => session.session_id === sessionManager.currentSessionId.value
     ) || null
   )
+  const llmRequestMetadata = computed(() => {
+    const sessionId = sessionManager.currentSessionId.value
+    if (!sessionId) return null
+    return llmRequestMetadataBySession.value.get(sessionId)
+      || normalizeLlmRequestMetadata(currentSession.value?.llm_request_metadata)
+  })
   const isCurrentSessionReadOnly = computed(() => {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
   })
+
+  // 3. 通信层
+  const transport = useChatTransport()
+
+  // 4. 消息处理
+  const messageProcessor = useMessageProcessor()
 
   const applyLifecycleEvent = (updateMessages, event, isCurrentRequestSession) => {
     if (!isCurrentRequestSession()) return
@@ -115,11 +135,34 @@ export function useChatSession() {
     })
   }
 
+  const updateLlmRequestMetadata = (event, isCurrentRequestSession) => {
+    if (!isCurrentRequestSession()) return
+    const currentSessionId = sessionManager.currentSessionId.value
+    const sessionId = event?.session_id || currentSessionId
+    if (!sessionId || sessionId !== currentSessionId) return
+
+    const metadata = normalizeLlmRequestMetadata(event)
+    if (!metadata) return
+
+    const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
+    nextMetadataBySession.set(sessionId, metadata)
+    llmRequestMetadataBySession.value = nextMetadataBySession
+
+    const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+    if (sessionIndex !== -1) {
+      sessionManager.sessions.value[sessionIndex] = {
+        ...sessionManager.sessions.value[sessionIndex],
+        llm_request_metadata: metadata
+      }
+    }
+  }
+
   const createLifecycleCallbacks = isCurrentRequestSession => ({
     onInputQueued: event => applyLifecycleEvent(markInputQueued, event, isCurrentRequestSession),
     onInputDequeued: event => applyLifecycleEvent(markInputsDequeued, event, isCurrentRequestSession),
     onAgentLoopStart: event => applyLifecycleEvent(startAgentLoop, event, isCurrentRequestSession),
     onAgentLoopOutput: event => applyLifecycleEvent(stopAgentLoop, event, isCurrentRequestSession),
+    onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
     onWorkFinished: event => applyLifecycleEvent(finishWorkLifecycle, event, isCurrentRequestSession)
   })
 
@@ -424,6 +467,13 @@ export function useChatSession() {
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
 
+      if (response.llm_request_metadata) {
+        updateLlmRequestMetadata({
+          ...response.llm_request_metadata,
+          session_id: response.llm_request_metadata.session_id || response.session_id
+        }, isCurrentRequestSession)
+      }
+
       const auditConfirmation = parseAuditConfirmationResponse(response)
       messageProcessor.processAiResponse(chatState.messages, response, null, requestId)
       if (auditConfirmation) {
@@ -539,12 +589,18 @@ export function useChatSession() {
         }
       },
       onProactiveReply: (data) => {
+        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
+        if (data.llm_request_metadata) {
+          updateLlmRequestMetadata({
+            ...data.llm_request_metadata,
+            session_id: data.session_id || sessionManager.currentSessionId.value
+          }, isCurrentRequestSession)
+        }
         if (
           data?.source === 'foreground' &&
           Array.isArray(data?.request_ids) &&
           data.request_ids.some(id => String(id) === String(requestId))
         ) return
-        if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
         const workId = data.work_id
         if (
           data.source === 'foreground' &&
@@ -862,6 +918,7 @@ export function useChatSession() {
     loading: chatState.loading,
     messageList: chatState.messageList,
     isContextSummarizing,
+    llmRequestMetadata,
     initialHistoryLoaded,
     
     // 新增附件状态导出

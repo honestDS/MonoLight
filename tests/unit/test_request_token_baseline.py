@@ -1,0 +1,102 @@
+from app.core.utils import request_token_baseline as baseline_module
+from app.models.message import InternalMessage, MessageRole
+
+
+def _metadata_for(messages, tools=None):
+    metadata = baseline_module.build_request_token_baseline(
+        messages,
+        tools,
+        model_id="grok-4.5",
+        protocol="openai",
+        context_summary_revision=2,
+        context_content_revision=3,
+    )
+    metadata.update(
+        {
+            "input_tokens": 7500,
+            "input_tokens_source": "provider",
+        }
+    )
+    return metadata
+
+
+def test_incremental_input_tokens_add_only_messages_after_provider_baseline(monkeypatch):
+    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    previous_messages = [
+        InternalMessage(role=MessageRole.SYSTEM, content="system"),
+        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+    ]
+    metadata = _metadata_for(previous_messages)
+    current_messages = [
+        *previous_messages,
+        InternalMessage(id=3, role=MessageRole.ASSISTANT, content="abc"),
+        InternalMessage(id=4, role=MessageRole.USER, content="xy", environment_prompt="env"),
+    ]
+
+    result = baseline_module.estimate_incremental_input_tokens(
+        current_messages,
+        None,
+        metadata,
+        model_id="grok-4.5",
+        protocol="openai",
+        context_summary_revision=2,
+        context_content_revision=3,
+    )
+
+    assert result == 7500 + len("abc") + len("xy") + len("env")
+
+
+def test_incremental_input_tokens_falls_back_when_history_range_changes(monkeypatch):
+    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    previous_messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+    ]
+    metadata = _metadata_for(previous_messages)
+
+    result = baseline_module.estimate_incremental_input_tokens(
+        [
+            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+            InternalMessage(id=3, role=MessageRole.USER, content="new user"),
+        ],
+        None,
+        metadata,
+        model_id="grok-4.5",
+        protocol="openai",
+        context_summary_revision=2,
+        context_content_revision=3,
+    )
+
+    assert result is None
+
+
+def test_incremental_input_tokens_falls_back_when_model_or_summary_changes(monkeypatch):
+    monkeypatch.setattr(baseline_module, "estimate_tokens", len)
+    messages = [
+        InternalMessage(id=1, role=MessageRole.USER, content="old user"),
+        InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+    ]
+    metadata = _metadata_for(messages)
+
+    model_changed = baseline_module.estimate_incremental_input_tokens(
+        messages,
+        None,
+        metadata,
+        model_id="other-model",
+        protocol="openai",
+        context_summary_revision=2,
+        context_content_revision=3,
+    )
+    summary_changed = baseline_module.estimate_incremental_input_tokens(
+        messages,
+        None,
+        metadata,
+        model_id="grok-4.5",
+        protocol="openai",
+        context_summary_revision=3,
+        context_content_revision=3,
+    )
+
+    assert model_changed is None
+    assert summary_changed is None

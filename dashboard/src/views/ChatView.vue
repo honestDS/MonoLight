@@ -68,6 +68,7 @@
         :history-loading="historyLoading"
         :initial-history-loaded="initialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
+        :llm-request-metadata="llmRequestMetadata"
         @audit-decision="handleAuditDecision"
       />
       <div class="input-area">
@@ -258,6 +259,7 @@ const {
   attachments,
   isCurrentSessionReadOnly,
   isContextSummarizing,
+  llmRequestMetadata,
   historyLoading,
   initialHistoryLoaded
 } = chat

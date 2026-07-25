@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -355,3 +356,54 @@ async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_p
     assert "旧总结" in result[1].content
     assert result[-1].content == merged_content
     assert all(message.content != "追加A" for message in result)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_passes_previous_provider_usage_override(monkeypatch):
+    captured = {}
+    previous_metadata = {
+        "input_tokens": 7500,
+        "input_tokens_source": "provider",
+    }
+
+    async def get_session(_db, _session_id):
+        return SimpleNamespace(
+            context_summary_revision=2,
+            context_content_revision=3,
+            llm_request_metadata=None,
+        )
+
+    async def ensure_summary(_db, **kwargs):
+        captured.update(kwargs)
+        return ContextSummaryState(content=None, message_id=None)
+
+    def estimate_incremental(*_args, **_kwargs):
+        return 7600
+
+    monkeypatch.setattr(checkpoint_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    monkeypatch.setattr(checkpoint_module, "estimate_incremental_input_tokens", estimate_incremental)
+
+    await checkpoint_module.apply_context_summary_checkpoint(
+        object(),
+        session_id="session-1",
+        uid="user-1",
+        profile=object(),
+        cfg=object(),
+        messages=[
+            InternalMessage(role=MessageRole.SYSTEM, content="系统提示"),
+            InternalMessage(id=1, role=MessageRole.USER, content="旧问题"),
+            InternalMessage(id=2, role=MessageRole.ASSISTANT, content="旧回答"),
+            InternalMessage(id=3, role=MessageRole.USER, content="新问题"),
+        ],
+        trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+        fixed_upper_message_id=3,
+        context_window_k=8,
+        max_tokens=512,
+        tools=None,
+        model_id="grok-4.5",
+        protocol="openai",
+        previous_llm_request_metadata=previous_metadata,
+    )
+
+    assert captured["required_input_tokens_override"] == 7600

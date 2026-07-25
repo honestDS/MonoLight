@@ -1,5 +1,23 @@
 <template>
   <div class="message-list-wrapper">
+    <div
+      class="llm-request-metadata"
+      role="status"
+      :aria-label="$t('chat.llm_request_metadata_label')"
+    >
+      <span class="llm-request-metadata-item">
+        <span>{{ $t('chat.input_tokens') }}</span>
+        <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
+      </span>
+      <span class="llm-request-metadata-item">
+        <span>{{ $t('chat.context_limit') }}</span>
+        <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
+      </span>
+      <span class="llm-request-metadata-item">
+        <span>{{ $t('chat.max_output') }}</span>
+        <strong>{{ formatTokenCount(llmRequestMetadata?.max_output_tokens) }}</strong>
+      </span>
+    </div>
     <VList
       ref="virtualList"
       class="message-list"
@@ -265,10 +283,13 @@ const props = defineProps({
   activeCollapse: { type: Array, default: () => [] },
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
-  contextSummarizing: { type: Boolean, default: false }
+  contextSummarizing: { type: Boolean, default: false },
+  llmRequestMetadata: { type: Object, default: null }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
+const tokenNumberFormatter = new Intl.NumberFormat()
+const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
 const pendingAuditDecisions = ref(new Set())
 const auditDecisionStatuses = ref(new Map())
 const auditCountdownNow = ref(Date.now())

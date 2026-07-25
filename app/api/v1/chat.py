@@ -264,6 +264,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "enable_markdown": row.enable_markdown,
                 "source": row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
+                "llm_request_metadata": row.llm_request_metadata,
             }
         )
     return StandardResponse.success(data=data, message=MSG_SESSION_LIST_SUCCESS)

@@ -140,6 +140,7 @@ class BackgroundDispatcherMixin:
         reply_source: str = "background_task",
         final_message_dedupe_key: str | None = None,
         audit_execution_binding_callback: Callable[[dict[str, Any] | None], Awaitable[None]] | None = None,
+        request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]]]:
         """根据历史生成后台回复，并持久化可能执行工具的审计绑定。"""
         user = await user_crud.get_by_uid(db, uid)
@@ -223,6 +224,7 @@ class BackgroundDispatcherMixin:
             uid=uid,
             session_id=session_id,
             tools=tools,
+            request_metadata_callback=request_metadata_callback,
         )
         ai_msg = response.message
 
@@ -266,6 +268,7 @@ class BackgroundDispatcherMixin:
                     uid=uid,
                     session_id=session_id,
                     tools=tools,
+                    request_metadata_callback=request_metadata_callback,
                 )
                 ai_msg = retry_response.message
                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
@@ -309,6 +312,7 @@ class BackgroundDispatcherMixin:
                         session_id=session_id,
                         tools=None,
                         require_content=True,
+                        request_metadata_callback=request_metadata_callback,
                     )
                     ai_msg = text_only_response.message
                     if ai_msg.tool_calls:
@@ -578,6 +582,7 @@ class BackgroundDispatcherMixin:
             session_id=session_id,
             tools=None,
             require_content_or_tools=False,
+            request_metadata_callback=request_metadata_callback,
         )
         final_msg = final_response.message
         if final_msg.tool_calls:
@@ -616,6 +621,7 @@ class BackgroundDispatcherMixin:
                 session_id=session_id,
                 tools=None,
                 require_content_or_tools=True,
+                request_metadata_callback=request_metadata_callback,
             )
             final_msg = corrected_response.message
             if final_msg.tool_calls:

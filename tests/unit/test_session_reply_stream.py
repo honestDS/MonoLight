@@ -22,6 +22,7 @@ from app.providers.llm.client import LLMClient
 def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monkeypatch):
     bound_fields = {}
     logged_messages = []
+    estimate_calls = []
 
     class CapturingLogger:
         def bind(self, **kwargs):
@@ -38,7 +39,16 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
     ]
     tools = [{"type": "function", "function": {"name": "search"}}]
     monkeypatch.setattr(llm_client_module, "logger", CapturingLogger())
-    monkeypatch.setattr(llm_client_module, "estimate_tokens", lambda _content: 321)
+
+    def estimate_request_context_tokens(request_messages, request_tools):
+        estimate_calls.append((request_messages, request_tools))
+        return 321
+
+    monkeypatch.setattr(
+        llm_client_module,
+        "estimate_request_context_tokens",
+        estimate_request_context_tokens,
+    )
 
     llm_client_module._log_request_context(
         model_id="model-1",
@@ -74,6 +84,43 @@ def test_llm_request_context_debug_log_contains_counts_and_estimated_tokens(monk
         "estimated_context_tokens": 321,
         "max_output_tokens": 512,
     }
+    assert estimate_calls == [(messages, tools)]
+
+
+def test_llm_request_context_debug_log_reuses_provided_estimated_tokens(monkeypatch):
+    bound_fields = {}
+    logged_fields = {}
+
+    class CapturingLogger:
+        def bind(self, **kwargs):
+            bound_fields.update(kwargs)
+            return self
+
+        def debug(self, _message, **kwargs):
+            logged_fields.update(kwargs)
+
+    def unexpected_estimate(*_args, **_kwargs):
+        raise AssertionError("provided request context tokens must be reused")
+
+    monkeypatch.setattr(llm_client_module, "logger", CapturingLogger())
+    monkeypatch.setattr(
+        llm_client_module,
+        "estimate_request_context_tokens",
+        unexpected_estimate,
+    )
+
+    llm_client_module._log_request_context(
+        model_id="model-1",
+        protocol="openai",
+        messages=[InternalMessage(role=MessageRole.USER, content="question")],
+        tools=None,
+        max_tokens=512,
+        streaming=False,
+        request_context_tokens=123,
+    )
+
+    assert bound_fields["estimated_context_tokens"] == 123
+    assert logged_fields["estimated_context_tokens"] == 123
 
 
 @pytest.mark.asyncio
@@ -873,13 +920,22 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     )
     published: list[tuple[int, dict]] = []
     dispatch_kwargs: dict = {}
+    metadata_updates = []
+    event_db_commits = []
 
     class FakeDb:
+        def __init__(self):
+            self.flush_calls = 0
+
         async def refresh(self, instance):
             return None
 
+        async def flush(self):
+            self.flush_calls += 1
+
     class EventDb:
-        pass
+        async def commit(self):
+            event_db_commits.append(self)
 
     class SessionContext:
         async def __aenter__(self):
@@ -894,11 +950,32 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     async def get_latest_sequence(db, *, work_id):
         return 0
 
-    async def publish(db, *, work_id, sequence_no, event):
+    async def publish(db, *, work_id, sequence_no, event, commit=True):
+        assert commit is False
         published.append((sequence_no, event))
+
+    async def update_llm_request_metadata(db, *, session_id, uid, metadata, commit=True):
+        metadata_updates.append(
+            {
+                "db_type": type(db).__name__,
+                "session_id": session_id,
+                "uid": uid,
+                "metadata": metadata,
+                "commit": commit,
+            }
+        )
+        return True
 
     async def dispatch_stream(**kwargs):
         dispatch_kwargs.update(kwargs)
+        yield {
+            "type": "llm_request_metadata",
+            "turn": 1,
+            "response_id": "response-turn-1",
+            "input_tokens": 100,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+        }
         yield {
             "type": "agent_loop_start",
             "session_id": "session-1",
@@ -917,6 +994,14 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
             "result": '{"status":"success"}',
             "tool_call_id": "call-1",
             "response_id": "response-turn-1",
+        }
+        yield {
+            "type": "llm_request_metadata",
+            "turn": 2,
+            "response_id": "response-turn-2",
+            "input_tokens": 120,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
         }
         yield {
             "type": "agent_loop_start",
@@ -946,6 +1031,10 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         "app.core.session_reply_queue.executor.session_reply_stream_event_crud.publish",
         publish,
     )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_crud.update_llm_request_metadata",
+        update_llm_request_metadata,
+    )
 
     async def unexpected_non_stream_dispatch(**_kwargs):
         raise AssertionError("stream work must not use ChatDispatcher.dispatch")
@@ -953,24 +1042,167 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", dispatch_stream)
     monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", unexpected_non_stream_dispatch)
 
-    result = await _execute_foreground(FakeDb(), work, "worker-1")
+    db = FakeDb()
+    result = await _execute_foreground(db, work, "worker-1")
 
     assert result == {"history": [], "files": None}
     assert dispatch_kwargs["expose_tool_call_content"] is False
-    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7]
+    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert [event["type"] for _sequence_no, event in published] == [
+        "llm_request_metadata",
         "input_dequeued",
         "agent_loop_start",
         "tool_start",
         "tool_end",
+        "llm_request_metadata",
         "input_dequeued",
         "agent_loop_start",
         "content",
     ]
-    assert published[0][1]["request_ids"] == ["request-1"]
-    assert published[2][1]["response_id"] == "response-turn-1"
-    assert published[3][1]["tool_call_id"] == "call-1"
-    assert published[4][1]["request_ids"] == ["request-2"]
-    assert published[6][1]["response_id"] == "response-turn-2"
+    assert published[1][1]["request_ids"] == ["request-1"]
+    assert published[0][1]["response_id"] == "response-turn-1"
+    assert published[3][1]["response_id"] == "response-turn-1"
+    assert published[4][1]["tool_call_id"] == "call-1"
+    assert published[6][1]["request_ids"] == ["request-2"]
+    assert published[5][1]["response_id"] == "response-turn-2"
+    assert published[8][1]["response_id"] == "response-turn-2"
     assert all(event["session_id"] == "session-1" for _sequence_no, event in published)
     assert all(event["work_id"] == 7 for _sequence_no, event in published)
+    assert db.flush_calls == 0
+    assert len(event_db_commits) == len(published)
+    assert metadata_updates == [
+        {
+            "db_type": "EventDb",
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": {
+                "type": "llm_request_metadata",
+                "turn": 1,
+                "response_id": "response-turn-1",
+                "input_tokens": 100,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+                "session_id": "session-1",
+                "work_id": 7,
+                "event_sequence_no": 1,
+            },
+            "commit": False,
+        },
+        {
+            "db_type": "EventDb",
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": {
+                "type": "llm_request_metadata",
+                "turn": 2,
+                "response_id": "response-turn-2",
+                "input_tokens": 120,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+                "session_id": "session-1",
+                "work_id": 7,
+                "event_sequence_no": 6,
+            },
+            "commit": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_foreground_persists_non_stream_llm_request_metadata(monkeypatch):
+    work = SimpleNamespace(
+        id=8,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="foreground-message:session-1:12",
+        created_at=datetime(2026, 7, 13, 21, 0, 0),
+        execution_state={
+            "stream_requested": False,
+            "request_ids": ["request-1"],
+        },
+    )
+    metadata_updates = []
+
+    class FakeDb:
+        async def refresh(self, instance):
+            return None
+
+    class EventDb:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return EventDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def freeze_foreground_input(db, *, work, worker_id):
+        return "测试", [], [12]
+
+    async def get_latest_sequence(db, *, work_id):
+        return 0
+
+    async def dispatch(**kwargs):
+        return {
+            "history": [],
+            "files": None,
+            "llm_request_metadata": {
+                "type": "llm_request_metadata",
+                "turn": 1,
+                "response_id": "response-turn-1",
+                "input_tokens": 222,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+            },
+        }
+
+    async def update_llm_request_metadata(db, *, session_id, uid, metadata, commit=True):
+        metadata_updates.append(
+            {
+                "session_id": session_id,
+                "uid": uid,
+                "metadata": metadata,
+                "commit": commit,
+            }
+        )
+        return True
+
+    async def unexpected_stream_dispatch(**_kwargs):
+        raise AssertionError("non-stream work must not use ChatDispatcher.dispatch_stream")
+
+    monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_reply_queue_manager.freeze_foreground_input",
+        freeze_foreground_input,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.get_latest_sequence",
+        get_latest_sequence,
+    )
+    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", dispatch)
+    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", unexpected_stream_dispatch)
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_crud.update_llm_request_metadata",
+        update_llm_request_metadata,
+    )
+
+    result = await _execute_foreground(FakeDb(), work, "worker-1")
+
+    assert result["llm_request_metadata"]["input_tokens"] == 222
+    assert metadata_updates == [
+        {
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": {
+                "type": "llm_request_metadata",
+                "turn": 1,
+                "response_id": "response-turn-1",
+                "input_tokens": 222,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+            },
+            "commit": False,
+        }
+    ]

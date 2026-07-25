@@ -121,16 +121,30 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rejected_foreground_reply_uses_history_without_decision_user_input(monkeypatch):
-    work = SimpleNamespace(
+    work = SessionReplyWorkItem(
         id=7,
         uid="user-1",
         session_id="session-1",
         profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="11",
         dedupe_key="foreground-message:session-1:11",
-        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by="worker-1",
+        input_message_ids=[11],
         execution_state={"audit_decision_response": True},
     )
     captured = {}
+    metadata_updates = []
+    request_metadata = {
+        "type": "llm_request_metadata",
+        "input_tokens": 123,
+        "input_tokens_source": "provider",
+        "context_window_tokens": 32768,
+        "max_output_tokens": 2048,
+    }
 
     class FakeDb:
         async def refresh(self, instance):
@@ -144,17 +158,32 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
 
     async def generate_reply(db, **kwargs):
         captured.update(kwargs)
+        await kwargs["request_metadata_callback"](request_metadata)
         return InternalMessage(role=MessageRole.ASSISTANT, content="已取消"), [InternalMessage(role=MessageRole.ASSISTANT, content="已取消")], []
+
+    async def update_request_metadata(db, **kwargs):
+        metadata_updates.append(kwargs)
 
     monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
     monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
     response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
 
     assert response["choices"][0]["message"]["content"] == "已取消"
     assert response["history"][0]["role"] == MessageRole.ASSISTANT
     assert response["history"][0]["content"] == "已取消"
+    assert response["llm_request_metadata"] == request_metadata
+    assert metadata_updates == [
+        {
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": request_metadata,
+            "commit": False,
+        }
+    ]
+    assert executor_module._event_for_work(work, response)["llm_request_metadata"] == request_metadata
     assert captured["allow_tools"] is False
     assert "extra_messages" not in captured
     assert "submission_context" not in captured

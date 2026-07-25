@@ -20,6 +20,7 @@ const lifecycleEventTypes = new Set([
   'input_dequeued',
   'agent_loop_start',
   'agent_loop_output',
+  'llm_request_metadata',
   'content',
   'turn_end',
   'tool_start',
@@ -95,6 +96,7 @@ export function useChatTransport() {
       onInputDequeued,
       onAgentLoopStart,
       onAgentLoopOutput,
+      onLlmRequestMetadata,
       onWorkFinished,
       scrollToBottom,
       setLoading,
@@ -114,6 +116,11 @@ export function useChatTransport() {
 
     if (type === 'context_summary_end') {
       if (onContextSummaryEnd) onContextSummaryEnd(data)
+      return
+    }
+
+    if (type === 'llm_request_metadata') {
+      if (onLlmRequestMetadata) onLlmRequestMetadata(data)
       return
     }
 
