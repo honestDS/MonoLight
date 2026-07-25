@@ -21,6 +21,7 @@ from app.models.message import (
     MessageRole,
 )
 from app.transformers.openai import OpenAITransformer
+from app.transformers.openai_responses import OpenAIResponsesTransformer
 
 logger = get_logger(__name__)
 
@@ -278,7 +279,10 @@ class _StreamToolCallAssembler:
 
 
 class LLMClient:
-    _transformers = {"openai": OpenAITransformer()}
+    _transformers = {
+        "openai": OpenAITransformer(),
+        "openai_responses": OpenAIResponsesTransformer(),
+    }
 
     @staticmethod
     def normalize_tool_calls(tool_calls: list[InternalToolCall] | None) -> list[InternalToolCall] | None:

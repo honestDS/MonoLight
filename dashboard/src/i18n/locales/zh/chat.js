@@ -3,6 +3,8 @@ export default {
   context_summarizing: '正在压缩上下文…',
   llm_request_metadata_label: 'LLM 请求 Token 信息',
   input_tokens: '输入 Token',
+  total_output: '总输出',
+  cache_hit_rate: '缓存命中率',
   context_limit: '上下文上限',
   max_output: '最大输出',
   session_prefix: '会话: {id}',

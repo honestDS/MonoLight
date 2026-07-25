@@ -104,6 +104,8 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "context_content_revision",
             "system_tokens",
             "tools_tokens",
+            "output_tokens",
+            "cached_tokens",
         )
         for field in optional_int_fields:
             if field not in metadata:
@@ -113,6 +115,12 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
                 return False
             persisted_metadata[field] = value
+
+        if "cache_hit_rate" in metadata:
+            cache_hit_rate = metadata["cache_hit_rate"]
+            if isinstance(cache_hit_rate, bool) or not isinstance(cache_hit_rate, (int, float)) or not 0 <= cache_hit_rate <= 1:
+                return False
+            persisted_metadata["cache_hit_rate"] = float(cache_hit_rate)
 
         for field in ("model_id", "protocol"):
             if field not in metadata:

@@ -54,6 +54,25 @@ def _is_timeout_exception(exc: Exception) -> bool:
 
 class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer):
     # 本转换器统一关闭 TLS 证书校验，以兼容自签名证书或证书链不完整的模型提供商。
+    @staticmethod
+    def _nonnegative_token_count(value: Any) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    @classmethod
+    def _normalize_usage(cls, usage: Any) -> dict[str, Any]:
+        normalized = dict(usage) if isinstance(usage, dict) else {}
+        prompt_details = normalized.get("prompt_tokens_details")
+        cached_tokens = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
+        normalized.update(
+            {
+                "prompt_tokens": cls._nonnegative_token_count(normalized.get("prompt_tokens")),
+                "completion_tokens": cls._nonnegative_token_count(normalized.get("completion_tokens")),
+                "total_tokens": cls._nonnegative_token_count(normalized.get("total_tokens")),
+                "cached_tokens": cls._nonnegative_token_count(cached_tokens),
+            }
+        )
+        return normalized
+
     async def list_models(
         self,
         api_key: str,
@@ -145,7 +164,9 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                     txt = await resp.text()
                     if resp.status != 200:
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    return json.loads(txt)
+                    parsed = json.loads(txt)
+                    parsed["usage"] = self._normalize_usage(parsed.get("usage"))
+                    return parsed
         except LLMException:
             raise
         except Exception as e:
@@ -235,6 +256,7 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
             "messages": self.to_provider(messages),
             "temperature": temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
@@ -301,6 +323,8 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                                 except Exception as json_err:
                                     logger.bind(model_id=model_id, base_url=base_url).warning(t("LOG_OPENAI_SSE_PARSE_FAILED", raw_line=raw_line, error=str(json_err)))
                                     continue
+                                if "usage" in parsed:
+                                    parsed["usage"] = self._normalize_usage(parsed.get("usage"))
                                 if self._stream_chunk_has_payload(parsed):
                                     deadline = loop.time() + timeout
                                 yield parsed

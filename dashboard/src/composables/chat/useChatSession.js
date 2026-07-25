@@ -59,6 +59,15 @@ const normalizeLlmRequestMetadata = (metadata) => {
     context_window_tokens: Math.trunc(metadata.context_window_tokens),
     max_output_tokens: Math.trunc(metadata.max_output_tokens)
   }
+  for (const field of ['output_tokens', 'cached_tokens']) {
+    if (!Object.prototype.hasOwnProperty.call(metadata, field)) continue
+    if (!Number.isFinite(metadata[field]) || metadata[field] < 0) return null
+    normalizedMetadata[field] = Math.trunc(metadata[field])
+  }
+  if (Object.prototype.hasOwnProperty.call(metadata, 'cache_hit_rate')) {
+    if (!Number.isFinite(metadata.cache_hit_rate) || metadata.cache_hit_rate < 0 || metadata.cache_hit_rate > 1) return null
+    normalizedMetadata.cache_hit_rate = Number(metadata.cache_hit_rate)
+  }
   if (Object.prototype.hasOwnProperty.call(metadata, 'response_id')) normalizedMetadata.response_id = metadata.response_id
   if (Object.prototype.hasOwnProperty.call(metadata, 'turn')) normalizedMetadata.turn = metadata.turn
   if (Object.prototype.hasOwnProperty.call(metadata, 'work_sequence_no')) {

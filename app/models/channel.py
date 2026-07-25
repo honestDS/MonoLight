@@ -47,6 +47,7 @@ class ImageGenerationQuality(enum.StrEnum):
 
 class ChannelType(enum.StrEnum):
     OPENAI = "OPENAI"
+    OPENAI_RESPONSES = "OPENAI_RESPONSES"
 
 
 class ChannelModelItem(BaseModel):
@@ -112,6 +113,11 @@ class ChannelBase(SQLModel):
 class ModelChannel(ChannelBase, table=True):
     __tablename__ = "channel"
     id: int | None = Field(default=None, primary_key=True, index=True)
+
+    @property
+    def protocol(self) -> str:
+        channel_type = getattr(self.channel_type, "value", self.channel_type)
+        return str(channel_type).lower()
 
     def get_decrypted_api_key(self) -> str:
         """获取解密后的API密钥"""

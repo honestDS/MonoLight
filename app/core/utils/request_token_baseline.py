@@ -14,6 +14,27 @@ def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def extract_provider_token_metrics(usage: Any) -> dict[str, int | float]:
+    if not isinstance(usage, dict):
+        return {}
+
+    metrics: dict[str, Any] = {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    cached_tokens = usage.get("cached_tokens")
+
+    if _is_positive_int(prompt_tokens):
+        metrics["input_tokens"] = prompt_tokens
+        metrics["input_tokens_source"] = "provider"
+        cached_tokens_for_rate = cached_tokens if _is_non_negative_int(cached_tokens) else 0
+        metrics["cache_hit_rate"] = min(cached_tokens_for_rate, prompt_tokens) / prompt_tokens
+    if _is_non_negative_int(completion_tokens):
+        metrics["output_tokens"] = completion_tokens
+    if _is_non_negative_int(cached_tokens):
+        metrics["cached_tokens"] = cached_tokens
+    return metrics
+
+
 def _positive_message_ids(messages: list[InternalMessage]) -> list[int]:
     return [message.id for message in messages if _is_positive_int(message.id)]
 

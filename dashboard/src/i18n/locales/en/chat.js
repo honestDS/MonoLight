@@ -3,6 +3,8 @@ export default {
   context_summarizing: 'Compressing conversation context…',
   llm_request_metadata_label: 'LLM request token information',
   input_tokens: 'Input tokens',
+  total_output: 'Total output',
+  cache_hit_rate: 'Cache hit rate',
   context_limit: 'Context limit',
   max_output: 'Max output',
   session_prefix: 'Session: {id}',

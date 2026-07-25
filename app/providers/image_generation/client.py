@@ -5,11 +5,13 @@ from app.core.exceptions import LLMException
 from app.models.channel import ChannelType
 from app.transformers.base import BaseImageGenerationTransformer
 from app.transformers.openai import OpenAITransformer
+from app.transformers.openai_responses import OpenAIResponsesTransformer
 
 
 class ImageGenerationClient:
     _transformers: dict[str, BaseImageGenerationTransformer] = {
         ChannelType.OPENAI.value.lower(): OpenAITransformer(),
+        ChannelType.OPENAI_RESPONSES.value.lower(): OpenAIResponsesTransformer(),
     }
 
     @classmethod

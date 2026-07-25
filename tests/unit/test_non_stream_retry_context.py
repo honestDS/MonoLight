@@ -398,7 +398,12 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
                 role=MessageRole.ASSISTANT,
                 content="ok",
             ),
-            usage={"prompt_tokens": 777, "completion_tokens": 10, "total_tokens": 787},
+            usage={
+                "prompt_tokens": 777,
+                "completion_tokens": 10,
+                "total_tokens": 787,
+                "cached_tokens": 222,
+            },
         )
 
     async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
@@ -475,6 +480,9 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert response["llm_request_metadata"]["input_tokens"] == 777
     assert response["llm_request_metadata"]["context_window_tokens"] == 4096
     assert response["llm_request_metadata"]["max_output_tokens"] == 256
+    assert response["llm_request_metadata"]["output_tokens"] == 10
+    assert response["llm_request_metadata"]["cached_tokens"] == 222
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(222 / 777)
 
 
 @pytest.mark.asyncio

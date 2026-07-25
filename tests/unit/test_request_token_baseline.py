@@ -2,6 +2,55 @@ from app.core.utils import request_token_baseline as baseline_module
 from app.models.message import InternalMessage, MessageRole
 
 
+def test_extract_provider_token_metrics_returns_available_usage_metrics():
+    assert baseline_module.extract_provider_token_metrics(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 120,
+            "cached_tokens": 250,
+        }
+    ) == {
+        "input_tokens": 1000,
+        "input_tokens_source": "provider",
+        "output_tokens": 120,
+        "cached_tokens": 250,
+        "cache_hit_rate": 0.25,
+    }
+
+
+def test_extract_provider_token_metrics_clamps_cache_hit_rate():
+    assert baseline_module.extract_provider_token_metrics(
+        {
+            "prompt_tokens": 1000,
+            "cached_tokens": 1500,
+        }
+    ) == {
+        "input_tokens": 1000,
+        "input_tokens_source": "provider",
+        "cached_tokens": 1500,
+        "cache_hit_rate": 1.0,
+    }
+
+
+def test_extract_provider_token_metrics_ignores_invalid_usage_values():
+    invalid_usages = (
+        {
+            "prompt_tokens": True,
+            "completion_tokens": True,
+            "cached_tokens": True,
+        },
+        {
+            "prompt_tokens": -1,
+            "completion_tokens": -1,
+            "cached_tokens": -1,
+        },
+        [],
+    )
+
+    for usage in invalid_usages:
+        assert baseline_module.extract_provider_token_metrics(usage) == {}
+
+
 def _metadata_for(messages, tools=None):
     metadata = baseline_module.build_request_token_baseline(
         messages,

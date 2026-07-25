@@ -5,11 +5,13 @@ from app.core.exceptions import LLMException
 from app.models.channel import ChannelType
 from app.transformers.base import BaseEmbeddingTransformer
 from app.transformers.openai import OpenAITransformer
+from app.transformers.openai_responses import OpenAIResponsesTransformer
 
 
 class EmbeddingClient:
     _transformers: dict[str, BaseEmbeddingTransformer] = {
         ChannelType.OPENAI.value.lower(): OpenAITransformer(),
+        ChannelType.OPENAI_RESPONSES.value.lower(): OpenAIResponsesTransformer(),
     }
 
     @classmethod

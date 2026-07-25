@@ -15,7 +15,11 @@
       @page-change="fetchChannels"
       @size-change="handleSizeChange">
       <el-table-column :resizable="false" prop="name" :label="$t('channels.name')" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" prop="channel_type" :label="$t('channels.type')" min-width="100" sortable></el-table-column>
+      <el-table-column :resizable="false" prop="channel_type" :label="$t('channels.type')" min-width="100" sortable>
+        <template #default="scope">
+          {{ getChannelTypeLabel(scope.row.channel_type) }}
+        </template>
+      </el-table-column>
       <el-table-column :resizable="false" :label="$t('channels.models')" min-width="300" sortable>
         <template #default="scope">
           <div class="models-list" v-if="scope.row.model_ids && scope.row.model_ids.length > 0">
@@ -55,7 +59,7 @@
                 </el-form-item>
                 <el-form-item :label="$t('channels.channel_type')">
                   <el-select v-model="form.channel_type" :placeholder="$t('channels.select_type')" class="full-width-input">
-                    <el-option v-for="item in channelTypes" :key="item" :label="item" :value="item" />
+                    <el-option v-for="item in channelTypes" :key="item" :label="getChannelTypeLabel(item)" :value="item" />
                   </el-select>
                 </el-form-item>
                 <el-form-item :label="$t('channels.api_key')">
@@ -249,6 +253,14 @@ const detectedModels = ref([])
 const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
 const testingModelIndex = ref(null)
+
+const getChannelTypeLabel = (value) => {
+  const map = {
+    OPENAI: 'Openai-completions',
+    OPENAI_RESPONSES: 'Openai-responses'
+  }
+  return map[value] || value
+}
 
 const getModelUsageLabel = (value) => {
   const map = {

@@ -6,6 +6,7 @@ from app.core.rerank.schemas import RerankResult
 from app.models.channel import ChannelType
 from app.transformers.base import BaseRerankTransformer
 from app.transformers.openai import OpenAITransformer
+from app.transformers.openai_responses import OpenAIResponsesTransformer
 
 # 单个 chunk 发送给远程 reranker 前的最大字符截断长度，防止 Payload Too Large 及过大网络开销
 RERANK_MAX_DOCUMENT_CHARS = 3000
@@ -16,6 +17,7 @@ logger = get_logger(__name__)
 class RerankClient:
     _transformers: dict[str, BaseRerankTransformer] = {
         ChannelType.OPENAI.value.lower(): OpenAITransformer(),
+        ChannelType.OPENAI_RESPONSES.value.lower(): OpenAIResponsesTransformer(),
     }
 
     @classmethod

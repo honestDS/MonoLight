@@ -10,6 +10,14 @@
         <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
       </span>
       <span class="llm-request-metadata-item">
+        <span>{{ $t('chat.total_output') }}</span>
+        <strong>{{ formatTokenCount(llmRequestMetadata?.output_tokens) }}</strong>
+      </span>
+      <span class="llm-request-metadata-item">
+        <span>{{ $t('chat.cache_hit_rate') }}</span>
+        <strong>{{ formatCacheHitRate(llmRequestMetadata?.cache_hit_rate) }}</strong>
+      </span>
+      <span class="llm-request-metadata-item">
         <span>{{ $t('chat.context_limit') }}</span>
         <strong>{{ formatTokenCount(llmRequestMetadata?.context_window_tokens) }}</strong>
       </span>
@@ -289,7 +297,9 @@ const props = defineProps({
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
 const tokenNumberFormatter = new Intl.NumberFormat()
+const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
 const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
+const formatCacheHitRate = value => Number.isFinite(value) ? percentNumberFormatter.format(value) : '-'
 const pendingAuditDecisions = ref(new Set())
 const auditDecisionStatuses = ref(new Map())
 const auditCountdownNow = ref(Date.now())

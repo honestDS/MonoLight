@@ -63,7 +63,11 @@ from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
 from app.core.utils.message_assembler import MessageAssembler
-from app.core.utils.request_token_baseline import build_request_token_baseline, estimate_incremental_input_tokens
+from app.core.utils.request_token_baseline import (
+    build_request_token_baseline,
+    estimate_incremental_input_tokens,
+    extract_provider_token_metrics,
+)
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, MessageRole
@@ -347,14 +351,11 @@ class InteractiveDispatcherMixin:
                                         **generation_kwargs,
                                         on_content=partial(_handle_stream_content, stream_state),
                                     )
-                                response_usage = getattr(response, "usage", None)
-                                prompt_tokens = response_usage.get("prompt_tokens") if isinstance(response_usage, dict) else None
-                                if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens > 0:
-                                    metadata_changed = latest_llm_request_metadata["input_tokens"] != prompt_tokens or latest_llm_request_metadata["input_tokens_source"] != "provider"
-                                    latest_llm_request_metadata["input_tokens"] = prompt_tokens
-                                    latest_llm_request_metadata["input_tokens_source"] = "provider"
-                                    if metadata_changed and stream_event_callback is not None:
-                                        await stream_event_callback(dict(latest_llm_request_metadata))
+                                provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
+                                metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
+                                latest_llm_request_metadata.update(provider_token_metrics)
+                                if metadata_changed and stream_event_callback is not None:
+                                    await stream_event_callback(dict(latest_llm_request_metadata))
                                 # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
                                 ai_msg = response.message
                                 if not ai_msg.tool_calls and not (ai_msg.content or "").strip():

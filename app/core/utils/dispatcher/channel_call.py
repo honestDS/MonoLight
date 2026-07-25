@@ -9,6 +9,7 @@ from app.core.exceptions import ApiKeyException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.request_token_baseline import extract_provider_token_metrics
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 from app.models.message import InternalMessage, InternalResponse
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
@@ -76,16 +77,14 @@ async def generate_chat_with_fallback(
             if require_content_or_tools and not ai_msg.tool_calls and not (ai_msg.content or "").strip():
                 raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             if request_metadata_callback is not None:
-                response_usage = getattr(response, "usage", None)
-                prompt_tokens = response_usage.get("prompt_tokens") if isinstance(response_usage, dict) else None
-                provider_tokens_available = isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens > 0
                 await request_metadata_callback(
                     {
                         "type": "llm_request_metadata",
-                        "input_tokens": prompt_tokens if provider_tokens_available else estimated_input_tokens,
-                        "input_tokens_source": "provider" if provider_tokens_available else "estimated",
+                        "input_tokens": estimated_input_tokens,
+                        "input_tokens_source": "estimated",
                         "context_window_tokens": max(1, int(chat_params["context_window_k"]) * 1024),
                         "max_output_tokens": max(0, int(chat_params["max_tokens"])),
+                        **extract_provider_token_metrics(getattr(response, "usage", None)),
                     }
                 )
             return response, chat_channel_obj, model_entry, channel_rule, chat_params
