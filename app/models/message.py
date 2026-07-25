@@ -62,12 +62,15 @@ class InternalToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any]
+    provider_metadata: dict[str, Any] | None = None
 
 
 class InternalMessage(BaseModel):
     id: int | None = None
     role: MessageRole
     content: str | list[TextPart | ImagePart | FilePart | MessagePart] | None = None
+    refusal: str | None = None
+    provider_metadata: dict[str, Any] | None = None
     environment_prompt: str | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
@@ -78,11 +81,16 @@ class InternalMessage(BaseModel):
 class InternalResponse(BaseModel):
     message: InternalMessage
     model: str
-    usage: dict[str, Any] = {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-    }
+    usage: dict[str, Any] = PyField(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    finish_reason: str | None = None
+    finish_details: dict[str, Any] | None = None
+    provider_metadata: dict[str, Any] | None = None
 
 
 class MessageBase(SQLModel):

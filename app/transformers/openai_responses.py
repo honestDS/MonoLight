@@ -16,7 +16,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.models.message import FilePart, ImagePart, InternalMessage, InternalToolCall, MessageRole, TextPart
+from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
 from .openai import OpenAITransformer, _is_timeout_exception
 
@@ -24,6 +24,8 @@ logger = get_logger(__name__)
 
 
 class OpenAIResponsesTransformer(OpenAITransformer):
+    _PROTOCOL_METADATA = "openai_responses"
+
     async def generate(
         self,
         api_key: str,
@@ -103,6 +105,10 @@ class OpenAIResponsesTransformer(OpenAITransformer):
         url = f"{base_url.rstrip('/')}/responses"
         argument_delta_indexes: set[int | str | None] = set()
         argument_fallback_indexes: set[int | str | None] = set()
+        text_delta_indexes: set[tuple[int | str | None, int | str | None]] = set()
+        text_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
+        refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] = set()
+        refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         try:
@@ -156,6 +162,10 @@ class OpenAIResponsesTransformer(OpenAITransformer):
                                 event,
                                 argument_delta_indexes=argument_delta_indexes,
                                 argument_fallback_indexes=argument_fallback_indexes,
+                                text_delta_indexes=text_delta_indexes,
+                                text_fallback_indexes=text_fallback_indexes,
+                                refusal_delta_indexes=refusal_delta_indexes,
+                                refusal_fallback_indexes=refusal_fallback_indexes,
                             )
                             if chunk is None:
                                 continue
@@ -181,6 +191,13 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             role = getattr(message.role, "value", message.role)
             role = str(role).lower()
 
+            if role == MessageRole.ASSISTANT.value and message.tool_calls:
+                metadata = message.provider_metadata or {}
+                if metadata.get("protocol") == cls._PROTOCOL_METADATA:
+                    output_items = metadata.get("output")
+                    if isinstance(output_items, list):
+                        provider_items.extend(dict(item) for item in output_items if isinstance(item, dict) and item.get("type") == "reasoning")
+
             if role == MessageRole.TOOL.value:
                 provider_items.append(
                     {
@@ -197,7 +214,10 @@ class OpenAIResponsesTransformer(OpenAITransformer):
 
             if role == MessageRole.ASSISTANT.value and message.tool_calls:
                 for tool_call in message.tool_calls:
-                    provider_items.append(
+                    metadata = tool_call.provider_metadata or {}
+                    raw_item = metadata.get("item") if metadata.get("protocol") == cls._PROTOCOL_METADATA else None
+                    provider_item = dict(raw_item) if isinstance(raw_item, dict) else {}
+                    provider_item.update(
                         {
                             "type": "function_call",
                             "call_id": tool_call.id,
@@ -205,6 +225,7 @@ class OpenAIResponsesTransformer(OpenAITransformer):
                             "arguments": json.dumps(tool_call.arguments, ensure_ascii=False, separators=(",", ":")),
                         }
                     )
+                    provider_items.append(provider_item)
         return provider_items
 
     @classmethod
@@ -214,6 +235,7 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
 
         text_parts: list[str] = []
+        refusal_parts: list[str] = []
         tool_calls: list[InternalToolCall] = []
         for item in output:
             if not isinstance(item, dict):
@@ -228,7 +250,8 @@ class OpenAIResponsesTransformer(OpenAITransformer):
                         message_texts.append(part["text"])
                     elif part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
                         refusals.append(part["refusal"])
-                text_parts.extend(message_texts or refusals)
+                text_parts.extend(message_texts)
+                refusal_parts.extend(refusals)
             elif item.get("type") == "function_call":
                 raw_arguments = item.get("arguments")
                 if isinstance(raw_arguments, dict):
@@ -245,17 +268,153 @@ class OpenAIResponsesTransformer(OpenAITransformer):
                         id=str(item.get("call_id") or item.get("id") or ""),
                         name=str(item.get("name") or ""),
                         arguments=arguments,
+                        provider_metadata=cls._responses_tool_call_provider_metadata(item),
                     )
                 )
 
-        content = "".join(text_parts)
-        if not content and not tool_calls:
+        refusal = "".join(refusal_parts) or None
+        content = "".join(text_parts) or refusal
+        if not content and not tool_calls and provider_response.get("status") != "incomplete":
             raise LLMException(ERR_LLM_EMPTY_RESPONSE)
         return InternalMessage(
             role=MessageRole.ASSISTANT,
             content=content or None,
+            refusal=refusal,
+            provider_metadata=cls._responses_message_provider_metadata(output),
             tool_calls=tool_calls or None,
         )
+
+    @classmethod
+    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+        if not isinstance(provider_response, dict):
+            return super().to_internal_response(provider_response, default_model)
+        if provider_response.get("status") == "failed" or provider_response.get("error"):
+            cls._raise_response_error(provider_response)
+
+        message = cls.from_provider(provider_response)
+        finish_reason, finish_details = cls._responses_finish(provider_response, message)
+        model = provider_response.get("model")
+        return InternalResponse(
+            message=message,
+            model=str(model) if model is not None else default_model,
+            usage=cls._normalize_responses_usage(provider_response.get("usage")),
+            finish_reason=finish_reason,
+            finish_details=finish_details,
+            provider_metadata=cls._responses_provider_metadata(provider_response),
+        )
+
+    @classmethod
+    def _responses_tool_call_provider_metadata(cls, item: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = {key: value for key, value in item.items() if key not in {"call_id", "name", "arguments"}}
+        if not metadata:
+            return None
+        return {"protocol": cls._PROTOCOL_METADATA, "item": metadata}
+
+    @classmethod
+    def _responses_output_metadata(cls, output: Any) -> list[dict[str, Any]]:
+        if not isinstance(output, list):
+            return []
+
+        output_metadata: list[dict[str, Any]] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "function_call":
+                continue
+            if item_type != "message":
+                output_metadata.append(dict(item))
+                continue
+
+            item_metadata = {key: value for key, value in item.items() if key != "content"}
+            content_metadata: list[dict[str, Any]] = []
+            for part in item.get("content") or []:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "output_text":
+                    part_metadata = {key: value for key, value in part.items() if key != "text"}
+                elif part_type == "refusal":
+                    part_metadata = {key: value for key, value in part.items() if key != "refusal"}
+                else:
+                    part_metadata = dict(part)
+                if len(part_metadata) > 1 or part_type not in {"output_text", "refusal"}:
+                    content_metadata.append(part_metadata)
+            if content_metadata:
+                item_metadata["content"] = content_metadata
+            output_metadata.append(item_metadata)
+        return output_metadata
+
+    @classmethod
+    def _responses_message_provider_metadata(cls, output: Any) -> dict[str, Any] | None:
+        output_metadata = cls._responses_output_metadata(output)
+        if not output_metadata:
+            return None
+        return {
+            "protocol": cls._PROTOCOL_METADATA,
+            "output": output_metadata,
+        }
+
+    @classmethod
+    def _responses_provider_metadata(cls, response: dict[str, Any]) -> dict[str, Any] | None:
+        response_metadata = {key: value for key, value in response.items() if key not in {"output", "model", "usage", "status", "incomplete_details", "error"}}
+        if not response_metadata:
+            return None
+        return {
+            "protocol": cls._PROTOCOL_METADATA,
+            "response": response_metadata,
+        }
+
+    @classmethod
+    def _responses_finish(
+        cls,
+        response: dict[str, Any],
+        message: InternalMessage | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        status = response.get("status")
+        incomplete_details = response.get("incomplete_details")
+        error = response.get("error")
+
+        if status == "completed":
+            if message is not None:
+                has_tool_calls = bool(message.tool_calls)
+                has_refusal = bool(message.refusal)
+            else:
+                output = response.get("output")
+                has_tool_calls = isinstance(output, list) and any(isinstance(item, dict) and item.get("type") == "function_call" for item in output)
+                has_refusal = cls._responses_output_has_refusal(output)
+            raw_reason = "tool_calls" if has_tool_calls else "refusal" if has_refusal else "stop"
+        elif status == "incomplete":
+            raw_reason = incomplete_details.get("reason") if isinstance(incomplete_details, dict) else incomplete_details
+            raw_reason = raw_reason or "incomplete"
+        else:
+            raw_reason = status
+
+        finish_reason, normalized_details = cls._normalize_finish_reason(raw_reason)
+        details = dict(normalized_details or {})
+        if status is not None:
+            details["status"] = status
+        if incomplete_details is not None:
+            details["incomplete_details"] = incomplete_details
+        if error is not None:
+            details["error"] = error
+        return finish_reason, details or None
+
+    @staticmethod
+    def _responses_output_has_refusal(output: Any) -> bool:
+        if not isinstance(output, list):
+            return False
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            if any(isinstance(part, dict) and part.get("type") == "refusal" and part.get("refusal") for part in item.get("content") or []):
+                return True
+        return False
+
+    @staticmethod
+    def _raise_response_error(response: dict[str, Any]) -> None:
+        official_error = response.get("error") or response.get("status") or response
+        raise LLMException(ERR_LLM_CONNECTION_FAILED, error=official_error, detail=response.get("error") or response)
 
     @classmethod
     def _request_payload(
@@ -275,6 +434,7 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             "input": cls.to_provider(messages),
             "stream": stream,
             "store": False,
+            "include": ["reasoning.encrypted_content"],
         }
         if temperature is not None:
             payload["temperature"] = temperature
@@ -389,18 +549,58 @@ class OpenAIResponsesTransformer(OpenAITransformer):
         *,
         argument_delta_indexes: set[int | str | None],
         argument_fallback_indexes: set[int | str | None],
+        text_delta_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
+        text_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
+        refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
+        refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         if not isinstance(event, dict):
             return None, False
+        text_delta_indexes = text_delta_indexes if text_delta_indexes is not None else set()
+        text_fallback_indexes = text_fallback_indexes if text_fallback_indexes is not None else set()
+        refusal_delta_indexes = refusal_delta_indexes if refusal_delta_indexes is not None else set()
+        refusal_fallback_indexes = refusal_fallback_indexes if refusal_fallback_indexes is not None else set()
         event_type = event.get("type")
-        if event_type in {"response.failed", "response.incomplete", "error"}:
+        if event_type in {"response.failed", "error"}:
             cls._raise_event_error(event)
 
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
             if not isinstance(delta, str):
                 return None, False
+            text_delta_indexes.add(cls._content_part_index(event))
             return {"choices": [{"delta": {"content": delta}}]}, True
+
+        if event_type == "response.output_text.done":
+            content_index = cls._content_part_index(event)
+            if content_index in text_delta_indexes or content_index in text_fallback_indexes:
+                return None, False
+            text = event.get("text")
+            if not isinstance(text, str):
+                text = event.get("delta")
+            if not isinstance(text, str):
+                return None, False
+            text_fallback_indexes.add(content_index)
+            return {"choices": [{"delta": {"content": text}}]}, True
+
+        if event_type == "response.refusal.delta":
+            delta = event.get("delta")
+            if not isinstance(delta, str):
+                return None, False
+            refusal_delta_indexes.add(cls._content_part_index(event))
+            return {"choices": [{"delta": {"refusal": delta}}]}, True
+
+        if event_type == "response.refusal.done":
+            content_index = cls._content_part_index(event)
+            if content_index in refusal_delta_indexes or content_index in refusal_fallback_indexes:
+                return None, False
+            refusal = event.get("refusal")
+            if not isinstance(refusal, str):
+                refusal = event.get("delta")
+            if not isinstance(refusal, str):
+                return None, False
+            refusal_fallback_indexes.add(content_index)
+            return {"choices": [{"delta": {"refusal": refusal}}]}, True
 
         if event_type == "response.output_item.added":
             item = event.get("item")
@@ -409,9 +609,10 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             output_index = cls._output_index(event)
             tool_call = {
                 "index": output_index,
-                "id": item.get("call_id"),
+                "id": item.get("call_id") or item.get("id"),
                 "type": "function",
                 "function": {"name": item.get("name")},
+                "provider_metadata": cls._responses_tool_call_provider_metadata(item),
             }
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
@@ -433,17 +634,18 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             if not isinstance(item, dict) or item.get("type") != "function_call":
                 return None, False
             output_index = cls._output_index(event)
+            tool_call = {
+                "index": output_index,
+                "type": "function",
+                "provider_metadata": cls._responses_tool_call_provider_metadata(item),
+            }
             if output_index in argument_delta_indexes or output_index in argument_fallback_indexes:
-                return None, False
+                return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, False
             argument_fallback_indexes.add(output_index)
             arguments = item.get("arguments")
             if not isinstance(arguments, str):
                 arguments = cls._stringify(arguments) if arguments is not None else ""
-            tool_call = {
-                "index": output_index,
-                "type": "function",
-                "function": {"arguments": arguments},
-            }
+            tool_call["function"] = {"arguments": arguments}
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
         if event_type == "response.function_call_arguments.done":
@@ -461,13 +663,20 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             }
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
-        if event_type == "response.completed":
+        if event_type in {"response.completed", "response.incomplete"}:
             response = event.get("response")
-            response = response if isinstance(response, dict) else {}
+            response = dict(response) if isinstance(response, dict) else {}
+            response.setdefault("status", "completed" if event_type == "response.completed" else "incomplete")
+            if response.get("status") == "failed" or response.get("error"):
+                cls._raise_response_error(response)
+            finish_reason, finish_details = cls._responses_finish(response)
             return {
-                "choices": [],
+                "choices": [{"delta": {}, "finish_reason": finish_reason}],
                 "model": response.get("model"),
                 "usage": cls._normalize_responses_usage(response.get("usage")),
+                "finish_details": finish_details,
+                "provider_metadata": cls._responses_provider_metadata(response),
+                "message_provider_metadata": cls._responses_message_provider_metadata(response.get("output")),
             }, False
 
         return None, False
@@ -481,14 +690,20 @@ class OpenAIResponsesTransformer(OpenAITransformer):
             return output_index
         return str(output_index)
 
+    @classmethod
+    def _content_part_index(cls, event: dict[str, Any]) -> tuple[int | str | None, int | str | None]:
+        content_index = event.get("content_index")
+        if isinstance(content_index, bool):
+            content_index = str(content_index)
+        elif not isinstance(content_index, (int, str)) and content_index is not None:
+            content_index = str(content_index)
+        return cls._output_index(event), content_index
+
     @staticmethod
     def _raise_event_error(event: dict[str, Any]) -> None:
         event_type = event.get("type")
         response = event.get("response") if isinstance(event.get("response"), dict) else {}
-        if event_type == "response.incomplete":
-            official_detail = response.get("incomplete_details") or event.get("detail") or response
-            official_error = response.get("error") or official_detail
-        elif event_type == "response.failed":
+        if event_type == "response.failed":
             official_error = response.get("error") or event.get("error") or event_type
             official_detail = response.get("error") or event.get("detail") or response
         else:

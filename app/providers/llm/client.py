@@ -25,6 +25,51 @@ from app.transformers.openai_responses import OpenAIResponsesTransformer
 
 logger = get_logger(__name__)
 
+_OPENAI_STREAM_APPEND_STRING_METADATA_FIELDS = frozenset({"reasoning_content"})
+
+
+def _merge_metadata(
+    current: dict[str, Any] | None,
+    incoming: Any,
+    append_string_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
+    if not isinstance(incoming, dict):
+        return current
+    merged = dict(current or {})
+    for key, value in incoming.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_metadata(existing, value, append_string_fields) or {}
+        elif isinstance(existing, list) and isinstance(value, list):
+            merged[key] = [*existing, *value]
+        elif isinstance(existing, str) and isinstance(value, str) and key in append_string_fields:
+            merged[key] = existing + value
+        else:
+            merged[key] = value
+    return merged
+
+
+def _openai_stream_metadata(
+    chunk: dict[str, Any],
+    choice: dict[str, Any] | None,
+    delta: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    response_metadata = {key: value for key, value in chunk.items() if key not in {"choices", "model", "usage", "finish_details", "provider_metadata", "message_provider_metadata"}}
+    choice_metadata = {key: value for key, value in (choice or {}).items() if key != "delta"}
+    choice_metadata.pop("finish_reason", None)
+    message_metadata = {key: value for key, value in (delta or {}).items() if key not in {"content", "refusal", "tool_calls"}}
+    provider_metadata = {
+        "protocol": OpenAITransformer._PROTOCOL_METADATA,
+        "response": response_metadata,
+        "choice": choice_metadata,
+        "message": message_metadata,
+    }
+    return provider_metadata, {
+        "protocol": OpenAITransformer._PROTOCOL_METADATA,
+        "choice": choice_metadata,
+        "message": message_metadata,
+    }
+
 
 def estimate_request_context_tokens(
     messages: list[InternalMessage],
@@ -96,22 +141,25 @@ class _StreamToolCallState:
     provider_id: str | None = None
     name: str = ""
     argument_chunks: list[str] = field(default_factory=list)
+    provider_metadata: dict[str, Any] | None = None
 
     @property
     def argument_text(self) -> str:
         return "".join(self.argument_chunks)
 
-    def append_delta(self, *, name: str, arguments: str) -> None:
+    def append_delta(self, *, name: str, arguments: str, provider_metadata: dict[str, Any] | None = None) -> None:
         if name and not self.name:
             self.name = name
         if arguments:
             self.argument_chunks.append(arguments)
+        self.provider_metadata = _merge_metadata(self.provider_metadata, provider_metadata)
 
 
 class _StreamToolCallAssembler:
     """Assemble provider tool-call deltas without content-based deduplication."""
 
-    def __init__(self) -> None:
+    def __init__(self, protocol: str = "openai") -> None:
+        self._protocol = protocol
         self._states: list[_StreamToolCallState] = []
         self._states_by_index: dict[int, _StreamToolCallState] = {}
         self._states_by_provider_id: dict[str, list[_StreamToolCallState]] = {}
@@ -128,6 +176,7 @@ class _StreamToolCallAssembler:
             index = self._get_index(tool_call)
             provider_id = self._get_provider_id(tool_call)
             name, arguments = self._get_function_delta(tool_call)
+            provider_metadata = self._get_provider_metadata(tool_call)
             state, is_snapshot_replay = self._find_state(
                 index=index,
                 provider_id=provider_id,
@@ -138,8 +187,9 @@ class _StreamToolCallAssembler:
                 state = self._create_state(index=index, provider_id=provider_id)
             elif provider_id and state.provider_id is None:
                 self._bind_provider_id(state, provider_id)
+            state.provider_metadata = _merge_metadata(state.provider_metadata, provider_metadata)
             if not is_snapshot_replay:
-                state.append_delta(name=name, arguments=arguments)
+                state.append_delta(name=name, arguments=arguments, provider_metadata=None)
 
     def build(self) -> list[InternalToolCall]:
         tool_calls: list[InternalToolCall] = []
@@ -155,6 +205,7 @@ class _StreamToolCallAssembler:
                     id=state.provider_id or f"call_{state.index if state.index is not None else state.order}",
                     name=state.name,
                     arguments=arguments,
+                    provider_metadata=state.provider_metadata,
                 )
             )
         return tool_calls
@@ -254,6 +305,26 @@ class _StreamToolCallAssembler:
         else:
             arguments = json.dumps(raw_arguments, ensure_ascii=False, separators=(",", ":"))
         return (str(name) if name else ""), arguments
+
+    def _get_provider_metadata(self, tool_call: dict[str, Any]) -> dict[str, Any] | None:
+        explicit_metadata = tool_call.get("provider_metadata")
+        metadata = dict(explicit_metadata) if isinstance(explicit_metadata, dict) else None
+        if self._protocol == "openai_responses":
+            return metadata
+
+        tool_call_metadata = {key: value for key, value in tool_call.items() if key not in {"index", "id", "function", "provider_metadata"}}
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            function_metadata = {key: value for key, value in function.items() if key not in {"name", "arguments"}}
+            if function_metadata:
+                tool_call_metadata["function"] = function_metadata
+        if tool_call_metadata:
+            protocol = OpenAITransformer._PROTOCOL_METADATA if self._protocol == "openai" else self._protocol
+            metadata = _merge_metadata(
+                metadata,
+                {"protocol": protocol, "tool_call": tool_call_metadata},
+            )
+        return metadata
 
     @staticmethod
     def _parse_json_object(arguments: str) -> dict[str, Any] | None:
@@ -378,13 +449,19 @@ class LLMClient:
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
-        tool_call_assembler = _StreamToolCallAssembler()
+        refusal_chunks: list[str] = []
+        normalized_protocol = protocol.lower()
+        tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
         model = model_id
         usage: dict[str, Any] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
         }
+        finish_reason: str | None = None
+        finish_details: dict[str, Any] | None = None
+        provider_metadata: dict[str, Any] | None = None
+        message_provider_metadata: dict[str, Any] | None = None
 
         async for chunk in cls.generate_stream(
             api_key=api_key,
@@ -405,25 +482,62 @@ class LLMClient:
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             choices = chunk.get("choices") or []
-            if not choices:
+            choice = choices[0] if choices and isinstance(choices[0], dict) else None
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            delta = delta if isinstance(delta, dict) else {}
+
+            if normalized_protocol == "openai":
+                chunk_provider_metadata, chunk_message_metadata = _openai_stream_metadata(chunk, choice, delta)
+                provider_metadata = _merge_metadata(
+                    provider_metadata,
+                    chunk_provider_metadata,
+                    _OPENAI_STREAM_APPEND_STRING_METADATA_FIELDS,
+                )
+                message_provider_metadata = _merge_metadata(
+                    message_provider_metadata,
+                    chunk_message_metadata,
+                    _OPENAI_STREAM_APPEND_STRING_METADATA_FIELDS,
+                )
+            provider_metadata = _merge_metadata(provider_metadata, chunk.get("provider_metadata"))
+            message_provider_metadata = _merge_metadata(message_provider_metadata, chunk.get("message_provider_metadata"))
+
+            if isinstance(choice, dict) and choice.get("finish_reason") is not None:
+                finish_reason, raw_finish_details = OpenAITransformer._normalize_finish_reason(choice.get("finish_reason"))
+                finish_details = _merge_metadata(finish_details, raw_finish_details)
+            finish_details = _merge_metadata(finish_details, chunk.get("finish_details"))
+
+            if not choice:
                 continue
-            delta = choices[0].get("delta") or {}
             content = delta.get("content")
+            refusal = delta.get("refusal")
             if isinstance(content, str) and content:
                 content_chunks.append(content)
                 await on_content(content)
+            if isinstance(refusal, str) and refusal:
+                refusal_chunks.append(refusal)
+                if not content:
+                    await on_content(refusal)
             tool_call_assembler.add(delta.get("tool_calls") or [])
 
         tool_calls = tool_call_assembler.build()
+        content = "".join(content_chunks)
+        refusal = "".join(refusal_chunks) or None
+        if refusal and finish_reason in {None, "stop"}:
+            finish_reason = "refusal"
 
         return InternalResponse(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
-                content="".join(content_chunks) or None,
+                content=content or refusal,
+                refusal=refusal,
+                provider_metadata=message_provider_metadata,
                 tool_calls=cls.normalize_tool_calls(tool_calls),
             ),
             model=model,
             usage=usage,
+            finish_reason=finish_reason,
+            finish_details=finish_details,
+            provider_metadata=provider_metadata,
         )
 
     @classmethod
@@ -468,19 +582,9 @@ class LLMClient:
             **kwargs,
         )
 
-        # Transformer 返回 InternalMessage，客户端统一替换工具调用编号并封装响应。
-        ai_message = transformer.from_provider(raw_response)
-        ai_message.tool_calls = cls.normalize_tool_calls(ai_message.tool_calls)
-
-        return InternalResponse(
-            message=ai_message,
-            model=raw_response.get("model", model_id),
-            usage=raw_response.get(
-                "usage",
-                {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-            ),
+        internal_response = transformer.to_internal_response(raw_response, default_model=model_id)
+        normalized_message = internal_response.message.model_copy(
+            update={"tool_calls": cls.normalize_tool_calls(internal_response.message.tool_calls)},
+            deep=True,
         )
+        return internal_response.model_copy(update={"message": normalized_message}, deep=True)

@@ -1,8 +1,20 @@
 // 消息处理 composable：AI 响应解析与工具调用处理
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
+import i18n from '../../i18n'
 import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
 import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
+
+const t = (key, ...args) => i18n.global.t(key, ...args)
+
+export const resolveAssistantDisplayContent = (content, refusal, finishReason) => {
+  if (typeof content === 'string' ? content.trim() : content !== undefined && content !== null) return content
+  if (typeof refusal === 'string' && refusal.trim()) return refusal
+  if (finishReason === 'length') return t('chat.response_output_limit')
+  if (finishReason === 'content_filter' || finishReason === 'refusal') return t('chat.response_refused')
+  if (finishReason === 'incomplete') return t('chat.response_incomplete')
+  return ''
+}
 
 const parseBackgroundSystemMessage = (item) => {
   if (item?.type !== 'background_result' && item?.role !== 'system') return null
@@ -401,12 +413,22 @@ export function useMessageProcessor() {
   const processAiResponse = (messagesRef, response, thinkingId, requestId = null) => {
     const workId = response.work_id
 
-    const aiContent = response.choices?.[0]?.message?.content ?? response.content ?? ''
+    const choice = response.choices?.[0]
+    const choiceMessage = choice?.message
+    const finishReason = choice?.finish_reason ?? response.finish_reason
+    const refusal = choiceMessage?.refusal ?? response.refusal
+    const finishDetails = choice?.finish_details ?? response.finish_details
+    const providerMetadata = choice?.provider_metadata ?? response.provider_metadata
+    const messageProviderMetadata = choiceMessage?.provider_metadata ?? response.message_provider_metadata
+    const aiContent = resolveAssistantDisplayContent(
+      choiceMessage ? choiceMessage.content : response.content,
+      refusal,
+      finishReason
+    )
     const history = response.history || []
     const responseFiles = response.files || []
-    const aiCreatedAt = response.choices?.[0]?.created_at || response.created_at || null
-    const role = response.choices?.[0]?.message?.role || response.role || 'assistant'
-    const finishReason = response.choices?.[0]?.finish_reason || response.finish_reason
+    const aiCreatedAt = choice?.created_at || response.created_at || null
+    const role = choiceMessage?.role || response.role || 'assistant'
 
     if (finishReason === 'queued') return
 
@@ -470,6 +492,21 @@ export function useMessageProcessor() {
     }
     if (response.response_id) {
       finalAiMsg.response_id = response.response_id
+    }
+    if (typeof finishReason === 'string' && finishReason) {
+      finalAiMsg.finish_reason = finishReason
+    }
+    if (finishDetails && typeof finishDetails === 'object' && Object.keys(finishDetails).length > 0) {
+      finalAiMsg.finish_details = finishDetails
+    }
+    if (typeof refusal === 'string' && refusal) {
+      finalAiMsg.refusal = refusal
+    }
+    if (providerMetadata && typeof providerMetadata === 'object' && Object.keys(providerMetadata).length > 0) {
+      finalAiMsg.provider_metadata = providerMetadata
+    }
+    if (messageProviderMetadata && typeof messageProviderMetadata === 'object' && Object.keys(messageProviderMetadata).length > 0) {
+      finalAiMsg.message_provider_metadata = messageProviderMetadata
     }
 
     aiMessagesToInsert.push(finalAiMsg)

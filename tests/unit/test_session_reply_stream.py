@@ -13,7 +13,7 @@ from app.core.session_reply_queue.manager import (
     build_foreground_message_dedupe_key,
 )
 from app.core.utils.dispatcher.helpers import dump_output_history
-from app.models.message import InternalMessage, InternalToolCall, MessageRole
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
@@ -136,6 +136,8 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
                             {
                                 "index": 0,
                                 "id": "call-1",
+                                "type": "function",
+                                "vendor_tag": "initial",
                                 "function": {
                                     "name": "search",
                                     "arguments": '{"query":',
@@ -197,8 +199,168 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     int(response.message.tool_calls[0].id.removeprefix("call_"), 16)
     assert response.message.tool_calls[0].name == "search"
     assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
+    assert response.message.tool_calls[0].provider_metadata == {
+        "protocol": "openai_chat_completions",
+        "tool_call": {
+            "type": "function",
+            "vendor_tag": "initial",
+        },
+    }
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_concatenates_reasoning_content_metadata(monkeypatch):
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "First reasoning. "}}]},
+        {"choices": [{"delta": {"reasoning_content": "Second reasoning."}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(_content: str) -> None:
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert response.message.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
+    assert response.provider_metadata["message"]["reasoning_content"] == "First reasoning. Second reasoning."
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_refusal_is_visible_and_normalizes_stop(monkeypatch):
+    chunks = [
+        {
+            "id": "chatcmpl_refusal",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "refusal": "Request ",
+                    },
+                }
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"refusal": "refused."},
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    ]
+    emitted: list[str] = []
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(content: str) -> None:
+        emitted.append(content)
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert emitted == ["Request ", "refused."]
+    assert response.message.content == "Request refused."
+    assert response.message.refusal == "Request refused."
+    assert response.finish_reason == "refusal"
+    assert response.finish_details == {"raw_finish_reason": "stop"}
+    assert response.provider_metadata == {
+        "protocol": "openai_chat_completions",
+        "response": {
+            "id": "chatcmpl_refusal",
+            "object": "chat.completion.chunk",
+        },
+        "choice": {"index": 0},
+        "message": {"role": "assistant"},
+    }
+    assert response.message.provider_metadata == {
+        "protocol": "openai_chat_completions",
+        "choice": {"index": 0},
+        "message": {"role": "assistant"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_length_returns_partial_content_and_raw_reason(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "Partial answer"},
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    emitted: list[str] = []
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(content: str) -> None:
+        emitted.append(content)
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert emitted == ["Partial answer"]
+    assert response.message.content == "Partial answer"
+    assert response.message.refusal is None
+    assert response.finish_reason == "length"
+    assert response.finish_details == {"raw_finish_reason": "length"}
 
 
 async def _collect_stream_tool_calls(monkeypatch, chunks):
@@ -478,10 +640,31 @@ async def test_generate_replaces_provider_tool_call_ids(monkeypatch):
         async def generate(self, **_kwargs):
             return {"model": "model-final"}
 
-        def from_provider(self, _raw_response):
-            return InternalMessage(
-                role=MessageRole.ASSISTANT,
-                tool_calls=[InternalToolCall(id="provider-call", name="search", arguments={"query": "MonoLight"})],
+        def to_internal_response(self, _raw_response, default_model):
+            return InternalResponse(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[
+                        InternalToolCall(
+                            id="provider-call",
+                            name="search",
+                            arguments={"query": "MonoLight"},
+                            provider_metadata={
+                                "protocol": "test",
+                                "tool_call": {
+                                    "type": "function",
+                                    "vendor_tag": "preserved",
+                                },
+                            },
+                        )
+                    ],
+                ),
+                model=_raw_response.get("model", default_model),
+                finish_reason="tool_calls",
+                provider_metadata={
+                    "protocol": "test",
+                    "response": {"trace_id": "trace-1"},
+                },
             )
 
     monkeypatch.setitem(LLMClient._transformers, "test", Transformer())
@@ -497,6 +680,19 @@ async def test_generate_replaces_provider_tool_call_ids(monkeypatch):
     assert response.message.tool_calls is not None
     assert response.message.tool_calls[0].id.startswith("call_")
     assert response.message.tool_calls[0].id != "provider-call"
+    assert response.message.tool_calls[0].provider_metadata == {
+        "protocol": "test",
+        "tool_call": {
+            "type": "function",
+            "vendor_tag": "preserved",
+        },
+    }
+    assert response.finish_reason == "tool_calls"
+    assert response.model == "model-final"
+    assert response.provider_metadata == {
+        "protocol": "test",
+        "response": {"trace_id": "trace-1"},
+    }
 
 
 def test_foreground_message_dedupe_key_scopes_reused_message_id_to_session():

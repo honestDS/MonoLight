@@ -221,7 +221,7 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
             role=MessageRole.ASSISTANT,
             content="continued response",
         ),
-        finish_reason=True,
+        finish_reason="stop",
         created_at=response["choices"][0]["created_at"],
     )
 

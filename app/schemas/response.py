@@ -14,6 +14,8 @@ class FinishReason(StrEnum):
     LENGTH = "length"
     TOOL_CALLS = "tool_calls"
     CONTENT_FILTER = "content_filter"
+    REFUSAL = "refusal"
+    INCOMPLETE = "incomplete"
     ERROR = "error"
 
 
@@ -61,13 +63,17 @@ class SentFile(BaseModel):
 
 class LLMChoiceMessage(BaseModel):
     role: str
-    content: str
+    content: str | None = None
+    refusal: str | None = None
+    provider_metadata: dict[str, Any] | None = None
 
 
 class LLMChoice(BaseModel):
     message: LLMChoiceMessage
     finish_reason: bool | str | FinishReason | None = True
     created_at: float
+    finish_details: dict[str, Any] | None = None
+    provider_metadata: dict[str, Any] | None = None
 
 
 class LLMResponse(BaseModel):

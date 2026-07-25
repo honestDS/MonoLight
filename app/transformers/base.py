@@ -65,9 +65,41 @@ class BaseTransformer(ABC):
 
     @classmethod
     @abstractmethod
-    def from_provider(cls, provider_response: Any) -> InternalResponse:
-        """将厂商特定响应转换为内部标准响应模型"""
+    def from_provider(cls, provider_response: Any) -> InternalMessage:
+        """将厂商特定响应转换为内部标准消息模型"""
         pass
+
+    @classmethod
+    def to_internal_response(cls, provider_response: Any, default_model: str) -> InternalResponse:
+        """将厂商响应封装为内部标准响应，子类可覆写以保留协议细节。"""
+        message = cls.from_provider(provider_response)
+        if isinstance(provider_response, dict):
+            model = provider_response.get("model")
+            raw_usage = provider_response.get("usage")
+        else:
+            model = getattr(provider_response, "model", None)
+            raw_usage = getattr(provider_response, "usage", None)
+
+        usage: dict[str, Any] | None = None
+        if isinstance(raw_usage, dict):
+            usage = dict(raw_usage)
+        elif hasattr(raw_usage, "model_dump"):
+            dumped_usage = raw_usage.model_dump(mode="json")
+            if isinstance(dumped_usage, dict):
+                usage = dumped_usage
+        elif raw_usage is not None:
+            try:
+                usage = dict(raw_usage)
+            except (TypeError, ValueError):
+                pass
+
+        response_kwargs: dict[str, Any] = {
+            "message": message,
+            "model": str(model) if model is not None else default_model,
+        }
+        if usage is not None:
+            response_kwargs["usage"] = usage
+        return InternalResponse(**response_kwargs)
 
 
 class BaseEmbeddingTransformer(ABC):

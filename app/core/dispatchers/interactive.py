@@ -145,7 +145,12 @@ class InteractiveDispatcherMixin:
                 fetcher=additional_user_messages_fetcher,
             )
 
-            final_ai_content = ""
+            final_ai_content = None
+            final_finish_reason: str | None = None
+            final_finish_details: dict[str, Any] | None = None
+            final_provider_metadata: dict[str, Any] | None = None
+            final_refusal: str | None = None
+            final_message_provider_metadata: dict[str, Any] | None = None
             latest_llm_request_metadata: dict[str, Any] | None = None
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
@@ -351,14 +356,21 @@ class InteractiveDispatcherMixin:
                                         **generation_kwargs,
                                         on_content=partial(_handle_stream_content, stream_state),
                                     )
+                                ai_msg = response.message
+                                response_finish_reason = getattr(response, "finish_reason", None)
+                                response_finish_details = getattr(response, "finish_details", None)
+                                response_provider_metadata = getattr(response, "provider_metadata", None)
+                                ai_refusal = getattr(ai_msg, "refusal", None)
+                                ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
                                 provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
                                 metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
                                 latest_llm_request_metadata.update(provider_token_metrics)
                                 if metadata_changed and stream_event_callback is not None:
                                     await stream_event_callback(dict(latest_llm_request_metadata))
-                                # 空响应（无内容且无工具调用）也视为渠道异常，纳入降级重试
-                                ai_msg = response.message
-                                if not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+                                has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
+                                has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
+                                legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
+                                if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                                 await _emit_agent_loop_output(stream_state)
                                 if stream_event_callback is not None and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content:
@@ -424,20 +436,32 @@ class InteractiveDispatcherMixin:
                             dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and new_user_batch is None else None,
                             created_at=attempt_started_at if stream_event_callback is not None else None,
                         )
-                        if stream_event_callback is not None and saved_msg is not None:
-                            turn_end_content = saved_msg.content
+                        if stream_event_callback is not None:
+                            turn_end_content = saved_msg.content if saved_msg is not None else ai_msg.content
                             if ai_msg.tool_calls:
                                 turn_end_content = ai_msg.content if expose_tool_call_content else None
-                            await stream_event_callback(
-                                {
-                                    "type": "turn_end",
-                                    "response_id": response_id,
-                                    "content": turn_end_content,
-                                }
-                            )
+                            turn_end_event: dict[str, Any] = {
+                                "type": "turn_end",
+                                "response_id": response_id,
+                            }
+                            turn_end_values = {
+                                "content": turn_end_content,
+                                "finish_reason": response_finish_reason,
+                                "finish_details": response_finish_details,
+                                "refusal": ai_refusal,
+                                "provider_metadata": response_provider_metadata,
+                                "message_provider_metadata": ai_provider_metadata,
+                            }
+                            turn_end_event.update({key: value for key, value in turn_end_values.items() if value is not None})
+                            await stream_event_callback(turn_end_event)
 
                         if not ai_msg.tool_calls:
                             final_ai_content = ai_msg.content
+                            final_finish_reason = response_finish_reason
+                            final_finish_details = response_finish_details
+                            final_provider_metadata = response_provider_metadata
+                            final_refusal = ai_refusal
+                            final_message_provider_metadata = ai_provider_metadata
                             if new_user_batch is None:
                                 break
 
@@ -835,7 +859,20 @@ class InteractiveDispatcherMixin:
                 checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
 
             response = LLMResponse(
-                choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=final_ai_content), finish_reason=True, created_at=time.time())],
+                choices=[
+                    LLMChoice(
+                        message=LLMChoiceMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=final_ai_content,
+                            refusal=final_refusal,
+                            provider_metadata=final_message_provider_metadata,
+                        ),
+                        finish_reason=final_finish_reason or "stop",
+                        finish_details=final_finish_details,
+                        provider_metadata=final_provider_metadata,
+                        created_at=time.time(),
+                    )
+                ],
                 history=dump_output_history(
                     turn_messages,
                     expose_tool_call_content=expose_tool_call_content,
