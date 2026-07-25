@@ -175,6 +175,12 @@ export function useChatSession() {
       || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
     if (!shouldReplaceLlmRequestMetadata(currentMetadata, metadata)) return
 
+    for (const field of ['output_tokens', 'cached_tokens', 'cache_hit_rate']) {
+      if (!Object.prototype.hasOwnProperty.call(metadata, field) && Object.prototype.hasOwnProperty.call(currentMetadata || {}, field)) {
+        metadata[field] = currentMetadata[field]
+      }
+    }
+
     const nextMetadataBySession = new Map(llmRequestMetadataBySession.value)
     nextMetadataBySession.set(sessionId, metadata)
     llmRequestMetadataBySession.value = nextMetadataBySession
@@ -230,7 +236,7 @@ export function useChatSession() {
       initialHistoryLoaded.value = true
       await nextTick()
       if (historyData && historyData.length > 0) {
-        await chatState.scrollToBottom('smooth')
+        await chatState.scrollToBottom('auto')
       }
     } finally {
       requestAnimationFrame(() => {

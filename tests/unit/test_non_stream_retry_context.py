@@ -653,6 +653,8 @@ async def _run_audited_interactive_dispatch(
     additional_user_messages_fetcher=None,
     persist_pending_confirmation_bundle_handler=None,
     supersede_pending_confirmation_bundle_handler=None,
+    response_usages=None,
+    execution_resume_state=None,
 ):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
@@ -677,6 +679,7 @@ async def _run_audited_interactive_dispatch(
         InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
     ]
     saved_message_id = 10
+    response_usage_iterator = iter(response_usages or [])
 
     async def get_user(db, uid):
         return SimpleNamespace(username="operator")
@@ -704,7 +707,7 @@ async def _run_audited_interactive_dispatch(
                     "messages": [message.model_copy(deep=True) for message in kwargs["messages"]],
                 }
             )
-        return SimpleNamespace(message=responses.pop(0))
+        return SimpleNamespace(message=responses.pop(0), usage=next(response_usage_iterator, None))
 
     async def generate_with_stream_callback(**kwargs):
         return await generate(**kwargs)
@@ -865,8 +868,146 @@ async def _run_audited_interactive_dispatch(
             execution_checkpoint_callback=checkpoint_callback,
             stream_event_callback=stream_event_callback,
             additional_user_messages_fetcher=additional_user_messages_fetcher,
+            execution_resume_state=execution_resume_state,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_accumulates_output_tokens_and_preserves_latest_cache_metrics(monkeypatch):
+    checkpoints = []
+    events = []
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(tool_call, *args, **kwargs):
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    async def publish_event(event):
+        events.append(event)
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_event_callback=publish_event,
+        response_usages=[
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 12,
+                "cached_tokens": 200,
+            },
+            {
+                "prompt_tokens": 1100,
+                "completion_tokens": 20,
+                "cached_tokens": 440,
+            },
+        ],
+    )
+
+    metadata_events = [event for event in events if event["type"] == "llm_request_metadata"]
+    assert [event["input_tokens_source"] for event in metadata_events] == [
+        "estimated",
+        "provider",
+        "estimated",
+        "provider",
+    ]
+    assert metadata_events[1]["output_tokens"] == 12
+    assert metadata_events[2]["output_tokens"] == 12
+    assert metadata_events[2]["cached_tokens"] == 200
+    assert metadata_events[2]["cache_hit_rate"] == pytest.approx(0.2)
+    assert metadata_events[3]["output_tokens"] == 32
+    assert metadata_events[3]["cached_tokens"] == 440
+    assert metadata_events[3]["cache_hit_rate"] == pytest.approx(0.4)
+    assert any(checkpoint["total_output_tokens"] == 12 for checkpoint in checkpoints)
+    assert response["llm_request_metadata"]["output_tokens"] == 32
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_preserves_output_tokens_when_first_usage_has_no_prompt_tokens(monkeypatch):
+    events = []
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(tool_call, *args, **kwargs):
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    async def publish_event(event):
+        events.append(event)
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_event_callback=publish_event,
+        response_usages=[
+            {"completion_tokens": 12},
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "cached_tokens": 30,
+            },
+        ],
+    )
+
+    metadata_events = [event for event in events if event["type"] == "llm_request_metadata"]
+    assert metadata_events[2]["input_tokens_source"] == "estimated"
+    assert metadata_events[2]["output_tokens"] == 12
+    assert metadata_events[3]["input_tokens_source"] == "provider"
+    assert metadata_events[3]["output_tokens"] == 32
+    assert response["llm_request_metadata"]["output_tokens"] == 32
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_resume_continues_total_output_tokens(monkeypatch):
+    events = []
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(tool_call, *args, **kwargs):
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    async def publish_event(event):
+        events.append(event)
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_event_callback=publish_event,
+        response_usages=[
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 7,
+                "cached_tokens": 20,
+            },
+            {
+                "prompt_tokens": 120,
+                "completion_tokens": 3,
+                "cached_tokens": 30,
+            },
+        ],
+        execution_resume_state={
+            "messages": [InternalMessage(role=MessageRole.USER, content="request").model_dump(mode="json")],
+            "turn_messages": [],
+            "files_to_user": [],
+            "current_turn": 0,
+            "total_output_tokens": 50,
+        },
+    )
+
+    provider_metadata_events = [event for event in events if event["type"] == "llm_request_metadata" and event["input_tokens_source"] == "provider"]
+    assert [event["output_tokens"] for event in provider_metadata_events] == [57, 60]
+    assert response["llm_request_metadata"]["output_tokens"] == 60
+    assert unknown_calls == []
 
 
 @pytest.mark.asyncio

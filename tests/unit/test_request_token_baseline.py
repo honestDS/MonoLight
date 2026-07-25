@@ -51,6 +51,44 @@ def test_extract_provider_token_metrics_ignores_invalid_usage_values():
         assert baseline_module.extract_provider_token_metrics(usage) == {}
 
 
+def test_extract_reusable_token_metrics_returns_valid_display_fields():
+    assert baseline_module.extract_reusable_token_metrics(
+        {
+            "output_tokens": 120,
+            "cached_tokens": 250,
+            "cache_hit_rate": 0.25,
+            "input_tokens": 1000,
+        }
+    ) == {
+        "output_tokens": 120,
+        "cached_tokens": 250,
+        "cache_hit_rate": 0.25,
+    }
+
+
+def test_extract_reusable_token_metrics_filters_invalid_fields():
+    assert (
+        baseline_module.extract_reusable_token_metrics(
+            {
+                "output_tokens": True,
+                "cached_tokens": -1,
+                "cache_hit_rate": 1.1,
+            }
+        )
+        == {}
+    )
+    assert baseline_module.extract_reusable_token_metrics(
+        {
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cache_hit_rate": False,
+        }
+    ) == {
+        "output_tokens": 0,
+        "cached_tokens": 0,
+    }
+
+
 def _metadata_for(messages, tools=None):
     metadata = baseline_module.build_request_token_baseline(
         messages,

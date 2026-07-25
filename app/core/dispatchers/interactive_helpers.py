@@ -96,6 +96,7 @@ class _ExecutionCheckpointState:
     turn_messages: list[InternalMessage]
     files_to_user: list[str]
     upper_message_id: int | None
+    total_output_tokens: int = 0
 
 
 async def _save_execution_checkpoint(
@@ -115,6 +116,7 @@ async def _save_execution_checkpoint(
         "current_turn": current_turn,
         "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
         "context_summary_fixed_upper_message_id": state.upper_message_id,
+        "total_output_tokens": state.total_output_tokens,
     }
     if update_active_audit_execution:
         checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution

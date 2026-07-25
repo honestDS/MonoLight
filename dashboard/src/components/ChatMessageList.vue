@@ -27,6 +27,7 @@
       </span>
     </div>
     <VList
+      :key="currentSessionId || '__new_session__'"
       ref="virtualList"
       class="message-list"
       :class="{ 'is-layout-ready': messagesLayoutReady }"
@@ -308,6 +309,7 @@ const auditCountdownTimer = window.setInterval(() => {
 }, 1000)
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
+let bottomScrollRequest = 0
 const messagesLayoutReady = ref(false)
 const scrollListeners = new Set()
 const codeRefs = new Map()
@@ -592,6 +594,9 @@ watch(displayMessages, async (messages, previousMessages = []) => {
 
 let layoutGeneration = 0
 watch(() => props.currentSessionId, () => {
+  maintainScrollPosition.value = false
+  bottomScrollRequest += 1
+  isMessageListNearBottom = true
   layoutGeneration += 1
   if (!props.initialHistoryLoaded) {
     messagesLayoutReady.value = false
@@ -627,7 +632,6 @@ const restoreScrollAnchor = async (anchor) => {
   maintainScrollPosition.value = false
 }
 const MESSAGE_LIST_EDGE_PADDING = 20
-let bottomScrollRequest = 0
 const scrollToBottom = async (behavior = 'auto') => {
   const request = ++bottomScrollRequest
   const alignBottom = (smooth = false) => {

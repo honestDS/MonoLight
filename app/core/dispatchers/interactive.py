@@ -67,6 +67,7 @@ from app.core.utils.request_token_baseline import (
     build_request_token_baseline,
     estimate_incremental_input_tokens,
     extract_provider_token_metrics,
+    extract_reusable_token_metrics,
 )
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
@@ -156,11 +157,13 @@ class InteractiveDispatcherMixin:
             turn_messages = [InternalMessage.model_validate(item) for item in execution_resume_state.get("turn_messages", [])] if execution_resume_state else []
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
             is_first_iter = execution_resume_state is None
+            resumed_total_output_tokens = execution_resume_state.get("total_output_tokens", 0) if execution_resume_state else 0
             checkpoint_state = _ExecutionCheckpointState(
                 callback=execution_checkpoint_callback,
                 turn_messages=turn_messages,
                 files_to_user=files_to_user,
                 upper_message_id=min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id,
+                total_output_tokens=(resumed_total_output_tokens if isinstance(resumed_total_output_tokens, int) and not isinstance(resumed_total_output_tokens, bool) and resumed_total_output_tokens >= 0 else 0),
             )
             if execution_resume_state is not None:
                 saved_checkpoint_mode = execution_resume_state.get("context_summary_trigger_mode")
@@ -307,11 +310,13 @@ class InteractiveDispatcherMixin:
                                         await db.refresh(session)
                                 context_summary_revision = session.context_summary_revision if session is not None else 0
                                 context_content_revision = session.context_content_revision if session is not None else 0
-                                previous_llm_request_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else session.llm_request_metadata if session is not None else None
+                                previous_session_llm_request_metadata = session.llm_request_metadata if session is not None else None
+                                previous_input_token_baseline_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else previous_session_llm_request_metadata
+                                previous_display_token_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) else previous_input_token_baseline_metadata
                                 incremental_input_tokens = estimate_incremental_input_tokens(
                                     request_messages,
                                     current_tools,
-                                    previous_llm_request_metadata,
+                                    previous_input_token_baseline_metadata,
                                     model_id=model_id,
                                     protocol=protocol,
                                     context_summary_revision=context_summary_revision,
@@ -335,6 +340,7 @@ class InteractiveDispatcherMixin:
                                         context_summary_revision=context_summary_revision,
                                         context_content_revision=context_content_revision,
                                     ),
+                                    **extract_reusable_token_metrics(previous_display_token_metadata),
                                 }
                                 if stream_event_callback is not None:
                                     await stream_event_callback(dict(latest_llm_request_metadata))
@@ -364,15 +370,18 @@ class InteractiveDispatcherMixin:
                                 ai_refusal = getattr(ai_msg, "refusal", None)
                                 ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
                                 provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
-                                metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
-                                latest_llm_request_metadata.update(provider_token_metrics)
-                                if metadata_changed and stream_event_callback is not None:
-                                    await stream_event_callback(dict(latest_llm_request_metadata))
                                 has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
                                 has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
                                 legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
                                 if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                if "output_tokens" in provider_token_metrics:
+                                    checkpoint_state.total_output_tokens += provider_token_metrics["output_tokens"]
+                                    provider_token_metrics["output_tokens"] = checkpoint_state.total_output_tokens
+                                metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
+                                latest_llm_request_metadata.update(provider_token_metrics)
+                                if metadata_changed and stream_event_callback is not None:
+                                    await stream_event_callback(dict(latest_llm_request_metadata))
                                 await _emit_agent_loop_output(stream_state)
                                 if stream_event_callback is not None and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content:
                                     await stream_event_callback(

@@ -35,6 +35,22 @@ def extract_provider_token_metrics(usage: Any) -> dict[str, int | float]:
     return metrics
 
 
+def extract_reusable_token_metrics(metadata: Any) -> dict[str, int | float]:
+    if not isinstance(metadata, dict):
+        return {}
+
+    metrics: dict[str, int | float] = {}
+    for field in ("output_tokens", "cached_tokens"):
+        value = metadata.get(field)
+        if _is_non_negative_int(value):
+            metrics[field] = value
+
+    cache_hit_rate = metadata.get("cache_hit_rate")
+    if isinstance(cache_hit_rate, (int, float)) and not isinstance(cache_hit_rate, bool) and 0 <= cache_hit_rate <= 1:
+        metrics["cache_hit_rate"] = cache_hit_rate
+    return metrics
+
+
 def _positive_message_ids(messages: list[InternalMessage]) -> list[int]:
     return [message.id for message in messages if _is_positive_int(message.id)]
 
