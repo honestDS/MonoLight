@@ -160,6 +160,23 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
     return event
 
 
+def _metadata_with_work_order(
+    work: SessionReplyWorkItem,
+    metadata: Any,
+    event_sequence_no: int | None = None,
+) -> Any:
+    if not isinstance(metadata, dict):
+        return metadata
+    ordered_metadata = {
+        **metadata,
+        "work_id": work.id,
+        "work_sequence_no": work.sequence_no,
+    }
+    if event_sequence_no is not None:
+        ordered_metadata["event_sequence_no"] = event_sequence_no
+    return ordered_metadata
+
+
 @dataclass
 class _ForegroundStreamEventState:
     work: SessionReplyWorkItem
@@ -180,6 +197,11 @@ async def _persist_foreground_stream_event(
     }
     async with AsyncSessionLocal() as event_db:
         if persisted_event["type"] == "llm_request_metadata":
+            persisted_event = _metadata_with_work_order(
+                work,
+                persisted_event,
+                event_sequence_no=stream_state.next_sequence,
+            )
             await session_crud.update_llm_request_metadata(
                 event_db,
                 session_id=work.session_id,
@@ -492,14 +514,15 @@ async def _generate_reply_with_request_metadata(
 
     async def persist_request_metadata(metadata: dict[str, Any]) -> None:
         nonlocal latest_request_metadata
+        ordered_metadata = _metadata_with_work_order(work, metadata)
         await session_crud.update_llm_request_metadata(
             db,
             session_id=work.session_id,
             uid=work.uid,
-            metadata=metadata,
+            metadata=ordered_metadata,
             commit=False,
         )
-        latest_request_metadata = dict(metadata)
+        latest_request_metadata = ordered_metadata
 
     ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
         db,
@@ -610,13 +633,15 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             if context_summary_events_requested
             else None,
         )
-        await session_crud.update_llm_request_metadata(
-            db,
-            session_id=work.session_id,
-            uid=work.uid,
-            metadata=response.get("llm_request_metadata"),
-            commit=False,
-        )
+        if isinstance(response.get("llm_request_metadata"), dict):
+            response["llm_request_metadata"] = _metadata_with_work_order(work, response["llm_request_metadata"])
+            await session_crud.update_llm_request_metadata(
+                db,
+                session_id=work.session_id,
+                uid=work.uid,
+                metadata=response["llm_request_metadata"],
+                commit=False,
+            )
         return response
 
     response = None
@@ -1086,8 +1111,9 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
     extra = task.extra if isinstance(task.extra, dict) else {}
     stored_boundary_message_id = extra.get("context_summary_user_boundary_message_id")
     initial_fixed_upper_message_id = stored_boundary_message_id if (isinstance(stored_boundary_message_id, int) and not isinstance(stored_boundary_message_id, bool) and stored_boundary_message_id > 0) else _fallback_last_frozen_user_message_id(submission_context)
-    ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
         db,
+        work=work,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -1107,11 +1133,14 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
         ),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-    return {
+    response = {
         "content": content,
         "history": dump_background_proactive_history(turn_messages),
         "files": files,
     }
+    if llm_request_metadata is not None:
+        response["llm_request_metadata"] = llm_request_metadata
+    return response
 
 
 async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = "") -> dict[str, Any]:
@@ -1120,8 +1149,9 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
     if profile is None or profile.uid != work.uid:
         raise RuntimeError(t(ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND))
 
-    ai_msg, turn_messages, files = await ChatDispatcher._generate_reply_from_history(
+    ai_msg, turn_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
         db,
+        work=work,
         uid=work.uid,
         session_id=work.session_id,
         profile=profile,
@@ -1140,11 +1170,14 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
         ),
     )
     content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-    return {
+    response = {
         "content": content,
         "history": [message.model_dump(mode="json") for message in turn_messages],
         "files": files,
     }
+    if llm_request_metadata is not None:
+        response["llm_request_metadata"] = llm_request_metadata
+    return response
 
 
 async def execute_session_reply_work(work_id: int, worker_id: str) -> None:

@@ -13,3 +13,7 @@ async def migrate(session: AsyncSession) -> None:
     session_columns = await _existing_columns(session, "chat_session")
     if "llm_request_metadata" not in session_columns:
         await session.execute(text("ALTER TABLE chat_session ADD COLUMN llm_request_metadata JSON"))
+    if "llm_request_metadata_work_sequence_no" not in session_columns:
+        await session.execute(text("ALTER TABLE chat_session ADD COLUMN llm_request_metadata_work_sequence_no INTEGER"))
+    if "llm_request_metadata_event_sequence_no" not in session_columns:
+        await session.execute(text("ALTER TABLE chat_session ADD COLUMN llm_request_metadata_event_sequence_no INTEGER"))

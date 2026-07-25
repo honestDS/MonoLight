@@ -228,6 +228,71 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
 
 
 @pytest.mark.asyncio
+async def test_llm_request_metadata_update_rejects_stale_work_and_event_sequences(db_session: AsyncSession):
+    session = ChatSession(session_id="session-1", uid="user-1")
+    db_session.add(session)
+    await db_session.commit()
+
+    def metadata(*, work_sequence_no: int, event_sequence_no: int, input_tokens: int) -> dict:
+        return {
+            "type": "llm_request_metadata",
+            "input_tokens": input_tokens,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "work_id": 7,
+            "work_sequence_no": work_sequence_no,
+            "event_sequence_no": event_sequence_no,
+        }
+
+    first_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata=metadata(work_sequence_no=3, event_sequence_no=5, input_tokens=100),
+    )
+    stale_work_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata=metadata(work_sequence_no=2, event_sequence_no=99, input_tokens=200),
+    )
+    stale_event_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata=metadata(work_sequence_no=3, event_sequence_no=4, input_tokens=300),
+    )
+    newer_event_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata=metadata(work_sequence_no=3, event_sequence_no=6, input_tokens=400),
+    )
+    newer_work_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata=metadata(work_sequence_no=4, event_sequence_no=1, input_tokens=500),
+    )
+    await db_session.refresh(session)
+
+    assert first_updated is True
+    assert stale_work_updated is False
+    assert stale_event_updated is False
+    assert newer_event_updated is True
+    assert newer_work_updated is True
+    assert session.llm_request_metadata_work_sequence_no == 4
+    assert session.llm_request_metadata_event_sequence_no == 1
+    assert session.llm_request_metadata == {
+        "input_tokens": 500,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+        "work_sequence_no": 4,
+        "event_sequence_no": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_user_sessions_include_llm_request_metadata(db_session: AsyncSession):
     db_session.add(User(uid="user-1", username="alice"))
     db_session.add(

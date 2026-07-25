@@ -32,6 +32,8 @@ class ChatSession(SQLModel, table=True):
     context_summary_revision: int = Field(default=0, ge=0)
     context_content_revision: int = Field(default=0, ge=0)
     llm_request_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    llm_request_metadata_work_sequence_no: int | None = Field(default=None, index=True)
+    llm_request_metadata_event_sequence_no: int | None = Field(default=None)
     created_at: datetime = Field(
         default_factory=get_local_time,
         sa_column=Column(DateTime(timezone=True)),

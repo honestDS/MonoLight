@@ -174,16 +174,21 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
     assert response["choices"][0]["message"]["content"] == "已取消"
     assert response["history"][0]["role"] == MessageRole.ASSISTANT
     assert response["history"][0]["content"] == "已取消"
-    assert response["llm_request_metadata"] == request_metadata
+    expected_request_metadata = {
+        **request_metadata,
+        "work_id": 7,
+        "work_sequence_no": 1,
+    }
+    assert response["llm_request_metadata"] == expected_request_metadata
     assert metadata_updates == [
         {
             "session_id": "session-1",
             "uid": "user-1",
-            "metadata": request_metadata,
+            "metadata": expected_request_metadata,
             "commit": False,
         }
     ]
-    assert executor_module._event_for_work(work, response)["llm_request_metadata"] == request_metadata
+    assert executor_module._event_for_work(work, response)["llm_request_metadata"] == expected_request_metadata
     assert captured["allow_tools"] is False
     assert "extra_messages" not in captured
     assert "submission_context" not in captured
@@ -744,6 +749,130 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
         "claim_token": "claim-token",
     }
     assert SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in persisted_states[-1]
+
+
+@pytest.mark.asyncio
+async def test_execute_background_persists_llm_request_metadata_with_work_identity(monkeypatch):
+    work = SimpleNamespace(
+        id=7,
+        sequence_no=1,
+        source_id="8",
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="reply-summary:8",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        execution_state={},
+    )
+    task = SimpleNamespace(extra={}, result={"status": "succeeded"}, tool_call_id="call-1", status="succeeded", tool_name="safe_tool", error=None)
+    captured = {}
+    metadata_updates = []
+    request_metadata = {
+        "type": "llm_request_metadata",
+        "input_tokens": 123,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+    }
+
+    async def get_task(db, task_id):
+        return task
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def generate_reply(db, **kwargs):
+        captured.update(kwargs)
+        await kwargs["request_metadata_callback"](request_metadata)
+        return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
+
+    async def update_request_metadata(db, **kwargs):
+        metadata_updates.append(kwargs)
+        return True
+
+    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+
+    response = await executor_module._execute_background(object(), work, "worker-1")
+
+    expected_request_metadata = {
+        **request_metadata,
+        "work_id": 7,
+        "work_sequence_no": 1,
+    }
+    assert callable(captured["request_metadata_callback"])
+    assert response["llm_request_metadata"] == expected_request_metadata
+    assert metadata_updates == [
+        {
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": expected_request_metadata,
+            "commit": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_scheduled_persists_llm_request_metadata_with_work_identity(monkeypatch):
+    work = SimpleNamespace(
+        id=8,
+        sequence_no=2,
+        source_id="8",
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="reply-summary:8",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        execution_state={},
+    )
+    task = SimpleNamespace(extra={}, result={"status": "succeeded"}, tool_call_id="call-1", status="succeeded", tool_name="safe_tool", error=None)
+    captured = {}
+    metadata_updates = []
+    request_metadata = {
+        "type": "llm_request_metadata",
+        "input_tokens": 456,
+        "context_window_tokens": 8192,
+        "max_output_tokens": 1024,
+    }
+
+    async def get_task(db, task_id):
+        return task
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def generate_reply(db, **kwargs):
+        captured.update(kwargs)
+        await kwargs["request_metadata_callback"](request_metadata)
+        return InternalMessage(role=MessageRole.ASSISTANT, content="定时总结"), [], []
+
+    async def update_request_metadata(db, **kwargs):
+        metadata_updates.append(kwargs)
+        return True
+
+    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+
+    response = await executor_module._execute_scheduled(object(), work, "worker-1")
+
+    expected_request_metadata = {
+        **request_metadata,
+        "work_id": 8,
+        "work_sequence_no": 2,
+    }
+    assert callable(captured["request_metadata_callback"])
+    assert response["llm_request_metadata"] == expected_request_metadata
+    assert metadata_updates == [
+        {
+            "session_id": "session-1",
+            "uid": "user-1",
+            "metadata": expected_request_metadata,
+            "commit": False,
+        }
+    ]
 
 
 @pytest.mark.asyncio

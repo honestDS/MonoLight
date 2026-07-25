@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import delete, update
+from sqlalchemy import and_, delete, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -128,14 +128,41 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 return False
             persisted_metadata["input_tokens_source"] = input_tokens_source
 
-        result = await db.execute(
-            update(ChatSession)
-            .where(
-                ChatSession.session_id == session_id,
-                ChatSession.uid == uid,
-            )
-            .values(llm_request_metadata=persisted_metadata)
+        work_sequence_no = metadata.get("work_sequence_no")
+        use_work_order = isinstance(work_sequence_no, int) and not isinstance(work_sequence_no, bool) and work_sequence_no > 0
+        event_sequence_no = 0
+        if use_work_order:
+            event_sequence_no = metadata.get("event_sequence_no", 0)
+            if not isinstance(event_sequence_no, int) or isinstance(event_sequence_no, bool) or event_sequence_no < 0:
+                return False
+            persisted_metadata["work_sequence_no"] = work_sequence_no
+            persisted_metadata["event_sequence_no"] = event_sequence_no
+
+        stmt = update(ChatSession).where(
+            ChatSession.session_id == session_id,
+            ChatSession.uid == uid,
         )
+        values = {"llm_request_metadata": persisted_metadata}
+        if use_work_order:
+            stmt = stmt.where(
+                or_(
+                    ChatSession.llm_request_metadata_work_sequence_no.is_(None),
+                    ChatSession.llm_request_metadata_work_sequence_no < work_sequence_no,
+                    and_(
+                        ChatSession.llm_request_metadata_work_sequence_no == work_sequence_no,
+                        or_(
+                            ChatSession.llm_request_metadata_event_sequence_no.is_(None),
+                            ChatSession.llm_request_metadata_event_sequence_no <= event_sequence_no,
+                        ),
+                    ),
+                )
+            )
+            values.update(
+                llm_request_metadata_work_sequence_no=work_sequence_no,
+                llm_request_metadata_event_sequence_no=event_sequence_no,
+            )
+
+        result = await db.execute(stmt.values(**values))
         if commit:
             await db.commit()
         else:

@@ -907,6 +907,7 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
 async def test_execute_foreground_persists_each_tool_event_with_original_response_id(monkeypatch):
     work = SimpleNamespace(
         id=7,
+        sequence_no=1,
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -1061,10 +1062,14 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     ]
     assert published[1][1]["request_ids"] == ["request-1"]
     assert published[0][1]["response_id"] == "response-turn-1"
+    assert published[0][1]["work_sequence_no"] == 1
+    assert published[0][1]["event_sequence_no"] == 1
     assert published[3][1]["response_id"] == "response-turn-1"
     assert published[4][1]["tool_call_id"] == "call-1"
     assert published[6][1]["request_ids"] == ["request-2"]
     assert published[5][1]["response_id"] == "response-turn-2"
+    assert published[5][1]["work_sequence_no"] == 1
+    assert published[5][1]["event_sequence_no"] == 6
     assert published[8][1]["response_id"] == "response-turn-2"
     assert all(event["session_id"] == "session-1" for _sequence_no, event in published)
     assert all(event["work_id"] == 7 for _sequence_no, event in published)
@@ -1084,6 +1089,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
                 "max_output_tokens": 512,
                 "session_id": "session-1",
                 "work_id": 7,
+                "work_sequence_no": 1,
                 "event_sequence_no": 1,
             },
             "commit": False,
@@ -1101,6 +1107,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
                 "max_output_tokens": 512,
                 "session_id": "session-1",
                 "work_id": 7,
+                "work_sequence_no": 1,
                 "event_sequence_no": 6,
             },
             "commit": False,
@@ -1112,6 +1119,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
 async def test_execute_foreground_persists_non_stream_llm_request_metadata(monkeypatch):
     work = SimpleNamespace(
         id=8,
+        sequence_no=2,
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -1155,6 +1163,8 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
                 "input_tokens": 222,
                 "context_window_tokens": 4096,
                 "max_output_tokens": 512,
+                "work_id": 8,
+                "work_sequence_no": 2,
             },
         }
 
@@ -1202,6 +1212,8 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
                 "input_tokens": 222,
                 "context_window_tokens": 4096,
                 "max_output_tokens": 512,
+                "work_id": 8,
+                "work_sequence_no": 2,
             },
             "commit": False,
         }
