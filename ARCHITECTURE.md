@@ -4,8 +4,6 @@
 
 ```text
 Monoligh/
-├── .agents/                # Agent 本地配置
-├── .clinerules/            # 项目规则
 ├── app/                    # FastAPI 后端源码
 ├── dashboard/              # Vue 管理与聊天前端
 ├── data/                   # 运行期持久化数据
@@ -103,14 +101,13 @@ app/adapters/
 
 ```text
 app/core/
-├── audit/                  # 整轮审计、确认判定、参数完整性与文件存储
+├── audit/                  # 整轮审计、确认判定、结果版本与文件存储
 ├── background_tasks/       # 后台任务与定时任务
 ├── crud/                   # 数据访问
 ├── dispatchers/            # 对话分发实现
 ├── embedding/              # 知识库向量化
 ├── i18n/                   # 后端多语言
 ├── message_platforms/      # 消息平台运行管理
-├── middleware/             # 工具调用审计
 ├── rerank/                 # 知识库重排
 ├── retrieval/              # 知识库检索
 ├── session_reply_queue/    # 会话最终回复队列
@@ -185,6 +182,7 @@ app/core/message_platforms/
 ```text
 app/core/crud/
 ├── audit.py                # 审计整轮、工具明细、确认占用与执行记录访问
+├── audit_tool_result_version.py # 工具结果不可变版本访问
 ├── background_task.py      # 后台任务数据访问
 ├── base.py                 # 通用数据访问基类
 ├── channel.py              # 渠道与模型数据访问
@@ -214,6 +212,7 @@ app/core/dispatchers/
 ├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
 ├── interactive.py          # HTTP/WebSocket/队列交互式流式与非流式对话共用执行流程
+├── interactive_helpers.py   # 交互式分发的消息、工具与执行检查点辅助逻辑
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用逻辑
 └── stream.py               # 流式对话分发
@@ -226,6 +225,7 @@ app/core/utils/dispatcher/
 ├── __init__.py
 ├── append_new_user_messages.py       # 追加用户消息
 ├── channel_call.py                   # 模型渠道调用
+├── context_summary_checkpoint.py     # Agent 循环中的上下文总结检查点
 ├── fetch_and_merge_new_user_messages.py # 获取并合并新消息
 ├── handle_parallel_tool_limit.py     # 并行工具数量限制
 ├── helpers.py                        # 调度共用函数
@@ -240,6 +240,7 @@ app/core/utils/dispatcher/
 ├── save_message.py                   # 通用消息保存
 ├── save_tool_response.py             # 工具响应保存
 ├── truncate_tool_result.py           # 工具结果截断
+├── user_input_batch.py               # 用户输入批次及来源消息标识
 └── validate_profile_and_cfg.py       # Profile 与配置校验
 ```
 
@@ -248,6 +249,7 @@ app/core/utils/dispatcher/
 ```text
 app/core/utils/context_summary/
 ├── __init__.py             # 上下文总结能力导出
+├── boundary.py              # 总结触发边界解析与校验
 ├── cleanup.py              # 过期总结任务与阶段清理
 ├── common.py               # 共用状态与令牌计算
 ├── history.py              # 历史消息测量与分页
@@ -259,7 +261,8 @@ app/core/utils/context_summary/
 ├── service.py              # 总结生成与保存入口
 ├── snapshot.py             # 消息快照构建
 ├── split.py                # 总结来源单元拆分
-└── stage.py                # 总结阶段执行与状态更新
+├── stage.py                # 总结阶段执行与状态更新
+└── user_message_block.py    # 总结中已覆盖用户消息的编码与解析
 ```
 
 ### 其他通用函数：`app/core/utils/`
@@ -274,6 +277,7 @@ app/core/utils/
 ├── context_messages.py     # 上下文消息处理
 ├── message_assembler.py    # 消息组装
 ├── message_parser.py       # 消息解析
+├── request_token_baseline.py # LLM 请求令牌基线与增量估算
 ├── session.py              # 会话辅助函数
 ├── system.py               # 系统信息
 ├── text_splitter.py        # 文本切分
@@ -336,7 +340,7 @@ app/core/i18n/
 ```text
 app/models/
 ├── __init__.py             # 模型导出
-├── audit.py                # 审计整轮、工具明细、确认占用与执行记录模型
+├── audit.py                # 审计整轮、工具明细、确认占用、执行记录与结果版本模型
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由游标模型
@@ -395,8 +399,14 @@ app/schemas/
 └── scheduled_task.py       # 定时任务接口数据结构
 
 app/transformers/
-├── base.py                 # 协议转换基类
-└── openai.py               # OpenAI 风格协议转换
+├── base.py                 # 聊天、嵌入、生图与重排转换基类
+├── cohere_rerank.py        # Cohere 重排协议转换
+└── openai/
+    ├── __init__.py         # OpenAI 转换器导出
+    ├── chat_completions.py # OpenAI Chat Completions 协议转换
+    ├── embedding.py        # OpenAI 嵌入协议转换
+    ├── image_generation.py # OpenAI 生图协议转换
+    └── responses.py        # OpenAI Responses 协议转换
 ```
 
 ## 前端目录：`dashboard/`
@@ -406,6 +416,7 @@ dashboard/
 ├── dist/                   # 前端构建产物
 ├── public/                 # 静态页面模板
 ├── src/                    # Vue 源码
+├── tests/                  # 前端聊天状态与事件跟踪测试
 ├── package-lock.json       # 依赖锁定文件
 └── package.json            # 前端依赖与命令
 ```
@@ -450,6 +461,7 @@ dashboard/src/views/
 dashboard/src/components/
 ├── BaseDataTable.vue       # 通用数据表格
 ├── ChannelEditor.vue       # 渠道编辑器
+├── ChatMessageList.vue     # 虚拟化聊天消息、工具结果与审计卡片展示
 ├── LanguageSwitcher.vue    # 语言切换器
 ├── MessagePlatformFormDialog.vue # 消息平台表单
 ├── ProfileFormDialog.vue   # Profile 表单
@@ -458,11 +470,28 @@ dashboard/src/components/
 └── weixin_oc/              # 微信 OpenClaw 登录组件
 
 dashboard/src/composables/
-├── chat/                   # 聊天状态、传输与会话逻辑
+├── chat/
+│   ├── contextSummaryTracker.js # 上下文总结工作与事件顺序跟踪
+│   ├── thinkingTracker.js       # Thinking 占位生命周期与请求归属跟踪
+│   ├── useChatSession.js         # 聊天会话模块编排
+│   ├── useChatState.js           # 消息列表与滚动状态
+│   ├── useChatTransport.js       # HTTP/WebSocket 通信与生命周期事件分发
+│   ├── useMessageProcessor.js    # 流式消息、工具调用与去重处理
+│   ├── useSessionManager.js      # 会话列表、历史分页与会话切换
+│   └── workLifecycleTracker.js   # 用户输入、Agent 循环与工作结束状态跟踪
 ├── useDeleteConfirm.js     # 删除确认
 ├── useResizeObserver.js    # 尺寸监听
 ├── useToolParser.js        # 工具调用内容解析
 └── useWebSocket.js         # WebSocket 连接管理
+```
+
+### 前端测试：`dashboard/tests/`
+
+```text
+dashboard/tests/
+├── contextSummaryTracker.test.js # 上下文总结工作与事件顺序测试
+├── thinkingTracker.test.js       # Thinking 占位生命周期测试
+└── workLifecycleTracker.test.js  # 聊天工作生命周期测试
 ```
 
 ## 测试目录：`tests/`
@@ -470,8 +499,11 @@ dashboard/src/composables/
 ```text
 tests/
 └── unit/
-    ├── context_summary_*_support.py  # 上下文总结测试辅助
-    ├── session_reply_queue_*_support.py # 回复队列测试辅助
+    ├── context_summary_*_fixture.py # 上下文总结测试夹具
+    ├── context_summary_*_support.py # 上下文总结测试辅助
+    ├── session_reply_queue_fixture.py # 回复队列测试夹具
+    ├── session_reply_queue_test_support.py # 回复队列测试辅助
+    ├── test_audit_*.py              # 审计、确认与审计存储测试
     ├── test_background_*.py          # 后台任务测试
     ├── test_context_*.py             # 上下文与总结测试
     ├── test_message_*.py             # 消息与消息平台测试
@@ -500,7 +532,11 @@ scripts/
 ├── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
 ├── migration_20260715_add_message_system_prompt.py     # 旧消息系统提醒字段
 ├── migration_20260715_migrate_message_environment_prompt.py # 消息环境提示字段迁移
-└── migration_20260717_add_audit_confirmation_records.py # 审计与确认记录表
+├── migration_20260717_add_audit_confirmation_records.py # 审计与确认记录表
+├── migration_20260719_add_background_task_audit_binding.py # 后台任务审计绑定
+├── migration_20260724_add_audit_tool_result_versions.py # 审计工具结果版本表
+├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
+└── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
 ```
 
 ## 运行期目录
