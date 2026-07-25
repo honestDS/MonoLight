@@ -540,6 +540,36 @@ async def test_llm_request_metadata_migration_upgrades_legacy_schema():
     assert "llm_request_metadata" in column_names
 
 
+@pytest.mark.asyncio
+async def test_llm_request_metadata_order_migration_upgrades_applied_metadata_schema():
+    migration = import_module("scripts.migration_20260726_add_chat_session_llm_request_metadata_order")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                CREATE TABLE chat_session (
+                    session_id VARCHAR(100) NOT NULL PRIMARY KEY,
+                    uid VARCHAR(100) NOT NULL,
+                    llm_request_metadata JSON
+                )
+                """
+            )
+        )
+        await migration.migrate(session)
+        await migration.migrate(session)
+        await session.commit()
+
+        columns = await session.execute(text("PRAGMA table_info(chat_session)"))
+        column_names = {str(row[1]) for row in columns.fetchall()}
+
+    await engine.dispose()
+    assert "llm_request_metadata_work_sequence_no" in column_names
+    assert "llm_request_metadata_event_sequence_no" in column_names
+
+
 def test_context_summary_storage_models_use_stable_work_and_stage_identity():
     stage_columns = ContextSummaryStage.__table__.columns
     fragment_columns = ContextSummaryFragment.__table__.columns
