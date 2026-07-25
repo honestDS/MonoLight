@@ -4,7 +4,7 @@ import pytest
 
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE
 from app.core.exceptions import LLMException
-from app.models.channel import ChannelType, ModelChannel
+from app.models.channel import ModelProtocol, resolve_model_protocol
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -14,9 +14,8 @@ from app.models.message import (
     TextPart,
 )
 from app.providers.llm.client import LLMClient
-from app.transformers import openai_responses as openai_responses_module
-from app.transformers.openai import OpenAITransformer
-from app.transformers.openai_responses import OpenAIResponsesTransformer
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
+from app.transformers.openai import responses as openai_responses_module
 
 
 class _AsyncBytesIterator:
@@ -68,7 +67,7 @@ class _FakeClientSession:
 
 
 def test_openai_usage_normalization() -> None:
-    usage = OpenAITransformer._normalize_usage(
+    usage = OpenAIChatCompletionsTransformer._normalize_usage(
         {
             "prompt_tokens": 10,
             "completion_tokens": 4,
@@ -84,7 +83,7 @@ def test_openai_usage_normalization() -> None:
         "cached_tokens": 3,
     }
 
-    invalid_usage = OpenAITransformer._normalize_usage(
+    invalid_usage = OpenAIChatCompletionsTransformer._normalize_usage(
         {
             "prompt_tokens": True,
             "completion_tokens": -1,
@@ -367,7 +366,7 @@ def test_responses_from_provider_rejects_empty_output() -> None:
 
 
 def test_chat_completions_refusal_is_visible_and_preserves_provider_fields() -> None:
-    response = OpenAITransformer.to_internal_response(
+    response = OpenAIChatCompletionsTransformer.to_internal_response(
         {
             "id": "chatcmpl_1",
             "object": "chat.completion",
@@ -1000,20 +999,14 @@ def test_responses_completed_stream_event_reports_output_finish_reason(
 
 
 @pytest.mark.parametrize(
-    ("channel_type", "expected_protocol"),
+    ("protocol", "expected_protocol"),
     [
-        (ChannelType.OPENAI_RESPONSES, "openai_responses"),
-        (ChannelType.OPENAI, "openai"),
+        (ModelProtocol.OPENAI_RESPONSES, "openai_responses"),
+        (ModelProtocol.OPENAI, "openai"),
     ],
 )
-def test_model_channel_protocol(
-    channel_type: ChannelType,
+def test_resolve_model_protocol(
+    protocol: ModelProtocol,
     expected_protocol: str,
 ) -> None:
-    channel = ModelChannel(
-        name=f"channel-{expected_protocol}",
-        channel_type=channel_type,
-        api_key="test-key",
-    )
-
-    assert channel.protocol == expected_protocol
+    assert resolve_model_protocol({"protocol": protocol}) == expected_protocol

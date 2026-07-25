@@ -20,7 +20,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
-from app.models.channel import ChannelConfig, ModelChannel, ModelUsage
+from app.models.channel import ChannelConfig, ModelChannel, ModelUsage, resolve_model_protocol
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
 from app.providers.embedding import EmbeddingClient
@@ -78,7 +78,6 @@ async def embed_chunks_with_knowledge_base_config(
     if release_connection:
         await db.commit()
     return await EmbeddingClient.embed_texts(
-        channel_type=channel.channel_type,
         api_key=channel.get_decrypted_api_key(),
         base_url=channel.base_url,
         model_id=kb.embedding_model_id,
@@ -86,6 +85,7 @@ async def embed_chunks_with_knowledge_base_config(
         batch_size=batch_size,
         dimensions=kb.embedding_dimensions,
         timeout=embedding_timeout,
+        protocol=resolve_model_protocol(model_entry),
     )
 
 
@@ -172,7 +172,6 @@ async def query_knowledge_base(
                 kb_id=kb_id,
                 candidate_count=len(fused_hits),
                 final_top_k=final_top_k,
-                rerank_channel_type=str(rerank_config.channel_type),
                 rerank_model_id=rerank_config.model_id,
                 rerank_latency_ms=round(rerank_latency_ms, 2),
             ).info(t("LOG_RERANK_REMOTE_FINISHED"))

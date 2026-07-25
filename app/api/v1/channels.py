@@ -7,17 +7,9 @@ import copy
 import json
 import re
 
-from fastapi import (
-    APIRouter,
-    Body,
-    Depends,
-)
-from pydantic import (
-    BaseModel,
-)
-from pydantic import (
-    Field as PydanticField,
-)
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
@@ -28,8 +20,10 @@ from app.core.constants import (
     ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_MODEL_LIST_FAILED,
     ERR_CHANNEL_MODEL_LIST_NO_API_KEY,
-    ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE,
     ERR_CHANNEL_MODEL_LIST_NO_URL,
+    ERR_CHANNEL_MODEL_NOT_FOUND,
+    ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED,
+    ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID,
     ERR_CHANNEL_NAME_EXISTS,
     ERR_CHANNEL_NOT_FOUND,
     ERR_CHANNEL_TEST_DIMENSION_ERROR,
@@ -60,14 +54,16 @@ from app.core.utils.channel_profile_sync import (
     _sync_channel_model_id_renames,
 )
 from app.models.channel import (
+    MODEL_PROTOCOLS_BY_USAGE,
     ChannelCreate,
     ChannelListResponse,
     ChannelResponse,
-    ChannelType,
     ChannelUpdate,
     ImageGenerationQuality,
     ImageGenerationSize,
+    ModelProtocol,
     ModelUsage,
+    resolve_model_protocol,
     validate_channel_model_ids,
 )
 from app.models.message import InternalMessage, MessageRole
@@ -82,14 +78,13 @@ from app.schemas.response import (
 
 
 class ChannelModelListRequest(BaseModel):
-    channel_type: ChannelType | None = None
     api_key: str | None = None
     base_url: str | None = None
     timeout: float = PydanticField(30.0, gt=0, le=120)
 
 
 class ChannelChatTestRequest(BaseModel):
-    channel_type: ChannelType | None = None
+    protocol: ModelProtocol | None = None
     api_key: str | None = None
     base_url: str | None = None
     model_id: str | None = None
@@ -100,7 +95,7 @@ class ChannelChatTestRequest(BaseModel):
 
 
 class ChannelImageGenerationTestRequest(BaseModel):
-    channel_type: ChannelType | None = None
+    protocol: ModelProtocol | None = None
     api_key: str | None = None
     base_url: str | None = None
     model_id: str | None = None
@@ -161,7 +156,7 @@ async def create_channel(
 async def get_channel_types():
     return StandardResponse.success(
         data={
-            "channel_types": [e.value for e in ChannelType],
+            "model_protocols": {usage.value: [protocol.value for protocol in protocols] for usage, protocols in MODEL_PROTOCOLS_BY_USAGE.items()},
             "model_usages": [e.value for e in ModelUsage],
         }
     )
@@ -199,13 +194,10 @@ async def list_channel_models(
     payload: ChannelModelListRequest = Body(...),
     _admin: dict = Depends(check_admin_privilege),
 ):
-    """按渠道类型检测模型列表。"""
-    channel_type = payload.channel_type
+    """检测渠道模型列表。"""
     api_key = payload.api_key
     base_url = payload.base_url
 
-    if not channel_type:
-        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
     if not base_url:
         raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
@@ -213,7 +205,6 @@ async def list_channel_models(
 
     try:
         models = await LLMClient.list_models(
-            protocol=channel_type.value if isinstance(channel_type, ChannelType) else str(channel_type),
             api_key=api_key,
             base_url=base_url,
             timeout=payload.timeout,
@@ -235,13 +226,15 @@ async def test_channel_chat(
     payload: ChannelChatTestRequest = Body(...),
     _admin: dict = Depends(check_admin_privilege),
 ):
-    channel_type = payload.channel_type
+    protocol = payload.protocol
     api_key = payload.api_key
     base_url = payload.base_url
     model_id = payload.model_id
 
-    if not channel_type:
-        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+    if not protocol:
+        raise ParameterException(ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED)
+    if protocol not in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]:
+        raise ParameterException(ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID)
     if not base_url:
         raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
@@ -251,7 +244,7 @@ async def test_channel_chat(
 
     try:
         response = await LLMClient.generate(
-            protocol=channel_type.value if isinstance(channel_type, ChannelType) else str(channel_type),
+            protocol=protocol.value.lower(),
             api_key=api_key,
             base_url=base_url,
             model_id=model_id.strip(),
@@ -287,13 +280,15 @@ async def test_channel_image_generation(
     payload: ChannelImageGenerationTestRequest = Body(...),
     _admin: dict = Depends(check_admin_privilege),
 ):
-    channel_type = payload.channel_type
     api_key = payload.api_key
     base_url = payload.base_url
     model_id = payload.model_id
+    protocol = payload.protocol
 
-    if not channel_type:
-        raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_CHANNEL_TYPE)
+    if not protocol:
+        raise ParameterException(ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED)
+    if protocol not in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.IMAGE_GENERATION]:
+        raise ParameterException(ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID)
     if not base_url:
         raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_URL)
     if not api_key:
@@ -303,10 +298,10 @@ async def test_channel_image_generation(
 
     try:
         response = await ImageGenerationClient.generate_image(
-            channel_type=channel_type,
             api_key=api_key,
             base_url=base_url,
             model_id=model_id.strip(),
+            protocol=protocol.value.lower(),
             prompt="A simple red apple on a white background.",
             size=payload.size,
             n=1,
@@ -453,13 +448,20 @@ async def test_embedding_dimension(
     if not db_obj.base_url:
         raise ParameterException(ERR_CHANNEL_TEST_NO_URL)
 
+    model_entry = next(
+        (item for item in db_obj.model_ids or [] if item.get("model_id") == model_id and str(item.get("usage")) == ModelUsage.EMBEDDING.value and item.get("is_enabled", True)),
+        None,
+    )
+    if model_entry is None:
+        raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
+
     try:
         embedding_response = await EmbeddingClient.get_embeddings(
-            channel_type=db_obj.channel_type,
             api_key=db_obj.get_decrypted_api_key(),
             base_url=db_obj.base_url,
             model_id=model_id,
             input_texts=["dimension test"],
+            protocol=resolve_model_protocol(model_entry),
         )
         if "data" in embedding_response and len(embedding_response["data"]) > 0:
             dimension = len(embedding_response["data"][0]["embedding"])

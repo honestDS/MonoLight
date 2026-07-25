@@ -18,7 +18,11 @@ from sqlmodel import (
     SQLModel,
 )
 
-from app.core.constants import ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID
+from app.core.constants import (
+    ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID,
+    ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED,
+    ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID,
+)
 from app.core.crypto import decrypt_api_key, encrypt_api_key
 from app.core.i18n import t
 
@@ -30,6 +34,22 @@ class ModelUsage(enum.StrEnum):
     EMBEDDING = "EMBEDDING"
     RERANK = "RERANK"
     IMAGE_GENERATION = "IMAGE_GENERATION"
+
+
+class ModelProtocol(enum.StrEnum):
+    OPENAI = "OPENAI"
+    OPENAI_RESPONSES = "OPENAI_RESPONSES"
+    OPENAI_EMBEDDING = "OPENAI_EMBEDDING"
+    OPENAI_IMAGE = "OPENAI_IMAGE"
+    COHERE_RERANK = "COHERE_RERANK"
+
+
+MODEL_PROTOCOLS_BY_USAGE: dict[ModelUsage, tuple[ModelProtocol, ...]] = {
+    ModelUsage.CHAT: (ModelProtocol.OPENAI, ModelProtocol.OPENAI_RESPONSES),
+    ModelUsage.EMBEDDING: (ModelProtocol.OPENAI_EMBEDDING,),
+    ModelUsage.RERANK: (ModelProtocol.COHERE_RERANK,),
+    ModelUsage.IMAGE_GENERATION: (ModelProtocol.OPENAI_IMAGE,),
+}
 
 
 class ImageGenerationSize(enum.StrEnum):
@@ -45,16 +65,12 @@ class ImageGenerationQuality(enum.StrEnum):
     HIGH = "high"
 
 
-class ChannelType(enum.StrEnum):
-    OPENAI = "OPENAI"
-    OPENAI_RESPONSES = "OPENAI_RESPONSES"
-
-
 class ChannelModelItem(BaseModel):
     """渠道下单个模型条目的完整配置"""
 
     model_id: str = PydanticField(..., min_length=1, description="模型唯一标识符")
     usage: ModelUsage = PydanticField(..., description="模型用途：CHAT/EMBEDDING/RERANK/IMAGE_GENERATION")
+    protocol: ModelProtocol | None = PydanticField(None, description="模型调用协议")
     image_understanding: bool = PydanticField(False, description="是否支持图像理解")
     audio_understanding: bool = PydanticField(False, description="是否支持音频理解")
     video_understanding: bool = PydanticField(False, description="是否支持视频理解")
@@ -71,10 +87,19 @@ class ChannelModelItem(BaseModel):
     description: str | None = PydanticField(None, description="模型描述")
 
     @model_validator(mode="after")
-    def validate_image_generation_fields(self):
+    def validate_usage_specific_fields(self):
+        if self.protocol is None:
+            raise ValueError(t(ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED))
+        if self.protocol not in MODEL_PROTOCOLS_BY_USAGE[self.usage]:
+            raise ValueError(t(ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID))
         if self.usage != ModelUsage.IMAGE_GENERATION and (self.size is not None or self.quality is not None):
             raise ValueError(t(ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID))
         return self
+
+
+def resolve_model_protocol(model_entry: dict) -> str:
+    """严格解析模型条目的客户端注册协议值。"""
+    return ModelProtocol(model_entry["protocol"]).value.lower()
 
 
 def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None, dict]:
@@ -99,7 +124,6 @@ def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None
 
 class ChannelBase(SQLModel):
     name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
-    channel_type: ChannelType = Field(nullable=False)
     api_key: str = Field(nullable=False, min_length=1)
     base_url: str | None = Field(default=None)
     is_active: bool = Field(default=True)
@@ -113,11 +137,6 @@ class ChannelBase(SQLModel):
 class ModelChannel(ChannelBase, table=True):
     __tablename__ = "channel"
     id: int | None = Field(default=None, primary_key=True, index=True)
-
-    @property
-    def protocol(self) -> str:
-        channel_type = getattr(self.channel_type, "value", self.channel_type)
-        return str(channel_type).lower()
 
     def get_decrypted_api_key(self) -> str:
         """获取解密后的API密钥"""
@@ -176,7 +195,6 @@ class ChannelCreate(ChannelBase):
 
 class ChannelUpdate(SQLModel):
     name: str | None = Field(None, min_length=1, max_length=100)
-    channel_type: ChannelType | None = None
     api_key: str | None = Field(None, min_length=1)
     base_url: str | None = None
     is_active: bool | None = None
@@ -199,7 +217,6 @@ def _channel_response_data(obj) -> dict:
     return {
         "id": obj.id,
         "name": obj.name,
-        "channel_type": obj.channel_type,
         "api_key": _safe_decrypt_api_key(getattr(obj, "api_key", None)),
         "base_url": obj.base_url,
         "is_active": obj.is_active,
@@ -210,7 +227,6 @@ def _channel_response_data(obj) -> dict:
 class ChannelResponse(BaseModel):
     id: int
     name: str
-    channel_type: ChannelType
     api_key: str
     base_url: str | None
     is_active: bool

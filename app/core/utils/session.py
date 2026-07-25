@@ -9,7 +9,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.utils.dispatcher.helpers import format_exception_message
-from app.models.channel import ChannelConfig
+from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
@@ -45,7 +45,7 @@ async def generate_session_title(
     api_key: str,
     base_url: str,
     model_id: str,
-    protocol: str = "openai",
+    protocol: str,
     max_tokens: int = 200,
     raise_on_error: bool = False,
 ) -> str | None:
@@ -137,7 +137,7 @@ async def generate_session_title_for_active_profile(db: AsyncSession, uid: str, 
                     api_key=channel.get_decrypted_api_key(),
                     base_url=channel.base_url,
                     model_id=model_entry["model_id"],
-                    protocol=getattr(channel, "protocol", "openai"),
+                    protocol=resolve_model_protocol(model_entry),
                     max_tokens=model_entry.get("max_tokens") or 200,
                     raise_on_error=True,
                 )

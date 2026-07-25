@@ -111,6 +111,7 @@ async def test_context_summary_channel_rules_are_validated_as_chat_models(monkey
             {
                 "model_id": "summary-model",
                 "usage": ModelUsage.CHAT.value,
+                "protocol": "OPENAI",
             }
         ]
     )
@@ -138,6 +139,7 @@ async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
             {
                 "model_id": "rerank-model",
                 "usage": ModelUsage.RERANK.value,
+                "protocol": "COHERE_RERANK",
             }
         ]
     )
@@ -183,6 +185,7 @@ def test_channel_model_cleanup_includes_context_summary_rules():
             {
                 "model_id": "chat-model",
                 "usage": ModelUsage.CHAT.value,
+                "protocol": "OPENAI",
             }
         ],
     )

@@ -24,7 +24,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.models.channel import ChannelConfig
+from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.providers.image_generation import ImageGenerationClient
 
 from .base import BaseExecutor
@@ -226,10 +226,10 @@ class ImageGenerationExecutor(BaseExecutor):
                 resolved_quality = quality or model_entry.get("quality") or "auto"
                 await self.db.commit()
                 response = await ImageGenerationClient.generate_image(
-                    channel_type=channel.channel_type,
                     api_key=channel.get_decrypted_api_key(),
                     base_url=channel.base_url or "",
                     model_id=model_entry["model_id"],
+                    protocol=resolve_model_protocol(model_entry),
                     prompt=prompt_text,
                     size=resolved_size,
                     n=1,

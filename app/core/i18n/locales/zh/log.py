@@ -123,7 +123,7 @@ MESSAGES = {
     "LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED": "嵌入模型接口携带可选参数调用失败，准备降级重试: {error}",
     "LOG_OPENAI_IMAGE_GENERATION_FAILED": "OpenAI 图片生成接口调用失败: {error}",
     "LOG_MODEL_LIST_FAILED": "模型列表接口调用失败: {error}",
-    "LOG_OPENAI_RERANK_FAILED": "Rerank 接口调用失败: {error}",
+    "LOG_RERANK_FAILED": "Rerank 接口调用失败: {error}",
     "LOG_OPENAI_SSE_PARSE_FAILED": "解析 SSE 响应行失败: {raw_line}，错误: {error}",
     "LOG_OPENAI_STREAM_CHAT_FAILED": "OpenAI 流式对话接口调用失败: {error}",
     "LOG_OPENAI_TOOL_ARGS_PARSE_FAILED": "解析工具调用参数失败: {error}",

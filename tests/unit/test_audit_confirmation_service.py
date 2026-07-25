@@ -378,7 +378,7 @@ async def test_configured_audit_runtime_failures_still_persist_audit_failed(monk
     class FakeChannel:
         is_active = True
         base_url = "https://audit.example"
-        protocol = "openai"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
 
         def get_decrypted_api_key(self):
             return "secret"
@@ -643,7 +643,7 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     class FakeChannel:
         is_active = True
         base_url = "https://audit.example"
-        protocol = "openai"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
 
         def get_decrypted_api_key(self):
             return "secret"
@@ -735,7 +735,7 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
     class FakeChannel:
         is_active = True
         base_url = "https://audit.example"
-        protocol = "openai"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
 
         def get_decrypted_api_key(self):
             return "secret"
@@ -1194,7 +1194,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     class FakeChannel:
         is_active = True
         base_url = "https://audit.example"
-        protocol = "openai"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
 
         def get_decrypted_api_key(self):
             return "secret"

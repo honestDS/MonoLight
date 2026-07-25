@@ -70,6 +70,7 @@ from app.core.utils.request_token_baseline import (
 )
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
+from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
@@ -268,7 +269,7 @@ class InteractiveDispatcherMixin:
                                         work_validity_checker=context_summary_work_validity_checker,
                                         lifecycle_event_callback=context_summary_lifecycle_callback,
                                         model_id=model_entry["model_id"],
-                                        protocol=getattr(chat_channel_obj, "protocol", "openai"),
+                                        protocol=resolve_model_protocol(model_entry),
                                         previous_llm_request_metadata=(latest_llm_request_metadata if isinstance(latest_llm_request_metadata, dict) and latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                                     )
                                 request_messages = ContextManager.trim_messages_for_model_request(
@@ -285,7 +286,7 @@ class InteractiveDispatcherMixin:
                                     tools=current_tools,
                                 )
                                 model_id = model_entry["model_id"]
-                                protocol = getattr(chat_channel_obj, "protocol", "openai")
+                                protocol = resolve_model_protocol(model_entry)
                                 generation_kwargs = {
                                     "api_key": chat_channel_obj.get_decrypted_api_key(),
                                     "base_url": chat_channel_obj.base_url,

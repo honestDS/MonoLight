@@ -6,7 +6,7 @@ import pytest
 from app.core.constants import ERR_LLM_STREAM_TIMEOUT
 from app.core.exceptions import LLMException
 from app.models.message import InternalMessage, MessageRole
-from app.transformers import openai as openai_module
+from app.transformers.openai import chat_completions as openai_module
 
 STREAM_TIMEOUT = 0.08
 
@@ -95,7 +95,7 @@ def _request_messages() -> list[InternalMessage]:
     return [InternalMessage(role=MessageRole.USER, content="hello")]
 
 
-async def _collect_stream(transformer: openai_module.OpenAITransformer, timeout: float = STREAM_TIMEOUT):
+async def _collect_stream(transformer: openai_module.OpenAIChatCompletionsTransformer, timeout: float = STREAM_TIMEOUT):
     chunks = []
     async for chunk in transformer.generate_stream(
         api_key="test-key",
@@ -123,7 +123,7 @@ async def test_stream_timeout_resets_after_each_content_chunk(monkeypatch):
     )
     _patch_http(monkeypatch, response_context)
 
-    chunks = await _collect_stream(openai_module.OpenAITransformer())
+    chunks = await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
 
     assert chunks == [
         json.loads(first.decode().removeprefix("data: ")),
@@ -147,7 +147,7 @@ async def test_stream_timeout_after_first_content_preserves_first_chunk(monkeypa
 
     chunks = []
     with pytest.raises(LLMException) as exc_info:
-        async for chunk in openai_module.OpenAITransformer().generate_stream(
+        async for chunk in openai_module.OpenAIChatCompletionsTransformer().generate_stream(
             api_key="test-key",
             base_url="https://example.invalid",
             model_id="test-model",
@@ -179,7 +179,7 @@ async def test_stream_parses_chinese_character_split_across_raw_byte_chunks(monk
     )
     _patch_http(monkeypatch, response_context)
 
-    chunks = await _collect_stream(openai_module.OpenAITransformer())
+    chunks = await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
 
     assert chunks == [payload]
     assert response_context.exited is True
@@ -191,7 +191,7 @@ async def test_stream_timeout_while_waiting_for_response_headers(monkeypatch):
     _patch_http(monkeypatch, response_context)
 
     with pytest.raises(LLMException) as exc_info:
-        await _collect_stream(openai_module.OpenAITransformer())
+        await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
 
     assert exc_info.value.message == ERR_LLM_STREAM_TIMEOUT
 
@@ -209,7 +209,7 @@ async def test_role_only_chunk_does_not_reset_stream_timeout(monkeypatch):
     _patch_http(monkeypatch, response_context)
 
     with pytest.raises(LLMException) as exc_info:
-        await _collect_stream(openai_module.OpenAITransformer())
+        await _collect_stream(openai_module.OpenAIChatCompletionsTransformer())
 
     assert exc_info.value.message == ERR_LLM_STREAM_TIMEOUT
     assert response_context.exited is True

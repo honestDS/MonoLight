@@ -15,16 +15,11 @@
       @page-change="fetchChannels"
       @size-change="handleSizeChange">
       <el-table-column :resizable="false" prop="name" :label="$t('channels.name')" min-width="120" sortable></el-table-column>
-      <el-table-column :resizable="false" prop="channel_type" :label="$t('channels.type')" min-width="100" sortable>
-        <template #default="scope">
-          {{ getChannelTypeLabel(scope.row.channel_type) }}
-        </template>
-      </el-table-column>
       <el-table-column :resizable="false" :label="$t('channels.models')" min-width="300" sortable>
         <template #default="scope">
           <div class="models-list" v-if="scope.row.model_ids && scope.row.model_ids.length > 0">
             <el-tag v-for="(m, idx) in scope.row.model_ids" :key="idx" class="model-tag">
-              {{ m.model_id }} ({{ getModelUsageLabel(m.usage) }})
+              {{ m.model_id }} ({{ getModelUsageLabel(m.usage) }}<template v-if="m.protocol"> - {{ getModelProtocolLabel(m.protocol) }}</template>)
             </el-tag>
           </div>
           <span v-else class="text-muted">{{ $t('channels.no_models') }}</span>
@@ -56,11 +51,6 @@
               <div class="channel-settings-row channel-settings-row--fields">
                 <el-form-item :label="$t('channels.channel_name')">
                   <el-input v-model="form.name" :placeholder="$t('channels.channel_name_placeholder')" />
-                </el-form-item>
-                <el-form-item :label="$t('channels.channel_type')">
-                  <el-select v-model="form.channel_type" :placeholder="$t('channels.select_type')" class="full-width-input">
-                    <el-option v-for="item in channelTypes" :key="item" :label="getChannelTypeLabel(item)" :value="item" />
-                  </el-select>
                 </el-form-item>
                 <el-form-item :label="$t('channels.api_key')">
                   <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
@@ -122,8 +112,15 @@
               </div>
               <div class="model-entry-field model-entry-field-half">
                 <el-form-item :label="$t('channels.model_type_label')" >
-                  <el-select v-model="entry.usage" class="full-width-input">
+                  <el-select v-model="entry.usage" class="full-width-input" @change="handleModelUsageChange(entry, idx)">
                     <el-option v-for="item in modelUsages" :key="item" :label="getModelUsageLabel(item)" :value="item" />
+                  </el-select>
+                </el-form-item>
+              </div>
+              <div class="model-entry-field model-entry-field-half">
+                <el-form-item :label="$t('channels.model_protocol')" :error="protocolErrors[idx]">
+                  <el-select v-model="entry.protocol" class="full-width-input" @change="handleProtocolChange(idx)">
+                    <el-option v-for="item in getModelProtocols(entry.usage)" :key="item" :label="getModelProtocolLabel(item)" :value="item" />
                   </el-select>
                 </el-form-item>
               </div>
@@ -237,7 +234,8 @@ import { defaultChannelForm, defaultModelEntry } from '../constants'
 const { t } = useI18n()
 
 const channels = ref([])
-const channelTypes = ref([])
+const modelProtocols = ref({})
+const modelProtocolsLoaded = ref(false)
 const modelUsages = ref([])
 const loading = ref(false)
 const total = ref(0)
@@ -248,18 +246,39 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
+const protocolErrors = ref([])
 const selectedDetectedModels = ref([])
 const detectedModels = ref([])
 const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
 const testingModelIndex = ref(null)
 
-const getChannelTypeLabel = (value) => {
+const defaultModelProtocols = {
+  CHAT: 'OPENAI',
+  EMBEDDING: 'OPENAI_EMBEDDING',
+  RERANK: 'COHERE_RERANK',
+  IMAGE_GENERATION: 'OPENAI_IMAGE'
+}
+
+const getModelProtocolLabel = (value) => {
   const map = {
-    OPENAI: 'Openai-completions',
-    OPENAI_RESPONSES: 'Openai-responses'
+    OPENAI: 'openai-completions',
+    OPENAI_RESPONSES: 'openai-responses',
+    OPENAI_EMBEDDING: 'openai-embedding',
+    OPENAI_IMAGE: 'openai-image',
+    COHERE_RERANK: 'cohere-rerank'
   }
   return map[value] || value
+}
+
+const getModelProtocols = (usage) => {
+  const protocols = modelProtocols.value[usage]
+  if (Array.isArray(protocols) && protocols.length > 0) return protocols
+  return modelProtocolsLoaded.value ? [] : [defaultModelProtocols[usage]].filter(Boolean)
+}
+
+const getDefaultModelProtocol = (usage) => {
+  return getModelProtocols(usage)[0] || defaultModelProtocols[usage] || ''
 }
 
 const getModelUsageLabel = (value) => {
@@ -277,11 +296,13 @@ const form = reactive(defaultChannelForm())
 const addModelEntry = () => {
   form.model_ids.push(defaultModelEntry())
   modelIdErrors.value.push('')
+  protocolErrors.value.push('')
 }
 
 const removeModelEntry = (idx) => {
   form.model_ids.splice(idx, 1)
   modelIdErrors.value.splice(idx, 1)
+  protocolErrors.value.splice(idx, 1)
   syncDetectedSelection()
 }
 
@@ -298,6 +319,15 @@ const handleModelIdInput = (idx) => {
   syncDetectedSelection()
 }
 
+const handleProtocolChange = (idx) => {
+  protocolErrors.value[idx] = ''
+}
+
+const handleModelUsageChange = (entry, idx) => {
+  entry.protocol = getDefaultModelProtocol(entry.usage)
+  protocolErrors.value[idx] = ''
+}
+
 const handleDetectedModelChange = (values) => {
   const added = values.filter(v => !_previousDetectedSelection.includes(v))
 
@@ -309,6 +339,7 @@ const handleDetectedModelChange = (values) => {
     if (targetIndex < 0) {
       form.model_ids.push(defaultModelEntry())
       modelIdErrors.value.push('')
+      protocolErrors.value.push('')
       targetIndex = form.model_ids.length - 1
     }
     form.model_ids[targetIndex].model_id = id
@@ -318,7 +349,7 @@ const handleDetectedModelChange = (values) => {
   syncDetectedSelection()
 }
 watch(
-  () => [form.channel_type, form.base_url, form.api_key],
+  () => [form.base_url, form.api_key],
   () => {
     resetDetectedModels()
   }
@@ -333,9 +364,6 @@ const syncDetectedSelection = () => {
 }
 
 const detectModelList = async () => {
-  if (!form.channel_type) {
-    return ElMessage.warning(t('channels.select_type'))
-  }
   if (!form.base_url || !form.base_url.trim()) {
     return ElMessage.warning(t('channels.model_list_base_url_required'))
   }
@@ -346,7 +374,6 @@ const detectModelList = async () => {
   detectingModels.value = true
   try {
     const payload = {
-      channel_type: form.channel_type,
       api_key: form.api_key || null,
       base_url: form.base_url || null
     }
@@ -469,8 +496,9 @@ const testChatModel = async (entry, idx) => {
   if (entry.usage !== 'CHAT') {
     return ElMessage.warning(t('channels.chat_test_chat_only'))
   }
-  if (!form.channel_type) {
-    return ElMessage.warning(t('channels.select_type'))
+  if (!entry.protocol) {
+    protocolErrors.value[idx] = t('channels.model_protocol_required')
+    return ElMessage.warning(t('channels.model_protocol_required'))
   }
   if (!form.base_url || !form.base_url.trim()) {
     return ElMessage.warning(t('channels.model_list_base_url_required'))
@@ -486,10 +514,10 @@ const testChatModel = async (entry, idx) => {
   testingModelIndex.value = idx
   try {
     const res = await channelApi.testChat({
-      channel_type: form.channel_type,
       api_key: form.api_key || null,
       base_url: form.base_url || null,
       model_id: entry.model_id.trim(),
+      protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
       max_tokens: entry.max_tokens || 0
@@ -533,8 +561,9 @@ const testImageGenerationModel = async (entry, idx) => {
   if (entry.usage !== 'IMAGE_GENERATION') {
     return ElMessage.warning(t('channels.image_generation_test_image_only'))
   }
-  if (!form.channel_type) {
-    return ElMessage.warning(t('channels.select_type'))
+  if (!entry.protocol) {
+    protocolErrors.value[idx] = t('channels.model_protocol_required')
+    return ElMessage.warning(t('channels.model_protocol_required'))
   }
   if (!form.base_url || !form.base_url.trim()) {
     return ElMessage.warning(t('channels.model_list_base_url_required'))
@@ -550,10 +579,10 @@ const testImageGenerationModel = async (entry, idx) => {
   testingModelIndex.value = idx
   try {
     const res = await channelApi.testImageGeneration({
-      channel_type: form.channel_type,
       api_key: form.api_key || null,
       base_url: form.base_url || null,
       model_id: entry.model_id.trim(),
+      protocol: entry.protocol,
       size: entry.size || '1024x1024',
       quality: entry.quality || 'auto'
     })
@@ -618,11 +647,12 @@ const detectEmbeddingDimension = async (entry, idx) => {
   }
 }
 
-const fetchChannelTypes = async () => {
+const fetchModelProtocols = async () => {
   try {
     const res = await channelApi.types()
     const data = res.data.data
-    channelTypes.value = data?.channel_types || []
+    modelProtocols.value = data?.model_protocols || {}
+    modelProtocolsLoaded.value = true
     modelUsages.value = data?.model_usages || []
   } catch (err) {
     console.error(t('channels.load_types_failed'), err)
@@ -662,6 +692,7 @@ const openCreateDialog = () => {
   const df = defaultChannelForm()
   Object.keys(df).forEach(k => { form[k] = df[k] })
   modelIdErrors.value = []
+  protocolErrors.value = []
   resetDetectedModels()
   dialogVisible.value = true
 }
@@ -670,7 +701,6 @@ const handleEdit = (row) => {
   isEdit.value = true
   currentId.value = row.id
   form.name = row.name
-  form.channel_type = row.channel_type
   form.api_key = row.api_key
   form.base_url = row.base_url || ''
   form.is_active = row.is_active
@@ -678,18 +708,26 @@ const handleEdit = (row) => {
     ? JSON.parse(JSON.stringify(row.model_ids))
     : []
   modelIdErrors.value = form.model_ids.map(() => '')
+  protocolErrors.value = form.model_ids.map(() => '')
   resetDetectedModels()
   dialogVisible.value = true
 }
 
 const submitForm = async () => {
-  if (!form.name || !form.channel_type) {
+  if (!form.name) {
     return ElMessage.warning(t('channels.fill_required'))
   }
 
   modelIdErrors.value = form.model_ids.map(m => m.model_id && m.model_id.trim() ? '' : t('channels.model_id_required'))
   if (modelIdErrors.value.some(Boolean)) {
     return ElMessage.warning(t('channels.fill_required'))
+  }
+
+  protocolErrors.value = form.model_ids.map(m => (
+    !m.protocol ? t('channels.model_protocol_required') : ''
+  ))
+  if (protocolErrors.value.some(Boolean)) {
+    return ElMessage.warning(t('channels.model_protocol_required'))
   }
 
   // 校验同一用途下 model_id 不可重复；同一 model_id 允许用于不同用途
@@ -715,7 +753,6 @@ const submitForm = async () => {
   try {
     const payload = {
       name: form.name,
-      channel_type: form.channel_type,
       api_key: form.api_key,
       base_url: form.base_url || null,
       is_active: form.is_active,
@@ -740,7 +777,7 @@ const submitForm = async () => {
 
 onMounted(() => {
   fetchChannels()
-  fetchChannelTypes()
+  fetchModelProtocols()
 })
 </script>
 

@@ -11,18 +11,13 @@ import aiohttp
 
 from app.core.constants import (
     ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR,
-    ERR_EMBEDDING_COUNT_MISMATCH,
-    ERR_EMBEDDING_DIMENSION_MISMATCH,
     ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_FIRST_CHAR_TIMEOUT,
     ERR_LLM_STREAM_TIMEOUT,
-    ERR_PROFILE_EMBEDDING_CALL_FAILED,
-    ERR_PROFILE_RERANK_CALL_FAILED,
-    ERR_RERANK_FORMAT_ERROR,
 )
-from app.core.exceptions import EmbeddingException, LLMException, RerankException
+from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import (
@@ -35,12 +30,7 @@ from app.models.message import (
     TextPart,
 )
 
-from .base import (
-    BaseEmbeddingTransformer,
-    BaseImageGenerationTransformer,
-    BaseRerankTransformer,
-    BaseTransformer,
-)
+from ..base import BaseTransformer
 
 logger = get_logger(__name__)
 
@@ -53,7 +43,7 @@ def _is_timeout_exception(exc: Exception) -> bool:
     return False
 
 
-class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer):
+class OpenAIChatCompletionsTransformer(BaseTransformer):
     _PROTOCOL_METADATA = "openai_chat_completions"
 
     # 本转换器统一关闭 TLS 证书校验，以兼容自签名证书或证书链不完整的模型提供商。
@@ -254,65 +244,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
                 raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
             raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
 
-    async def generate_image(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        prompt: str,
-        size: str = "1024x1024",
-        n: int = 1,
-        quality: str | None = None,
-        response_format: str | None = None,
-        style: str | None = None,
-        timeout: float = 60.0,
-        **kwargs,
-    ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "prompt": prompt,
-            "n": n,
-            "size": size,
-        }
-
-        optional_fields = {
-            "quality": quality,
-            "response_format": response_format,
-            "style": style,
-            "user": kwargs.get("user"),
-            "background": kwargs.get("background"),
-            "moderation": kwargs.get("moderation"),
-            "output_compression": kwargs.get("output_compression"),
-            "output_format": kwargs.get("output_format"),
-        }
-        payload.update({key: value for key, value in optional_fields.items() if value is not None})
-
-        extra_body = kwargs.get("extra_body")
-        if isinstance(extra_body, dict):
-            payload.update(extra_body)
-
-        url = f"{self._normalize_image_base_url(base_url)}/images/generations"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    return json.loads(txt)
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_IMAGE_GENERATION_FAILED", error=str(e)))
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
-
     async def generate_stream(
         self,
         api_key: str,
@@ -439,227 +370,6 @@ class OpenAITransformer(BaseTransformer, BaseEmbeddingTransformer, BaseImageGene
         if delta.get("tool_calls"):
             return True
         return False
-
-    async def get_embeddings(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        input_texts: str | list[str],
-        suppress_error_log: bool = False,
-        timeout: float = 30.0,
-        **kwargs,
-    ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": model_id,
-            "input": input_texts,
-        }
-        if "dimensions" in kwargs:
-            payload["dimensions"] = kwargs["dimensions"]
-        if "encoding_format" in kwargs:
-            payload["encoding_format"] = kwargs["encoding_format"]
-        if "user" in kwargs:
-            payload["user"] = kwargs["user"]
-
-        url = f"{self._normalize_embedding_base_url(base_url)}/embeddings"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise EmbeddingException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    return json.loads(txt)
-        except EmbeddingException:
-            raise
-        except Exception as e:
-            if suppress_error_log:
-                logger.bind(model_id=model_id, base_url=base_url, fallback_candidate=True).warning(t("LOG_OPENAI_EMBEDDING_OPTIONAL_PARAMS_FAILED", error=str(e)))
-            else:
-                logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_EMBEDDING_FAILED", error=str(e)))
-            raise EmbeddingException(ERR_PROFILE_EMBEDDING_CALL_FAILED, message=str(e))
-
-    @staticmethod
-    def _normalize_embedding_base_url(base_url: str) -> str:
-        return base_url.rstrip("/").removesuffix("/embeddings")
-
-    @staticmethod
-    def _normalize_image_base_url(base_url: str) -> str:
-        return base_url.rstrip("/").removesuffix("/images/generations").removesuffix("/images")
-
-    @staticmethod
-    def _normalize_rerank_base_url(base_url: str) -> str:
-        # 允许用户把 base_url 配到服务根路径、/v1 或 /v1/rerank，统一归一化为不含 /rerank 后缀的基础路径
-        return base_url.rstrip("/").removesuffix("/rerank")
-
-    async def get_rerank(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        query: str,
-        documents: list[str],
-        top_n: int | None = None,
-        timeout: float = 15.0,
-        **kwargs,
-    ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "query": query,
-            "documents": documents,
-        }
-        if top_n is not None:
-            payload["top_n"] = top_n
-
-        url = f"{self._normalize_rerank_base_url(base_url)}/rerank"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise RerankException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    return json.loads(txt)
-        except RerankException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url).error(t("LOG_OPENAI_RERANK_FAILED", error=str(e)))
-            raise RerankException(ERR_PROFILE_RERANK_CALL_FAILED, params={"message": str(e)})
-
-    async def rerank_texts(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        query: str,
-        documents: list[str],
-        top_n: int | None = None,
-        timeout: float = 15.0,
-    ) -> list[dict[str, Any]]:
-        if not documents:
-            return []
-
-        response = await self.get_rerank(
-            api_key=api_key,
-            base_url=base_url,
-            model_id=model_id,
-            query=query,
-            documents=documents,
-            top_n=top_n,
-            timeout=timeout,
-        )
-
-        raw_results = response.get("results")
-        if not isinstance(raw_results, list):
-            raise RerankException(ERR_RERANK_FORMAT_ERROR)
-
-        normalized: list[dict[str, Any]] = []
-        for item in raw_results:
-            if not isinstance(item, dict):
-                continue
-            index = item.get("index")
-            if index is None:
-                continue
-            # 优先取 relevance_score，缺失时兼容 score 后备字段
-            score = item.get("relevance_score")
-            if score is None:
-                score = item.get("score")
-            if score is None:
-                continue
-            normalized.append({"index": int(index), "relevance_score": float(score)})
-
-        return normalized
-
-    async def embed_texts(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        input_texts: list[str],
-        batch_size: int = 16,
-        dimensions: int | None = None,
-        timeout: float = 30.0,
-    ) -> list[list[float]]:
-        if not input_texts:
-            return []
-
-        normalized_base_url = self._normalize_embedding_base_url(base_url)
-        embeddings: list[list[float]] = []
-        dimensions_supported: bool | None = None
-
-        for start in range(0, len(input_texts), batch_size):
-            batch_texts = input_texts[start : start + batch_size]
-            result = await self._get_embedding_batch_with_dimension_fallback(
-                api_key=api_key,
-                base_url=normalized_base_url,
-                model_id=model_id,
-                input_texts=batch_texts,
-                dimensions=dimensions,
-                dimensions_supported=dimensions_supported,
-                timeout=timeout,
-            )
-
-            dimensions_supported = result["dimensions_supported"]
-            batch_embeddings = [item["embedding"] for item in result["response"].get("data", [])]
-
-            if len(batch_embeddings) != len(batch_texts):
-                raise EmbeddingException(ERR_EMBEDDING_COUNT_MISMATCH)
-            if dimensions and dimensions_supported is True and batch_embeddings and len(batch_embeddings[0]) != dimensions:
-                raise EmbeddingException(ERR_EMBEDDING_DIMENSION_MISMATCH, actual=len(batch_embeddings[0]), expected=dimensions)
-
-            embeddings.extend(batch_embeddings)
-
-        return embeddings
-
-    async def _get_embedding_batch_with_dimension_fallback(
-        self,
-        api_key: str,
-        base_url: str,
-        model_id: str,
-        input_texts: list[str],
-        dimensions: int | None,
-        dimensions_supported: bool | None,
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        if dimensions and dimensions_supported is not False:
-            try:
-                response = await self.get_embeddings(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model_id=model_id,
-                    input_texts=input_texts,
-                    suppress_error_log=dimensions_supported is None,
-                    dimensions=dimensions,
-                    timeout=timeout,
-                )
-                return {"response": response, "dimensions_supported": True}
-            except EmbeddingException:
-                if dimensions_supported is True:
-                    raise
-
-        response = await self.get_embeddings(
-            api_key=api_key,
-            base_url=base_url,
-            model_id=model_id,
-            input_texts=input_texts,
-            timeout=timeout,
-        )
-        return {"response": response, "dimensions_supported": False if dimensions else dimensions_supported}
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:

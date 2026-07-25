@@ -74,6 +74,7 @@ async def test_image_generation_is_submitted_in_background_without_parameter(mon
 async def test_image_generation_releases_database_connection_before_remote_call(monkeypatch):
     commits = []
     generate_calls = []
+    generated_protocols = []
 
     class TrackingSession:
         async def commit(self):
@@ -82,12 +83,13 @@ async def test_image_generation_releases_database_connection_before_remote_call(
     async def select_channel(db, *_args, **_kwargs):
         assert db is session
         channel = SimpleNamespace(
-            channel_type="OPENAI",
             base_url="https://example.invalid",
             get_decrypted_api_key=lambda: "secret",
         )
         model_entry = {
             "model_id": "image-model",
+            "usage": "IMAGE_GENERATION",
+            "protocol": "OPENAI_IMAGE",
             "size": "1024x1024",
             "quality": "auto",
         }
@@ -95,6 +97,7 @@ async def test_image_generation_releases_database_connection_before_remote_call(
 
     async def generate_image(**kwargs):
         generate_calls.append(list(commits))
+        generated_protocols.append(kwargs["protocol"])
         return {
             "model": "image-model",
             "data": [{"b64_json": "aGVsbG8="}],
@@ -146,3 +149,4 @@ async def test_image_generation_releases_database_connection_before_remote_call(
     assert result["status"] == "success"
     assert commits == ["commit"]
     assert generate_calls == [["commit"]]
+    assert generated_protocols == ["openai_image"]

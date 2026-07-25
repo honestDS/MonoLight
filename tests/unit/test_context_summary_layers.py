@@ -15,7 +15,6 @@ class _SummaryChannel:
     id = 7
     name = "summary-channel"
     base_url = "https://example.invalid"
-    protocol = "openai"
 
     def get_decrypted_api_key(self) -> str:
         return "secret"
@@ -34,6 +33,8 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
                 "model_id": "summary-model",
                 "context_window_k": 8,
                 "max_tokens": 4096,
+                "usage": "CHAT",
+                "protocol": "OPENAI",
             },
             SimpleNamespace(priority=3),
         )

@@ -18,12 +18,12 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
-from .openai import OpenAITransformer, _is_timeout_exception
+from .chat_completions import OpenAIChatCompletionsTransformer, _is_timeout_exception
 
 logger = get_logger(__name__)
 
 
-class OpenAIResponsesTransformer(OpenAITransformer):
+class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
     _PROTOCOL_METADATA = "openai_responses"
 
     async def generate(

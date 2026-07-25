@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.confirmation import cancel_confirmation_by_session
 from app.core.audit.integrity import build_tool_round_integrity_snapshot, create_file_integrity_snapshot, summarize_tool_arguments
 from app.core.audit.persistence import persist_prepared_audit_round
+from app.core.channel_router import get_model_entry
 from app.core.constants import (
     ERR_AUDIT_CHANNEL_UNAVAILABLE,
     ERR_AUDIT_CONFIG_MISSING,
@@ -47,6 +48,7 @@ from app.core.tools.shell import ShellExecutor
 from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
+from app.models.channel import ModelUsage, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
 from app.providers.llm.client import LLMClient
@@ -405,6 +407,13 @@ async def _call_auditor(
     channel = await channel_crud.get(db, channel_id)
     if channel is None or not channel.is_active:
         raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE))
+    model_entry = get_model_entry(channel, model_id, ModelUsage.CHAT.value)
+    if model_entry is None:
+        raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE))
+    try:
+        protocol = resolve_model_protocol(model_entry)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE)) from exc
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_BATCH_PROMPT),
         InternalMessage(role=MessageRole.USER, content=json.dumps(request_payload, ensure_ascii=False)),
@@ -421,7 +430,7 @@ async def _call_auditor(
             messages=messages,
             temperature=0.1,
             timeout=cfg.channel.chat_channel.chat_timeout,
-            protocol=getattr(channel, "protocol", "openai"),
+            protocol=protocol,
             tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
         )
         if not response.message.tool_calls:
@@ -464,6 +473,13 @@ async def _summarize_pending(
     channel = await channel_crud.get(db, cfg.security.audit_channel_id)
     if channel is None or not channel.is_active or not cfg.security.audit_model_id:
         return fallback_summary, {"fallback": True}
+    model_entry = get_model_entry(channel, cfg.security.audit_model_id, ModelUsage.CHAT.value)
+    if model_entry is None:
+        return fallback_summary, {"fallback": True}
+    try:
+        protocol = resolve_model_protocol(model_entry)
+    except (KeyError, TypeError, ValueError):
+        return fallback_summary, {"fallback": True}
     workdir = Path(working_directory or os.getcwd()).resolve(strict=False)
     summary_payload = {
         "working_directory": str(workdir),
@@ -493,7 +509,7 @@ async def _summarize_pending(
                 messages=messages,
                 temperature=0.1,
                 timeout=cfg.channel.chat_channel.chat_timeout,
-                protocol=getattr(channel, "protocol", "openai"),
+                protocol=protocol,
                 tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
             )
             if not response.message.tool_calls:

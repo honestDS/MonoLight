@@ -20,8 +20,7 @@ from app.models.message import (
     InternalToolCall,
     MessageRole,
 )
-from app.transformers.openai import OpenAITransformer
-from app.transformers.openai_responses import OpenAIResponsesTransformer
+from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
 
 logger = get_logger(__name__)
 
@@ -59,13 +58,13 @@ def _openai_stream_metadata(
     choice_metadata.pop("finish_reason", None)
     message_metadata = {key: value for key, value in (delta or {}).items() if key not in {"content", "refusal", "tool_calls"}}
     provider_metadata = {
-        "protocol": OpenAITransformer._PROTOCOL_METADATA,
+        "protocol": OpenAIChatCompletionsTransformer._PROTOCOL_METADATA,
         "response": response_metadata,
         "choice": choice_metadata,
         "message": message_metadata,
     }
     return provider_metadata, {
-        "protocol": OpenAITransformer._PROTOCOL_METADATA,
+        "protocol": OpenAIChatCompletionsTransformer._PROTOCOL_METADATA,
         "choice": choice_metadata,
         "message": message_metadata,
     }
@@ -319,7 +318,7 @@ class _StreamToolCallAssembler:
             if function_metadata:
                 tool_call_metadata["function"] = function_metadata
         if tool_call_metadata:
-            protocol = OpenAITransformer._PROTOCOL_METADATA if self._protocol == "openai" else self._protocol
+            protocol = OpenAIChatCompletionsTransformer._PROTOCOL_METADATA if self._protocol == "openai" else self._protocol
             metadata = _merge_metadata(
                 metadata,
                 {"protocol": protocol, "tool_call": tool_call_metadata},
@@ -351,7 +350,7 @@ class _StreamToolCallAssembler:
 
 class LLMClient:
     _transformers = {
-        "openai": OpenAITransformer(),
+        "openai": OpenAIChatCompletionsTransformer(),
         "openai_responses": OpenAIResponsesTransformer(),
     }
 
@@ -502,7 +501,7 @@ class LLMClient:
             message_provider_metadata = _merge_metadata(message_provider_metadata, chunk.get("message_provider_metadata"))
 
             if isinstance(choice, dict) and choice.get("finish_reason") is not None:
-                finish_reason, raw_finish_details = OpenAITransformer._normalize_finish_reason(choice.get("finish_reason"))
+                finish_reason, raw_finish_details = OpenAIChatCompletionsTransformer._normalize_finish_reason(choice.get("finish_reason"))
                 finish_details = _merge_metadata(finish_details, raw_finish_details)
             finish_details = _merge_metadata(finish_details, chunk.get("finish_details"))
 

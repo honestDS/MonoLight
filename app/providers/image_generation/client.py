@@ -1,33 +1,29 @@
 from typing import Any
 
-from app.core.constants import ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL
+from app.core.constants import ERR_LLM_UNSUPPORTED_PROTOCOL
 from app.core.exceptions import LLMException
-from app.models.channel import ChannelType
-from app.transformers.base import BaseImageGenerationTransformer
-from app.transformers.openai import OpenAITransformer
-from app.transformers.openai_responses import OpenAIResponsesTransformer
+from app.transformers.openai import OpenAIImageGenerationTransformer
 
 
 class ImageGenerationClient:
-    _transformers: dict[str, BaseImageGenerationTransformer] = {
-        ChannelType.OPENAI.value.lower(): OpenAITransformer(),
-        ChannelType.OPENAI_RESPONSES.value.lower(): OpenAIResponsesTransformer(),
+    _transformers = {
+        "openai_image": OpenAIImageGenerationTransformer(),
     }
 
     @classmethod
-    def get_transformer(cls, channel_type: ChannelType | str) -> BaseImageGenerationTransformer:
-        transformer = cls._transformers.get(str(channel_type).lower())
+    def get_transformer(cls, protocol: str) -> OpenAIImageGenerationTransformer:
+        transformer = cls._transformers.get(protocol.lower())
         if not transformer:
-            raise LLMException(message=ERR_LLM_UNSUPPORTED_IMAGE_GENERATION_CHANNEL, channel_type=channel_type)
+            raise LLMException(ERR_LLM_UNSUPPORTED_PROTOCOL, protocol=protocol)
         return transformer
 
     @classmethod
     async def generate_image(
         cls,
-        channel_type: ChannelType | str,
         api_key: str,
         base_url: str,
         model_id: str,
+        protocol: str,
         prompt: str,
         size: str = "1024x1024",
         n: int = 1,
@@ -37,7 +33,7 @@ class ImageGenerationClient:
         timeout: float = 60.0,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        transformer = cls.get_transformer(channel_type)
+        transformer = cls.get_transformer(protocol)
         return await transformer.generate_image(
             api_key=api_key,
             base_url=base_url,

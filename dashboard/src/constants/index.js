@@ -67,6 +67,7 @@ export const defaultChannelRule = () => ({
 export const defaultModelEntry = () => ({
   model_id: '',
   usage: 'CHAT',
+  protocol: 'OPENAI',
   image_understanding: false,
   audio_understanding: false,
   video_understanding: false,
@@ -81,7 +82,6 @@ export const defaultModelEntry = () => ({
 // 默认渠道表单
 export const defaultChannelForm = () => ({
   name: '',
-  channel_type: 'OPENAI',
   api_key: '',
   base_url: '',
   is_active: true,

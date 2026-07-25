@@ -49,7 +49,6 @@ class _Channel:
     id = 1
     name = "test-channel"
     base_url = "https://example.invalid"
-    protocol = "openai"
 
     def get_decrypted_api_key(self):
         return "secret"
@@ -123,8 +122,8 @@ async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_messa
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         if kwargs.get("excluded_priorities"):
-            return _Channel(), {"model_id": "model-2"}, SimpleNamespace(priority=2)
-        return _Channel(), {"model_id": "model-1"}, SimpleNamespace(priority=1)
+            return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
         return [], []
@@ -252,8 +251,8 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         if kwargs.get("excluded_priorities"):
-            return _Channel(), {"model_id": "model-2"}, SimpleNamespace(priority=2)
-        return _Channel(), {"model_id": "model-1"}, SimpleNamespace(priority=1)
+            return _Channel(), {"model_id": "model-2", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
         return [], []
@@ -373,8 +372,8 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         if kwargs.get("excluded_priorities"):
-            return _Channel(), {"model_id": "model-2", "max_tokens": 256}, SimpleNamespace(priority=2)
-        return _Channel(), {"model_id": "model-1", "max_tokens": 1024}, SimpleNamespace(priority=1)
+            return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
         return [], []
@@ -526,8 +525,8 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     async def select_channel(db, channel_config, expected_usage, **kwargs):
         channel_call_contexts.append(kwargs["call_context"])
         if kwargs.get("excluded_priorities"):
-            return _Channel(), {"model_id": "model-2", "max_tokens": 256}, SimpleNamespace(priority=2)
-        return _Channel(), {"model_id": "model-1", "max_tokens": 1024}, SimpleNamespace(priority=1)
+            return _Channel(), {"model_id": "model-2", "max_tokens": 256, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
+        return _Channel(), {"model_id": "model-1", "max_tokens": 1024, "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
         return [], []
@@ -689,7 +688,7 @@ async def _run_audited_interactive_dispatch(
         return cfg
 
     async def select_channel(db, channel_config, expected_usage, **kwargs):
-        return _Channel(), {"model_id": "model-1"}, SimpleNamespace(priority=1)
+        return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
         return [SimpleNamespace(name="execute_shell")], []

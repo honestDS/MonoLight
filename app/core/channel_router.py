@@ -21,13 +21,13 @@ from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
 logger = get_logger(__name__)
 
 
-def _get_model_entry(channel: ModelChannel, model_id: str, expected_usage: str) -> dict | None:
+def get_model_entry(channel: ModelChannel, model_id: str, expected_usage: str) -> dict | None:
     """从渠道的 model_ids 中查找匹配 model_id 且 usage 一致的条目。
 
     允许同一 model_id 配置多个不同 usage 的条目，因此匹配时需同时校验 usage，
     避免命中同名但用途不符的条目。
     """
-    for entry in channel.model_ids:
+    for entry in channel.model_ids or []:
         if entry.get("model_id") == model_id and entry.get("usage") == expected_usage:
             return entry
     return None
@@ -130,7 +130,7 @@ async def select_channel(
                 continue
 
             # 校验渠道的 model_ids 中存在 model_id 且 usage 匹配的启用条目
-            model_entry = _get_model_entry(channel, rule.model_id, expected_usage)
+            model_entry = get_model_entry(channel, rule.model_id, expected_usage)
             if not model_entry:
                 logger.bind(
                     channel_id=channel.id,

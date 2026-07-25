@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
 from app.core.utils.dispatcher.helpers import resolve_chat_params
-from app.models.channel import ChannelConfig, ModelUsage
+from app.models.channel import ChannelConfig, ModelUsage, resolve_model_protocol
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ async def select_context_summary_model(
         channel_id=channel.id,
         channel_name=channel.name,
         model_id=model_entry["model_id"],
-        protocol=getattr(channel, "protocol", "openai"),
+        protocol=resolve_model_protocol(model_entry),
         base_url=channel.base_url,
         api_key=channel.get_decrypted_api_key(),
         priority=rule.priority,

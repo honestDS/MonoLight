@@ -12,7 +12,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.schemas import RerankConfig
 from app.core.retrieval.schemas import RetrievalHit
-from app.models.channel import ChannelConfig
+from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.profile import Profile
 from app.providers.rerank import RerankClient
 
@@ -62,10 +62,10 @@ async def get_profile_rerank_config(
     return RerankConfig(
         channel_id=channel.id,
         channel_name=channel.name,
-        channel_type=channel.channel_type,
         api_key=channel.get_decrypted_api_key(),
         base_url=channel.base_url,
         model_id=model_entry["model_id"],
+        protocol=resolve_model_protocol(model_entry),
         candidate_k=rerank_channel.rerank_candidate_k,
         timeout=model_entry.get("rerank_timeout") if model_entry.get("rerank_timeout") is not None else rerank_channel.rerank_timeout,
         priority=_rule.priority,
@@ -84,10 +84,10 @@ async def rerank_retrieval_hits(
 
     documents = [hit.content for hit in hits]
     results = await RerankClient.rerank_texts(
-        channel_type=config.channel_type,
         api_key=config.api_key,
         base_url=config.base_url,
         model_id=config.model_id,
+        protocol=config.protocol,
         query=query,
         documents=documents,
         top_n=final_top_k,

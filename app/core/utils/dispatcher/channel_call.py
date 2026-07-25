@@ -10,7 +10,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.request_token_baseline import extract_provider_token_metrics
-from app.models.channel import ChannelConfig, ChannelRule, ModelChannel
+from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
@@ -67,7 +67,7 @@ async def generate_chat_with_fallback(
                 top_p=chat_params["top_p"],
                 max_tokens=chat_params["max_tokens"],
                 tools=tools,
-                protocol=getattr(chat_channel_obj, "protocol", "openai"),
+                protocol=resolve_model_protocol(model_entry),
                 timeout=chat_params["chat_timeout"],
                 **request_context_kwargs,
             )

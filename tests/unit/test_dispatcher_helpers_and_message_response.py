@@ -97,12 +97,11 @@ async def test_channel_call_releases_connection_before_model_request(monkeypatch
     model_call_commit_counts = []
     channel = SimpleNamespace(
         base_url="https://example.invalid",
-        protocol="openai",
         get_decrypted_api_key=lambda: "secret",
     )
 
     async def select_channel(*_args, **_kwargs):
-        return channel, {"model_id": "model-1"}, SimpleNamespace(priority=1)
+        return channel, {"model_id": "model-1", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def generate(**_kwargs):
         model_call_commit_counts.append(db.commit_count)

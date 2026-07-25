@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-from app.models.channel import ChannelType
-
 
 @dataclass
 class RerankResult:
@@ -17,10 +15,10 @@ class RerankConfig:
 
     channel_id: int
     channel_name: str | None
-    channel_type: ChannelType
     api_key: str
     base_url: str
     model_id: str
+    protocol: str
     candidate_k: int
     timeout: float
     priority: int

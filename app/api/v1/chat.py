@@ -57,7 +57,7 @@ from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
-from app.models.channel import ChannelConfig
+from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import (
     ChatCompletionRequest,
     MessageResponse,
@@ -379,7 +379,7 @@ async def generate_title(
                 api_key=channel.get_decrypted_api_key(),
                 base_url=channel.base_url,
                 model_id=model_entry["model_id"],
-                protocol=getattr(channel, "protocol", "openai"),
+                protocol=resolve_model_protocol(model_entry),
                 max_tokens=model_entry.get("max_tokens") or 200,
                 raise_on_error=True,
             )
