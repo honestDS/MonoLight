@@ -29,20 +29,13 @@ from app.models.profile import ProfileConfig
     "prompt",
     [CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_COMPRESS_PROMPT],
 )
-def test_summary_prompts_preserve_observation_time_for_time_sensitive_facts(prompt):
-    assert "time-sensitive facts" in prompt
-    assert "prices" in prompt
-    assert "observation or source time and timezone" in prompt
-    assert "not as current facts" in prompt
-    assert "do not infer" in prompt
-
-
-@pytest.mark.parametrize(
-    "prompt",
-    [CONTEXT_SUMMARY_PROMPT, CONTEXT_SUMMARY_COMPRESS_PROMPT],
-)
-def test_summary_prompts_preserve_active_work_and_compress_tool_process(prompt):
+def test_summary_prompts_preserve_required_context_details(prompt):
     required_phrases = [
+        "time-sensitive facts",
+        "prices",
+        "observation or source time and timezone",
+        "not as current facts",
+        "do not infer",
         "active user goal",
         "requested deliverables",
         "acceptance criteria",

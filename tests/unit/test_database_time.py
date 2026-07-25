@@ -1,26 +1,27 @@
+import pytest
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.sql import select
 
 from app.providers.database.time import build_database_timestamp_expression
 
 
-def test_database_timestamp_expression_uses_sqlite_unixepoch():
-    sql = str(select(build_database_timestamp_expression("sqlite")).compile(dialect=sqlite.dialect()))
+@pytest.mark.parametrize(
+    ("database_type", "dialect", "required_fragments", "forbidden_fragments"),
+    [
+        ("sqlite", sqlite.dialect(), ["unixepoch()"], ["extract"]),
+        ("mysql", mysql.dialect(), ["unix_timestamp", "current_timestamp"], ["extract"]),
+        ("postgresql", postgresql.dialect(), ["extract(epoch", "current_timestamp"], []),
+    ],
+)
+def test_database_timestamp_expression_uses_dialect_specific_sql(
+    database_type,
+    dialect,
+    required_fragments,
+    forbidden_fragments,
+):
+    sql = str(select(build_database_timestamp_expression(database_type)).compile(dialect=dialect)).lower()
 
-    assert "unixepoch()" in sql.lower()
-    assert "extract" not in sql.lower()
-
-
-def test_database_timestamp_expression_uses_mysql_unix_timestamp():
-    sql = str(select(build_database_timestamp_expression("mysql")).compile(dialect=mysql.dialect()))
-
-    assert "unix_timestamp" in sql.lower()
-    assert "current_timestamp" in sql.lower()
-    assert "extract" not in sql.lower()
-
-
-def test_database_timestamp_expression_uses_postgresql_extract_epoch():
-    sql = str(select(build_database_timestamp_expression("postgresql")).compile(dialect=postgresql.dialect()))
-
-    assert "extract(epoch" in sql.lower()
-    assert "current_timestamp" in sql.lower()
+    for fragment in required_fragments:
+        assert fragment in sql
+    for fragment in forbidden_fragments:
+        assert fragment not in sql

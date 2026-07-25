@@ -224,32 +224,22 @@ async def test_other_users_session_is_not_writable(monkeypatch):
     assert exc_info.value.message == ERR_SESSION_NO_PERMISSION
 
 
-def test_websocket_event_matches_only_its_session():
-    assert chat_api._event_matches_session(
-        {"type": "content", "session_id": "session-a"},
-        "session-a",
-    )
-    assert not chat_api._event_matches_session(
-        {"type": "content", "session_id": "session-b"},
-        "session-a",
-    )
-
-
-def test_websocket_notification_requires_session_id():
-    assert not chat_api._event_matches_session(
-        {"type": "proactive_reply"},
-        "session-a",
-        require_session_id=True,
-    )
-    assert not chat_api._event_matches_session(
-        {"type": "proactive_reply", "session_id": "session-a"},
-        None,
-        require_session_id=True,
-    )
-
-
-def test_websocket_direct_response_can_omit_session_id_for_compatibility():
-    assert chat_api._event_matches_session(
-        {"type": "content"},
-        "session-a",
+@pytest.mark.parametrize(
+    ("event", "session_id", "require_session_id", "expected"),
+    [
+        ({"type": "content", "session_id": "session-a"}, "session-a", False, True),
+        ({"type": "content", "session_id": "session-b"}, "session-a", False, False),
+        ({"type": "proactive_reply"}, "session-a", True, False),
+        ({"type": "proactive_reply", "session_id": "session-a"}, None, True, False),
+        ({"type": "content"}, "session-a", False, True),
+    ],
+)
+def test_websocket_event_matches_session(event, session_id, require_session_id, expected):
+    assert (
+        chat_api._event_matches_session(
+            event,
+            session_id,
+            require_session_id=require_session_id,
+        )
+        is expected
     )

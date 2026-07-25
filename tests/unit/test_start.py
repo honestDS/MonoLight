@@ -123,27 +123,19 @@ def test_build_web_command_uses_current_python_and_worker_count():
     ]
 
 
-def test_build_message_platform_command_starts_exactly_one_worker_process():
-    assert start.build_message_platform_command() == [
+@pytest.mark.parametrize(
+    ("command_builder", "module_name"),
+    [
+        (start.build_message_platform_command, "app.workers.message_platform"),
+        (start.build_background_task_command, "app.workers.background_task"),
+        (start.build_session_reply_command, "app.workers.session_reply"),
+    ],
+)
+def test_build_worker_command_starts_exactly_one_worker_process(command_builder, module_name):
+    assert command_builder() == [
         sys.executable,
         "-m",
-        "app.workers.message_platform",
-    ]
-
-
-def test_build_background_task_command_starts_exactly_one_worker_process():
-    assert start.build_background_task_command() == [
-        sys.executable,
-        "-m",
-        "app.workers.background_task",
-    ]
-
-
-def test_build_session_reply_command_starts_exactly_one_worker_process():
-    assert start.build_session_reply_command() == [
-        sys.executable,
-        "-m",
-        "app.workers.session_reply",
+        module_name,
     ]
 
 

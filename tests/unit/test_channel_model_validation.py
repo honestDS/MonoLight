@@ -52,5 +52,15 @@ def test_model_rejects_protocol_for_different_usage(usage: ModelUsage, protocol:
         )
 
 
-def test_resolve_model_protocol_returns_lowercase_client_key() -> None:
-    assert resolve_model_protocol({"protocol": ModelProtocol.OPENAI_RESPONSES}) == "openai_responses"
+@pytest.mark.parametrize(
+    ("protocol", "expected_protocol"),
+    [
+        (ModelProtocol.OPENAI, "openai"),
+        (ModelProtocol.OPENAI_RESPONSES, "openai_responses"),
+    ],
+)
+def test_resolve_model_protocol_returns_lowercase_client_key(
+    protocol: ModelProtocol,
+    expected_protocol: str,
+) -> None:
+    assert resolve_model_protocol({"protocol": protocol}) == expected_protocol

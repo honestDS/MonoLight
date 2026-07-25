@@ -4,7 +4,6 @@ import pytest
 
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE
 from app.core.exceptions import LLMException
-from app.models.channel import ModelProtocol, resolve_model_protocol
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -996,17 +995,3 @@ def test_responses_completed_stream_event_reports_output_finish_reason(
             "output": [{"type": "message"}],
         }
     assert has_payload is False
-
-
-@pytest.mark.parametrize(
-    ("protocol", "expected_protocol"),
-    [
-        (ModelProtocol.OPENAI_RESPONSES, "openai_responses"),
-        (ModelProtocol.OPENAI, "openai"),
-    ],
-)
-def test_resolve_model_protocol(
-    protocol: ModelProtocol,
-    expected_protocol: str,
-) -> None:
-    assert resolve_model_protocol({"protocol": protocol}) == expected_protocol

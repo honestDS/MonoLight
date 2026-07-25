@@ -1,118 +1,125 @@
+import pytest
+
 from app.core.utils import request_token_baseline as baseline_module
 from app.models.message import InternalMessage, MessageRole
 
 
-def test_extract_provider_token_metrics_returns_available_usage_metrics():
-    assert baseline_module.extract_provider_token_metrics(
-        {
-            "prompt_tokens": 1000,
-            "completion_tokens": 120,
-            "cached_tokens": 250,
-        }
-    ) == {
-        "input_tokens": 1000,
-        "input_tokens_source": "provider",
-        "output_tokens": 120,
-        "cached_tokens": 250,
-        "cache_hit_rate": 0.25,
-    }
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    (
+        (
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "cached_tokens": 250,
+            },
+            {
+                "input_tokens": 1000,
+                "input_tokens_source": "provider",
+                "output_tokens": 120,
+                "cached_tokens": 250,
+                "cache_hit_rate": 0.25,
+            },
+        ),
+        (
+            {
+                "prompt_tokens": 1000,
+                "cached_tokens": 1500,
+            },
+            {
+                "input_tokens": 1000,
+                "input_tokens_source": "provider",
+                "cached_tokens": 1500,
+                "cache_hit_rate": 1.0,
+            },
+        ),
+        (
+            {
+                "prompt_tokens": True,
+                "completion_tokens": True,
+                "cached_tokens": True,
+            },
+            {},
+        ),
+        (
+            {
+                "prompt_tokens": -1,
+                "completion_tokens": -1,
+                "cached_tokens": -1,
+            },
+            {},
+        ),
+        ([], {}),
+    ),
+)
+def test_extract_provider_token_metrics(usage, expected):
+    assert baseline_module.extract_provider_token_metrics(usage) == expected
 
 
-def test_extract_provider_token_metrics_clamps_cache_hit_rate():
-    assert baseline_module.extract_provider_token_metrics(
-        {
-            "prompt_tokens": 1000,
-            "cached_tokens": 1500,
-        }
-    ) == {
-        "input_tokens": 1000,
-        "input_tokens_source": "provider",
-        "cached_tokens": 1500,
-        "cache_hit_rate": 1.0,
-    }
-
-
-def test_extract_provider_token_metrics_ignores_invalid_usage_values():
-    invalid_usages = (
-        {
-            "prompt_tokens": True,
-            "completion_tokens": True,
-            "cached_tokens": True,
-        },
-        {
-            "prompt_tokens": -1,
-            "completion_tokens": -1,
-            "cached_tokens": -1,
-        },
-        [],
-    )
-
-    for usage in invalid_usages:
-        assert baseline_module.extract_provider_token_metrics(usage) == {}
-
-
-def test_extract_reusable_token_metrics_returns_valid_display_fields():
-    assert baseline_module.extract_reusable_token_metrics(
-        {
-            "output_tokens": 120,
-            "cached_tokens": 250,
-            "cache_hit_rate": 0.25,
-            "input_tokens": 1000,
-        }
-    ) == {
-        "output_tokens": 120,
-        "cached_tokens": 250,
-        "cache_hit_rate": 0.25,
-    }
-
-
-def test_extract_reusable_token_metrics_filters_invalid_fields():
-    assert (
-        baseline_module.extract_reusable_token_metrics(
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        (
+            {
+                "output_tokens": 120,
+                "cached_tokens": 250,
+                "cache_hit_rate": 0.25,
+                "input_tokens": 1000,
+            },
+            {
+                "output_tokens": 120,
+                "cached_tokens": 250,
+                "cache_hit_rate": 0.25,
+            },
+        ),
+        (
             {
                 "output_tokens": True,
                 "cached_tokens": -1,
                 "cache_hit_rate": 1.1,
-            }
-        )
-        == {}
-    )
-    assert baseline_module.extract_reusable_token_metrics(
-        {
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "cache_hit_rate": False,
-        }
-    ) == {
-        "output_tokens": 0,
-        "cached_tokens": 0,
-    }
+            },
+            {},
+        ),
+        (
+            {
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "cache_hit_rate": False,
+            },
+            {
+                "output_tokens": 0,
+                "cached_tokens": 0,
+            },
+        ),
+    ),
+)
+def test_extract_reusable_token_metrics(metadata, expected):
+    assert baseline_module.extract_reusable_token_metrics(metadata) == expected
 
 
-def test_extract_session_total_output_tokens_prefers_accumulated_value():
-    assert (
-        baseline_module.extract_session_total_output_tokens(
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        (
             {
                 "output_tokens": 20,
                 "total_output_tokens": 200,
-            }
-        )
-        == 200
-    )
-
-
-def test_extract_session_total_output_tokens_falls_back_to_legacy_value():
-    assert (
-        baseline_module.extract_session_total_output_tokens(
+            },
+            200,
+        ),
+        (
             {
                 "output_tokens": 20,
                 "total_output_tokens": -1,
-            }
-        )
-        == 20
-    )
-    assert baseline_module.extract_session_total_output_tokens({"total_output_tokens": True}) == 0
-    assert baseline_module.extract_session_total_output_tokens([]) == 0
+            },
+            20,
+        ),
+        ({"total_output_tokens": True}, 0),
+        ([], 0),
+    ),
+)
+def test_extract_session_total_output_tokens(metadata, expected):
+    assert baseline_module.extract_session_total_output_tokens(metadata) == expected
 
 
 def _metadata_for(messages, tools=None):

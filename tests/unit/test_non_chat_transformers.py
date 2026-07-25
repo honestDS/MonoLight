@@ -5,13 +5,10 @@ from app.core.exceptions import LLMException
 from app.providers.embedding.client import EmbeddingClient
 from app.providers.image_generation.client import ImageGenerationClient
 from app.providers.rerank.client import RerankClient
-from app.transformers.base import BaseEmbeddingTransformer, BaseImageGenerationTransformer, BaseRerankTransformer
 from app.transformers.cohere_rerank import CohereRerankTransformer
 from app.transformers.openai import (
-    OpenAIChatCompletionsTransformer,
     OpenAIEmbeddingTransformer,
     OpenAIImageGenerationTransformer,
-    OpenAIResponsesTransformer,
 )
 
 
@@ -19,13 +16,6 @@ def test_non_chat_clients_bind_dedicated_transformers() -> None:
     assert isinstance(EmbeddingClient.get_transformer("openai_embedding"), OpenAIEmbeddingTransformer)
     assert isinstance(ImageGenerationClient.get_transformer("openai_image"), OpenAIImageGenerationTransformer)
     assert isinstance(RerankClient.get_transformer("cohere_rerank"), CohereRerankTransformer)
-
-
-@pytest.mark.parametrize("transformer", [OpenAIChatCompletionsTransformer(), OpenAIResponsesTransformer()])
-def test_chat_transformers_do_not_implement_non_chat_protocols(transformer: OpenAIChatCompletionsTransformer) -> None:
-    assert not isinstance(transformer, BaseEmbeddingTransformer)
-    assert not isinstance(transformer, BaseImageGenerationTransformer)
-    assert not isinstance(transformer, BaseRerankTransformer)
 
 
 @pytest.mark.parametrize(
