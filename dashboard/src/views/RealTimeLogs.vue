@@ -8,6 +8,15 @@
         </span>
       </div>
       <div class="toolbar-right">
+        <div class="control-item log-level-filter">
+          <span class="label">{{ $t('realTimeLogs.level_filter') }}</span>
+          <el-checkbox-group v-model="selectedLevels">
+            <el-checkbox v-for="level in LOG_LEVELS" :key="level" :label="level">
+              {{ level }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </div>
+        <el-divider direction="vertical" />
         <div class="control-item">
           <span class="label">{{ $t('realTimeLogs.auto_scroll') }}</span>
           <el-switch v-model="isAutoScroll" size="small" />
@@ -26,16 +35,16 @@
     </div>
 
     <div class="terminal-body">
-      <div v-if="logs.length === 0" class="empty-state">
+      <div v-if="filteredLogs.length === 0" class="empty-state">
         <el-icon class="is-loading"><Loading /></el-icon>
-        <span>{{ $t('realTimeLogs.waiting') }}</span>
+        <span>{{ logs.length === 0 ? $t('realTimeLogs.waiting') : $t('realTimeLogs.no_matching_logs') }}</span>
       </div>
 
       <!-- 日志项容器：极致扁平化，支持自然文本复制 -->
       <div
-        v-for="log in logs"
+        v-for="log in filteredLogs"
         :key="log._id"
-        :class="['log-item', log.level.toLowerCase()]"
+        :class="['log-item', normalizeLogLevel(log.level).toLowerCase()]"
       >
         <span class="txt-time">[{{ log.timestamp }}]</span>
         <span class="txt-level">[{{ log.level }}]</span>
@@ -59,14 +68,16 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, triggerRef, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, shallowRef, triggerRef, onMounted, onUnmounted, nextTick } from 'vue'
 import { Monitor, Delete, Loading } from '@element-plus/icons-vue'
 import { systemApi } from '../api'
 
 const MAX_LOGS = 2000
 const FLUSH_INTERVAL = 100
+const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR', 'DEBUG']
 
 const logs = shallowRef([])
+const selectedLevels = ref([...LOG_LEVELS])
 const isAutoScroll = ref(true)
 const scrollAnchor = ref(null)
 let ws = null
@@ -77,6 +88,17 @@ let pendingLogs = []
 let flushTimer = null
 
 let scrollPending = false
+
+const normalizeLogLevel = (level) => {
+  const normalizedLevel = String(level || '').toUpperCase()
+  if (normalizedLevel === 'WARN') return 'WARNING'
+  if (normalizedLevel === 'ERRO') return 'ERROR'
+  return normalizedLevel
+}
+
+const filteredLogs = computed(() => {
+  return logs.value.filter((log) => selectedLevels.value.includes(normalizeLogLevel(log.level)))
+})
 
 const prepareLog = (log) => {
   log._id = ++logIdCounter

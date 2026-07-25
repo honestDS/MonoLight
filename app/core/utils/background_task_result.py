@@ -16,12 +16,19 @@ _SENSITIVE_TEXT_PATTERNS = (
 )
 
 
-def sanitize_execution_value(value: Any, active_container_ids: set[int] | None = None, *, redact_output: bool = False) -> Any:
+def sanitize_execution_value(
+    value: Any,
+    active_container_ids: set[int] | None = None,
+    *,
+    redact_output: bool = False,
+    redact_sensitive: bool = True,
+) -> Any:
     active_ids = active_container_ids if active_container_ids is not None else set()
     if isinstance(value, str):
         sanitized = value
-        for pattern, replacement in _SENSITIVE_TEXT_PATTERNS:
-            sanitized = pattern.sub(replacement, sanitized)
+        if redact_sensitive:
+            for pattern, replacement in _SENSITIVE_TEXT_PATTERNS:
+                sanitized = pattern.sub(replacement, sanitized)
         return sanitized
     if value is None or isinstance(value, (int, float, bool)):
         return value
@@ -31,7 +38,7 @@ def sanitize_execution_value(value: Any, active_container_ids: set[int] | None =
             return "<circular reference>"
         active_ids.add(value_id)
         try:
-            return {str(key): "<redacted>" if _SENSITIVE_KEY_PATTERN.search(str(key)) or (redact_output and _OUTPUT_KEY_PATTERN.fullmatch(str(key))) else sanitize_execution_value(item, active_ids, redact_output=redact_output) for key, item in value.items()}
+            return {str(key): "<redacted>" if (redact_sensitive and _SENSITIVE_KEY_PATTERN.search(str(key))) or (redact_output and _OUTPUT_KEY_PATTERN.fullmatch(str(key))) else sanitize_execution_value(item, active_ids, redact_output=redact_output, redact_sensitive=redact_sensitive) for key, item in value.items()}
         finally:
             active_ids.remove(value_id)
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -40,14 +47,21 @@ def sanitize_execution_value(value: Any, active_container_ids: set[int] | None =
             return "<circular reference>"
         active_ids.add(value_id)
         try:
-            return [sanitize_execution_value(item, active_ids, redact_output=redact_output) for item in value]
+            return [sanitize_execution_value(item, active_ids, redact_output=redact_output, redact_sensitive=redact_sensitive) for item in value]
         finally:
             active_ids.remove(value_id)
-    return sanitize_execution_value(str(value), active_ids)
+    return sanitize_execution_value(str(value), active_ids, redact_output=redact_output, redact_sensitive=redact_sensitive)
 
 
-def sanitize_execution_summary(value: Any, *, max_chars: int = 1000, redact_text: bool = False) -> str:
-    sanitized = sanitize_execution_value(value, redact_output=True)
+def sanitize_execution_summary(
+    value: Any,
+    *,
+    max_chars: int = 1000,
+    redact_text: bool = False,
+    redact_output: bool = True,
+    redact_sensitive: bool = True,
+) -> str:
+    sanitized = sanitize_execution_value(value, redact_output=redact_output, redact_sensitive=redact_sensitive)
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
@@ -57,7 +71,10 @@ def sanitize_execution_summary(value: Any, *, max_chars: int = 1000, redact_text
             if redact_text and not isinstance(parsed, (dict, list)):
                 serialized = json.dumps({"redacted": True, "original_chars": len(sanitized)}, ensure_ascii=False)
             else:
-                serialized = json.dumps(sanitize_execution_value(parsed, redact_output=True), ensure_ascii=False)
+                serialized = json.dumps(
+                    sanitize_execution_value(parsed, redact_output=redact_output, redact_sensitive=redact_sensitive),
+                    ensure_ascii=False,
+                )
     else:
         serialized = json.dumps(sanitized, ensure_ascii=False)
     if len(serialized) <= max_chars:

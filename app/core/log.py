@@ -226,7 +226,7 @@ class LogManager:
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
-        safe_result = sanitize_execution_summary(result, max_chars=LOG_MESSAGE_MAX_LENGTH, redact_text=True)
+        safe_result = sanitize_execution_summary(result, max_chars=LOG_MESSAGE_MAX_LENGTH, redact_output=False, redact_sensitive=False)
         logger.bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=safe_result))
 
 

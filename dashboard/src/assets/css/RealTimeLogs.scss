@@ -48,6 +48,41 @@ body.is-terminal-page {
     gap: 8px;
     .label { font-size: 12px; color: #858585; }
   }
+  .log-level-filter {
+    gap: 6px;
+
+    .el-checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .el-checkbox {
+      height: auto;
+      margin-right: 0;
+    }
+    .el-checkbox__input {
+      line-height: 1;
+    }
+    .el-checkbox__inner {
+      width: 12px;
+      height: 12px;
+      background: #1e1e1e;
+      border-color: #5a5a5a;
+    }
+    .el-checkbox__label {
+      padding-left: 4px;
+      color: #a6a6a6;
+      font-family: inherit;
+      line-height: 1;
+    }
+    .el-checkbox__input.is-checked + .el-checkbox__label {
+      color: #d4d4d4;
+    }
+    .el-checkbox__input.is-checked .el-checkbox__inner {
+      background: #007acc;
+      border-color: #007acc;
+    }
+  }
   .toolbar-btn {
     padding: 0; color: #858585; font-size: 12px;
     display: flex; align-items: center; gap: 4px;

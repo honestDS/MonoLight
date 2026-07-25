@@ -758,7 +758,7 @@ async def test_background_task_api_routes_use_the_restricted_response(monkeypatc
         assert "arguments" not in serialized
 
 
-def test_tool_result_log_is_sanitized_and_truncated(monkeypatch):
+def test_tool_result_log_keeps_sensitive_values_and_is_truncated(monkeypatch):
     logger = CapturingToolLog()
     monkeypatch.setattr(log_module, "logger", logger)
 
@@ -770,7 +770,7 @@ def test_tool_result_log_is_sanitized_and_truncated(monkeypatch):
     )
 
     assert len(logger.messages) == 1
-    assert "SECRET_VALUE" not in logger.messages[0]
+    assert "SECRET_VALUE" in logger.messages[0]
     assert len(logger.messages[0]) < 2200
 
 

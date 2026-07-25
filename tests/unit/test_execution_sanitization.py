@@ -56,7 +56,7 @@ def test_tool_result_conversion_keeps_non_sensitive_output_for_model_result():
     assert result["nested"]["api_key"] == "<redacted>"
 
 
-def test_tool_result_log_redacts_json_output_and_nested_error(monkeypatch):
+def test_tool_result_log_keeps_json_output_and_nested_error(monkeypatch):
     logger = CapturingLogger()
     monkeypatch.setattr(log_module, "logger", logger)
 
@@ -75,9 +75,9 @@ def test_tool_result_log_redacts_json_output_and_nested_error(monkeypatch):
     )
 
     assert len(logger.messages) == 1
-    assert "RAW_SHELL_OUTPUT" not in logger.messages[0]
-    assert "RAW_PASSWORD" not in logger.messages[0]
-    assert "RAW_TOKEN" not in logger.messages[0]
+    assert "RAW_SHELL_OUTPUT" in logger.messages[0]
+    assert "RAW_PASSWORD" in logger.messages[0]
+    assert "RAW_TOKEN" in logger.messages[0]
 
 
 def test_exception_log_uses_the_same_safe_summary(monkeypatch):
