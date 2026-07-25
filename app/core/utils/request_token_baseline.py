@@ -51,6 +51,17 @@ def extract_reusable_token_metrics(metadata: Any) -> dict[str, int | float]:
     return metrics
 
 
+def extract_session_total_output_tokens(metadata: Any) -> int:
+    if not isinstance(metadata, dict):
+        return 0
+
+    total_output_tokens = metadata.get("total_output_tokens")
+    if _is_non_negative_int(total_output_tokens):
+        return total_output_tokens
+    output_tokens = metadata.get("output_tokens")
+    return output_tokens if _is_non_negative_int(output_tokens) else 0
+
+
 def _positive_message_ids(messages: list[InternalMessage]) -> list[int]:
     return [message.id for message in messages if _is_positive_int(message.id)]
 

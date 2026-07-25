@@ -59,7 +59,7 @@ const normalizeLlmRequestMetadata = (metadata) => {
     context_window_tokens: Math.trunc(metadata.context_window_tokens),
     max_output_tokens: Math.trunc(metadata.max_output_tokens)
   }
-  for (const field of ['output_tokens', 'cached_tokens']) {
+  for (const field of ['output_tokens', 'cached_tokens', 'total_output_tokens']) {
     if (!Object.prototype.hasOwnProperty.call(metadata, field)) continue
     if (!Number.isFinite(metadata[field]) || metadata[field] < 0) return null
     normalizedMetadata[field] = Math.trunc(metadata[field])
@@ -175,7 +175,7 @@ export function useChatSession() {
       || normalizeLlmRequestMetadata(sessionManager.sessions.value[sessionIndex]?.llm_request_metadata)
     if (!shouldReplaceLlmRequestMetadata(currentMetadata, metadata)) return
 
-    for (const field of ['output_tokens', 'cached_tokens', 'cache_hit_rate']) {
+    for (const field of ['output_tokens', 'cached_tokens', 'cache_hit_rate', 'total_output_tokens']) {
       if (!Object.prototype.hasOwnProperty.call(metadata, field) && Object.prototype.hasOwnProperty.call(currentMetadata || {}, field)) {
         metadata[field] = currentMetadata[field]
       }

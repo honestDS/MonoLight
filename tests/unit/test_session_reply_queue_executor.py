@@ -176,6 +176,8 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
     assert response["history"][0]["content"] == "已取消"
     expected_request_metadata = {
         **request_metadata,
+        "output_tokens": 0,
+        "total_output_tokens": 0,
         "work_id": 7,
         "work_sequence_no": 1,
     }
@@ -770,9 +772,22 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     request_metadata = {
         "type": "llm_request_metadata",
         "input_tokens": 123,
+        "output_tokens": 7,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
     }
+
+    second_request_metadata = {
+        "type": "llm_request_metadata",
+        "input_tokens": 456,
+        "output_tokens": 11,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+    }
+
+    class FakeDb:
+        async def execute(self, *args, **kwargs):
+            return None
 
     async def get_task(db, task_id):
         return task
@@ -783,7 +798,16 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     async def generate_reply(db, **kwargs):
         captured.update(kwargs)
         await kwargs["request_metadata_callback"](request_metadata)
+        await kwargs["request_metadata_callback"](second_request_metadata)
         return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
+
+    async def get_session(db, session_id):
+        assert session_id == "session-1"
+        return SimpleNamespace(
+            llm_request_metadata={
+                "total_output_tokens": 200,
+            }
+        )
 
     async def update_request_metadata(db, **kwargs):
         metadata_updates.append(kwargs)
@@ -792,25 +816,36 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
-    response = await executor_module._execute_background(object(), work, "worker-1")
+    response = await executor_module._execute_background(FakeDb(), work, "worker-1")
 
     expected_request_metadata = {
-        **request_metadata,
+        **second_request_metadata,
+        "output_tokens": 18,
+        "total_output_tokens": 218,
         "work_id": 7,
         "work_sequence_no": 1,
     }
     assert callable(captured["request_metadata_callback"])
     assert response["llm_request_metadata"] == expected_request_metadata
-    assert metadata_updates == [
-        {
-            "session_id": "session-1",
-            "uid": "user-1",
-            "metadata": expected_request_metadata,
-            "commit": False,
-        }
-    ]
+    assert response["llm_request_metadata"]["input_tokens"] == 456
+    assert "total_input_tokens" not in response["llm_request_metadata"]
+    assert metadata_updates[-1] == {
+        "session_id": "session-1",
+        "uid": "user-1",
+        "metadata": expected_request_metadata,
+        "commit": False,
+    }
+    assert metadata_updates[0]["metadata"] == {
+        **request_metadata,
+        "output_tokens": 7,
+        "total_output_tokens": 207,
+        "work_id": 7,
+        "work_sequence_no": 1,
+    }
+    assert len(metadata_updates) == 2
 
 
 @pytest.mark.asyncio
@@ -826,18 +861,19 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         created_at=datetime(2026, 7, 20, 0, 0, 0),
         execution_state={},
     )
-    task = SimpleNamespace(extra={}, result={"status": "succeeded"}, tool_call_id="call-1", status="succeeded", tool_name="safe_tool", error=None)
     captured = {}
     metadata_updates = []
     request_metadata = {
         "type": "llm_request_metadata",
         "input_tokens": 456,
+        "output_tokens": 21,
         "context_window_tokens": 8192,
         "max_output_tokens": 1024,
     }
 
-    async def get_task(db, task_id):
-        return task
+    class FakeDb:
+        async def execute(self, *args, **kwargs):
+            return None
 
     async def get_profile(db, profile_id):
         return SimpleNamespace(id=3, uid="user-1")
@@ -847,24 +883,36 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         await kwargs["request_metadata_callback"](request_metadata)
         return InternalMessage(role=MessageRole.ASSISTANT, content="定时总结"), [], []
 
+    async def get_session(db, session_id):
+        assert session_id == "session-1"
+        return SimpleNamespace(
+            llm_request_metadata={
+                "total_output_tokens": 200,
+            }
+        )
+
     async def update_request_metadata(db, **kwargs):
         metadata_updates.append(kwargs)
         return True
 
-    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
     monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
-    response = await executor_module._execute_scheduled(object(), work, "worker-1")
+    response = await executor_module._execute_scheduled(FakeDb(), work, "worker-1")
 
     expected_request_metadata = {
         **request_metadata,
+        "output_tokens": 21,
+        "total_output_tokens": 221,
         "work_id": 8,
         "work_sequence_no": 2,
     }
     assert callable(captured["request_metadata_callback"])
     assert response["llm_request_metadata"] == expected_request_metadata
+    assert response["llm_request_metadata"]["input_tokens"] == 456
+    assert "total_input_tokens" not in response["llm_request_metadata"]
     assert metadata_updates == [
         {
             "session_id": "session-1",

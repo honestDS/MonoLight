@@ -56,6 +56,7 @@ from app.core.utils.dispatcher.process_single_tool import get_queued_background_
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.request_token_baseline import extract_session_total_output_tokens
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import InternalMessage, InternalToolCall, Message, MessageRole, MessageType
@@ -511,10 +512,27 @@ async def _generate_reply_with_request_metadata(
     **kwargs: Any,
 ) -> tuple[InternalMessage, list[InternalMessage], list[dict[str, Any]], dict[str, Any] | None]:
     latest_request_metadata = None
+    session_total_output_tokens = 0
+    work_output_tokens = 0
+    if hasattr(db, "execute"):
+        session = await session_crud.get_by_session_id(db, work.session_id)
+        if session is not None:
+            session_total_output_tokens = extract_session_total_output_tokens(session.llm_request_metadata)
 
     async def persist_request_metadata(metadata: dict[str, Any]) -> None:
-        nonlocal latest_request_metadata
-        ordered_metadata = _metadata_with_work_order(work, metadata)
+        nonlocal latest_request_metadata, session_total_output_tokens, work_output_tokens
+        output_tokens = metadata.get("output_tokens")
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool) and output_tokens >= 0:
+            session_total_output_tokens += output_tokens
+            work_output_tokens += output_tokens
+        ordered_metadata = _metadata_with_work_order(
+            work,
+            {
+                **metadata,
+                "output_tokens": work_output_tokens,
+                "total_output_tokens": session_total_output_tokens,
+            },
+        )
         await session_crud.update_llm_request_metadata(
             db,
             session_id=work.session_id,

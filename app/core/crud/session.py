@@ -105,6 +105,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "system_tokens",
             "tools_tokens",
             "output_tokens",
+            "total_output_tokens",
             "cached_tokens",
         )
         for field in optional_int_fields:

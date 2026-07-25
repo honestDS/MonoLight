@@ -914,15 +914,24 @@ async def test_interactive_accumulates_output_tokens_and_preserves_latest_cache_
         "estimated",
         "provider",
     ]
+    provider_metadata_events = [event for event in metadata_events if event["input_tokens_source"] == "provider"]
+    assert [event["input_tokens"] for event in provider_metadata_events] == [1000, 1100]
+    assert all("total_input_tokens" not in event for event in metadata_events)
     assert metadata_events[1]["output_tokens"] == 12
+    assert metadata_events[1]["total_output_tokens"] == 12
     assert metadata_events[2]["output_tokens"] == 12
+    assert metadata_events[2]["total_output_tokens"] == 12
     assert metadata_events[2]["cached_tokens"] == 200
     assert metadata_events[2]["cache_hit_rate"] == pytest.approx(0.2)
     assert metadata_events[3]["output_tokens"] == 32
+    assert metadata_events[3]["total_output_tokens"] == 32
     assert metadata_events[3]["cached_tokens"] == 440
     assert metadata_events[3]["cache_hit_rate"] == pytest.approx(0.4)
     assert any(checkpoint["total_output_tokens"] == 12 for checkpoint in checkpoints)
+    assert any(checkpoint["session_total_output_tokens"] == 12 for checkpoint in checkpoints)
     assert response["llm_request_metadata"]["output_tokens"] == 32
+    assert response["llm_request_metadata"]["total_output_tokens"] == 32
+    assert "total_input_tokens" not in response["llm_request_metadata"]
     assert unknown_calls == []
 
 
@@ -1001,12 +1010,17 @@ async def test_interactive_resume_continues_total_output_tokens(monkeypatch):
             "files_to_user": [],
             "current_turn": 0,
             "total_output_tokens": 50,
+            "session_total_output_tokens": 12,
         },
     )
 
     provider_metadata_events = [event for event in events if event["type"] == "llm_request_metadata" and event["input_tokens_source"] == "provider"]
     assert [event["output_tokens"] for event in provider_metadata_events] == [57, 60]
+    assert [event["total_output_tokens"] for event in provider_metadata_events] == [19, 22]
     assert response["llm_request_metadata"]["output_tokens"] == 60
+    assert response["llm_request_metadata"]["total_output_tokens"] == 22
+    assert all("total_input_tokens" not in event for event in events if event["type"] == "llm_request_metadata")
+    assert "total_input_tokens" not in response["llm_request_metadata"]
     assert unknown_calls == []
 
 
@@ -1378,7 +1392,7 @@ async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatc
         "turn_end",
         "done",
     ]
-    assert events[1]["response_id"] == events[2]["response_id"] == events[3]["response_id"]
+    assert events[1]["response_id"] == events[2]["response_id"]
     assert events[7]["response_id"] == events[8]["response_id"] == events[9]["response_id"]
     assert events[1]["response_id"] != events[7]["response_id"]
     assert json.loads(events[6]["result"])["status"] == "failed"

@@ -89,6 +89,32 @@ def test_extract_reusable_token_metrics_filters_invalid_fields():
     }
 
 
+def test_extract_session_total_output_tokens_prefers_accumulated_value():
+    assert (
+        baseline_module.extract_session_total_output_tokens(
+            {
+                "output_tokens": 20,
+                "total_output_tokens": 200,
+            }
+        )
+        == 200
+    )
+
+
+def test_extract_session_total_output_tokens_falls_back_to_legacy_value():
+    assert (
+        baseline_module.extract_session_total_output_tokens(
+            {
+                "output_tokens": 20,
+                "total_output_tokens": -1,
+            }
+        )
+        == 20
+    )
+    assert baseline_module.extract_session_total_output_tokens({"total_output_tokens": True}) == 0
+    assert baseline_module.extract_session_total_output_tokens([]) == 0
+
+
 def _metadata_for(messages, tools=None):
     metadata = baseline_module.build_request_token_baseline(
         messages,

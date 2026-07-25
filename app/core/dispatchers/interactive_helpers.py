@@ -97,6 +97,7 @@ class _ExecutionCheckpointState:
     files_to_user: list[str]
     upper_message_id: int | None
     total_output_tokens: int = 0
+    session_total_output_tokens: int | None = None
 
 
 async def _save_execution_checkpoint(
@@ -118,6 +119,8 @@ async def _save_execution_checkpoint(
         "context_summary_fixed_upper_message_id": state.upper_message_id,
         "total_output_tokens": state.total_output_tokens,
     }
+    if state.session_total_output_tokens is not None:
+        checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
     if update_active_audit_execution:
         checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
     await state.callback(checkpoint)

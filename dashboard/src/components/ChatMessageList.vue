@@ -11,7 +11,7 @@
       </span>
       <span class="llm-request-metadata-item">
         <span>{{ $t('chat.total_output') }}</span>
-        <strong>{{ formatTokenCount(llmRequestMetadata?.output_tokens) }}</strong>
+        <strong>{{ formatTokenCount(llmRequestMetadata?.total_output_tokens ?? llmRequestMetadata?.output_tokens) }}</strong>
       </span>
       <span class="llm-request-metadata-item">
         <span>{{ $t('chat.cache_hit_rate') }}</span>

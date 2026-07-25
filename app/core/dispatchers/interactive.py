@@ -68,6 +68,7 @@ from app.core.utils.request_token_baseline import (
     estimate_incremental_input_tokens,
     extract_provider_token_metrics,
     extract_reusable_token_metrics,
+    extract_session_total_output_tokens,
 )
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
@@ -158,12 +159,14 @@ class InteractiveDispatcherMixin:
             files_to_user = list(execution_resume_state.get("files_to_user", [])) if execution_resume_state else []
             is_first_iter = execution_resume_state is None
             resumed_total_output_tokens = execution_resume_state.get("total_output_tokens", 0) if execution_resume_state else 0
+            resumed_session_total_output_tokens = execution_resume_state.get("session_total_output_tokens") if execution_resume_state else None
             checkpoint_state = _ExecutionCheckpointState(
                 callback=execution_checkpoint_callback,
                 turn_messages=turn_messages,
                 files_to_user=files_to_user,
                 upper_message_id=min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id,
                 total_output_tokens=(resumed_total_output_tokens if isinstance(resumed_total_output_tokens, int) and not isinstance(resumed_total_output_tokens, bool) and resumed_total_output_tokens >= 0 else 0),
+                session_total_output_tokens=(resumed_session_total_output_tokens if isinstance(resumed_session_total_output_tokens, int) and not isinstance(resumed_session_total_output_tokens, bool) and resumed_session_total_output_tokens >= 0 else None),
             )
             if execution_resume_state is not None:
                 saved_checkpoint_mode = execution_resume_state.get("context_summary_trigger_mode")
@@ -311,6 +314,14 @@ class InteractiveDispatcherMixin:
                                 context_summary_revision = session.context_summary_revision if session is not None else 0
                                 context_content_revision = session.context_content_revision if session is not None else 0
                                 previous_session_llm_request_metadata = session.llm_request_metadata if session is not None else None
+                                persisted_session_total_output_tokens = extract_session_total_output_tokens(previous_session_llm_request_metadata)
+                                if checkpoint_state.session_total_output_tokens is None:
+                                    checkpoint_state.session_total_output_tokens = persisted_session_total_output_tokens
+                                else:
+                                    checkpoint_state.session_total_output_tokens = max(
+                                        checkpoint_state.session_total_output_tokens,
+                                        persisted_session_total_output_tokens,
+                                    )
                                 previous_input_token_baseline_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) and previous_in_memory_llm_request_metadata.get("input_tokens_source") == "provider" else previous_session_llm_request_metadata
                                 previous_display_token_metadata = previous_in_memory_llm_request_metadata if isinstance(previous_in_memory_llm_request_metadata, dict) else previous_input_token_baseline_metadata
                                 incremental_input_tokens = estimate_incremental_input_tokens(
@@ -330,6 +341,7 @@ class InteractiveDispatcherMixin:
                                     "response_id": response_id,
                                     "input_tokens": estimated_input_tokens,
                                     "input_tokens_source": "estimated",
+                                    "total_output_tokens": checkpoint_state.session_total_output_tokens,
                                     "context_window_tokens": max(1, int(chat_params["context_window_k"]) * 1024),
                                     "max_output_tokens": max(0, int(chat_params["max_tokens"])),
                                     **build_request_token_baseline(
@@ -377,7 +389,9 @@ class InteractiveDispatcherMixin:
                                     raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                                 if "output_tokens" in provider_token_metrics:
                                     checkpoint_state.total_output_tokens += provider_token_metrics["output_tokens"]
+                                    checkpoint_state.session_total_output_tokens += provider_token_metrics["output_tokens"]
                                     provider_token_metrics["output_tokens"] = checkpoint_state.total_output_tokens
+                                    provider_token_metrics["total_output_tokens"] = checkpoint_state.session_total_output_tokens
                                 metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
                                 latest_llm_request_metadata.update(provider_token_metrics)
                                 if metadata_changed and stream_event_callback is not None:
