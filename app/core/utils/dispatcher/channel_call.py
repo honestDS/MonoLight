@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
-from app.core.constants import ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CHAT_CHANNEL_NOT_FOUND, ERR_LLM_EMPTY_RESPONSE
 from app.core.exceptions import ApiKeyException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
@@ -82,7 +82,7 @@ async def generate_chat_with_fallback(
                         "type": "llm_request_metadata",
                         "input_tokens": estimated_input_tokens,
                         "input_tokens_source": "estimated",
-                        "context_window_tokens": max(1, int(chat_params["context_window_k"]) * 1024),
+                        "context_window_tokens": max(1, int(chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                         "max_output_tokens": max(0, int(chat_params["max_tokens"])),
                         **extract_provider_token_metrics(getattr(response, "usage", None)),
                     }

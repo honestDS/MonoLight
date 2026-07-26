@@ -58,10 +58,10 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
         base_url="https://example.invalid",
         api_key="secret",
         priority=3,
-        context_window_tokens=8192,
-        max_output_tokens=512,
+        context_window_tokens=8000,
+        max_output_tokens=500,
         safety_margin_tokens=256,
-        input_budget_tokens=7424,
+        input_budget_tokens=7244,
     )
     assert selection_calls == [
         {
@@ -70,8 +70,8 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
             "cursor_key": "9:CHAT:CONTEXT_SUMMARY",
         }
     ]
-    assert snapshot.accepts_prompt_tokens(7424)
-    assert not snapshot.accepts_prompt_tokens(7425)
+    assert snapshot.accepts_prompt_tokens(7244)
+    assert not snapshot.accepts_prompt_tokens(7245)
     with pytest.raises(FrozenInstanceError):
         snapshot.model_id = "other-model"
 

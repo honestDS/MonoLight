@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_CHAT_INPUT_TOO_LONG,
 )
@@ -203,7 +204,7 @@ class ContextManager:
 
     @classmethod
     def get_history_budget_tokens(cls, context_window_k: int, reserved_tokens: int = 0) -> int:
-        return max(1, context_window_k * 1024 - max(reserved_tokens, 0))
+        return max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K - max(reserved_tokens, 0))
 
     @classmethod
     def build_request_budget(

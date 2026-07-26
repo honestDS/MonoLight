@@ -1,5 +1,6 @@
 import json
 
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.context import ContextManager
 from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.context_messages import message_token_text
@@ -44,11 +45,12 @@ def test_complete_request_usage_counts_messages_tools_output_and_safety_with_sha
     expected_system_tokens = estimate_tokens(message_token_text(messages[0]))
     expected_non_system_tokens = sum(estimate_tokens(message_token_text(message)) for message in messages[1:])
     expected_tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False))
-    expected_input_limit = 4 * 1024 - 512 - 128
+    expected_input_limit = 4 * CONTEXT_WINDOW_TOKENS_PER_K - 512 - 128
 
     assert usage.system_tokens == expected_system_tokens
     assert usage.non_system_tokens == expected_non_system_tokens
     assert usage.budget.tools_tokens == expected_tools_tokens
+    assert usage.budget.context_window_tokens == 4000
     assert usage.required_input_tokens == expected_system_tokens + expected_non_system_tokens + expected_tools_tokens
     assert usage.summary_trigger_tokens == expected_input_limit * 75 // 100
     assert usage.exceeds_hard_window == (usage.required_input_tokens > expected_input_limit)

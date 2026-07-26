@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import tiktoken
 
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.message import InternalMessage
@@ -45,7 +46,7 @@ def truncate_tool_result_with_stats(content: str, context_window_k: int, limit_t
     if not content:
         return ToolResultTruncation(content=content, truncated=False, original_tokens=0, final_tokens=0, removed_chars=0)
 
-    limit_tokens = max(1, limit_tokens if limit_tokens is not None else (context_window_k * 1024) // 2)
+    limit_tokens = max(1, limit_tokens if limit_tokens is not None else (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2)
 
     try:
         encoding = tiktoken.get_encoding("cl100k_base")

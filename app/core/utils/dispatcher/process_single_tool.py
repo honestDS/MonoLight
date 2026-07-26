@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_BACKGROUND_TASK_UNSUPPORTED,
     ERR_TOOL_ARGUMENT_SCHEMA_INVALID,
     ERR_TOOL_MISSING_REQUIRED_ARGUMENTS,
@@ -366,7 +367,7 @@ async def process_single_tool(
     truncation_stats = truncate_tool_messages_for_budget(
         tool_msgs=[tool_msg],
         context_window_k=context_window_k,
-        budget_tokens=max(1, (context_window_k * 1024) // 2),
+        budget_tokens=max(1, (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2),
         uid=uid,
         session_id=session_id,
     )

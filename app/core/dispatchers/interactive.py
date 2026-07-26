@@ -18,6 +18,7 @@ from app.core.audit.confirmation import (
 from app.core.audit.service import audit_tool_round
 from app.core.channel_router import select_channel
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_AUDIT_EXECUTION_CLAIM_FAILED,
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
@@ -342,7 +343,7 @@ class InteractiveDispatcherMixin:
                                     "input_tokens": estimated_input_tokens,
                                     "input_tokens_source": "estimated",
                                     "total_output_tokens": checkpoint_state.session_total_output_tokens,
-                                    "context_window_tokens": max(1, int(chat_params["context_window_k"]) * 1024),
+                                    "context_window_tokens": max(1, int(chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                                     "max_output_tokens": max(0, int(chat_params["max_tokens"])),
                                     **build_request_token_baseline(
                                         request_messages,

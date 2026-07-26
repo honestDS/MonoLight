@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CONTEXT_SUMMARY_FRAGMENT_RESULT_CONFLICT,
     ERR_CONTEXT_SUMMARY_FRAGMENT_WRITE_ORDER_FAILED,
     ERR_CONTEXT_SUMMARY_LAYER_CONFLICT,
@@ -386,7 +387,7 @@ async def generate_snapshot_summary_with_model(
         model_key=model_key,
         channel_id=model.channel_id,
         model_id=model.model_id,
-        context_window_k=max(1, model.context_window_tokens // 1024),
+        context_window_k=max(1, model.context_window_tokens // CONTEXT_WINDOW_TOKENS_PER_K),
         max_output_tokens=model.max_output_tokens,
         safety_margin_tokens=model.safety_margin_tokens,
         expected_summary_message_id=snapshot.expected_summary_message_id,

@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_VALUE_MUST_BE_BETWEEN,
 )
@@ -106,7 +107,7 @@ def build_context_request_budget(
     tools: list[dict] | None = None,
     safety_margin_tokens: int = 256,
 ) -> ContextRequestBudget:
-    context_window_tokens = max(1, context_window_k * 1024)
+    context_window_tokens = max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K)
     output_tokens = max(max_tokens, 0)
     tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
     safety_tokens = max(safety_margin_tokens, 0)

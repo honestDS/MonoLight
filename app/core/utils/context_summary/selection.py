@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.models.channel import ChannelConfig, ModelUsage, resolve_model_protocol
 
@@ -47,8 +48,8 @@ async def select_context_summary_model(
 
     channel, model_entry, rule = selection
     chat_params = resolve_chat_params(model_entry, channel_config)
-    context_window_tokens = chat_params["context_window_k"] * 1024
-    max_output_tokens = min(1024, max(256, chat_params["context_window_k"] * 64))
+    context_window_tokens = chat_params["context_window_k"] * CONTEXT_WINDOW_TOKENS_PER_K
+    max_output_tokens = min(1024, max(256, context_window_tokens // 16))
     normalized_safety_margin = max(safety_margin_tokens, 0)
 
     return ContextSummaryModelSnapshot(

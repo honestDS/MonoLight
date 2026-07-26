@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CONTEXT_SUMMARY_FINAL_RESULT_EMPTY,
     ERR_CONTEXT_SUMMARY_FINAL_STAGE_EMPTY,
     ERR_CONTEXT_SUMMARY_FINAL_STAGE_MULTIPLE,
@@ -164,7 +165,7 @@ async def create_reduction_stage(
         model_key=model_key,
         channel_id=model.channel_id,
         model_id=model.model_id,
-        context_window_k=max(1, model.context_window_tokens // 1024),
+        context_window_k=max(1, model.context_window_tokens // CONTEXT_WINDOW_TOKENS_PER_K),
         max_output_tokens=model.max_output_tokens,
         safety_margin_tokens=model.safety_margin_tokens,
         expected_summary_message_id=lower_stage.expected_summary_message_id,

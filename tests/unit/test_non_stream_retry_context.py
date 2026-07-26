@@ -477,7 +477,7 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert saved_created_at == [None]
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
     assert response["llm_request_metadata"]["input_tokens"] == 777
-    assert response["llm_request_metadata"]["context_window_tokens"] == 4096
+    assert response["llm_request_metadata"]["context_window_tokens"] == 4000
     assert response["llm_request_metadata"]["max_output_tokens"] == 256
     assert response["llm_request_metadata"]["output_tokens"] == 10
     assert response["llm_request_metadata"]["cached_tokens"] == 222

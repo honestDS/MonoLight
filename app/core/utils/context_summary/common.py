@@ -2,7 +2,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from app.core.constants import ERR_CONTEXT_SUMMARY_WORK_INVALID
+from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K, ERR_CONTEXT_SUMMARY_WORK_INVALID
 from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
 from app.core.utils.tokenizer import estimate_tokens
@@ -129,7 +129,7 @@ def calc_token_usage(
     summary_tokens = estimate_summary_tokens(summary_content)
     history_tokens = history_tokens_override if history_tokens_override is not None else sum(estimate_tokens(serialize_message(message)) for message in messages)
     tools_tokens = estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
-    context_window_tokens = context_window_k * 1024
+    context_window_tokens = context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
     output_tokens = max(max_tokens, 0)
     safety_tokens = max(safety_margin_tokens, 0)
     input_budget = max(1, context_window_tokens - output_tokens - safety_tokens)
