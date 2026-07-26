@@ -731,11 +731,6 @@ const detectModelMetadata = async (entry, idx) => {
       entry.context_window_k = Math.max(1, Math.floor(contextLength / 1000))
       filledFields.push(t('channels.context_window_k'))
     }
-    const maxTokens = toPositiveInteger(model.top_provider?.max_completion_tokens)
-    if (maxTokens) {
-      entry.max_tokens = maxTokens
-      filledFields.push(t('channels.max_tokens'))
-    }
     if (Array.isArray(model.architecture?.input_modalities)) {
       const modalities = new Set(model.architecture.input_modalities
         .filter(modality => typeof modality === 'string')
