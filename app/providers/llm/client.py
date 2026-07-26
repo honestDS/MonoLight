@@ -404,6 +404,7 @@ class LLMClient:
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
@@ -430,6 +431,7 @@ class LLMClient:
             tool_choice=tool_choice,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
             **kwargs,
         ):
             yield chunk
@@ -450,6 +452,7 @@ class LLMClient:
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
@@ -480,6 +483,7 @@ class LLMClient:
             timeout=timeout,
             request_context_tokens=request_context_tokens,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
             **kwargs,
         ):
             if isinstance(chunk.get("model"), str):
@@ -560,6 +564,7 @@ class LLMClient:
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
@@ -586,6 +591,7 @@ class LLMClient:
             tool_choice=tool_choice,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
             **kwargs,
         )
 

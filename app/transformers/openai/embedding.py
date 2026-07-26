@@ -13,6 +13,7 @@ from app.core.exceptions import EmbeddingException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.model_request_headers import build_model_request_headers
 
 from ..base import BaseEmbeddingTransformer
 
@@ -29,12 +30,10 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         suppress_error_log: bool = False,
         timeout: float = 30.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
 
         payload = {
             "model": model_id,
@@ -79,6 +78,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         dimensions: int | None = None,
         timeout: float = 30.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> list[list[float]]:
         if not input_texts:
             return []
@@ -98,6 +98,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                 dimensions_supported=dimensions_supported,
                 timeout=timeout,
                 http_proxy=http_proxy,
+                custom_headers=custom_headers,
             )
 
             dimensions_supported = result["dimensions_supported"]
@@ -122,6 +123,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         dimensions_supported: bool | None,
         timeout: float = 30.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if dimensions and dimensions_supported is not False:
             try:
@@ -134,6 +136,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                     dimensions=dimensions,
                     timeout=timeout,
                     http_proxy=http_proxy,
+                    custom_headers=custom_headers,
                 )
                 return {"response": response, "dimensions_supported": True}
             except EmbeddingException:
@@ -147,6 +150,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
             input_texts=input_texts,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
         )
         return {"response": response, "dimensions_supported": False if dimensions else dimensions_supported}
 

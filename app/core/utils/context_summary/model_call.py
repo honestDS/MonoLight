@@ -20,6 +20,7 @@ async def call_context_summary_model(
         protocol=model.protocol,
         timeout=CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS,
         http_proxy=model.http_proxy,
+        custom_headers=model.custom_headers,
     )
     summary = (response.message.content or "").strip()
     return summary or None

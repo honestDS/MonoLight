@@ -218,6 +218,25 @@
               </div>
             </div>
 
+            <el-collapse v-model="advancedSettingsExpanded[idx]" class="model-entry-advanced-settings">
+              <el-collapse-item :title="$t('channels.advanced_settings')" :name="idx">
+                <div class="custom-request-headers-heading">
+                  <span class="custom-request-headers-title">{{ $t('channels.custom_request_headers') }}</span>
+                  <el-button size="small" type="primary" plain @click="fillCustomHeadersTemplate(idx)">
+                    {{ $t('channels.fill_headers_template') }}
+                  </el-button>
+                </div>
+                <el-form-item :error="advancedSettingsErrors[idx]" class="advanced-settings-form-item">
+                  <el-input
+                    v-model="advancedSettingsDrafts[idx]"
+                    type="textarea"
+                    :rows="4"
+                    :placeholder="$t('channels.custom_headers_placeholder')"
+                    @input="handleAdvancedSettingsInput(idx)" />
+                </el-form-item>
+              </el-collapse-item>
+            </el-collapse>
+
           </div>
 
           <el-button type="primary" :icon="Plus" @click="addModelEntry">{{ $t('channels.add_model') }}</el-button>
@@ -259,6 +278,9 @@ const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
 const protocolErrors = ref([])
+const advancedSettingsDrafts = ref([])
+const advancedSettingsErrors = ref([])
+const advancedSettingsExpanded = ref([])
 const proxyError = ref('')
 const selectedDetectedModels = ref([])
 const detectedModels = ref([])
@@ -308,16 +330,158 @@ const getModelUsageLabel = (value) => {
 
 const form = reactive(defaultChannelForm())
 
+const customHeadersTemplate = {
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+  accept: 'application/json, text/plain, */*',
+  'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  'cache-control': 'no-cache'
+}
+const httpHeaderNamePattern = /^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$/
+const reservedCustomHeaderNames = new Set([
+  'authorization',
+  'content-type',
+  'content-length',
+  'host',
+  'connection',
+  'transfer-encoding',
+  'proxy-authorization',
+  'proxy-connection'
+])
+
+const isPlainJsonObject = (value) => (
+  value !== null &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  Object.getPrototypeOf(value) === Object.prototype
+)
+
 const ensureAdvancedSettings = (entry) => {
-  entry.advanced_settings = {
-    ...(entry.advanced_settings || {})
+  if (!isPlainJsonObject(entry.advanced_settings)) {
+    entry.advanced_settings = {}
   }
+}
+
+const getCustomHeaders = (settings) => {
+  if (!isPlainJsonObject(settings)) return {}
+  if (isPlainJsonObject(settings.custom_headers)) return settings.custom_headers
+  if (settings.custom_headers === undefined && typeof settings.user_agent === 'string') {
+    return { 'user-agent': settings.user_agent }
+  }
+  return {}
+}
+
+const formatAdvancedSettings = (settings) => {
+  const customHeaders = getCustomHeaders(settings)
+  if (Object.keys(customHeaders).length === 0) return ''
+  return JSON.stringify(customHeaders, null, 2)
+}
+
+const parseAdvancedSettingsDraft = (draft) => {
+  const text = typeof draft === 'string' ? draft.trim() : ''
+  if (!text) return { value: {}, error: '' }
+
+  let settings
+  try {
+    settings = JSON.parse(text)
+  } catch {
+    return { value: null, error: t('channels.custom_headers_json_object_error') }
+  }
+
+  if (!isPlainJsonObject(settings)) {
+    return { value: null, error: t('channels.custom_headers_json_object_error') }
+  }
+
+  const headerEntries = Object.entries(settings)
+  if (headerEntries.length > 32) {
+    return { value: null, error: t('channels.custom_headers_max_items_error') }
+  }
+
+  const normalizedHeaders = {}
+  const headerNames = new Set()
+  for (const [headerName, headerValue] of headerEntries) {
+    if (!httpHeaderNamePattern.test(headerName)) {
+      return { value: null, error: t('channels.custom_headers_name_error') }
+    }
+
+    const normalizedName = headerName.toLowerCase()
+    if (headerNames.has(normalizedName)) {
+      return { value: null, error: t('channels.custom_headers_name_error') }
+    }
+    if (reservedCustomHeaderNames.has(normalizedName)) {
+      return {
+        value: null,
+        error: t('channels.custom_headers_reserved_header_error', { header: normalizedName })
+      }
+    }
+    if (typeof headerValue !== 'string') {
+      return { value: null, error: t('channels.custom_headers_value_error') }
+    }
+
+    const normalizedValue = headerValue.trim()
+    if (!normalizedValue || normalizedValue.length > 4096 || /[^\x20-\x7E]/.test(normalizedValue)) {
+      return { value: null, error: t('channels.custom_headers_value_error') }
+    }
+    Object.defineProperty(normalizedHeaders, normalizedName, {
+      configurable: true,
+      enumerable: true,
+      value: normalizedValue,
+      writable: true
+    })
+    headerNames.add(normalizedName)
+  }
+
+  return { value: normalizedHeaders, error: '' }
+}
+
+const mergeCustomHeaders = (entry, customHeaders) => {
+  const advancedSettings = isPlainJsonObject(entry.advanced_settings)
+    ? { ...entry.advanced_settings }
+    : {}
+  delete advancedSettings.user_agent
+  if (Object.keys(customHeaders).length === 0) {
+    delete advancedSettings.custom_headers
+  } else {
+    advancedSettings.custom_headers = { ...customHeaders }
+  }
+  entry.advanced_settings = advancedSettings
+  return advancedSettings
+}
+
+const validateAdvancedSettings = () => {
+  const results = form.model_ids.map((_, idx) => parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx]))
+  advancedSettingsErrors.value = results.map(result => result.error)
+  if (advancedSettingsErrors.value.some(Boolean)) {
+    advancedSettingsExpanded.value = results.map((result, idx) => (
+      result.error ? [idx] : advancedSettingsExpanded.value[idx]
+    ))
+    ElMessage.warning(advancedSettingsErrors.value.find(Boolean))
+    return null
+  }
+  return results.map(result => result.value)
+}
+
+const validateModelAdvancedSettings = (idx) => {
+  const result = parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx])
+  advancedSettingsErrors.value[idx] = result.error
+  if (result.error) {
+    advancedSettingsExpanded.value[idx] = [idx]
+    ElMessage.warning(result.error)
+    return null
+  }
+  return mergeCustomHeaders(form.model_ids[idx], result.value)
 }
 
 const syncModelEntryStates = () => {
   form.model_ids.forEach(ensureAdvancedSettings)
   modelIdErrors.value = form.model_ids.map((_, idx) => modelIdErrors.value[idx] || '')
   protocolErrors.value = form.model_ids.map((_, idx) => protocolErrors.value[idx] || '')
+  advancedSettingsDrafts.value = form.model_ids.map((entry, idx) => (
+    typeof advancedSettingsDrafts.value[idx] === 'string'
+      ? advancedSettingsDrafts.value[idx]
+      : formatAdvancedSettings(entry.advanced_settings)
+  ))
+  advancedSettingsErrors.value = form.model_ids.map((_, idx) => advancedSettingsErrors.value[idx] || '')
+  advancedSettingsExpanded.value = form.model_ids.map((_, idx) => advancedSettingsExpanded.value[idx] || [])
 }
 
 const addModelEntry = () => {
@@ -329,6 +493,9 @@ const removeModelEntry = (idx) => {
   form.model_ids.splice(idx, 1)
   modelIdErrors.value.splice(idx, 1)
   protocolErrors.value.splice(idx, 1)
+  advancedSettingsDrafts.value.splice(idx, 1)
+  advancedSettingsErrors.value.splice(idx, 1)
+  advancedSettingsExpanded.value.splice(idx, 1)
   syncDetectedSelection()
 }
 
@@ -347,6 +514,15 @@ const handleModelIdInput = (idx) => {
 
 const handleProtocolChange = (idx) => {
   protocolErrors.value[idx] = ''
+}
+
+const handleAdvancedSettingsInput = (idx) => {
+  advancedSettingsErrors.value[idx] = ''
+}
+
+const fillCustomHeadersTemplate = (idx) => {
+  advancedSettingsDrafts.value[idx] = JSON.stringify(customHeadersTemplate, null, 2)
+  advancedSettingsErrors.value[idx] = ''
 }
 
 const handleModelUsageChange = (entry, idx) => {
@@ -636,6 +812,8 @@ const testChatModel = async (entry, idx) => {
     return ElMessage.warning(t('channels.model_id_required'))
   }
   if (!validateChannelHttpProxy()) return
+  const advancedSettings = validateModelAdvancedSettings(idx)
+  if (!advancedSettings) return
 
   testingModelIndex.value = idx
   try {
@@ -647,7 +825,8 @@ const testChatModel = async (entry, idx) => {
       protocol: entry.protocol,
       temperature: entry.temperature,
       top_p: entry.top_p,
-      max_tokens: entry.max_tokens || 0
+      max_tokens: entry.max_tokens || 0,
+      advanced_settings: advancedSettings
     })
     ElMessage.success(t('channels.chat_test_success'))
     const data = res.data?.data || {}
@@ -703,6 +882,8 @@ const testImageGenerationModel = async (entry, idx) => {
     return ElMessage.warning(t('channels.model_id_required'))
   }
   if (!validateChannelHttpProxy()) return
+  const advancedSettings = validateModelAdvancedSettings(idx)
+  if (!advancedSettings) return
 
   testingModelIndex.value = idx
   try {
@@ -713,7 +894,8 @@ const testImageGenerationModel = async (entry, idx) => {
       model_id: entry.model_id.trim(),
       protocol: entry.protocol,
       size: entry.size || '1024x1024',
-      quality: entry.quality || 'auto'
+      quality: entry.quality || 'auto',
+      advanced_settings: advancedSettings
     })
     ElMessage.success(t('channels.image_generation_test_success'))
     const data = res.data?.data || {}
@@ -802,7 +984,7 @@ const buildModelEntryPayload = (entry) => {
   const payload = {
     ...entry,
     model_id: (entry.model_id || '').trim(),
-    advanced_settings: { ...(entry.advanced_settings || {}) }
+    advanced_settings: { ...entry.advanced_settings }
   }
 
   if (payload.usage !== 'IMAGE_GENERATION') {
@@ -855,6 +1037,9 @@ const openCreateDialog = () => {
   Object.keys(df).forEach(k => { form[k] = df[k] })
   modelIdErrors.value = []
   protocolErrors.value = []
+  advancedSettingsDrafts.value = []
+  advancedSettingsErrors.value = []
+  advancedSettingsExpanded.value = []
   proxyError.value = ''
   resetDetectedModels()
   dialogVisible.value = true
@@ -873,6 +1058,9 @@ const handleEdit = (row) => {
     : []
   modelIdErrors.value = []
   protocolErrors.value = []
+  advancedSettingsDrafts.value = []
+  advancedSettingsErrors.value = []
+  advancedSettingsExpanded.value = []
   proxyError.value = ''
   syncModelEntryStates()
   resetDetectedModels()
@@ -883,6 +1071,12 @@ const submitForm = async () => {
   if (!form.name) {
     return ElMessage.warning(t('channels.fill_required'))
   }
+
+  const parsedCustomHeaders = validateAdvancedSettings()
+  if (!parsedCustomHeaders) return
+  form.model_ids.forEach((entry, idx) => {
+    mergeCustomHeaders(entry, parsedCustomHeaders[idx])
+  })
 
   modelIdErrors.value = form.model_ids.map(m => m.model_id && m.model_id.trim() ? '' : t('channels.model_id_required'))
   if (modelIdErrors.value.some(Boolean)) {

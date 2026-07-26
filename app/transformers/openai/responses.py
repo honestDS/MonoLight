@@ -17,6 +17,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
 from .chat_completions import OpenAIChatCompletionsTransformer, _is_timeout_exception
@@ -39,12 +40,10 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload = self._request_payload(
             model_id=model_id,
             messages=messages,
@@ -90,12 +89,10 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload = self._request_payload(
             model_id=model_id,
             messages=messages,

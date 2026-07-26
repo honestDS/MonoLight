@@ -28,6 +28,10 @@ from app.core.constants import (
 from app.core.crypto import decrypt_api_key, encrypt_api_key
 from app.core.i18n import t
 from app.core.utils.http_proxy import normalize_http_proxy
+from app.core.utils.model_request_headers import (
+    normalize_legacy_model_user_agent,
+    normalize_model_custom_headers,
+)
 
 ENCRYPTED_API_KEY_PREFIX = "enc:v1:"
 
@@ -72,6 +76,31 @@ class ChannelModelAdvancedSettings(BaseModel):
     """可扩展的模型高级设置。"""
 
     model_config = ConfigDict(extra="allow")
+    custom_headers: dict[str, str] = PydanticField(default_factory=dict, exclude_if=lambda value: not value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_user_agent(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+
+        normalized_value = dict(value)
+        legacy_user_agent = normalized_value.pop("user_agent", None)
+        custom_headers = normalized_value.get("custom_headers")
+        if legacy_user_agent is None or not isinstance(custom_headers, (dict, type(None))):
+            return normalized_value
+
+        normalized_custom_headers = dict(custom_headers or {})
+        has_user_agent = any(isinstance(header_name, str) and header_name.lower() == "user-agent" for header_name in normalized_custom_headers)
+        if not has_user_agent:
+            normalized_custom_headers["user-agent"] = normalize_legacy_model_user_agent(legacy_user_agent)
+        normalized_value["custom_headers"] = normalized_custom_headers
+        return normalized_value
+
+    @field_validator("custom_headers", mode="before")
+    @classmethod
+    def validate_custom_headers(cls, value: object) -> dict[str, str]:
+        return normalize_model_custom_headers(value)
 
 
 class ChannelModelIdsNormalizationError(ValueError):

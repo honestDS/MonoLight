@@ -200,11 +200,17 @@ async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatc
         model_id="gpt-test",
         messages=[InternalMessage(role=MessageRole.USER, content="Question")],
         http_proxy="http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080",
+        custom_headers={
+            "User-Agent": "MyClient/1.0",
+            "Accept-Language": "en-US",
+        },
     )
 
     post_kwargs = sessions[0].post_calls[0]["kwargs"]
     assert post_kwargs["proxy"] == "http://proxy.example.com:8080"
     assert post_kwargs["proxy_headers"]["Proxy-Authorization"] == ("Basic dXNlckBuYW1lOnBhc3N3b3JkOndpdGgvc2xhc2g=")
+    assert post_kwargs["headers"]["user-agent"] == "MyClient/1.0"
+    assert post_kwargs["headers"]["accept-language"] == "en-US"
 
 
 @pytest.mark.asyncio

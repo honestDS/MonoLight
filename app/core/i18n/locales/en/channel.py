@@ -32,4 +32,5 @@ MESSAGES = {
     "ERR_CHANNEL_USAGE_MISMATCH": "Model usage mismatch: expected {expected}, actual {actual}",
     "ERR_CHANNEL_MODEL_DISABLED": "Model entry is disabled",
     "ERR_CHANNEL_HTTP_PROXY_INVALID": "Invalid channel HTTP proxy format. Only http://host:port or http://username:password@host:port is supported; special characters in the username and password must be URL-encoded; leave blank for a direct connection.",
+    "ERR_CHANNEL_MODEL_CUSTOM_HEADERS_INVALID": "Model custom request headers must be an object with at most 32 valid headers, with valid names and values that do not override reserved headers.",
 }

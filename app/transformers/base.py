@@ -39,6 +39,7 @@ class BaseTransformer(ABC):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> InternalResponse:
         pass
@@ -56,6 +57,7 @@ class BaseTransformer(ABC):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         pass
@@ -115,6 +117,7 @@ class BaseEmbeddingTransformer(ABC):
         input_texts: str | list[str],
         timeout: float = 30.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -130,6 +133,7 @@ class BaseEmbeddingTransformer(ABC):
         dimensions: int | None = None,
         timeout: float = 30.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> list[list[float]]:
         pass
 
@@ -149,6 +153,7 @@ class BaseImageGenerationTransformer(ABC):
         style: str | None = None,
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -166,6 +171,7 @@ class BaseRerankTransformer(ABC):
         top_n: int | None = None,
         timeout: float = 15.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -181,5 +187,6 @@ class BaseRerankTransformer(ABC):
         top_n: int | None = None,
         timeout: float = 15.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         pass

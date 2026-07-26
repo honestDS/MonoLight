@@ -8,6 +8,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.model_request_headers import build_model_request_headers
 
 from ..base import BaseImageGenerationTransformer
 
@@ -28,12 +29,10 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
         style: str | None = None,
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload: dict[str, Any] = {
             "model": model_id,
             "prompt": prompt,

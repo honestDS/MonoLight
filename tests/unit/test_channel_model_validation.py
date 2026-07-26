@@ -1,6 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
+from app.core.utils.model_request_headers import (
+    build_model_request_headers,
+    get_model_custom_headers,
+    normalize_model_custom_headers,
+)
 from app.models.channel import (
     ChannelCreate,
     ChannelModelAdvancedSettings,
@@ -122,7 +127,190 @@ def test_model_advanced_settings_preserve_future_and_legacy_proxy_fields() -> No
     )
 
     assert settings.model_dump(mode="json") == advanced_settings
+    assert settings.custom_headers == {}
     assert model_ids[0]["advanced_settings"] == advanced_settings
+
+
+def test_model_advanced_settings_omits_empty_custom_headers() -> None:
+    advanced_settings = {
+        "user_agent": None,
+        "future_extension": {"enabled": True},
+    }
+    expected_settings = {"future_extension": {"enabled": True}}
+
+    settings = ChannelModelAdvancedSettings.model_validate(advanced_settings)
+    model_ids = normalize_channel_model_ids(
+        [
+            {
+                "model_id": "model",
+                "advanced_settings": advanced_settings,
+            }
+        ]
+    )
+
+    assert settings.custom_headers == {}
+    assert settings.model_dump(mode="json") == expected_settings
+    assert model_ids[0]["advanced_settings"] == expected_settings
+
+
+def test_model_advanced_settings_normalize_custom_headers_and_preserve_extensions() -> None:
+    advanced_settings = {
+        "custom_headers": {
+            "User-Agent": "  MyClient/1.0  ",
+            "Accept-Language": " en-US ",
+        },
+        "future_extension": {"enabled": True},
+        "legacy_option": None,
+    }
+    expected_settings = {
+        "custom_headers": {
+            "user-agent": "MyClient/1.0",
+            "accept-language": "en-US",
+        },
+        "future_extension": {"enabled": True},
+        "legacy_option": None,
+    }
+
+    settings = ChannelModelAdvancedSettings.model_validate(advanced_settings)
+    model_ids = normalize_channel_model_ids(
+        [
+            {
+                "model_id": "model",
+                "advanced_settings": advanced_settings,
+            }
+        ]
+    )
+
+    assert settings.custom_headers == expected_settings["custom_headers"]
+    assert settings.model_dump(mode="json") == expected_settings
+    assert model_ids[0]["advanced_settings"] == expected_settings
+
+
+def test_model_advanced_settings_migrates_legacy_user_agent() -> None:
+    advanced_settings = {
+        "user_agent": "  MyClient/1.0  ",
+        "future_extension": {"enabled": True},
+    }
+    expected_settings = {
+        "custom_headers": {"user-agent": "MyClient/1.0"},
+        "future_extension": {"enabled": True},
+    }
+
+    settings = ChannelModelAdvancedSettings.model_validate(advanced_settings)
+    model_ids = normalize_channel_model_ids(
+        [
+            {
+                "model_id": "model",
+                "advanced_settings": advanced_settings,
+            }
+        ]
+    )
+
+    assert settings.custom_headers == {"user-agent": "MyClient/1.0"}
+    assert settings.model_dump(mode="json") == expected_settings
+    assert model_ids[0]["advanced_settings"] == expected_settings
+
+
+@pytest.mark.parametrize(
+    "custom_headers",
+    [
+        "not-an-object",
+        {f"x-test-{index}": "value" for index in range(33)},
+        {"invalid header": "value"},
+        {"X-Test": "one", "x-test": "two"},
+        {"authorization": "Bearer other"},
+        {"Content-Type": "text/plain"},
+        {"x-test": 123},
+        {"x-test": ""},
+        {"x-test": "   "},
+        {"x-test": "value\nnext"},
+        {"x-test": "value\x1fnext"},
+        {"x-test": "value \u00e9"},
+        {"x-test": "a" * 4097},
+    ],
+)
+def test_normalize_model_custom_headers_rejects_invalid_values(custom_headers: object) -> None:
+    with pytest.raises(ValueError):
+        normalize_model_custom_headers(custom_headers)
+
+
+@pytest.mark.parametrize(
+    ("model_entry", "expected_headers"),
+    [
+        (
+            {
+                "advanced_settings": {
+                    "custom_headers": {
+                        "User-Agent": "  MyClient/1.0  ",
+                        "Accept-Language": " en-US ",
+                    }
+                }
+            },
+            {"user-agent": "MyClient/1.0", "accept-language": "en-US"},
+        ),
+        (
+            {"advanced_settings": {"user_agent": "  LegacyClient/1.0  "}},
+            {"user-agent": "LegacyClient/1.0"},
+        ),
+        (
+            {
+                "advanced_settings": {
+                    "custom_headers": {"User-Agent": "NewClient/1.0"},
+                    "user_agent": "LegacyClient/1.0",
+                }
+            },
+            {"user-agent": "NewClient/1.0"},
+        ),
+        ({"advanced_settings": {"custom_headers": {"authorization": "Bearer other"}}}, {}),
+        (
+            {
+                "advanced_settings": {
+                    "custom_headers": "invalid",
+                    "user_agent": "LegacyClient/1.0",
+                }
+            },
+            {"user-agent": "LegacyClient/1.0"},
+        ),
+    ],
+)
+def test_get_model_custom_headers_handles_new_legacy_and_dirty_values(
+    model_entry: dict,
+    expected_headers: dict[str, str],
+) -> None:
+    assert get_model_custom_headers(model_entry) == expected_headers
+
+
+def test_get_model_custom_headers_returns_normalized_copy() -> None:
+    custom_headers = {"User-Agent": "MyClient/1.0"}
+    model_entry = {"advanced_settings": {"custom_headers": custom_headers}}
+
+    headers = get_model_custom_headers(model_entry)
+
+    assert headers == {"user-agent": "MyClient/1.0"}
+    assert headers is not custom_headers
+
+
+def test_build_model_request_headers_adds_or_omits_custom_headers() -> None:
+    expected_base_headers = {
+        "Authorization": "Bearer key",
+        "Content-Type": "application/json",
+    }
+
+    assert build_model_request_headers(
+        "key",
+        {
+            "User-Agent": "  MyClient/1.0  ",
+            "Accept-Language": " en-US ",
+        },
+    ) == {
+        **expected_base_headers,
+        "user-agent": "MyClient/1.0",
+        "accept-language": "en-US",
+    }
+    assert build_model_request_headers("key") == expected_base_headers
+    assert build_model_request_headers("key", None) == expected_base_headers
+    with pytest.raises(ValueError):
+        build_model_request_headers("key", {"authorization": "Bearer other"})
 
 
 def test_channel_response_defaults_missing_http_proxy_to_none() -> None:

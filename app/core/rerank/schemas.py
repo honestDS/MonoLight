@@ -23,3 +23,4 @@ class RerankConfig:
     timeout: float
     priority: int
     http_proxy: str | None = None
+    custom_headers: dict[str, str] | None = None

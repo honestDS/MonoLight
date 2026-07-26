@@ -55,10 +55,12 @@ from app.core.utils.channel_profile_sync import (
     _sync_channel_model_id_renames,
 )
 from app.core.utils.http_proxy import get_channel_http_proxy, normalize_http_proxy
+from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import (
     MODEL_PROTOCOLS_BY_USAGE,
     ChannelCreate,
     ChannelListResponse,
+    ChannelModelAdvancedSettings,
     ChannelModelIdsNormalizationError,
     ChannelResponse,
     ChannelUpdate,
@@ -105,6 +107,7 @@ class ChannelChatTestRequest(ChannelHTTPProxyRequest):
     top_p: float | None = PydanticField(None, ge=0, le=1.0)
     max_tokens: int | None = PydanticField(None, ge=0)
     timeout: float = PydanticField(60.0, gt=0, le=600)
+    advanced_settings: ChannelModelAdvancedSettings = PydanticField(default_factory=ChannelModelAdvancedSettings)
 
 
 class ChannelImageGenerationTestRequest(ChannelHTTPProxyRequest):
@@ -115,6 +118,7 @@ class ChannelImageGenerationTestRequest(ChannelHTTPProxyRequest):
     size: ImageGenerationSize = ImageGenerationSize.SIZE_1024X1024
     quality: ImageGenerationQuality | None = ImageGenerationQuality.AUTO
     timeout: float = PydanticField(60.0, gt=0, le=600)
+    advanced_settings: ChannelModelAdvancedSettings = PydanticField(default_factory=ChannelModelAdvancedSettings)
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -277,6 +281,7 @@ async def test_channel_chat(
             top_p=payload.top_p,
             timeout=payload.timeout,
             http_proxy=payload.http_proxy,
+            custom_headers=payload.advanced_settings.custom_headers,
         )
         content = response.message.content
         if isinstance(content, str):
@@ -332,6 +337,7 @@ async def test_channel_image_generation(
             quality=payload.quality,
             timeout=payload.timeout,
             http_proxy=payload.http_proxy,
+            custom_headers=payload.advanced_settings.custom_headers,
         )
         images = response.get("data") if isinstance(response, dict) else None
         if not isinstance(images, list) or not images:
@@ -490,6 +496,7 @@ async def test_embedding_dimension(
             input_texts=["dimension test"],
             protocol=resolve_model_protocol(model_entry),
             http_proxy=get_channel_http_proxy(db_obj),
+            custom_headers=get_model_custom_headers(model_entry),
         )
         if "data" in embedding_response and len(embedding_response["data"]) > 0:
             dimension = len(embedding_response["data"][0]["embedding"])

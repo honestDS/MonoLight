@@ -32,6 +32,7 @@ class ImageGenerationClient:
         style: str | None = None,
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         transformer = cls.get_transformer(protocol)
@@ -47,5 +48,6 @@ class ImageGenerationClient:
             style=style,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
             **kwargs,
         )

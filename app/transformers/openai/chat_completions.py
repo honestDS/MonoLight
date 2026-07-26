@@ -21,6 +21,7 @@ from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -203,13 +204,11 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload = {
             "model": model_id,
             "messages": self.to_provider(messages),
@@ -261,12 +260,10 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         tool_choice: str = "auto",
         timeout: float = 60.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload = {
             "model": model_id,
             "messages": self.to_provider(messages),

@@ -36,6 +36,9 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
                 "max_tokens": 4096,
                 "usage": "CHAT",
                 "protocol": "OPENAI",
+                "advanced_settings": {
+                    "custom_headers": {"User-Agent": "SummaryClient/1.0"},
+                },
             },
             SimpleNamespace(priority=3),
         )
@@ -64,6 +67,7 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
         safety_margin_tokens=256,
         input_budget_tokens=7244,
         http_proxy="http://proxy.example.com:8080",
+        custom_headers={"user-agent": "SummaryClient/1.0"},
     )
     assert selection_calls == [
         {
@@ -103,6 +107,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
         safety_margin_tokens=256,
         input_budget_tokens=7424,
         http_proxy="http://proxy.example.com:8080",
+        custom_headers={"user-agent": "SummaryClient/1.0"},
     )
 
     result = await call_module.call_context_summary_model(
@@ -124,6 +129,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
     assert request["protocol"] == "openai"
     assert request["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
     assert request["http_proxy"] == "http://proxy.example.com:8080"
+    assert request["custom_headers"] == {"user-agent": "SummaryClient/1.0"}
 
 
 @pytest.mark.asyncio

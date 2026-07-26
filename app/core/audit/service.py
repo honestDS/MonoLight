@@ -47,6 +47,7 @@ from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_
 from app.core.tools.shell import ShellExecutor
 from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelUsage, resolve_model_protocol
@@ -434,6 +435,7 @@ async def _call_auditor(
             protocol=protocol,
             tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
             http_proxy=get_channel_http_proxy(channel),
+            custom_headers=get_model_custom_headers(model_entry),
         )
         if not response.message.tool_calls:
             parsed = _extract_json_object(response.message.content)
@@ -514,6 +516,7 @@ async def _summarize_pending(
                 protocol=protocol,
                 tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
                 http_proxy=get_channel_http_proxy(channel),
+                custom_headers=get_model_custom_headers(model_entry),
             )
             if not response.message.tool_calls:
                 summary = (response.message.content or "").strip()

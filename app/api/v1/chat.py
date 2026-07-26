@@ -56,6 +56,7 @@ from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
 from app.models.background_task import BackgroundTaskResponse
 from app.models.channel import ChannelConfig, resolve_model_protocol
@@ -384,6 +385,7 @@ async def generate_title(
                 max_tokens=model_entry.get("max_tokens") or 200,
                 raise_on_error=True,
                 http_proxy=get_channel_http_proxy(channel),
+                custom_headers=get_model_custom_headers(model_entry),
             )
             return StandardResponse.success(data={"title": title}, message=MSG_TITLE_GENERATED)
         except LLMException as e:

@@ -40,6 +40,7 @@ class RerankClient:
         top_n: int | None = None,
         timeout: float = 15.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> list[RerankResult]:
         # 空文档短路，避免无意义的远程调用
         if not documents:
@@ -57,6 +58,7 @@ class RerankClient:
             top_n=top_n,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
         )
 
         results = [RerankResult(index=item["index"], relevance_score=item["relevance_score"]) for item in raw_results]

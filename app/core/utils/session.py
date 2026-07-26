@@ -10,6 +10,7 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.http_proxy import get_channel_http_proxy
+from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -50,6 +51,7 @@ async def generate_session_title(
     max_tokens: int = 200,
     raise_on_error: bool = False,
     http_proxy: str | None = None,
+    custom_headers: dict[str, str] | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -76,6 +78,7 @@ async def generate_session_title(
             max_tokens=max_tokens,
             protocol=protocol,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
         )
 
         title = (response.message.content or "").strip()
@@ -144,6 +147,7 @@ async def generate_session_title_for_active_profile(db: AsyncSession, uid: str, 
                     max_tokens=model_entry.get("max_tokens") or 200,
                     raise_on_error=True,
                     http_proxy=get_channel_http_proxy(channel),
+                    custom_headers=get_model_custom_headers(model_entry),
                 )
             except Exception as exc:
                 excluded_priorities.add(rule.priority)

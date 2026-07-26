@@ -12,6 +12,7 @@ from app.core.exceptions import RerankException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
+from app.core.utils.model_request_headers import build_model_request_headers
 
 from .base import BaseRerankTransformer
 
@@ -29,12 +30,10 @@ class CohereRerankTransformer(BaseRerankTransformer):
         top_n: int | None = None,
         timeout: float = 15.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = build_model_request_headers(api_key, custom_headers)
         payload: dict[str, Any] = {
             "model": model_id,
             "query": query,
@@ -72,6 +71,7 @@ class CohereRerankTransformer(BaseRerankTransformer):
         top_n: int | None = None,
         timeout: float = 15.0,
         http_proxy: str | None = None,
+        custom_headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         if not documents:
             return []
@@ -85,6 +85,7 @@ class CohereRerankTransformer(BaseRerankTransformer):
             top_n=top_n,
             timeout=timeout,
             http_proxy=http_proxy,
+            custom_headers=custom_headers,
         )
 
         raw_results = response.get("results")
