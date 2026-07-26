@@ -95,5 +95,13 @@ export default {
   profile_rules_synced: '已同步 {count} 条配置中的渠道路由规则。',
   profile_rules_removed: '已移除 {count} 条配置中不可用的渠道路由规则。',
   audit_refs_synced: '已同步 {count} 个配置中的审计模型引用。',
-  audit_refs_cleared: '已清空 {count} 个配置中不可用的审计模型引用。'
+  audit_refs_cleared: '已清空 {count} 个配置中不可用的审计模型引用。',
+  model_metadata_detect: '参数探测',
+  model_metadata_chat_only: '仅对话模型支持从 OpenRouter 探测参数',
+  model_metadata_not_found: 'OpenRouter 未找到模型 {model}',
+  model_metadata_ambiguous: 'OpenRouter 找到多个匹配模型：{models}',
+  model_metadata_invalid_response: 'OpenRouter 返回了无效的模型信息',
+  model_metadata_no_mappable_fields: 'OpenRouter 未返回可映射的参数',
+  model_metadata_detect_success: '已从 OpenRouter 探测 {model} 的参数：{fields}',
+  model_metadata_detect_failed: '从 OpenRouter 探测参数失败'
 }

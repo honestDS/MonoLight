@@ -95,5 +95,13 @@ export default {
   profile_rules_synced: 'Synchronized {count} channel routing rule(s) in profile configurations.',
   profile_rules_removed: 'Removed {count} unavailable channel routing rule(s) from profile configurations.',
   audit_refs_synced: 'Synchronized audit model references in {count} profile(s).',
-  audit_refs_cleared: 'Cleared unavailable audit model references in {count} profile(s).'
+  audit_refs_cleared: 'Cleared unavailable audit model references in {count} profile(s).',
+  model_metadata_detect: 'Detect Parameters',
+  model_metadata_chat_only: 'Only chat models support parameter detection from OpenRouter',
+  model_metadata_not_found: 'OpenRouter could not find model {model}',
+  model_metadata_ambiguous: 'OpenRouter found multiple matching models: {models}',
+  model_metadata_invalid_response: 'OpenRouter returned invalid model information',
+  model_metadata_no_mappable_fields: 'OpenRouter returned no mappable parameters',
+  model_metadata_detect_success: 'Detected parameters from OpenRouter for {model}: {fields}',
+  model_metadata_detect_failed: 'Failed to detect parameters from OpenRouter'
 }

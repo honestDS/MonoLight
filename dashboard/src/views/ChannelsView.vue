@@ -106,6 +106,9 @@
                 <el-button type="text" :loading="testingModelIndex === idx" :disabled="!isTestableModel(entry)" @click="testModel(entry, idx)">
                   {{ $t('channels.test') }}
                 </el-button>
+                <el-button type="text" :loading="detectingMetadataIndex === idx" :disabled="entry.usage !== 'CHAT' || (detectingMetadataIndex !== null && detectingMetadataIndex !== idx)" @click="detectModelMetadata(entry, idx)">
+                  {{ $t('channels.model_metadata_detect') }}
+                </el-button>
                 <el-button type="text" class="remove" @click="removeModelEntry(idx)">
                   {{ $t('channels.remove') }}
                 </el-button>
@@ -231,10 +234,10 @@
 
 <script setup>
 import { ref, onMounted, reactive, watch } from 'vue'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { channelApi } from '../api'
+import { channelApi, openRouterApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
@@ -262,6 +265,8 @@ const detectedModels = ref([])
 const detectingModels = ref(false)
 const detectingDimensionIndex = ref(null)
 const testingModelIndex = ref(null)
+const detectingMetadataIndex = ref(null)
+let openRouterModelsCache = null
 
 const defaultModelProtocols = {
   CHAT: 'OPENAI',
@@ -487,6 +492,104 @@ const formatErrorDetail = (err) => {
 
 const isTestableModel = (entry) => {
   return entry.usage === 'CHAT' || entry.usage === 'IMAGE_GENERATION'
+}
+
+const getOpenRouterModelMatches = (models, modelId) => {
+  const query = modelId.trim().toLowerCase()
+  const matchByIdentifiers = (candidateQuery) => models.filter(model => {
+    const identifiers = [model.id, model.canonical_slug]
+    return identifiers.some(identifier => typeof identifier === 'string' && identifier.toLowerCase() === candidateQuery)
+  })
+  const uniqueMatches = (matches) => [...new Map(matches.map(model => [model.id, model])).values()]
+  const exactMatches = uniqueMatches(matchByIdentifiers(query))
+  if (exactMatches.length > 0) return exactMatches
+
+  const removeProviderPrefix = (identifier) => {
+    const separator = identifier.indexOf('/')
+    return separator >= 0 ? identifier.slice(separator + 1) : identifier
+  }
+  const strippedQuery = removeProviderPrefix(query)
+  return uniqueMatches(models.filter(model => {
+    const identifiers = [model.id, model.canonical_slug]
+    return identifiers.some(identifier => typeof identifier === 'string' && removeProviderPrefix(identifier.toLowerCase()) === strippedQuery)
+  }))
+}
+
+const toPositiveInteger = (value) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null
+  return Math.floor(value)
+}
+
+const detectModelMetadata = async (entry, idx) => {
+  if (entry.usage !== 'CHAT') {
+    return ElMessage.warning(t('channels.model_metadata_chat_only'))
+  }
+  if (!entry.model_id || !entry.model_id.trim()) {
+    modelIdErrors.value[idx] = t('channels.model_id_required')
+    return ElMessage.warning(t('channels.model_id_required'))
+  }
+
+  detectingMetadataIndex.value = idx
+  try {
+    if (!openRouterModelsCache) {
+      const res = await openRouterApi.models()
+      const models = res.data?.data
+      if (!Array.isArray(models) || models.some(model => !model || typeof model !== 'object' || Array.isArray(model))) {
+        throw new Error(t('channels.model_metadata_invalid_response'))
+      }
+      openRouterModelsCache = models
+    }
+
+    const matches = getOpenRouterModelMatches(openRouterModelsCache, entry.model_id)
+    if (matches.length === 0) {
+      throw new Error(t('channels.model_metadata_not_found', { model: entry.model_id.trim() }))
+    }
+    if (matches.length > 1) {
+      throw new Error(t('channels.model_metadata_ambiguous', { models: matches.map(model => model.id).join(', ') }))
+    }
+
+    const model = matches[0]
+    const filledFields = []
+    const contextLength = toPositiveInteger(model.top_provider?.context_length) || toPositiveInteger(model.context_length)
+    if (contextLength) {
+      entry.context_window_k = Math.max(1, Math.floor(contextLength / 1000))
+      filledFields.push(t('channels.context_window_k'))
+    }
+    const maxTokens = toPositiveInteger(model.top_provider?.max_completion_tokens)
+    if (maxTokens) {
+      entry.max_tokens = maxTokens
+      filledFields.push(t('channels.max_tokens'))
+    }
+    if (Array.isArray(model.architecture?.input_modalities)) {
+      const modalities = new Set(model.architecture.input_modalities
+        .filter(modality => typeof modality === 'string')
+        .map(modality => modality.toLowerCase()))
+      entry.image_understanding = modalities.has('image')
+      entry.audio_understanding = modalities.has('audio')
+      entry.video_understanding = modalities.has('video')
+      filledFields.push(
+        t('channels.image_understanding'),
+        t('channels.audio_understanding'),
+        t('channels.video_understanding')
+      )
+    }
+    if (typeof model.description === 'string' && model.description.trim() && (!entry.description || !entry.description.trim())) {
+      entry.description = model.description.trim()
+      filledFields.push(t('channels.description'))
+    }
+    if (filledFields.length === 0) {
+      throw new Error(t('channels.model_metadata_no_mappable_fields'))
+    }
+
+    ElMessage.success(t('channels.model_metadata_detect_success', {
+      model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
+      fields: filledFields.join(', ')
+    }))
+  } catch (err) {
+    ElMessage.error(err.message || t('channels.model_metadata_detect_failed'))
+  } finally {
+    detectingMetadataIndex.value = null
+  }
 }
 
 const testModel = async (entry, idx) => {

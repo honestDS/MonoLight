@@ -186,6 +186,10 @@ export const channelApi = {
   testEmbeddingDimension: (channelId, modelId) => request.post(`/channels/test-embedding-dimension?channel_id=${channelId}&model_id=${encodeURIComponent(modelId)}`)
 }
 
+export const openRouterApi = {
+  models: () => axios.get('https://openrouter.ai/api/v1/models', { timeout: 30000 })
+}
+
 
 export const messagePlatformApi = {
   list: (params) => request.get('/message-platforms/list', { params }),
