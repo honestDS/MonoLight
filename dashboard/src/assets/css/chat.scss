@@ -377,15 +377,31 @@
 
           &::before {
             content: '';
-            width: 12px;
-            height: 12px;
-            box-sizing: border-box;
-            flex: 0 0 12px;
-            border: 2px solid #d8dce1;
-            border-top-color: #7d8792;
-            border-right-color: #7d8792;
+            width: 2.4px;
+            height: 2.4px;
+            flex: 0 0 2.4px;
+            margin: 6.8px;
+            background: transparent;
             border-radius: 50%;
-            animation: thinking-indicator-spin 0.85s linear infinite;
+            transform-origin: center;
+            box-shadow:
+              /* Row 1: 2 dots */
+              -1.7px -5.1px 0 rgba(125, 135, 146, 0.5),
+               1.7px -5.1px 0 rgba(125, 135, 146, 0.5),
+              /* Row 2: 4 dots */
+              -5.1px -1.7px 0 rgba(125, 135, 146, 0.35),
+              -1.7px -1.7px 0 rgba(125, 135, 146, 0.9),
+               1.7px -1.7px 0 rgba(125, 135, 146, 0.9),
+               5.1px -1.7px 0 rgba(125, 135, 146, 0.35),
+              /* Row 3: 4 dots */
+              -5.1px 1.7px 0 rgba(125, 135, 146, 0.35),
+              -1.7px 1.7px 0 rgba(125, 135, 146, 0.9),
+               1.7px 1.7px 0 rgba(125, 135, 146, 0.9),
+               5.1px 1.7px 0 rgba(125, 135, 146, 0.35),
+              /* Row 4: 2 dots */
+              -1.7px 5.1px 0 rgba(125, 135, 146, 0.5),
+               1.7px 5.1px 0 rgba(125, 135, 146, 0.5);
+            animation: thinking-indicator-breathe 2.4s ease-in-out infinite;
           }
         }
       }
@@ -859,13 +875,23 @@
   to { transform: rotate(360deg); }
 }
 
-@keyframes thinking-indicator-spin {
-  to { transform: rotate(360deg); }
+@keyframes thinking-indicator-breathe {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .chat-main .message-list .message-item.thinking .content::before {
     animation: none;
+    opacity: 1;
+    transform: scale(1);
   }
 }
 
