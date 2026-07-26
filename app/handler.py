@@ -14,10 +14,12 @@ from app.core.exceptions import BaseBusinessException, LLMException, ParameterEx
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
-from app.core.log import reset_system_log_locale, set_system_log_locale
+from app.core.log import get_logger, reset_system_log_locale, set_system_log_locale
 from app.core.paths import FAVICON_PATH
 from app.providers.database import AsyncSessionLocal
 from app.schemas.response import StandardResponse
+
+logger = get_logger(__name__)
 
 
 async def favicon():
@@ -27,6 +29,15 @@ async def favicon():
 
 
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+    orig = getattr(exc, "orig", None)
+    logger.error(
+        "Database operation failed: method={} path={} sqlalchemy_error={} db_error={} db_message={}",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        type(orig).__name__ if orig is not None else None,
+        str(orig) if orig is not None else None,
+    )
     return JSONResponse(status_code=500, content=StandardResponse.error(code=500, message=ERR_DB_OPERATION_FAILED).model_dump())
 
 
@@ -67,6 +78,12 @@ async def business_exception_handler(request: Request, exc: BaseBusinessExceptio
 
 
 async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "Unhandled exception: method={} path={} error={}",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+    )
     server_exc = ServerException(message=ERR_INTERNAL_SERVER_ERROR, cause=str(exc))
     return JSONResponse(status_code=500, content=StandardResponse.from_exception(server_exc).model_dump())
 

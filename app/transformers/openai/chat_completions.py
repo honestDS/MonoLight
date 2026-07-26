@@ -20,6 +20,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -147,6 +148,7 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         api_key: str,
         base_url: str,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> list[dict[str, Any]]:
         headers = {
@@ -156,11 +158,12 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         url = f"{base_url.rstrip('/')}/models"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.get(url, headers=headers) as resp:
+                async with session.get(url, headers=headers, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
@@ -199,6 +202,7 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:  # 返回原始响应字典，由 Dispatcher 或 BaseTransformer 处理最终封装
 
@@ -225,11 +229,12 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         # 非流式：对整个请求设置整体超时
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
@@ -255,6 +260,7 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         headers = {
@@ -283,11 +289,12 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=None),
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                resp_cm = session.post(url, headers=headers, json=payload)
+                resp_cm = session.post(url, headers=headers, json=payload, **proxy_kwargs)
                 # 等待响应头（含服务端首次有效输出前的思考时间）也纳入流响应超时
                 try:
                     resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))

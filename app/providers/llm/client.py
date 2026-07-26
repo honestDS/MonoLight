@@ -374,6 +374,7 @@ class LLMClient:
         base_url: str,
         protocol: str = "openai",
         timeout: float = 30.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> list[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
@@ -384,6 +385,7 @@ class LLMClient:
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            http_proxy=http_proxy,
             **kwargs,
         )
 
@@ -401,6 +403,7 @@ class LLMClient:
         protocol: str = "openai",
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         transformer = cls._transformers.get(protocol.lower())
@@ -426,6 +429,7 @@ class LLMClient:
             tools=tools,
             tool_choice=tool_choice,
             timeout=timeout,
+            http_proxy=http_proxy,
             **kwargs,
         ):
             yield chunk
@@ -445,6 +449,7 @@ class LLMClient:
         protocol: str = "openai",
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
@@ -474,6 +479,7 @@ class LLMClient:
             protocol=protocol,
             timeout=timeout,
             request_context_tokens=request_context_tokens,
+            http_proxy=http_proxy,
             **kwargs,
         ):
             if isinstance(chunk.get("model"), str):
@@ -553,6 +559,7 @@ class LLMClient:
         protocol: str = "openai",
         timeout: float = 60.0,
         request_context_tokens: int | None = None,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> InternalResponse:
         transformer = cls._transformers.get(protocol.lower())
@@ -578,6 +585,7 @@ class LLMClient:
             tools=tools,
             tool_choice=tool_choice,
             timeout=timeout,
+            http_proxy=http_proxy,
             **kwargs,
         )
 

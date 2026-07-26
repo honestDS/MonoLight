@@ -20,6 +20,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelConfig, ModelChannel, ModelUsage, resolve_model_protocol
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
@@ -86,6 +87,7 @@ async def embed_chunks_with_knowledge_base_config(
         dimensions=kb.embedding_dimensions,
         timeout=embedding_timeout,
         protocol=resolve_model_protocol(model_entry),
+        http_proxy=get_channel_http_proxy(channel),
     )
 
 

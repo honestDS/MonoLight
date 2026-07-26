@@ -55,7 +55,18 @@
                 <el-form-item :label="$t('channels.api_key')">
                   <el-input v-model="form.api_key" type="password" show-password :placeholder="$t('channels.api_key_placeholder')" />
                 </el-form-item>
-                <el-form-item>
+                <el-form-item :label="$t('channels.base_url')">
+                  <el-input v-model="form.base_url" :placeholder="$t('channels.base_url_placeholder')" />
+                </el-form-item>
+                <el-form-item :label="$t('channels.http_proxy')" :error="proxyError" class="http-proxy-form-item">
+                  <div class="http-proxy-input-wrapper">
+                    <el-input
+                      v-model="form.http_proxy"
+                      :placeholder="$t('channels.http_proxy_placeholder')"
+                      @input="proxyError = ''" />
+                  </div>
+                </el-form-item>
+                <el-form-item class="channel-model-detect-form-item">
                   <div class="channel-model-detect-row">
                     <el-button type="primary" plain :loading="detectingModels" @click="detectModelList">
                       {{ $t('channels.detect_model_list') }}
@@ -83,9 +94,6 @@
                       </el-option>
                     </el-select>
                   </div>
-                </el-form-item>
-                <el-form-item :label="$t('channels.base_url')">
-                  <el-input v-model="form.base_url" :placeholder="$t('channels.base_url_placeholder')" />
                 </el-form-item>
               </div>
             </el-form>
@@ -206,6 +214,7 @@
                 </el-form-item>
               </div>
             </div>
+
           </div>
 
           <el-button type="primary" :icon="Plus" @click="addModelEntry">{{ $t('channels.add_model') }}</el-button>
@@ -247,6 +256,7 @@ const isEdit = ref(false)
 const currentId = ref(null)
 const modelIdErrors = ref([])
 const protocolErrors = ref([])
+const proxyError = ref('')
 const selectedDetectedModels = ref([])
 const detectedModels = ref([])
 const detectingModels = ref(false)
@@ -293,10 +303,21 @@ const getModelUsageLabel = (value) => {
 
 const form = reactive(defaultChannelForm())
 
+const ensureAdvancedSettings = (entry) => {
+  entry.advanced_settings = {
+    ...(entry.advanced_settings || {})
+  }
+}
+
+const syncModelEntryStates = () => {
+  form.model_ids.forEach(ensureAdvancedSettings)
+  modelIdErrors.value = form.model_ids.map((_, idx) => modelIdErrors.value[idx] || '')
+  protocolErrors.value = form.model_ids.map((_, idx) => protocolErrors.value[idx] || '')
+}
+
 const addModelEntry = () => {
   form.model_ids.push(defaultModelEntry())
-  modelIdErrors.value.push('')
-  protocolErrors.value.push('')
+  syncModelEntryStates()
 }
 
 const removeModelEntry = (idx) => {
@@ -337,9 +358,7 @@ const handleDetectedModelChange = (values) => {
 
     let targetIndex = form.model_ids.findIndex(entry => !entry.model_id || !entry.model_id.trim())
     if (targetIndex < 0) {
-      form.model_ids.push(defaultModelEntry())
-      modelIdErrors.value.push('')
-      protocolErrors.value.push('')
+      addModelEntry()
       targetIndex = form.model_ids.length - 1
     }
     form.model_ids[targetIndex].model_id = id
@@ -349,13 +368,14 @@ const handleDetectedModelChange = (values) => {
   syncDetectedSelection()
 }
 watch(
-  () => [form.base_url, form.api_key],
+  () => [form.base_url, form.api_key, form.http_proxy],
   () => {
     resetDetectedModels()
   }
 )
 
 const syncDetectedSelection = () => {
+  syncModelEntryStates()
   const matched = detectedModels.value
     .filter(m => form.model_ids.some(e => (e.model_id || '').trim() === m.id))
     .map(m => m.id)
@@ -370,12 +390,14 @@ const detectModelList = async () => {
   if (!form.api_key || !form.api_key.trim()) {
     return ElMessage.warning(t('channels.model_list_api_key_required'))
   }
+  if (!validateChannelHttpProxy()) return
 
   detectingModels.value = true
   try {
     const payload = {
       api_key: form.api_key || null,
-      base_url: form.base_url || null
+      base_url: form.base_url || null,
+      http_proxy: normalizeHttpProxy(form.http_proxy) || null
     }
     const res = await channelApi.models(payload)
     const models = res.data?.data?.models || []
@@ -510,12 +532,14 @@ const testChatModel = async (entry, idx) => {
     modelIdErrors.value[idx] = t('channels.model_id_required')
     return ElMessage.warning(t('channels.model_id_required'))
   }
+  if (!validateChannelHttpProxy()) return
 
   testingModelIndex.value = idx
   try {
     const res = await channelApi.testChat({
       api_key: form.api_key || null,
       base_url: form.base_url || null,
+      http_proxy: normalizeHttpProxy(form.http_proxy) || null,
       model_id: entry.model_id.trim(),
       protocol: entry.protocol,
       temperature: entry.temperature,
@@ -575,12 +599,14 @@ const testImageGenerationModel = async (entry, idx) => {
     modelIdErrors.value[idx] = t('channels.model_id_required')
     return ElMessage.warning(t('channels.model_id_required'))
   }
+  if (!validateChannelHttpProxy()) return
 
   testingModelIndex.value = idx
   try {
     const res = await channelApi.testImageGeneration({
       api_key: form.api_key || null,
       base_url: form.base_url || null,
+      http_proxy: normalizeHttpProxy(form.http_proxy) || null,
       model_id: entry.model_id.trim(),
       protocol: entry.protocol,
       size: entry.size || '1024x1024',
@@ -672,7 +698,8 @@ const handleSizeChange = () => {
 const buildModelEntryPayload = (entry) => {
   const payload = {
     ...entry,
-    model_id: (entry.model_id || '').trim()
+    model_id: (entry.model_id || '').trim(),
+    advanced_settings: { ...(entry.advanced_settings || {}) }
   }
 
   if (payload.usage !== 'IMAGE_GENERATION') {
@@ -686,6 +713,38 @@ const buildModelEntryPayload = (entry) => {
   return payload
 }
 
+const httpProxyPattern = /^http:\/\/(?:(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+:(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+@)?(?:\[[^\]\s/@?#]+\]|[^:/\s@?#]+):(\d+)\/?$/
+
+const normalizeHttpProxy = (value) => typeof value === 'string' ? value.trim() : ''
+
+const isValidHttpProxy = (value) => {
+  const proxy = typeof value === 'string' ? value : ''
+  if (!proxy.trim()) return true
+
+  const match = proxy.match(httpProxyPattern)
+  if (/\s/.test(proxy) || !match) return false
+
+  try {
+    const url = new URL(proxy)
+    const port = Number(match[1])
+    return url.protocol === 'http:' && Boolean(url.hostname) &&
+      Number.isInteger(port) && port >= 1 && port <= 65535 &&
+      Boolean(url.username) === Boolean(url.password) && url.pathname === '/' &&
+      !url.search && !url.hash
+  } catch {
+    return false
+  }
+}
+
+const validateChannelHttpProxy = () => {
+  const isValid = isValidHttpProxy(form.http_proxy)
+  proxyError.value = isValid ? '' : t('channels.http_proxy_format_error')
+  if (!isValid) {
+    ElMessage.warning(t('channels.http_proxy_format_error'))
+  }
+  return isValid
+}
+
 const openCreateDialog = () => {
   isEdit.value = false
   currentId.value = null
@@ -693,6 +752,7 @@ const openCreateDialog = () => {
   Object.keys(df).forEach(k => { form[k] = df[k] })
   modelIdErrors.value = []
   protocolErrors.value = []
+  proxyError.value = ''
   resetDetectedModels()
   dialogVisible.value = true
 }
@@ -703,12 +763,15 @@ const handleEdit = (row) => {
   form.name = row.name
   form.api_key = row.api_key
   form.base_url = row.base_url || ''
+  form.http_proxy = row.http_proxy || ''
   form.is_active = row.is_active
   form.model_ids = (row.model_ids && row.model_ids.length > 0)
     ? JSON.parse(JSON.stringify(row.model_ids))
     : []
-  modelIdErrors.value = form.model_ids.map(() => '')
-  protocolErrors.value = form.model_ids.map(() => '')
+  modelIdErrors.value = []
+  protocolErrors.value = []
+  proxyError.value = ''
+  syncModelEntryStates()
   resetDetectedModels()
   dialogVisible.value = true
 }
@@ -729,6 +792,8 @@ const submitForm = async () => {
   if (protocolErrors.value.some(Boolean)) {
     return ElMessage.warning(t('channels.model_protocol_required'))
   }
+
+  if (!validateChannelHttpProxy()) return
 
   // 校验同一用途下 model_id 不可重复；同一 model_id 允许用于不同用途
   const seen = new Map()
@@ -755,6 +820,7 @@ const submitForm = async () => {
       name: form.name,
       api_key: form.api_key,
       base_url: form.base_url || null,
+      http_proxy: normalizeHttpProxy(form.http_proxy) || null,
       is_active: form.is_active,
       model_ids: form.model_ids.map(buildModelEntryPayload)
     }

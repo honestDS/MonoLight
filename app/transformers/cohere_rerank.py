@@ -11,6 +11,7 @@ from app.core.constants import (
 from app.core.exceptions import RerankException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 
 from .base import BaseRerankTransformer
 
@@ -27,6 +28,7 @@ class CohereRerankTransformer(BaseRerankTransformer):
         documents: list[str],
         top_n: int | None = None,
         timeout: float = 15.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         headers = {
@@ -44,11 +46,12 @@ class CohereRerankTransformer(BaseRerankTransformer):
         url = f"{self._normalize_rerank_base_url(base_url)}/rerank"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise RerankException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
@@ -68,6 +71,7 @@ class CohereRerankTransformer(BaseRerankTransformer):
         documents: list[str],
         top_n: int | None = None,
         timeout: float = 15.0,
+        http_proxy: str | None = None,
     ) -> list[dict[str, Any]]:
         if not documents:
             return []
@@ -80,6 +84,7 @@ class CohereRerankTransformer(BaseRerankTransformer):
             documents=documents,
             top_n=top_n,
             timeout=timeout,
+            http_proxy=http_proxy,
         )
 
         raw_results = response.get("results")

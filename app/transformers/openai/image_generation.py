@@ -7,6 +7,7 @@ from app.core.constants import ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, ERR_LLM_C
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 
 from ..base import BaseImageGenerationTransformer
 
@@ -26,6 +27,7 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
         response_format: str | None = None,
         style: str | None = None,
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         headers = {
@@ -58,11 +60,12 @@ class OpenAIImageGenerationTransformer(BaseImageGenerationTransformer):
         url = f"{self._normalize_image_base_url(base_url)}/images/generations"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)

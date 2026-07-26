@@ -12,6 +12,7 @@ from app.core.constants import (
 from app.core.exceptions import EmbeddingException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 
 from ..base import BaseEmbeddingTransformer
 
@@ -27,6 +28,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         input_texts: str | list[str],
         suppress_error_log: bool = False,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         headers = {
@@ -48,11 +50,12 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         url = f"{self._normalize_embedding_base_url(base_url)}/embeddings"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise EmbeddingException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
@@ -75,6 +78,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         batch_size: int = 16,
         dimensions: int | None = None,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
     ) -> list[list[float]]:
         if not input_texts:
             return []
@@ -93,6 +97,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                 dimensions=dimensions,
                 dimensions_supported=dimensions_supported,
                 timeout=timeout,
+                http_proxy=http_proxy,
             )
 
             dimensions_supported = result["dimensions_supported"]
@@ -116,6 +121,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
         dimensions: int | None,
         dimensions_supported: bool | None,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
     ) -> dict[str, Any]:
         if dimensions and dimensions_supported is not False:
             try:
@@ -127,6 +133,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
                     suppress_error_log=dimensions_supported is None,
                     dimensions=dimensions,
                     timeout=timeout,
+                    http_proxy=http_proxy,
                 )
                 return {"response": response, "dimensions_supported": True}
             except EmbeddingException:
@@ -139,6 +146,7 @@ class OpenAIEmbeddingTransformer(BaseEmbeddingTransformer):
             model_id=model_id,
             input_texts=input_texts,
             timeout=timeout,
+            http_proxy=http_proxy,
         )
         return {"response": response, "dimensions_supported": False if dimensions else dimensions_supported}
 

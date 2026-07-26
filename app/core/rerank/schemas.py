@@ -22,3 +22,4 @@ class RerankConfig:
     candidate_k: int
     timeout: float
     priority: int
+    http_proxy: str | None = None

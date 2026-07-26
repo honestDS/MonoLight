@@ -12,6 +12,7 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.schemas import RerankConfig
 from app.core.retrieval.schemas import RetrievalHit
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.profile import Profile
 from app.providers.rerank import RerankClient
@@ -69,6 +70,7 @@ async def get_profile_rerank_config(
         candidate_k=rerank_channel.rerank_candidate_k,
         timeout=model_entry.get("rerank_timeout") if model_entry.get("rerank_timeout") is not None else rerank_channel.rerank_timeout,
         priority=_rule.priority,
+        http_proxy=get_channel_http_proxy(channel),
     )
 
 
@@ -92,6 +94,7 @@ async def rerank_retrieval_hits(
         documents=documents,
         top_n=final_top_k,
         timeout=config.timeout,
+        http_proxy=config.http_proxy,
     )
 
     if not results:

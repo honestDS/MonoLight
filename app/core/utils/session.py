@@ -9,6 +9,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.utils.dispatcher.helpers import format_exception_message
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -48,6 +49,7 @@ async def generate_session_title(
     protocol: str,
     max_tokens: int = 200,
     raise_on_error: bool = False,
+    http_proxy: str | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -73,6 +75,7 @@ async def generate_session_title(
             temperature=0.3,  # 较低随机性以获得更准确的标题
             max_tokens=max_tokens,
             protocol=protocol,
+            http_proxy=http_proxy,
         )
 
         title = (response.message.content or "").strip()
@@ -140,6 +143,7 @@ async def generate_session_title_for_active_profile(db: AsyncSession, uid: str, 
                     protocol=resolve_model_protocol(model_entry),
                     max_tokens=model_entry.get("max_tokens") or 200,
                     raise_on_error=True,
+                    http_proxy=get_channel_http_proxy(channel),
                 )
             except Exception as exc:
                 excluded_priorities.add(rule.priority)

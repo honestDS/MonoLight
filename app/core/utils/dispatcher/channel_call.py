@@ -9,6 +9,7 @@ from app.core.exceptions import ApiKeyException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.request_token_baseline import extract_provider_token_metrics
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
@@ -69,6 +70,7 @@ async def generate_chat_with_fallback(
                 tools=tools,
                 protocol=resolve_model_protocol(model_entry),
                 timeout=chat_params["chat_timeout"],
+                http_proxy=get_channel_http_proxy(chat_channel_obj),
                 **request_context_kwargs,
             )
             ai_msg = response.message

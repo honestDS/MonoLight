@@ -22,13 +22,15 @@ from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.session_notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
-from app.providers.database.bootstrap import create_database_tables
+from app.providers.database import AsyncSessionLocal
+from app.providers.database.bootstrap import init_database_schema
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 兼容直接运行 main.py 或 uvicorn main:app，不能依赖父启动器预先建表。
-    await create_database_tables()
+    # 兼容直接运行 main.py 或 uvicorn main:app，不能依赖父启动器预先建表或迁移。
+    async with AsyncSessionLocal() as session:
+        await init_database_schema(session)
     await session_notifier.start()
 
     # 记录启动时的信息，确保此时异步环境已就绪，日志能够入库

@@ -1,10 +1,12 @@
 """渠道模型：渠道实体、渠道规则与渠道配置"""
 
+import copy
 import enum
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    field_validator,
     model_validator,
 )
 from pydantic import (
@@ -25,6 +27,7 @@ from app.core.constants import (
 )
 from app.core.crypto import decrypt_api_key, encrypt_api_key
 from app.core.i18n import t
+from app.core.utils.http_proxy import normalize_http_proxy
 
 ENCRYPTED_API_KEY_PREFIX = "enc:v1:"
 
@@ -65,6 +68,21 @@ class ImageGenerationQuality(enum.StrEnum):
     HIGH = "high"
 
 
+class ChannelModelAdvancedSettings(BaseModel):
+    """可扩展的模型高级设置。"""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ChannelModelIdsNormalizationError(ValueError):
+    """模型条目规范化失败，保留失败条目索引。"""
+
+    def __init__(self, index: int, error: str):
+        self.index = index
+        self.error = error
+        super().__init__(error)
+
+
 class ChannelModelItem(BaseModel):
     """渠道下单个模型条目的完整配置"""
 
@@ -85,6 +103,10 @@ class ChannelModelItem(BaseModel):
     rerank_timeout: float | None = PydanticField(None, gt=0, le=120, description="重排模型调用超时（秒），RERANK 专属")
     is_enabled: bool = PydanticField(True, description="是否启用该模型条目")
     description: str | None = PydanticField(None, description="模型描述")
+    advanced_settings: ChannelModelAdvancedSettings = PydanticField(
+        default_factory=ChannelModelAdvancedSettings,
+        description="模型高级设置",
+    )
 
     @model_validator(mode="after")
     def validate_usage_specific_fields(self):
@@ -122,16 +144,47 @@ def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None
     return None, {}
 
 
+def normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
+    """仅规范化模型条目的高级设置，避免为历史条目补入其它默认字段。"""
+    if not model_ids:
+        return []
+
+    normalized_model_ids = []
+    for index, item in enumerate(model_ids):
+        normalized_item = copy.deepcopy(item)
+        if not isinstance(normalized_item, dict):
+            normalized_model_ids.append(normalized_item)
+            continue
+
+        advanced_settings = normalized_item.get("advanced_settings")
+        if advanced_settings is None:
+            advanced_settings = {}
+        try:
+            normalized_item["advanced_settings"] = ChannelModelAdvancedSettings.model_validate(advanced_settings).model_dump(mode="json")
+        except Exception as exc:
+            raise ChannelModelIdsNormalizationError(index, str(exc)) from exc
+
+        normalized_model_ids.append(normalized_item)
+
+    return normalized_model_ids
+
+
 class ChannelBase(SQLModel):
     name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
     api_key: str = Field(nullable=False, min_length=1)
     base_url: str | None = Field(default=None)
+    http_proxy: str | None = Field(default=None, description="渠道 HTTP 代理")
     is_active: bool = Field(default=True)
     model_ids: list[dict] = Field(
         default_factory=list,
         sa_column=Column(JSON),
         description="模型条目列表，每项符合 ChannelModelItem 结构",
     )
+
+    @field_validator("http_proxy", mode="before")
+    @classmethod
+    def validate_http_proxy(cls, value: object) -> str | None:
+        return normalize_http_proxy(value)
 
 
 class ModelChannel(ChannelBase, table=True):
@@ -197,8 +250,14 @@ class ChannelUpdate(SQLModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     api_key: str | None = Field(None, min_length=1)
     base_url: str | None = None
+    http_proxy: str | None = None
     is_active: bool | None = None
     model_ids: list[dict] | None = None
+
+    @field_validator("http_proxy", mode="before")
+    @classmethod
+    def validate_http_proxy(cls, value: object) -> str | None:
+        return normalize_http_proxy(value)
 
 
 def _safe_decrypt_api_key(api_key: str | None) -> str:
@@ -219,6 +278,7 @@ def _channel_response_data(obj) -> dict:
         "name": obj.name,
         "api_key": _safe_decrypt_api_key(getattr(obj, "api_key", None)),
         "base_url": obj.base_url,
+        "http_proxy": obj.http_proxy,
         "is_active": obj.is_active,
         "model_ids": obj.model_ids or [],
     }
@@ -229,6 +289,7 @@ class ChannelResponse(BaseModel):
     name: str
     api_key: str
     base_url: str | None
+    http_proxy: str | None = None
     is_active: bool
     model_ids: list[dict]
     model_config = ConfigDict(from_attributes=True)

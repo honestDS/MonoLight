@@ -31,6 +31,7 @@ class ImageGenerationClient:
         response_format: str | None = None,
         style: str | None = None,
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         transformer = cls.get_transformer(protocol)
@@ -45,5 +46,6 @@ class ImageGenerationClient:
             response_format=response_format,
             style=style,
             timeout=timeout,
+            http_proxy=http_proxy,
             **kwargs,
         )

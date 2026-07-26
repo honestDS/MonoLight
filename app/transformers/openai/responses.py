@@ -16,6 +16,7 @@ from app.core.constants import (
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
 from .chat_completions import OpenAIChatCompletionsTransformer, _is_timeout_exception
@@ -37,6 +38,7 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         headers = {
@@ -56,11 +58,12 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         url = f"{base_url.rstrip('/')}/responses"
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=client_timeout,
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
+                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     txt = await resp.text()
                     if resp.status != 200:
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
@@ -86,6 +89,7 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         headers = {
@@ -112,11 +116,12 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         try:
+            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=None),
                 connector=aiohttp.TCPConnector(ssl=False),
             ) as session:
-                resp_cm = session.post(url, headers=headers, json=payload)
+                resp_cm = session.post(url, headers=headers, json=payload, **proxy_kwargs)
                 try:
                     resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
                 except TimeoutError:

@@ -76,6 +76,7 @@ export const defaultModelEntry = () => ({
   top_p: 1,
   max_tokens: 2048,
   embedding_dimensions: null,
+  advanced_settings: {},
   description: '',
 })
 
@@ -84,6 +85,7 @@ export const defaultChannelForm = () => ({
   name: '',
   api_key: '',
   base_url: '',
+  http_proxy: '',
   is_active: true,
   model_ids: []
 })

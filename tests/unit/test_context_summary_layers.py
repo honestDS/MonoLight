@@ -15,6 +15,7 @@ class _SummaryChannel:
     id = 7
     name = "summary-channel"
     base_url = "https://example.invalid"
+    http_proxy = "http://proxy.example.com:8080"
 
     def get_decrypted_api_key(self) -> str:
         return "secret"
@@ -62,6 +63,7 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
         max_output_tokens=500,
         safety_margin_tokens=256,
         input_budget_tokens=7244,
+        http_proxy="http://proxy.example.com:8080",
     )
     assert selection_calls == [
         {
@@ -100,6 +102,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
         max_output_tokens=512,
         safety_margin_tokens=256,
         input_budget_tokens=7424,
+        http_proxy="http://proxy.example.com:8080",
     )
 
     result = await call_module.call_context_summary_model(
@@ -120,6 +123,7 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
     assert request["max_tokens"] == 512
     assert request["protocol"] == "openai"
     assert request["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
+    assert request["http_proxy"] == "http://proxy.example.com:8080"
 
 
 @pytest.mark.asyncio

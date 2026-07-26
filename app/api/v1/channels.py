@@ -8,7 +8,7 @@ import json
 import re
 
 from fastapi import APIRouter, Body, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.core.constants import (
     ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID,
     ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE,
+    ERR_CHANNEL_MODEL_IDS_ITEM_INVALID,
     ERR_CHANNEL_MODEL_LIST_FAILED,
     ERR_CHANNEL_MODEL_LIST_NO_API_KEY,
     ERR_CHANNEL_MODEL_LIST_NO_URL,
@@ -53,16 +54,19 @@ from app.core.utils.channel_profile_sync import (
     _sync_audit_model_id_renames,
     _sync_channel_model_id_renames,
 )
+from app.core.utils.http_proxy import get_channel_http_proxy, normalize_http_proxy
 from app.models.channel import (
     MODEL_PROTOCOLS_BY_USAGE,
     ChannelCreate,
     ChannelListResponse,
+    ChannelModelIdsNormalizationError,
     ChannelResponse,
     ChannelUpdate,
     ImageGenerationQuality,
     ImageGenerationSize,
     ModelProtocol,
     ModelUsage,
+    normalize_channel_model_ids,
     resolve_model_protocol,
     validate_channel_model_ids,
 )
@@ -77,13 +81,22 @@ from app.schemas.response import (
 )
 
 
-class ChannelModelListRequest(BaseModel):
+class ChannelHTTPProxyRequest(BaseModel):
+    http_proxy: str | None = None
+
+    @field_validator("http_proxy", mode="before")
+    @classmethod
+    def validate_http_proxy(cls, value: object) -> str | None:
+        return normalize_http_proxy(value)
+
+
+class ChannelModelListRequest(ChannelHTTPProxyRequest):
     api_key: str | None = None
     base_url: str | None = None
     timeout: float = PydanticField(30.0, gt=0, le=120)
 
 
-class ChannelChatTestRequest(BaseModel):
+class ChannelChatTestRequest(ChannelHTTPProxyRequest):
     protocol: ModelProtocol | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -94,7 +107,7 @@ class ChannelChatTestRequest(BaseModel):
     timeout: float = PydanticField(60.0, gt=0, le=600)
 
 
-class ChannelImageGenerationTestRequest(BaseModel):
+class ChannelImageGenerationTestRequest(ChannelHTTPProxyRequest):
     protocol: ModelProtocol | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -110,7 +123,7 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
-def _normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
+def _clean_channel_model_ids_for_usage(model_ids: list[dict] | None) -> list[dict]:
     normalized_model_ids = []
     for item in model_ids or []:
         normalized_item = copy.deepcopy(item)
@@ -119,6 +132,13 @@ def _normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
             normalized_item.pop("quality", None)
         normalized_model_ids.append(normalized_item)
     return normalized_model_ids
+
+
+def _prepare_channel_model_ids(model_ids: list[dict] | None) -> tuple[list[dict] | None, dict | None]:
+    try:
+        return normalize_channel_model_ids(_clean_channel_model_ids_for_usage(model_ids)), None
+    except ChannelModelIdsNormalizationError as exc:
+        return None, {"index": exc.index, "error": exc.error}
 
 
 router = APIRouter(prefix="/channels", tags=["Channels"], dependencies=[Depends(get_current_user)])
@@ -130,7 +150,9 @@ async def create_channel(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    channel_in.model_ids = _normalize_channel_model_ids(channel_in.model_ids)
+    channel_in.model_ids, normalization_error = _prepare_channel_model_ids(channel_in.model_ids)
+    if normalization_error:
+        return StandardResponse.error(code=422, message=ERR_CHANNEL_MODEL_IDS_ITEM_INVALID, **normalization_error)
     validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
     if validation_error:
         return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
@@ -208,6 +230,7 @@ async def list_channel_models(
             api_key=api_key,
             base_url=base_url,
             timeout=payload.timeout,
+            http_proxy=payload.http_proxy,
         )
     except BaseBusinessException as e:
         detail = t(e.message, default=e.message, **e.kwargs)
@@ -253,6 +276,7 @@ async def test_channel_chat(
             max_tokens=payload.max_tokens or 0,
             top_p=payload.top_p,
             timeout=payload.timeout,
+            http_proxy=payload.http_proxy,
         )
         content = response.message.content
         if isinstance(content, str):
@@ -307,6 +331,7 @@ async def test_channel_image_generation(
             n=1,
             quality=payload.quality,
             timeout=payload.timeout,
+            http_proxy=payload.http_proxy,
         )
         images = response.get("data") if isinstance(response, dict) else None
         if not isinstance(images, list) or not images:
@@ -348,7 +373,9 @@ async def update_channel(
 
     # 校验 model_ids 合法性（如果传入）
     if channel_in.model_ids is not None:
-        channel_in.model_ids = _normalize_channel_model_ids(channel_in.model_ids)
+        channel_in.model_ids, normalization_error = _prepare_channel_model_ids(channel_in.model_ids)
+        if normalization_error:
+            return StandardResponse.error(code=422, message=ERR_CHANNEL_MODEL_IDS_ITEM_INVALID, **normalization_error)
         validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
         if validation_error:
             return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
@@ -462,6 +489,7 @@ async def test_embedding_dimension(
             model_id=model_id,
             input_texts=["dimension test"],
             protocol=resolve_model_protocol(model_entry),
+            http_proxy=get_channel_http_proxy(db_obj),
         )
         if "data" in embedding_response and len(embedding_response["data"]) > 0:
             dimension = len(embedding_response["data"][0]["embedding"])

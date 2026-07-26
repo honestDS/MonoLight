@@ -29,14 +29,17 @@
 }
 
 .channel-settings-row--fields {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 12px;
 }
 
 .channel-settings-row--fields .el-form-item {
-  flex: 1 1 calc(50% - 12px);
-  min-width: 240px;
+  min-width: 0;
+}
+
+.channel-model-detect-form-item {
+  grid-column: 1 / -1;
 }
 
 .model-entry-card {
@@ -69,6 +72,15 @@
   flex-wrap: wrap;
   gap: 0 12px;
   padding: 12px 14px 2px;
+}
+
+.http-proxy-form-item {
+  align-self: start;
+}
+
+.http-proxy-input-wrapper {
+  width: 100%;
+  min-width: 0;
 }
 
 .model-entry-field {
@@ -173,4 +185,23 @@
   object-fit: contain;
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
+}
+
+@media (max-width: 768px) {
+  .channel-settings-row--fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .channel-model-detect-form-item {
+    grid-column: 1;
+  }
+
+  .channel-model-detect-row {
+    flex-wrap: wrap;
+  }
+
+  .channel-model-detect-select {
+    flex: 1 1 100%;
+    width: 100%;
+  }
 }

@@ -24,6 +24,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelConfig, resolve_model_protocol
 from app.providers.image_generation import ImageGenerationClient
 
@@ -235,6 +236,7 @@ class ImageGenerationExecutor(BaseExecutor):
                     n=1,
                     quality=resolved_quality,
                     timeout=float(getattr(getattr(self.cfg, "tool", None), "image_generation_timeout", 60.0) or 60.0),
+                    http_proxy=get_channel_http_proxy(channel),
                 )
                 images = response.get("data") if isinstance(response, dict) else None
                 if not isinstance(images, list) or not images:

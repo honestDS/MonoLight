@@ -21,6 +21,7 @@ class BaseTransformer(ABC):
         api_key: str,
         base_url: str,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> list[dict[str, Any]]:
         raise LLMException(ERR_CHANNEL_MODEL_LIST_UNSUPPORTED, protocol=self.__class__.__name__)
@@ -37,6 +38,7 @@ class BaseTransformer(ABC):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> InternalResponse:
         pass
@@ -53,6 +55,7 @@ class BaseTransformer(ABC):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> AsyncGenerator[dict[str, Any]]:
         pass
@@ -111,6 +114,7 @@ class BaseEmbeddingTransformer(ABC):
         model_id: str,
         input_texts: str | list[str],
         timeout: float = 30.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -125,6 +129,7 @@ class BaseEmbeddingTransformer(ABC):
         batch_size: int = 16,
         dimensions: int | None = None,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
     ) -> list[list[float]]:
         pass
 
@@ -143,6 +148,7 @@ class BaseImageGenerationTransformer(ABC):
         response_format: str | None = None,
         style: str | None = None,
         timeout: float = 60.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -159,6 +165,7 @@ class BaseRerankTransformer(ABC):
         documents: list[str],
         top_n: int | None = None,
         timeout: float = 15.0,
+        http_proxy: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         pass
@@ -173,5 +180,6 @@ class BaseRerankTransformer(ABC):
         documents: list[str],
         top_n: int | None = None,
         timeout: float = 15.0,
+        http_proxy: str | None = None,
     ) -> list[dict[str, Any]]:
         pass

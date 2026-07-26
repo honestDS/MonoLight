@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.channel_router import select_channel
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.utils.dispatcher.helpers import resolve_chat_params
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelConfig, ModelUsage, resolve_model_protocol
 
 
@@ -21,6 +22,7 @@ class ContextSummaryModelSnapshot:
     max_output_tokens: int
     safety_margin_tokens: int
     input_budget_tokens: int
+    http_proxy: str | None = None
 
     def accepts_prompt_tokens(self, prompt_tokens: int) -> bool:
         return prompt_tokens <= self.input_budget_tokens
@@ -67,4 +69,5 @@ async def select_context_summary_model(
             1,
             context_window_tokens - max_output_tokens - normalized_safety_margin,
         ),
+        http_proxy=get_channel_http_proxy(channel),
     )

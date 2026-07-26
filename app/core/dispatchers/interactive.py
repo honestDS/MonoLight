@@ -63,6 +63,7 @@ from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
+from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.request_token_baseline import (
     build_request_token_baseline,
@@ -305,6 +306,7 @@ class InteractiveDispatcherMixin:
                                     "tools": current_tools,
                                     "protocol": protocol,
                                     "timeout": chat_params["chat_timeout"],
+                                    "http_proxy": get_channel_http_proxy(chat_channel_obj),
                                 }
                                 previous_in_memory_llm_request_metadata = latest_llm_request_metadata
                                 session = None

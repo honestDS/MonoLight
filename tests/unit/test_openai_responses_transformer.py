@@ -54,6 +54,7 @@ class _FakeAiohttpResponse:
 class _FakeClientSession:
     def __init__(self, response: _FakeAiohttpResponse):
         self._response = response
+        self.post_calls: list[dict] = []
 
     async def __aenter__(self):
         return self
@@ -61,7 +62,8 @@ class _FakeClientSession:
     async def __aexit__(self, _exc_type, _exc, _traceback):
         return False
 
-    def post(self, _url, **_kwargs):
+    def post(self, url, **kwargs):
+        self.post_calls.append({"url": url, "kwargs": kwargs})
         return self._response
 
 
@@ -164,6 +166,45 @@ async def test_responses_generate_creates_connector_with_ssl_disabled(monkeypatc
     assert len(connector_calls) == 1
     assert connector_calls[0]["ssl"] is False
     assert session_calls[0]["connector"] is connector
+
+
+@pytest.mark.asyncio
+async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatch) -> None:
+    response = _FakeAiohttpResponse(
+        text=json.dumps(
+            {
+                "id": "resp_1",
+                "status": "completed",
+                "model": "gpt-test",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Answer"}],
+                    }
+                ],
+            }
+        )
+    )
+    sessions: list[_FakeClientSession] = []
+
+    def fake_client_session(**_kwargs):
+        session = _FakeClientSession(response)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(openai_responses_module.aiohttp, "ClientSession", fake_client_session)
+
+    await OpenAIResponsesTransformer().generate(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="gpt-test",
+        messages=[InternalMessage(role=MessageRole.USER, content="Question")],
+        http_proxy="http://user%40name:password%3Awith%2Fslash@proxy.example.com:8080",
+    )
+
+    post_kwargs = sessions[0].post_calls[0]["kwargs"]
+    assert post_kwargs["proxy"] == "http://proxy.example.com:8080"
+    assert post_kwargs["proxy_headers"]["Proxy-Authorization"] == ("Basic dXNlckBuYW1lOnBhc3N3b3JkOndpdGgvc2xhc2g=")
 
 
 @pytest.mark.asyncio

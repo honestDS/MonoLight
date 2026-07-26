@@ -31,4 +31,5 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_NOT_FOUND": "渠道中未找到对应模型条目",
     "ERR_CHANNEL_USAGE_MISMATCH": "模型用途不匹配：期望 {expected}，实际 {actual}",
     "ERR_CHANNEL_MODEL_DISABLED": "模型条目已禁用",
+    "ERR_CHANNEL_HTTP_PROXY_INVALID": "渠道 HTTP 代理格式无效，仅支持 http://host:port 或 http://username:password@host:port，用户名密码中的特殊字符需 URL 编码；留空表示直连。",
 }

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,8 @@ from app.providers.database.bootstrap import ensure_migration_record_table
 from scripts import migration_20260717_add_audit_confirmation_records as audit_migration
 from scripts import migration_20260719_add_background_task_audit_binding as background_task_migration
 from scripts import migration_20260724_add_audit_tool_result_versions as audit_tool_result_version_migration
+from scripts import migration_20260727_add_channel_http_proxy as channel_http_proxy_migration
+from scripts import migration_20260727_drop_channel_type as drop_channel_type_migration
 
 
 @pytest.mark.parametrize(
@@ -195,6 +198,84 @@ async def test_audit_tool_result_version_migration_is_idempotent_after_metadata_
             )
         assert "audit_tool_result_version" in table_names
         assert "ix_audit_tool_result_version_audit_record_id" in indexes
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_drop_channel_type_migration_is_idempotent_on_sqlite_legacy_channel(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'drop-channel-type-migration.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE TABLE channel (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, channel_type VARCHAR NOT NULL)"))
+        async with session_factory() as session:
+            await drop_channel_type_migration.migrate(session)
+            await session.commit()
+            await drop_channel_type_migration.migrate(session)
+            await session.commit()
+        async with engine.connect() as connection:
+            column_names = await connection.run_sync(lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("channel")})
+        assert "channel_type" not in column_names
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_channel_http_proxy_migration_promotes_only_unambiguous_legacy_proxy_on_sqlite(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'channel-http-proxy-migration.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    single_proxy_model_ids = json.dumps(
+        [
+            {
+                "model_id": "single-proxy-model",
+                "advanced_settings": {
+                    "http_proxy": "http://proxy.example.com:8080",
+                    "future_extension": {"enabled": True},
+                },
+            }
+        ],
+        indent=2,
+    )
+    conflicting_proxy_model_ids = json.dumps(
+        [
+            {
+                "model_id": "first-model",
+                "advanced_settings": {"http_proxy": "http://first-proxy.example.com:8080"},
+            },
+            {
+                "model_id": "second-model",
+                "advanced_settings": {"http_proxy": "http://second-proxy.example.com:8080"},
+            },
+        ],
+        separators=(", ", ": "),
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("CREATE TABLE channel (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, model_ids TEXT)"))
+            await connection.execute(
+                text("INSERT INTO channel (id, name, model_ids) VALUES (:id, :name, :model_ids)"),
+                [
+                    {"id": 1, "name": "single-proxy", "model_ids": single_proxy_model_ids},
+                    {"id": 2, "name": "conflicting-proxies", "model_ids": conflicting_proxy_model_ids},
+                ],
+            )
+
+        async with session_factory() as session:
+            await channel_http_proxy_migration.migrate(session)
+            await session.commit()
+            await channel_http_proxy_migration.migrate(session)
+            await session.commit()
+
+        async with engine.connect() as connection:
+            column_names = await connection.run_sync(lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("channel")})
+            rows = (await connection.execute(text("SELECT id, model_ids, http_proxy FROM channel ORDER BY id"))).mappings().all()
+
+        assert "http_proxy" in column_names
+        assert rows[0]["http_proxy"] == "http://proxy.example.com:8080"
+        assert rows[1]["http_proxy"] is None
+        assert rows[0]["model_ids"] == single_proxy_model_ids
+        assert rows[1]["model_ids"] == conflicting_proxy_model_ids
     finally:
         await engine.dispose()
 

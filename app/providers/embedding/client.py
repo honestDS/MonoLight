@@ -25,6 +25,7 @@ class EmbeddingClient:
         model_id: str,
         protocol: str,
         input_texts: str | list[str],
+        http_proxy: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         transformer = cls.get_transformer(protocol)
@@ -33,6 +34,7 @@ class EmbeddingClient:
             base_url=base_url,
             model_id=model_id,
             input_texts=input_texts,
+            http_proxy=http_proxy,
             **kwargs,
         )
 
@@ -47,6 +49,7 @@ class EmbeddingClient:
         batch_size: int = 16,
         dimensions: int | None = None,
         timeout: float = 30.0,
+        http_proxy: str | None = None,
     ) -> list[list[float]]:
         transformer = cls.get_transformer(protocol)
         return await transformer.embed_texts(
@@ -57,4 +60,5 @@ class EmbeddingClient:
             batch_size=batch_size,
             dimensions=dimensions,
             timeout=timeout,
+            http_proxy=http_proxy,
         )
