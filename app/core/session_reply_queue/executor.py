@@ -666,6 +666,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
     async for event in ChatDispatcher.dispatch_stream(
         **dispatch_kwargs,
         context_summary_events_requested=context_summary_events_requested,
+        raise_errors=True,
     ):
         event_type = event.get("type")
         if event_type == "done":

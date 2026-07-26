@@ -49,7 +49,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
         try:
             response = await cls._dispatch_interactive(**dispatch_kwargs)
         except BaseBusinessException as exc:
-            await event_queue.put(("error", t(exc.message, default=exc.message, **exc.kwargs)))
+            await event_queue.put(("business_error", exc))
         except Exception as exc:
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_DISPATCHER_STREAM_ERROR"), exc_info=True)
             await event_queue.put(("error", t(str(exc), default=str(exc))))
@@ -120,6 +120,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
+        raise_errors: bool = False,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
         response_state: dict[str, str | None] = {"latest_response_id": None}
@@ -172,6 +173,11 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
                     continue
                 if item_type == "error":
                     yield cls._build_error_event(payload, session_id, request_id)
+                    break
+                if item_type == "business_error":
+                    if raise_errors:
+                        raise payload
+                    yield cls._build_error_event(payload.render_message(), session_id, request_id)
                     break
 
                 yield cls._build_done_event(

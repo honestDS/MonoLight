@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters import chat_web as chat_web_module
-from app.core.constants import ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
+from app.core.constants import ERR_LLM_STREAM_TIMEOUT, ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
+from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.exceptions import BaseBusinessException, LLMException
 from app.core.session_reply_queue.executor import _execute_foreground
 from app.core.session_reply_queue.manager import (
@@ -121,6 +122,44 @@ def test_llm_request_context_debug_log_reuses_provided_estimated_tokens(monkeypa
 
     assert bound_fields["estimated_context_tokens"] == 123
     assert logged_fields["estimated_context_tokens"] == 123
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stream_raise_errors_controls_business_exception_surface():
+    class FailingStreamDispatcher(StreamDispatcherMixin):
+        @classmethod
+        async def _dispatch_interactive(cls, **_kwargs):
+            raise LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
+
+    expected_error = LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
+
+    events = [
+        event
+        async for event in FailingStreamDispatcher.dispatch_stream(
+            db=None,
+            message="测试",
+            uid="user-1",
+            session_id="session-1",
+        )
+    ]
+
+    assert [event["type"] for event in events] == ["task_start", "error"]
+    assert events[1]["message"] == expected_error.render_message()
+
+    raised_events = []
+    with pytest.raises(LLMException) as exc_info:
+        async for event in FailingStreamDispatcher.dispatch_stream(
+            db=None,
+            message="测试",
+            uid="user-1",
+            session_id="session-1",
+            raise_errors=True,
+        ):
+            raised_events.append(event)
+
+    assert [event["type"] for event in raised_events] == ["task_start"]
+    assert exc_info.value.message == ERR_LLM_STREAM_TIMEOUT
+    assert exc_info.value.kwargs["timeout"] == 120.0
 
 
 @pytest.mark.asyncio
@@ -1309,6 +1348,63 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
             "commit": False,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
+    work = SimpleNamespace(
+        id=9,
+        sequence_no=1,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="foreground-message:session-1:13",
+        created_at=datetime(2026, 7, 13, 21, 0, 0),
+        execution_state={"stream_requested": True},
+    )
+
+    class FakeDb:
+        async def refresh(self, instance):
+            return None
+
+    class EventDb:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return EventDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def freeze_foreground_input(db, *, work, worker_id):
+        return "测试", [], [13]
+
+    async def get_latest_sequence(db, *, work_id):
+        return 0
+
+    async def dispatch_stream(**kwargs):
+        assert kwargs["raise_errors"] is True
+        raise LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
+        yield
+
+    monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_reply_queue_manager.freeze_foreground_input",
+        freeze_foreground_input,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.get_latest_sequence",
+        get_latest_sequence,
+    )
+    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", dispatch_stream)
+
+    with pytest.raises(LLMException) as exc_info:
+        await _execute_foreground(FakeDb(), work, "worker-1")
+
+    assert not isinstance(exc_info.value, RuntimeError)
+    assert exc_info.value.message == ERR_LLM_STREAM_TIMEOUT
+    assert exc_info.value.kwargs["timeout"] == 120.0
 
 
 @pytest.mark.asyncio
