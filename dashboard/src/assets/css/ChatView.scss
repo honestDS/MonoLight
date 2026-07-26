@@ -33,15 +33,15 @@
   align-items: center;
   justify-content: center;
   gap: 4px 12px;
-  width: 100%;
+  width: calc(100% - 12px);
   padding: 6px 10px;
   box-sizing: border-box;
   color: #606266;
   font-size: 12px;
   line-height: 18px;
   pointer-events: none;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid #dcdfe6;
+  background: #FFF;
+  border-bottom: 1px solid #dcdfe6;
 }
 
 .llm-request-metadata-item {

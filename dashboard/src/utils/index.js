@@ -57,6 +57,7 @@ export const findMessageReplacementIndex = (messages, incomingMessage) => {
 export const mergeRemoteMessage = (localMessage, remoteMessage) => ({
   ...localMessage,
   ...remoteMessage,
+  id: localMessage?.id ?? remoteMessage?.id,
   response_id: localMessage?.response_id ?? remoteMessage?.response_id,
   request_id: localMessage?.request_id ?? remoteMessage?.request_id,
   work_id: localMessage?.work_id ?? remoteMessage?.work_id,

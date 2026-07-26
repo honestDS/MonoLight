@@ -98,6 +98,8 @@ export function useChatTransport() {
       onAgentLoopOutput,
       onLlmRequestMetadata,
       onWorkFinished,
+      deferAgentLoopOutput = false,
+      completeBeforeWorkFinished = false,
       scrollToBottom,
       setLoading,
       requestId: currentRequestId
@@ -143,7 +145,7 @@ export function useChatTransport() {
     }
 
     if (type === 'agent_loop_output') {
-      if (onAgentLoopOutput) onAgentLoopOutput(data)
+      if (!deferAgentLoopOutput && onAgentLoopOutput) onAgentLoopOutput(data)
       if (scrollToBottom) scrollToBottom()
       return
     }
@@ -203,9 +205,15 @@ export function useChatTransport() {
 
     // 4. 处理对话结束
     if (type === 'done') {
-      if (onWorkFinished) onWorkFinished(data)
-      if (onComplete) {
-        onComplete(data, null, requestId)
+      const complete = () => {
+        if (onComplete) onComplete(data, null, requestId)
+      }
+      if (completeBeforeWorkFinished) {
+        complete()
+        if (onWorkFinished) onWorkFinished(data)
+      } else {
+        if (onWorkFinished) onWorkFinished(data)
+        complete()
       }
       getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (setLoading) {

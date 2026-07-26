@@ -60,9 +60,9 @@ export function useChatState() {
   /**
    * 滚动到消息列表底部
    */
-  const scrollToBottom = (behavior = 'smooth') => {
+  const scrollToBottom = (behavior = 'smooth', restoreFollow = true) => {
     if (messageList.value?.scrollToBottom) {
-      return messageList.value.scrollToBottom(behavior)
+      return messageList.value.scrollToBottom(behavior, restoreFollow)
     }
     if (messageList.value) {
       messageList.value.scrollTo({
@@ -70,6 +70,12 @@ export function useChatState() {
         behavior
       })
     }
+  }
+
+  const followOutputToBottom = (behavior = 'auto') => {
+    const list = messageList.value
+    if (!list || typeof list.canFollowOutput !== 'function' || !list.canFollowOutput()) return
+    return scrollToBottom(behavior, false)
   }
 
   // 滚动到指定消息位置
@@ -92,6 +98,7 @@ export function useChatState() {
     clearMessages,
     // 滚动操作
     scrollToBottom,
+    followOutputToBottom,
     scrollToMessage
   }
 }

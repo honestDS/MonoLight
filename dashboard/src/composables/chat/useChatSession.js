@@ -1,5 +1,5 @@
 // 聊天会话管理 composable，聚合状态、会话、通信与消息处理
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
@@ -12,7 +12,9 @@ import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
+const HTTP_HISTORY_IDLE_SYNC_INTERVAL_MS = 15000
+const HTTP_HISTORY_FAST_SYNC_WINDOW_MS = 120000
 
 const normalizeHistoryMessage = (message) => {
   const normalizedMessage = {
@@ -157,7 +159,7 @@ export function useChatSession() {
 
     chatState.messages.value = updateMessages(chatState.messages.value, event)
     void nextTick(() => {
-      if (isCurrentRequestSession()) chatState.scrollToBottom()
+      if (isCurrentRequestSession()) chatState.followOutputToBottom('auto')
     })
   }
 
@@ -288,6 +290,131 @@ export function useChatSession() {
     }
   }
 
+  let httpHistorySyncTimer = null
+  let isHttpHistorySyncing = false
+  let httpHistoryFastSyncUntil = 0
+  let backgroundTaskSessionId = null
+  let httpHistorySyncVersion = 0
+
+  const stopHttpHistorySync = () => {
+    httpHistorySyncVersion += 1
+    if (httpHistorySyncTimer !== null) {
+      clearTimeout(httpHistorySyncTimer)
+      httpHistorySyncTimer = null
+    }
+    isHttpHistorySyncing = false
+    httpHistoryFastSyncUntil = 0
+    backgroundTaskSessionId = null
+  }
+
+  const syncCurrentHttpSessionHistory = async () => {
+    const sessionId = sessionManager.currentSessionId.value
+    if (
+      transport.transportMode.value !== 'http'
+      || !sessionId
+      || chatState.loading.value
+      || isHttpHistorySyncing
+    ) return
+
+    const syncVersion = httpHistorySyncVersion
+    isHttpHistorySyncing = true
+    try {
+      await mergeLatestSessionHistory(sessionId)
+      if (
+        syncVersion !== httpHistorySyncVersion
+        || transport.transportMode.value !== 'http'
+        || sessionId !== sessionManager.currentSessionId.value
+        || backgroundTaskSessionId !== sessionId
+      ) return
+
+      const response = await chatApi.backgroundTasks({
+        session_id: sessionId,
+        page: 1,
+        size: 20
+      })
+      if (
+        syncVersion !== httpHistorySyncVersion
+        || transport.transportMode.value !== 'http'
+        || sessionId !== sessionManager.currentSessionId.value
+      ) return
+
+      const tasks = response.data?.data || []
+      const hasUnfinishedTasks = tasks.some(task =>
+        ['pending', 'running'].includes(String(task.status || '').toLowerCase())
+        || ['pending', 'running'].includes(String(task.reply_status || '').toLowerCase())
+      )
+      if (!hasUnfinishedTasks) {
+        backgroundTaskSessionId = null
+        await mergeLatestSessionHistory(sessionId)
+      }
+    } catch (err) {
+      console.error('HTTP session history synchronization failed:', err)
+    } finally {
+      if (syncVersion === httpHistorySyncVersion) {
+        isHttpHistorySyncing = false
+      }
+    }
+  }
+
+  const scheduleNextHttpHistorySync = () => {
+    if (httpHistorySyncTimer !== null) {
+      clearTimeout(httpHistorySyncTimer)
+      httpHistorySyncTimer = null
+    }
+
+    const sessionId = sessionManager.currentSessionId.value
+    if (transport.transportMode.value !== 'http' || !sessionId) return
+
+    const syncVersion = httpHistorySyncVersion
+    const hasKnownBackgroundTasks = backgroundTaskSessionId === sessionId
+    const delay = Date.now() < httpHistoryFastSyncUntil || hasKnownBackgroundTasks
+      ? HTTP_HISTORY_FAST_SYNC_INTERVAL_MS
+      : HTTP_HISTORY_IDLE_SYNC_INTERVAL_MS
+
+    httpHistorySyncTimer = setTimeout(async () => {
+      if (syncVersion !== httpHistorySyncVersion) return
+      httpHistorySyncTimer = null
+      await syncCurrentHttpSessionHistory()
+      if (syncVersion === httpHistorySyncVersion) {
+        scheduleNextHttpHistorySync()
+      }
+    }, delay)
+  }
+
+  const activateHttpHistoryFastSync = (sessionId, hasBackgroundTasks = false) => {
+    if (
+      transport.transportMode.value !== 'http'
+      || !sessionId
+      || sessionId !== sessionManager.currentSessionId.value
+    ) return
+
+    httpHistoryFastSyncUntil = Math.max(
+      httpHistoryFastSyncUntil,
+      Date.now() + HTTP_HISTORY_FAST_SYNC_WINDOW_MS
+    )
+    if (hasBackgroundTasks) {
+      backgroundTaskSessionId = sessionId
+    }
+    scheduleNextHttpHistorySync()
+  }
+
+  watch(
+    () => [transport.transportMode.value, sessionManager.currentSessionId.value],
+    async ([transportMode, sessionId]) => {
+      stopHttpHistorySync()
+      if (transportMode !== 'http' || !sessionId) return
+
+      const syncVersion = httpHistorySyncVersion
+      await syncCurrentHttpSessionHistory()
+      if (syncVersion === httpHistorySyncVersion) {
+        scheduleNextHttpHistorySync()
+      }
+    },
+    { immediate: true }
+  )
+
+  onScopeDispose(stopHttpHistorySync)
+
   const applyAuditConfirmationStatus = (data) => {
     if (shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
@@ -350,25 +477,6 @@ export function useChatSession() {
     void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
       console.error('Audit tool result history merge failed:', err)
     })
-  }
-
-  const pollBackgroundTasksUntilSettled = async (sessionId, intervalSeconds = 2) => {
-    if (!sessionId) return
-    const maxAttempts = 60
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await sleep(Math.max(1, intervalSeconds) * 1000)
-      if (sessionId !== sessionManager.currentSessionId.value) return
-      await mergeLatestSessionHistory(sessionId)
-
-      const res = await chatApi.backgroundTasks({ session_id: sessionId, page: 1, size: 20 })
-      if (sessionId !== sessionManager.currentSessionId.value) return
-      const tasks = res.data?.data || []
-      const hasUnfinishedTasks = tasks.some(task => ['pending', 'running'].includes(task.status) || ['pending', 'running'].includes(task.reply_status))
-      if (!hasUnfinishedTasks) {
-        await mergeLatestSessionHistory(sessionId)
-        return
-      }
-    }
   }
 
   // ==================== 核心发送方法 ====================
@@ -457,6 +565,7 @@ export function useChatSession() {
    */
   const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null) => {
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
+    let finalResponseProcessed = false
     try {
       const response = await transport.httpSend({
         message: text,
@@ -465,6 +574,19 @@ export function useChatSession() {
         requestId,
         callbacks: {
           ...createLifecycleCallbacks(isCurrentRequestSession),
+          deferAgentLoopOutput: true,
+          completeBeforeWorkFinished: true,
+          onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
+            if (eventType === 'turn_end' || data?.type !== 'done' || !isCurrentRequestSession()) return
+            const responseData = data.response || data
+            const completedResponse = {
+              ...responseData,
+              ...(responseData?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
+              ...(responseData?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {})
+            }
+            messageProcessor.processAiResponse(chatState.messages, completedResponse, null, requestIdParam || requestId)
+            finalResponseProcessed = true
+          },
           onContextSummaryStart: (data) => {
             if (isCurrentRequestSession()) {
               if (!shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
@@ -510,17 +632,18 @@ export function useChatSession() {
         }, isCurrentRequestSession)
       }
 
+      if (response.has_background_tasks) {
+        activateHttpHistoryFastSync(requestSessionId, true)
+      }
+
       const auditConfirmation = parseAuditConfirmationResponse(response)
-      messageProcessor.processAiResponse(chatState.messages, response, null, requestId)
+      if (!finalResponseProcessed) {
+        messageProcessor.processAiResponse(chatState.messages, response, null, requestId)
+      }
       if (auditConfirmation) {
         chatState.loading.value = false
       }
 
-      if (response.has_background_tasks) {
-        void pollBackgroundTasksUntilSettled(requestSessionId, response.background_task_poll_interval || 2).catch(err => {
-          console.error('Background task polling failed:', err)
-        })
-      }
     } catch (err) {
       if (requestSessionId !== sessionManager.currentSessionId.value) return
       finishRequestLifecycle(requestId, isCurrentRequestSession)
@@ -538,6 +661,7 @@ export function useChatSession() {
         if (!hasThinking) {
           chatState.loading.value = false
         }
+        activateHttpHistoryFastSync(requestSessionId)
       }
     }
   }

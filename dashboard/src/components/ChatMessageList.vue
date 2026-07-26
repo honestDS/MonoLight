@@ -35,6 +35,10 @@
       :buffer-size="600"
       :shift="maintainScrollPosition"
       @scroll="handleVirtualScroll"
+      @wheel="handleWheel"
+      @touchmove="handleTouchMove"
+      @keydown="handleScrollableKeyDown"
+      @pointerdown="handlePointerDown"
     >
       <template #default="{ item: msg }">
         <div class="message-list-item" :key="getDisplayKey(msg)" :data-message-key="getDisplayKey(msg)">
@@ -236,7 +240,7 @@
     </div>
     <Transition name="new-message-indicator">
       <button
-        v-if="unreadMessageKeys.length > 0"
+        v-if="unreadMessageKeys.length > 0 && !canFollowOutput()"
         type="button"
         class="new-message-indicator"
         :aria-label="$t('chat.new_messages')"
@@ -310,6 +314,14 @@ const auditCountdownTimer = window.setInterval(() => {
 const virtualList = ref(null)
 const maintainScrollPosition = ref(false)
 let bottomScrollRequest = 0
+let programmaticScrollRequest = 0
+const programmaticScrollRequests = new Set()
+const programmaticScrollReleaseTasks = new Map()
+let pointerScrollSession = false
+let transientUserScrollCandidate = false
+let transientUserScrollCandidateTimer = null
+let lastVirtualScrollOffset = null
+let messageListUnmounted = false
 const messagesLayoutReady = ref(false)
 const scrollListeners = new Set()
 const codeRefs = new Map()
@@ -499,69 +511,158 @@ const buildDisplayMessages = (messages) => {
 
 const displayMessages = computed(() => buildDisplayMessages(props.messages))
 const unreadMessageKeys = ref([])
+const latestLlmMessageVisible = ref(true)
+const followsOutput = ref(true)
 let unreadTrackingReady = false
 let unreadTrackingGeneration = 0
 let visibilityFrameId = null
 
 const isIncomingMessage = message => message.type === 'tool_group' || !['user', 'thinking'].includes(message.role)
 const isLlmOutputMessage = message => message.type === 'tool_group' || ['assistant', 'tool'].includes(message.role)
-const MESSAGE_LIST_BOTTOM_THRESHOLD = 200
-let isMessageListNearBottom = true
-const updateMessageListBottomState = (offset = virtualList.value?.scrollOffset || 0) => {
-  const list = virtualList.value
-  if (!list) return
-  const currentOffset = Number.isFinite(offset) ? offset : list.scrollOffset
-  isMessageListNearBottom = list.scrollSize - list.viewportSize - currentOffset <= MESSAGE_LIST_BOTTOM_THRESHOLD
-  if (isMessageListNearBottom && unreadMessageKeys.value.length > 0) {
+const OUTPUT_FOLLOW_BOTTOM_TOLERANCE = 24
+let messageListAtBottom = true
+const setOutputFollowState = (shouldFollow) => {
+  if (shouldFollow) {
+    followsOutput.value = true
     unreadMessageKeys.value = []
+    return
   }
+  if (!followsOutput.value) return
+  followsOutput.value = false
+  bottomScrollRequest += 1
+}
+const canFollowOutput = () => followsOutput.value && latestLlmMessageVisible.value
+const getMessageListBottomDistance = (offset) => {
+  const list = virtualList.value
+  const currentOffset = Number.isFinite(offset) ? offset : list?.scrollOffset
+  if (!list || !Number.isFinite(currentOffset)) return null
+  const bottomDistance = list.scrollSize - list.viewportSize - currentOffset
+  return Number.isFinite(bottomDistance) ? Math.max(0, bottomDistance) : null
+}
+const updateMessageListBottomState = (offset) => {
+  const bottomDistance = getMessageListBottomDistance(offset)
+  if (bottomDistance === null) return messageListAtBottom
+  messageListAtBottom = bottomDistance <= OUTPUT_FOLLOW_BOTTOM_TOLERANCE
+  return messageListAtBottom
+}
+const calculateLatestLlmMessageVisible = () => {
+  const latestMessage = [...displayMessages.value].reverse().find(isLlmOutputMessage)
+  const listElement = virtualList.value?.$el
+  if (!latestMessage || !listElement) return messageListAtBottom
+
+  const latestMessageKey = getDisplayKey(latestMessage)
+  const messageElement = [...listElement.querySelectorAll('[data-message-key]')]
+    .find(element => element.dataset.messageKey === latestMessageKey)
+  if (!messageElement) return messageListAtBottom
+
+  const viewportRect = listElement.getBoundingClientRect()
+  const messageRect = messageElement.getBoundingClientRect()
+  return messageRect.bottom > viewportRect.top && messageRect.top < viewportRect.bottom
+}
+const refreshLatestLlmMessageVisibility = () => {
+  latestLlmMessageVisible.value = calculateLatestLlmMessageVisible()
+  if (canFollowOutput()) unreadMessageKeys.value = []
+  return latestLlmMessageVisible.value
 }
 const scheduleUnreadVisibilityCheck = () => {
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
   visibilityFrameId = requestAnimationFrame(() => {
     visibilityFrameId = null
-    const listElement = virtualList.value?.$el
-    if (!listElement || unreadMessageKeys.value.length === 0) return
-
-    const viewportRect = listElement.getBoundingClientRect()
-    const visibleKeys = new Set()
-    listElement.querySelectorAll('[data-message-key]').forEach((element) => {
-      const key = element.dataset.messageKey
-      if (!unreadMessageKeys.value.includes(key)) return
-      const itemRect = element.getBoundingClientRect()
-      const fullyVisible = itemRect.top >= viewportRect.top && itemRect.bottom <= viewportRect.bottom
-      const oversizedRead = itemRect.height > viewportRect.height && itemRect.bottom > viewportRect.top && itemRect.bottom <= viewportRect.bottom
-      if (fullyVisible || oversizedRead) visibleKeys.add(key)
-    })
-    if (visibleKeys.size > 0) {
-      unreadMessageKeys.value = unreadMessageKeys.value.filter(key => !visibleKeys.has(key))
-    }
+    refreshLatestLlmMessageVisibility()
   })
 }
+const clearTransientUserScrollCandidate = () => {
+  transientUserScrollCandidate = false
+  if (transientUserScrollCandidateTimer !== null) {
+    window.clearTimeout(transientUserScrollCandidateTimer)
+    transientUserScrollCandidateTimer = null
+  }
+}
+const createTransientUserScrollCandidate = () => {
+  transientUserScrollCandidate = true
+  if (transientUserScrollCandidateTimer !== null) window.clearTimeout(transientUserScrollCandidateTimer)
+  transientUserScrollCandidateTimer = window.setTimeout(() => {
+    transientUserScrollCandidate = false
+    transientUserScrollCandidateTimer = null
+  }, 250)
+}
+const resetUserScrollCandidates = () => {
+  pointerScrollSession = false
+  clearTransientUserScrollCandidate()
+}
 
-const getChangedIncomingMessages = (messages, previousMessages = []) => {
-  let firstChanged = 0
-  const sharedLength = Math.min(messages.length, previousMessages.length)
-  while (firstChanged < sharedLength && messages[firstChanged] === previousMessages[firstChanged]) firstChanged += 1
-
-  const previousByKey = new Map(previousMessages.slice(firstChanged).map(message => [getDisplayKey(message), message]))
-  return messages
-    .slice(firstChanged)
-    .filter(message => isIncomingMessage(message) && previousByKey.get(getDisplayKey(message)) !== message)
+const stableSerialize = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+const getIncomingMessageFields = message => ({
+  role: message?.role,
+  type: message?.type,
+  content: message?.content,
+  status: message?.status,
+  attachments: message?.attachments,
+  files: message?.files,
+  finish_reason: message?.finish_reason,
+  refusal: message?.refusal
+})
+const getIncomingMessageSnapshot = (message) => {
+  const snapshot = getIncomingMessageFields(message)
+  if (message?.type === 'tool_group') {
+    snapshot.pairs = (message.pairs || []).map(pair => ({
+      id: pair.id,
+      toolCall: pair.toolCall,
+      resultMessage: pair.resultMessage ? getIncomingMessageFields(pair.resultMessage) : null
+    }))
+    snapshot.latestEvent = message.latestEvent
+      ? { type: message.latestEvent.type, pair: message.latestEvent.pair ? { id: message.latestEvent.pair.id } : null }
+      : null
+  }
+  return stableSerialize(snapshot)
+}
+let incomingMessageSnapshots = new Map()
+const resetIncomingMessageSnapshots = (messages) => {
+  incomingMessageSnapshots = new Map(messages.map(message => [getDisplayKey(message), getIncomingMessageSnapshot(message)]))
+}
+const getChangedIncomingMessages = (messages) => {
+  const nextSnapshots = new Map()
+  const changedMessages = []
+  messages.forEach((message) => {
+    const key = getDisplayKey(message)
+    const snapshot = getIncomingMessageSnapshot(message)
+    nextSnapshots.set(key, snapshot)
+    if (isIncomingMessage(message) && (!incomingMessageSnapshots.has(key) || incomingMessageSnapshots.get(key) !== snapshot)) {
+      changedMessages.push(message)
+    }
+  })
+  incomingMessageSnapshots = nextSnapshots
+  return changedMessages
 }
 
 const handleChangedIncomingMessages = async (changedMessages, replaceUnread = false) => {
   if (changedMessages.length === 0) return
-  const shouldFollowOutput = isMessageListNearBottom && changedMessages.some(isLlmOutputMessage)
+  const shouldFollowOutput = canFollowOutput() && changedMessages.some(isLlmOutputMessage)
   const changedKeys = changedMessages.map(getDisplayKey)
-  unreadMessageKeys.value = replaceUnread
-    ? [...new Set(changedKeys)]
-    : [...new Set([...unreadMessageKeys.value, ...changedKeys])]
+  if (!shouldFollowOutput) {
+    unreadMessageKeys.value = replaceUnread
+      ? [...new Set(changedKeys)]
+      : [...new Set([...unreadMessageKeys.value, ...changedKeys])]
+  }
 
   await nextTick()
-  if (shouldFollowOutput) {
-    await scrollToBottom('auto')
+  if (shouldFollowOutput && canFollowOutput()) {
+    await scrollToBottom('auto', false)
     updateMessageListBottomState()
+    refreshLatestLlmMessageVisibility()
+  } else {
+    if (shouldFollowOutput) {
+      unreadMessageKeys.value = replaceUnread
+        ? [...new Set(changedKeys)]
+        : [...new Set([...unreadMessageKeys.value, ...changedKeys])]
+    }
+    refreshLatestLlmMessageVisibility()
   }
   scheduleUnreadVisibilityCheck()
 }
@@ -572,31 +673,41 @@ watch(
     const generation = ++unreadTrackingGeneration
     unreadTrackingReady = false
     unreadMessageKeys.value = []
+    incomingMessageSnapshots = new Map()
     if (!historyLoaded) return
     const baselineMessages = displayMessages.value
+    resetIncomingMessageSnapshots(baselineMessages)
     await nextTick()
     await new Promise(resolve => requestAnimationFrame(resolve))
     if (generation !== unreadTrackingGeneration || !props.initialHistoryLoaded) return
 
     unreadTrackingReady = true
-    const changedMessages = getChangedIncomingMessages(displayMessages.value, baselineMessages)
+    const changedMessages = getChangedIncomingMessages(displayMessages.value)
     await handleChangedIncomingMessages(changedMessages, true)
   },
   { immediate: true, flush: 'post' }
 )
 
-watch(displayMessages, async (messages, previousMessages = []) => {
-  if (!unreadTrackingReady || lastDisplayChangeWasPrepend) return
+watch(displayMessages, async (messages) => {
+  if (!unreadTrackingReady) return
+  if (lastDisplayChangeWasPrepend) {
+    resetIncomingMessageSnapshots(messages)
+    return
+  }
 
-  const changedMessages = getChangedIncomingMessages(messages, previousMessages)
+  const changedMessages = getChangedIncomingMessages(messages)
   await handleChangedIncomingMessages(changedMessages)
-}, { flush: 'pre' })
+}, { deep: true, flush: 'pre' })
 
 let layoutGeneration = 0
 watch(() => props.currentSessionId, () => {
   maintainScrollPosition.value = false
   bottomScrollRequest += 1
-  isMessageListNearBottom = true
+  messageListAtBottom = true
+  latestLlmMessageVisible.value = true
+  followsOutput.value = true
+  resetUserScrollCandidates()
+  lastVirtualScrollOffset = null
   layoutGeneration += 1
   if (!props.initialHistoryLoaded) {
     messagesLayoutReady.value = false
@@ -615,8 +726,74 @@ watch(() => props.initialHistoryLoaded, async (historyLoaded) => {
   }
 }, { immediate: true, flush: 'post' })
 
+const beginProgrammaticScroll = () => {
+  const request = ++programmaticScrollRequest
+  programmaticScrollRequests.add(request)
+  return request
+}
+const finishProgrammaticScroll = (request, settleDuration = 0) => {
+  if (messageListUnmounted) {
+    programmaticScrollRequests.delete(request)
+    return
+  }
+
+  const task = { firstFrameId: null, secondFrameId: null, timeoutId: null }
+  const release = () => {
+    programmaticScrollRequests.delete(request)
+    programmaticScrollReleaseTasks.delete(request)
+  }
+  task.firstFrameId = requestAnimationFrame(() => {
+    task.firstFrameId = null
+    task.secondFrameId = requestAnimationFrame(() => {
+      task.secondFrameId = null
+      if (settleDuration > 0) {
+        task.timeoutId = window.setTimeout(() => {
+          task.timeoutId = null
+          release()
+        }, settleDuration)
+        return
+      }
+      release()
+    })
+  })
+  programmaticScrollReleaseTasks.set(request, task)
+}
+const isProgrammaticScrollInProgress = () => programmaticScrollRequests.size > 0
+const handleWheel = () => {
+  createTransientUserScrollCandidate()
+}
+const handleTouchMove = () => {
+  createTransientUserScrollCandidate()
+}
+const scrollKeys = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ', 'Spacebar'])
+const handleScrollableKeyDown = (event) => {
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || !scrollKeys.has(event.key)) return
+  if (event.target instanceof Element && event.target.closest('input, textarea, select, button, [contenteditable]')) return
+  createTransientUserScrollCandidate()
+}
+const handlePointerDown = () => {
+  pointerScrollSession = true
+}
+const endPointerScrollSession = () => {
+  pointerScrollSession = false
+}
+window.addEventListener('pointerup', endPointerScrollSession)
+window.addEventListener('pointercancel', endPointerScrollSession)
 const handleVirtualScroll = (offset) => {
-  updateMessageListBottomState(offset)
+  const currentOffset = Number.isFinite(offset) ? offset : virtualList.value?.scrollOffset
+  const hasValidOffset = Number.isFinite(currentOffset)
+  const hasScrollBaseline = Number.isFinite(lastVirtualScrollOffset)
+  const offsetChanged = hasScrollBaseline && hasValidOffset && currentOffset !== lastVirtualScrollOffset
+  const hasUserScrollCandidate = pointerScrollSession || transientUserScrollCandidate
+  const userScrolled = hasValidOffset && (
+    (hasUserScrollCandidate && (!hasScrollBaseline || offsetChanged)) ||
+    (offsetChanged && !isProgrammaticScrollInProgress())
+  )
+  const atBottom = updateMessageListBottomState(currentOffset)
+  if (userScrolled) setOutputFollowState(atBottom)
+  if (hasValidOffset) lastVirtualScrollOffset = currentOffset
+
+  refreshLatestLlmMessageVisibility()
   scrollListeners.forEach(listener => listener(offset))
   scheduleUnreadVisibilityCheck()
 }
@@ -632,8 +809,10 @@ const restoreScrollAnchor = async (anchor) => {
   maintainScrollPosition.value = false
 }
 const MESSAGE_LIST_EDGE_PADDING = 20
-const scrollToBottom = async (behavior = 'auto') => {
+const scrollToBottom = async (behavior = 'auto', restoreFollow = true) => {
+  if (restoreFollow) setOutputFollowState(true)
   const request = ++bottomScrollRequest
+  const programmaticRequest = beginProgrammaticScroll()
   const alignBottom = (smooth = false) => {
     const list = virtualList.value
     const lastIndex = displayMessages.value.length - 1
@@ -646,22 +825,26 @@ const scrollToBottom = async (behavior = 'auto') => {
     return list
   }
 
-  await nextTick()
-  if (behavior === 'smooth') {
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-    if (request !== bottomScrollRequest || !alignBottom(true)) return
-    await new Promise(resolve => setTimeout(resolve, 350))
-    if (request === bottomScrollRequest) alignBottom(true)
-    return
-  }
-
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    if (request !== bottomScrollRequest) return
-    const list = alignBottom()
-    if (!list) return
-    await new Promise(resolve => requestAnimationFrame(resolve))
-    if (request !== bottomScrollRequest) return
-    list.scrollTo(list.scrollSize)
+  try {
+    await nextTick()
+    if (behavior === 'smooth') {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      if (request !== bottomScrollRequest) return
+      if (!alignBottom(true)) return
+      await new Promise(resolve => setTimeout(resolve, 350))
+      if (request === bottomScrollRequest) alignBottom(true)
+      return
+    }
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (request !== bottomScrollRequest) return
+      const list = alignBottom()
+      if (!list) return
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      if (request !== bottomScrollRequest) return
+      list.scrollTo(list.scrollSize)
+    }
+  } finally {
+    finishProgrammaticScroll(programmaticRequest, behavior === 'smooth' ? 350 : 0)
   }
 }
 
@@ -788,7 +971,6 @@ const formatFileSize = (size) => {
 }
 const getMessageClass = role => ({ user: 'user', thinking: 'thinking', background_system: 'background-system', err: 'error' })[role] || 'ai'
 const handleNewMessageClick = async () => {
-  isMessageListNearBottom = true
   await scrollToBottom('smooth')
   updateMessageListBottomState()
   scheduleUnreadVisibilityCheck()
@@ -797,15 +979,38 @@ const handleImageLoad = () => {
   scheduleUnreadVisibilityCheck()
 }
 onUnmounted(() => {
+  messageListUnmounted = true
   window.clearInterval(auditCountdownTimer)
   if (visibilityFrameId !== null) cancelAnimationFrame(visibilityFrameId)
+  window.removeEventListener('pointerup', endPointerScrollSession)
+  window.removeEventListener('pointercancel', endPointerScrollSession)
+  resetUserScrollCandidates()
+  programmaticScrollReleaseTasks.forEach((task) => {
+    if (task.firstFrameId !== null) cancelAnimationFrame(task.firstFrameId)
+    if (task.secondFrameId !== null) cancelAnimationFrame(task.secondFrameId)
+    if (task.timeoutId !== null) window.clearTimeout(task.timeoutId)
+  })
+  programmaticScrollReleaseTasks.clear()
+  programmaticScrollRequests.clear()
 })
+
+const scrollTo = (options) => {
+  const list = virtualList.value
+  if (!list) return
+  const request = beginProgrammaticScroll()
+  try {
+    return list.scrollTo(typeof options === 'number' ? options : options?.top || 0)
+  } finally {
+    finishProgrammaticScroll(request)
+  }
+}
 
 defineExpose({
   captureScrollAnchor,
   restoreScrollAnchor,
+  canFollowOutput,
   scrollToBottom,
-  scrollTo: options => virtualList.value?.scrollTo(typeof options === 'number' ? options : options?.top || 0),
+  scrollTo,
   addEventListener: (type, listener) => {
     if (type === 'scroll') scrollListeners.add(listener)
   },
