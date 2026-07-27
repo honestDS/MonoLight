@@ -65,6 +65,52 @@ async def test_runtime_instruction_is_rebuilt_persisted_and_materialized_on_late
     assert build_max_output_tokens_instruction(0) == ""
 
 
+@pytest.mark.asyncio
+async def test_runtime_instruction_materialization_appends_guidance_after_environment_prompt(monkeypatch):
+    environment_prompt = "环境提示"
+    guidance_prompt = "[系统提示信息]永久引导[系统提示信息结束]"
+    latest_message = InternalMessage(
+        id=2,
+        role=MessageRole.USER,
+        content="用户正文",
+        guidance_prompt=guidance_prompt,
+    )
+    persisted_environment_prompts = []
+
+    async def build_runtime_instructions(_db, session_id, max_tokens):
+        assert session_id == "session-1"
+        assert max_tokens == 256
+        return environment_prompt
+
+    async def set_environment_prompt(_db, message_id, prompt):
+        persisted_environment_prompts.append((message_id, prompt))
+        return True
+
+    monkeypatch.setattr(markdown_instruction_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(markdown_instruction_module.message_crud, "set_environment_prompt", set_environment_prompt)
+
+    request_messages = await materialize_latest_user_environment_prompt(
+        object(),
+        "session-1",
+        [latest_message],
+        256,
+    )
+
+    assert request_messages[0].content == "用户正文" + environment_prompt + "\n\n" + guidance_prompt
+    assert request_messages[0].guidance_prompt == guidance_prompt
+    second_request_messages = await materialize_latest_user_environment_prompt(
+        object(),
+        "session-1",
+        [latest_message],
+        256,
+    )
+
+    assert second_request_messages[0].content == request_messages[0].content
+    assert latest_message.content == "用户正文"
+    assert latest_message.guidance_prompt == guidance_prompt
+    assert persisted_environment_prompts == [(2, environment_prompt), (2, environment_prompt)]
+
+
 def test_runtime_instruction_assignment_does_not_change_message_content():
     message = InternalMessage(role=MessageRole.USER, content="current user input")
 

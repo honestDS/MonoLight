@@ -28,6 +28,7 @@ from app.core.constants import (
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
 from app.core.crud.audit import audit_crud
+from app.core.crud.message import message_crud
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
@@ -338,6 +339,15 @@ class SessionReplyQueueManager:
             raw_message=decision_raw_message,
         )
         await update_confirmation_message_status(db, audit_record_id=claimed_record.id)
+        guidance_prompt = None
+        if source not in {"http", "ws"}:
+            guidance_prompt = await message_crud.activate_and_get_guidance_prompt(
+                db,
+                session_id=session_id,
+                uid=uid,
+            )
+            message_row.guidance_prompt = guidance_prompt
+            db.add(message_row)
         work, _created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -359,6 +369,7 @@ class SessionReplyQueueManager:
             "language": get_current_locale(),
             "message_source": source,
             "request_ids": merge_work_request_ids(work, request_id=request_id),
+            "guidance_prompt": guidance_prompt,
         }
         if cleaned_additional_system_prompt:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
@@ -371,6 +382,7 @@ class SessionReplyQueueManager:
                 id=message_row.id,
                 role=MessageRole.USER,
                 content=message_row.content,
+                guidance_prompt=message_row.guidance_prompt,
                 created_at=message_row.created_at.timestamp(),
             ),
             work,
@@ -484,6 +496,17 @@ class SessionReplyQueueManager:
             await db.flush()
         elif message_row.uid != uid or message_row.session_id != session_id or message_row.profile_id != profile_id:
             raise ValueError(t(ERR_PERSISTED_USER_MESSAGE_MISMATCH))
+
+        guidance_prompt = None
+        if source not in {"http", "ws"}:
+            guidance_prompt = await message_crud.activate_and_get_guidance_prompt(
+                db,
+                session_id=session_id,
+                uid=uid,
+            )
+            message_row.guidance_prompt = guidance_prompt
+            db.add(message_row)
+
         work, created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -509,6 +532,7 @@ class SessionReplyQueueManager:
             }
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
         state["request_ids"] = merge_work_request_ids(work, request_id=request_id)
+        state["guidance_prompt"] = message_row.guidance_prompt
         cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         if cleaned_additional_system_prompt:
             state["additional_system_prompt"] = cleaned_additional_system_prompt
@@ -526,6 +550,7 @@ class SessionReplyQueueManager:
                 role=MessageRole.USER,
                 content=message_row.content,
                 attachments=message_row.attachments,
+                guidance_prompt=message_row.guidance_prompt,
                 created_at=message_row.created_at.timestamp(),
             ),
             work,
@@ -660,6 +685,10 @@ class SessionReplyQueueManager:
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
         context_summary_events_requested = any(bool((item.execution_state or {}).get("context_summary_events_requested")) for item in contiguous)
         expose_tool_call_content = all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in contiguous)
+        latest_guidance_prompt = next(
+            (message.guidance_prompt for message in reversed(messages) if isinstance(message.guidance_prompt, str) and message.guidance_prompt.strip()),
+            None,
+        )
         execution_state = {
             **(work.execution_state or {}),
             "stream_requested": stream_requested,
@@ -667,6 +696,8 @@ class SessionReplyQueueManager:
             "expose_tool_call_content": expose_tool_call_content,
             "request_ids": merge_work_request_ids(*contiguous),
         }
+        if latest_guidance_prompt is not None:
+            execution_state["guidance_prompt"] = latest_guidance_prompt
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work.id,
@@ -767,12 +798,17 @@ class SessionReplyQueueManager:
         work.input_message_ids = [*frozen_message_ids, *message_ids]
         work.execution_state = execution_state
         content, attachments, _ids = self._merge_messages(messages)
+        latest_guidance_prompt = next(
+            (message.guidance_prompt for message in reversed(messages) if isinstance(message.guidance_prompt, str) and message.guidance_prompt.strip()),
+            None,
+        )
         source_message_ids = tuple(dict.fromkeys(message_ids))
         combined_message = InternalMessage(
             id=source_message_ids[-1],
             role=MessageRole.USER,
             content=content or None,
             attachments=attachments or None,
+            guidance_prompt=latest_guidance_prompt,
         )
         logger.bind(
             uid=work.uid,

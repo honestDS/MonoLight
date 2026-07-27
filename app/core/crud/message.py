@@ -18,6 +18,7 @@ from app.core.i18n import t
 from app.models.message import (
     Message,
     MessageCreate,
+    MessageRole,
     MessageType,
 )
 from app.models.session import ChatSession
@@ -25,6 +26,60 @@ from app.models.user import User
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
+    async def create_guidance(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        profile_id: int,
+        content: str,
+        commit: bool = True,
+    ) -> Message:
+        message = Message(
+            session_id=session_id,
+            uid=uid,
+            role=MessageRole.SYSTEM,
+            type=MessageType.GUIDANCE,
+            content=content,
+            profile_id=profile_id,
+            is_processed=False,
+        )
+        db.add(message)
+        if commit:
+            await db.commit()
+            await db.refresh(message)
+        else:
+            await db.flush()
+        return message
+
+    async def activate_and_get_guidance_prompt(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+    ) -> str | None:
+        result = await db.execute(
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.uid == uid,
+                Message.type == MessageType.GUIDANCE,
+            )
+            .order_by(Message.id.asc())
+            .with_for_update()
+        )
+        messages = list(result.scalars().all())
+        if not messages:
+            return None
+
+        pending_message_ids = [message.id for message in messages if message.id is not None and not message.is_processed]
+        if pending_message_ids:
+            await db.execute(update(Message).where(Message.id.in_(pending_message_ids)).values(is_processed=True).execution_options(synchronize_session=False))
+        await db.flush()
+        return messages[-1].content or None
+
     async def set_environment_prompt(self, db: AsyncSession, message_id: int, environment_prompt: str | None) -> bool:
         result = await db.execute(update(Message).where(Message.id == message_id).values(environment_prompt=environment_prompt))
         await db.commit()
@@ -168,7 +223,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
         if after_id is not None:
@@ -199,7 +254,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_after_id is not None:
             lower_bound = page_after_id if lower_bound is None else max(lower_bound, page_after_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
         if lower_bound is not None:
             stmt = stmt.where(Message.id > lower_bound)
         if before_id is not None:
@@ -229,7 +284,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_before_id is not None:
             upper_bound = page_before_id if upper_bound is None else min(upper_bound, page_before_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
         if after_id is not None:
             stmt = stmt.where(Message.id > after_id)
         if upper_bound is not None:
@@ -248,6 +303,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             .where(Message.uid == uid)
             .where(Message.is_processed == False)  # noqa: E712
             .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+            .where(Message.type != MessageType.GUIDANCE)
             .order_by(Message.created_at.asc())
         )
         return result.scalars().all()
@@ -290,7 +346,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.all()
 
     async def get_latest_session_profile_id(self, db: AsyncSession, *, session_id: str, uid: str) -> int | None:
-        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).order_by(Message.created_at.desc()).limit(1)
+        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.GUIDANCE).order_by(Message.created_at.desc()).limit(1)
         result = await db.execute(stmt)
         return result.scalars().first()
 

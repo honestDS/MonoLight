@@ -519,6 +519,11 @@ async def _generate_reply_with_request_metadata(
         additional_system_prompt = execution_state.get("additional_system_prompt") if isinstance(execution_state, dict) else None
         if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
             kwargs["additional_system_prompt"] = additional_system_prompt.strip()
+    if "guidance_prompt" not in kwargs:
+        execution_state = getattr(work, "execution_state", None)
+        guidance_prompt = execution_state.get("guidance_prompt") if isinstance(execution_state, dict) else None
+        if isinstance(guidance_prompt, str) and guidance_prompt.strip():
+            kwargs["guidance_prompt"] = guidance_prompt
     if hasattr(db, "execute"):
         session = await session_crud.get_by_session_id(db, work.session_id)
         if session is not None:
@@ -557,13 +562,15 @@ async def _generate_reply_with_request_metadata(
 
 async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
     content, attachments, message_ids = await session_reply_queue_manager.freeze_foreground_input(db, work=work, worker_id=worker_id)
+    await db.refresh(work)
+    execution_state = work.execution_state or {}
     initial_message = InternalMessage(
         id=message_ids[-1],
         role=MessageRole.USER,
         content=content,
         attachments=attachments or None,
+        guidance_prompt=execution_state.get("guidance_prompt"),
     )
-    await db.refresh(work)
     if bool((work.execution_state or {}).get("audit_decision_response")):
         profile = await profile_crud.get_with_relations(db, work.profile_id)
         if profile is None or profile.uid != work.uid:
@@ -607,7 +614,6 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         dequeued_request_ids=set(),
     )
 
-    execution_state = work.execution_state or {}
     expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):

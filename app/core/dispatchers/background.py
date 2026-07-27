@@ -135,6 +135,7 @@ class BackgroundDispatcherMixin:
         extra_messages: list[InternalMessage] | None = None,
         submission_context: list[InternalMessage] | None = None,
         additional_system_prompt: str | None = None,
+        guidance_prompt: str | None = None,
         persist_response: bool = True,
         initial_trigger_mode: ContextSummaryTriggerMode | None = None,
         initial_fixed_upper_message_id: int | None = None,
@@ -152,6 +153,7 @@ class BackgroundDispatcherMixin:
         chat_cursor_key = f"{profile.id}:CHAT"
         messages: list[InternalMessage] = []
         cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
+        cleaned_guidance_prompt = guidance_prompt.strip() if isinstance(guidance_prompt, str) else ""
 
         tools = None
         allowed_knowledge_base_ids = None
@@ -206,6 +208,11 @@ class BackgroundDispatcherMixin:
                     max_tokens=chat_params["max_tokens"],
                     tools=tools,
                 )
+            if cleaned_guidance_prompt:
+                for message in reversed(messages):
+                    if message.role == MessageRole.USER:
+                        message.guidance_prompt = cleaned_guidance_prompt
+                        break
             return ContextManager.trim_messages_for_model_request(
                 messages=await materialize_latest_user_environment_prompt(
                     db,

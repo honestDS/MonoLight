@@ -43,9 +43,23 @@
       <template #default="{ item: msg }">
         <div class="message-list-item" :key="getDisplayKey(msg)" :data-message-key="getDisplayKey(msg)">
           <div
-            :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued' }]"
+            :class="['message-item', getMessageClass(msg.role), { queued: msg.status === 'queued', guidance: msg.type === 'guidance' }]"
           >
-        <template v-if="msg.type === 'tool_group'">
+        <template v-if="msg.type === 'guidance'">
+          <div class="message-header">
+            <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
+          </div>
+          <div class="content guidance-card">
+            <div class="guidance-card-header">
+              <span class="guidance-title">{{ $t('chat.guidance') }}</span>
+              <span :class="['guidance-status', { 'is-used': msg.is_processed }]">
+                {{ msg.is_processed ? $t('chat.guidance_used') : $t('chat.guidance_pending') }}
+              </span>
+            </div>
+            <div class="guidance-text">{{ getGuidanceText(msg.content) }}</div>
+          </div>
+        </template>
+        <template v-else-if="msg.type === 'tool_group'">
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
           </div>
@@ -882,6 +896,13 @@ const getMessageText = (message) => {
   return parsed ? parsed.text || '' : message.content
 }
 const getMessageFiles = (message) => message.files || parseAssistantFilesContent(message.content)?.files || []
+const GUIDANCE_START_MARKER = '[系统提示信息]'
+const GUIDANCE_END_MARKER = '[系统提示信息结束]'
+const getGuidanceText = (content) => {
+  if (typeof content !== 'string') return ''
+  if (!content.startsWith(GUIDANCE_START_MARKER) || !content.endsWith(GUIDANCE_END_MARKER)) return content
+  return content.slice(GUIDANCE_START_MARKER.length, -GUIDANCE_END_MARKER.length).trim()
+}
 const parseAuditConfirmation = (content) => {
   try {
     const parsed = typeof content === 'string' ? JSON.parse(content) : content

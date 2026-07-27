@@ -52,12 +52,15 @@ async def materialize_latest_user_environment_prompt(
 ) -> list[InternalMessage]:
     request_messages = [message.model_copy(deep=True) for message in messages]
     for message in reversed(request_messages):
-        if message.role != MessageRole.USER or (message.id is None and not message.environment_prompt):
+        if message.role != MessageRole.USER or (message.id is None and not message.environment_prompt and not message.guidance_prompt):
             continue
         message.environment_prompt = await build_user_runtime_instructions(db, session_id, max_tokens)
         if message.id is not None:
             await message_crud.set_environment_prompt(db, message.id, message.environment_prompt)
         append_text_instruction(message, message.environment_prompt)
+        guidance_prompt = message.guidance_prompt.strip() if isinstance(message.guidance_prompt, str) else ""
+        if guidance_prompt:
+            append_text_instruction(message, f"\n\n{guidance_prompt}")
         break
     return request_messages
 

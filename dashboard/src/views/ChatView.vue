@@ -73,7 +73,7 @@
       />
       <div class="input-area">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
-          {{ $t('chat.external_session_read_only') }}
+          <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
         <div class="toolbar-row">
           <el-button type="primary" @click="createNewSession" class="new-session-btn">
@@ -154,8 +154,10 @@
 
               <el-input
                 v-model="inputMsg" 
-                :placeholder="isCurrentSessionReadOnly ? $t('chat.external_session_read_only') : $t('chat.input_placeholder')"
-                :disabled="isCurrentSessionReadOnly"
+                :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
+                :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
+                :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
+                :show-word-limit="false"
                 @keyup.enter="send"
                 @paste="handlePaste"
                 type="textarea"
@@ -168,7 +170,8 @@
                 <el-button 
                   type="primary" 
                   @click="send" 
-                  :disabled="isCurrentSessionReadOnly || (!inputMsg.trim() && attachments.length === 0)"
+                  :loading="isCurrentSessionReadOnly && guidanceSubmitting"
+                  :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : !inputMsg.trim() && attachments.length === 0"
                   class="action-btn"                  
                   circle
                 >
@@ -180,11 +183,12 @@
         </div>
       </div>
     </div>
+
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
@@ -276,10 +280,44 @@ const {
   handleScroll
 } = chat
 
+const guidanceSubmitting = ref(false)
+
 // 拦截发送，发送完成后清空列表
 const send = async () => {
   if (isCurrentSessionReadOnly.value) {
-    ElMessage.warning(t('chat.external_session_read_only'))
+    const content = inputMsg.value.trim()
+    const sessionId = currentSessionId.value
+    if (!content || !sessionId || guidanceSubmitting.value) return
+
+    guidanceSubmitting.value = true
+    try {
+      const response = await chatApi.createGuidance({ session_id: sessionId, content })
+      const guidanceMessage = response.data?.data
+      const guidanceMessageIds = [guidanceMessage?.id, guidanceMessage?.db_id]
+        .filter(id => id !== undefined && id !== null)
+        .map(String)
+
+      if (sessionId === currentSessionId.value && guidanceMessage) {
+        const exists = guidanceMessageIds.length > 0 && messages.value.some(message =>
+          [message.id, message.db_id].some(id => guidanceMessageIds.includes(String(id)))
+        )
+        if (!exists) {
+          messages.value.push({
+            ...guidanceMessage,
+            db_id: guidanceMessage.db_id ?? guidanceMessage.id
+          })
+          await nextTick()
+          await messageList.value?.scrollToBottom('auto')
+        }
+      }
+      inputMsg.value = ''
+      ElMessage.success(t('chat.guidance_created'))
+      void loadSessions()
+    } catch (error) {
+      ElMessage.error(error.message || t('chat.guidance_create_failed'))
+    } finally {
+      guidanceSubmitting.value = false
+    }
     return
   }
 

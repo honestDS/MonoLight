@@ -77,7 +77,7 @@ def estimate_request_context_tokens(
     message_payload = [
         message.model_dump(
             mode="json",
-            exclude={"id", "attachments", "created_at", "environment_prompt"},
+            exclude={"id", "attachments", "created_at", "environment_prompt", "guidance_prompt"},
             exclude_none=True,
         )
         for message in messages

@@ -31,6 +31,7 @@ class MessageRole(StrEnum):
 
 class MessageType(StrEnum):
     TEXT = "text"
+    GUIDANCE = "guidance"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     AUDIT_CONFIRMATION = "audit_confirmation"
@@ -72,6 +73,7 @@ class InternalMessage(BaseModel):
     refusal: str | None = None
     provider_metadata: dict[str, Any] | None = None
     environment_prompt: str | None = None
+    guidance_prompt: str | None = None
     tool_calls: list[InternalToolCall] | None = None
     tool_call_id: str | None = None
     attachments: list[str] | None = None
@@ -108,6 +110,7 @@ class Message(MessageBase, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))
+    guidance_prompt: str | None = Field(default=None, sa_column=Column(Text))
     dedupe_key: str | None = Field(default=None, unique=True, max_length=64)
     audit_record_id: int | None = Field(default=None, index=True)
     audit_tool_call_id: str | None = Field(default=None, index=True, max_length=100)

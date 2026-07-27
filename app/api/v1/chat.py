@@ -12,7 +12,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
@@ -24,13 +24,17 @@ from app.core.constants import (
     ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_NO_VALID_CHANNEL,
+    ERR_SESSION_GUIDANCE_EXTERNAL_ONLY,
     ERR_SESSION_NO_PERMISSION,
     ERR_SESSION_NOT_FOUND,
     ERR_SESSION_READ_ONLY,
+    GUIDANCE_MESSAGE_PREFIX,
+    GUIDANCE_MESSAGE_SUFFIX,
     MSG_BACKGROUND_TASK_DETAIL_SUCCESS,
     MSG_BACKGROUND_TASK_LIST_SUCCESS,
     MSG_MESSAGE_LIST_SUCCESS,
     MSG_SESSION_CLEARED,
+    MSG_SESSION_GUIDANCE_CREATED,
     MSG_SESSION_LIST_SUCCESS,
     MSG_SESSION_UPDATED,
     MSG_TITLE_GENERATED,
@@ -300,6 +304,53 @@ class SessionSettingRequest(BaseModel):
 
     session_id: str
     enable_markdown: bool | None = None
+
+
+class SessionGuidanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    content: str = Field(max_length=10000)
+
+
+@router.post("/sessions/guidance")
+async def create_session_guidance(
+    request: SessionGuidanceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    uid = getattr(current_user, "uid", None)
+    session = await session_crud.get_by_session_id(db, request.session_id)
+    if not session:
+        return StandardResponse.error(message=ERR_SESSION_NOT_FOUND)
+    if session.uid != uid:
+        return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
+    source = session.source or "http"
+    if source in {"http", "ws"}:
+        return StandardResponse.error(code=403, message=ERR_SESSION_GUIDANCE_EXTERNAL_ONLY)
+
+    content = request.content.strip()
+    if not content:
+        return StandardResponse.error(message=ERR_CHAT_MESSAGE_OR_ATTACHMENTS_REQUIRED)
+
+    profile_id = session.profile_id
+    if profile_id is None:
+        profile_id = await message_crud.get_latest_session_profile_id(
+            db,
+            session_id=session.session_id,
+            uid=uid,
+        )
+    row = await message_crud.create_guidance(
+        db,
+        session_id=session.session_id,
+        uid=uid,
+        profile_id=profile_id if profile_id is not None else -1,
+        content=f"{GUIDANCE_MESSAGE_PREFIX}{content}{GUIDANCE_MESSAGE_SUFFIX}",
+    )
+    return StandardResponse.success(
+        data=MessageResponse.model_validate(row),
+        message=MSG_SESSION_GUIDANCE_CREATED,
+    )
 
 
 @router.post("/sessions/setting")

@@ -296,6 +296,10 @@ export function useChatSession() {
   let backgroundTaskSessionId = null
   let httpHistorySyncVersion = 0
 
+  const shouldSyncCurrentSessionHistory = () => (
+    transport.transportMode.value === 'http' || isCurrentSessionReadOnly.value
+  )
+
   const stopHttpHistorySync = () => {
     httpHistorySyncVersion += 1
     if (httpHistorySyncTimer !== null) {
@@ -310,7 +314,7 @@ export function useChatSession() {
   const syncCurrentHttpSessionHistory = async () => {
     const sessionId = sessionManager.currentSessionId.value
     if (
-      transport.transportMode.value !== 'http'
+      !shouldSyncCurrentSessionHistory()
       || !sessionId
       || chatState.loading.value
       || isHttpHistorySyncing
@@ -322,7 +326,7 @@ export function useChatSession() {
       await mergeLatestSessionHistory(sessionId)
       if (
         syncVersion !== httpHistorySyncVersion
-        || transport.transportMode.value !== 'http'
+        || !shouldSyncCurrentSessionHistory()
         || sessionId !== sessionManager.currentSessionId.value
         || backgroundTaskSessionId !== sessionId
       ) return
@@ -334,7 +338,7 @@ export function useChatSession() {
       })
       if (
         syncVersion !== httpHistorySyncVersion
-        || transport.transportMode.value !== 'http'
+        || !shouldSyncCurrentSessionHistory()
         || sessionId !== sessionManager.currentSessionId.value
       ) return
 
@@ -363,11 +367,11 @@ export function useChatSession() {
     }
 
     const sessionId = sessionManager.currentSessionId.value
-    if (transport.transportMode.value !== 'http' || !sessionId) return
+    if (!shouldSyncCurrentSessionHistory() || !sessionId) return
 
     const syncVersion = httpHistorySyncVersion
     const hasKnownBackgroundTasks = backgroundTaskSessionId === sessionId
-    const delay = Date.now() < httpHistoryFastSyncUntil || hasKnownBackgroundTasks
+    const delay = isCurrentSessionReadOnly.value || Date.now() < httpHistoryFastSyncUntil || hasKnownBackgroundTasks
       ? HTTP_HISTORY_FAST_SYNC_INTERVAL_MS
       : HTTP_HISTORY_IDLE_SYNC_INTERVAL_MS
 
@@ -383,7 +387,7 @@ export function useChatSession() {
 
   const activateHttpHistoryFastSync = (sessionId, hasBackgroundTasks = false) => {
     if (
-      transport.transportMode.value !== 'http'
+      !shouldSyncCurrentSessionHistory()
       || !sessionId
       || sessionId !== sessionManager.currentSessionId.value
     ) return
@@ -399,10 +403,10 @@ export function useChatSession() {
   }
 
   watch(
-    () => [transport.transportMode.value, sessionManager.currentSessionId.value],
-    async ([transportMode, sessionId]) => {
+    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value],
+    async ([, sessionId]) => {
       stopHttpHistorySync()
-      if (transportMode !== 'http' || !sessionId) return
+      if (!shouldSyncCurrentSessionHistory() || !sessionId) return
 
       const syncVersion = httpHistorySyncVersion
       await syncCurrentHttpSessionHistory()

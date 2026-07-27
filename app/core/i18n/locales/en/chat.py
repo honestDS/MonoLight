@@ -1,8 +1,10 @@
 MESSAGES = {
     "MSG_SESSION_LIST_SUCCESS": "Session list retrieved successfully",
+    "MSG_SESSION_GUIDANCE_CREATED": "Guidance message added",
     "ERR_SESSION_NOT_FOUND": "Session not found or deleted",
     "MSG_SESSION_CLEARED": "Successfully cleared all history for session {session_id}",
     "ERR_SESSION_NO_PERMISSION": "No permission to operate on this session",
+    "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "Guidance can only be added to external message platform sessions",
     "ERR_SESSION_READ_ONLY": "This session comes from an external message platform and is read-only on the web",
     "MSG_SESSION_UPDATED": "Session settings updated",
     "ERR_NO_VALID_CHANNEL": "No valid model channel configured",

@@ -818,6 +818,9 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
         enqueue_calls.append(kwargs)
         return work, True
 
+    async def activate_and_get_guidance_prompt(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager.session_crud.upsert_profile",
         upsert_profile,
@@ -825,6 +828,10 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
     monkeypatch.setattr(
         "app.core.session_reply_queue.manager.session_reply_work_item_crud.enqueue",
         enqueue,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.message_crud.activate_and_get_guidance_prompt",
+        activate_and_get_guidance_prompt,
     )
 
     _message, queued_work = await manager.enqueue_foreground_message(

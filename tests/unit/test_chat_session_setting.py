@@ -5,9 +5,15 @@ from pydantic import ValidationError
 
 from app.adapters import chat_web as chat_web_adapter
 from app.api.v1 import chat as chat_api
-from app.core.constants import ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
+from app.core.constants import (
+    ERR_SESSION_NO_PERMISSION,
+    ERR_SESSION_READ_ONLY,
+    GUIDANCE_MESSAGE_PREFIX,
+    GUIDANCE_MESSAGE_SUFFIX,
+)
 from app.core.exceptions import ForbiddenException
 from app.core.utils import session as session_utils
+from app.models.message import Message, MessageRole, MessageType
 
 
 class FakeDb:
@@ -102,6 +108,92 @@ async def test_update_external_session_setting_is_read_only(monkeypatch):
     assert response.message == "该会话来自外部消息平台，网页端仅允许查看"
     assert session.enable_markdown is True
     assert db.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_create_external_session_guidance_wraps_and_persists_content(monkeypatch):
+    db = FakeDb()
+    session = SimpleNamespace(
+        session_id="weixin-openclaw:user-1",
+        uid="user-1",
+        source="weixin-openclaw",
+        profile_id=7,
+    )
+    create_calls = []
+
+    async def get_by_session_id(db_arg, session_id: str):
+        assert db_arg is db
+        assert session_id == session.session_id
+        return session
+
+    async def create_guidance(db_arg, **kwargs):
+        assert db_arg is db
+        create_calls.append(kwargs)
+        return Message(
+            id=11,
+            session_id=kwargs["session_id"],
+            uid=kwargs["uid"],
+            profile_id=kwargs["profile_id"],
+            role=MessageRole.SYSTEM,
+            type=MessageType.GUIDANCE,
+            content=kwargs["content"],
+            is_processed=False,
+        )
+
+    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
+    monkeypatch.setattr(chat_api.message_crud, "create_guidance", create_guidance)
+
+    response = await chat_api.create_session_guidance(
+        chat_api.SessionGuidanceRequest(
+            session_id=session.session_id,
+            content="  请先回答重点  ",
+        ),
+        db=db,
+        current_user=SimpleNamespace(uid="user-1"),
+    )
+
+    wrapped = f"{GUIDANCE_MESSAGE_PREFIX}请先回答重点{GUIDANCE_MESSAGE_SUFFIX}"
+    assert response.code == 200
+    assert response.data.type == MessageType.GUIDANCE
+    assert response.data.content == wrapped
+    assert create_calls == [
+        {
+            "session_id": session.session_id,
+            "uid": "user-1",
+            "profile_id": 7,
+            "content": wrapped,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [None, "", "http", "ws"])
+async def test_create_guidance_rejects_non_external_session_sources(monkeypatch, source):
+    db = FakeDb()
+    session = SimpleNamespace(
+        session_id="session-1",
+        uid="user-1",
+        source=source,
+        profile_id=1,
+    )
+
+    async def get_by_session_id(db_arg, session_id: str):
+        return session
+
+    async def create_guidance(*args, **kwargs):
+        raise AssertionError("non-external session must not persist guidance")
+
+    monkeypatch.setattr(chat_api.session_crud, "get_by_session_id", get_by_session_id)
+    monkeypatch.setattr(chat_api.message_crud, "create_guidance", create_guidance)
+
+    response = await chat_api.create_session_guidance(
+        chat_api.SessionGuidanceRequest(session_id="session-1", content="guide"),
+        db=db,
+        current_user=SimpleNamespace(uid="user-1"),
+    )
+
+    assert response.code == 403
+    assert response.message == "只有外部消息平台会话可添加引导"
 
 
 def test_session_setting_rejects_reserved_reply_target_source():

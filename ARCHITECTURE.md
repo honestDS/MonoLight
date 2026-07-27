@@ -346,7 +346,7 @@ app/models/
 ├── channel_cursor.py       # 渠道路由游标模型
 ├── context_summary_stage.py # 上下文总结阶段与片段模型
 ├── knowledge_base.py       # 知识库、文档与分块模型
-├── message.py              # 消息模型
+├── message.py              # 消息与持久引导模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息平台发件箱模型
 ├── profile.py              # Profile 配置模型
@@ -461,7 +461,7 @@ dashboard/src/views/
 dashboard/src/components/
 ├── BaseDataTable.vue       # 通用数据表格
 ├── ChannelEditor.vue       # 渠道编辑器
-├── ChatMessageList.vue     # 虚拟化聊天消息、工具结果与审计卡片展示
+├── ChatMessageList.vue     # 虚拟化聊天消息、引导、工具结果与审计卡片展示
 ├── LanguageSwitcher.vue    # 语言切换器
 ├── MessagePlatformFormDialog.vue # 消息平台表单
 ├── ProfileFormDialog.vue   # Profile 表单
@@ -498,6 +498,9 @@ dashboard/tests/
 
 ```text
 tests/
+├── integration/
+│   ├── conftest.py                  # 接口测试数据库夹具
+│   └── test_chat_guidance_api.py    # 外部会话引导接口请求测试
 └── unit/
     ├── context_summary_*_fixture.py # 上下文总结测试夹具
     ├── context_summary_*_support.py # 上下文总结测试辅助
@@ -536,7 +539,8 @@ scripts/
 ├── migration_20260719_add_background_task_audit_binding.py # 后台任务审计绑定
 ├── migration_20260724_add_audit_tool_result_versions.py # 审计工具结果版本表
 ├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
-└── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
+├── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
+└── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
 ```
 
 ## 运行期目录

@@ -4,11 +4,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.crud.message import message_crud
 from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem
 from app.core.exceptions import BaseBusinessException
 from app.core.session_reply_queue import executor as executor_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager
-from app.models.message import Message
+from app.models.message import Message, MessageRole, MessageType
+from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
     SessionReplyWorkItem,
@@ -21,6 +23,161 @@ from tests.unit.session_reply_queue_test_support import (
 )
 
 pytest_plugins = ("tests.unit.session_reply_queue_fixture",)
+
+
+@pytest.mark.asyncio
+async def test_external_foreground_message_uses_latest_guidance_across_turns(db_session: AsyncSession):
+    manager = SessionReplyQueueManager()
+    db_session.add(
+        ChatSession(
+            session_id="session-1",
+            uid="user-1",
+            profile_id=1,
+            source="weixin-openclaw",
+            reply_target_source="weixin-openclaw",
+        )
+    )
+    guidance_messages = [
+        Message(
+            session_id="session-1",
+            uid="user-1",
+            profile_id=1,
+            role=MessageRole.SYSTEM,
+            type=MessageType.GUIDANCE,
+            content="[系统提示信息]第一条引导[系统提示信息结束]",
+            is_processed=False,
+        ),
+        Message(
+            session_id="session-1",
+            uid="user-1",
+            profile_id=1,
+            role=MessageRole.SYSTEM,
+            type=MessageType.GUIDANCE,
+            content="[系统提示信息]第二条引导[系统提示信息结束]",
+            is_processed=False,
+        ),
+    ]
+    db_session.add_all(guidance_messages)
+    await db_session.commit()
+
+    initial_message, work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="用户从 IM 发来的消息",
+        attachments=None,
+        source="weixin-openclaw",
+    )
+    input_message = await db_session.get(Message, initial_message.id)
+    latest_guidance = guidance_messages[-1].content
+
+    assert input_message.content == "用户从 IM 发来的消息"
+    assert input_message.guidance_prompt == latest_guidance
+    assert work.execution_state["guidance_prompt"] == latest_guidance
+    assert "additional_system_prompt" not in work.execution_state
+    for guidance in guidance_messages:
+        await db_session.refresh(guidance)
+        assert guidance.is_processed is True
+
+    work.status = SessionReplyWorkStatus.RUNNING
+    work.locked_by = "worker-1"
+    db_session.add(work)
+    await db_session.commit()
+    content, attachments, message_ids = await manager.freeze_foreground_input(
+        db_session,
+        work=work,
+        worker_id="worker-1",
+    )
+
+    assert content == "用户从 IM 发来的消息"
+    assert attachments == []
+    assert message_ids == [input_message.id]
+
+    work.status = SessionReplyWorkStatus.SUCCEEDED
+    work.locked_by = None
+    db_session.add(work)
+    await db_session.commit()
+
+    next_initial_message, next_work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="第二条 IM 消息",
+        attachments=None,
+        source="weixin-openclaw",
+    )
+    next_input_message = await db_session.get(Message, next_initial_message.id)
+
+    assert next_input_message.guidance_prompt == latest_guidance
+    assert next_work.execution_state["guidance_prompt"] == latest_guidance
+
+    latest_guidance = await message_crud.create_guidance(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile_id=1,
+        content="[系统提示信息]第三条引导[系统提示信息结束]",
+    )
+    newest_initial_message, newest_work = await manager._enqueue_foreground_message(
+        db_session,
+        uid="user-1",
+        session_id="session-1",
+        profile=SimpleNamespace(id=1),
+        message="第三条 IM 消息",
+        attachments=None,
+        source="weixin-openclaw",
+    )
+    newest_input_message = await db_session.get(Message, newest_initial_message.id)
+
+    assert newest_input_message.guidance_prompt == latest_guidance.content
+    assert newest_work.execution_state["guidance_prompt"] == latest_guidance.content
+    assert guidance_messages[0].content not in newest_input_message.guidance_prompt
+    assert guidance_messages[1].content not in newest_input_message.guidance_prompt
+
+
+@pytest.mark.asyncio
+async def test_permanent_guidance_is_visible_in_web_history_but_excluded_from_model_history(db_session: AsyncSession):
+    guidance = await message_crud.create_guidance(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        profile_id=1,
+        content="[系统提示信息]永久引导[系统提示信息结束]",
+        commit=False,
+    )
+    text_message = Message(
+        session_id="session-1",
+        uid="user-1",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="普通消息",
+        is_processed=False,
+    )
+    db_session.add(text_message)
+    await db_session.commit()
+
+    model_history = await message_crud.get_history_backward_by_id(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+    )
+    unprocessed = await message_crud.get_unprocessed_messages(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+    )
+    web_history = await message_crud.get_history_paged(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+    )
+
+    assert [message.id for message in model_history] == [text_message.id]
+    assert [message.id for message in unprocessed] == [text_message.id]
+    assert {message.id for message in web_history} == {guidance.id, text_message.id}
 
 
 @pytest.mark.asyncio

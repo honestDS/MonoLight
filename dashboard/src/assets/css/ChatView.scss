@@ -165,3 +165,80 @@
   gap: 8px;
   margin-top: 14px;
 }
+
+.chat-main .input-area .read-only-notice {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: auto;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  box-sizing: border-box;
+}
+
+.read-only-notice-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-main .message-list .message-item.guidance {
+  align-items: center;
+  width: min(640px, 100%);
+  max-width: 100%;
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.chat-main .message-list .message-item.guidance .message-header {
+  align-self: center;
+}
+
+.chat-main .message-list .message-item.guidance .guidance-card {
+  width: 100%;
+  box-sizing: border-box;
+  color: #5b4a1f;
+  background: #fffaf0;
+  border: 1px solid #e6a23c;
+  border-radius: 8px;
+}
+
+.guidance-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.guidance-title {
+  color: #7a5613;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.guidance-status {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  color: #a66a12;
+  font-size: 12px;
+  line-height: 18px;
+  background: #fff3d9;
+  border-radius: 4px;
+}
+
+.guidance-status.is-used {
+  color: #3d7668;
+  background: #e7f4ef;
+}
+
+.guidance-text {
+  margin-top: 8px;
+  color: #4e4330;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

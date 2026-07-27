@@ -1,8 +1,10 @@
 MESSAGES = {
     "MSG_SESSION_LIST_SUCCESS": "会话列表获取成功",
+    "MSG_SESSION_GUIDANCE_CREATED": "引导消息已添加",
     "ERR_SESSION_NOT_FOUND": "会话未找到或已删除",
     "MSG_SESSION_CLEARED": "已成功清理会话 {session_id} 的全部历史记录",
     "ERR_SESSION_NO_PERMISSION": "无权操作此会话",
+    "ERR_SESSION_GUIDANCE_EXTERNAL_ONLY": "只有外部消息平台会话可添加引导",
     "ERR_SESSION_READ_ONLY": "该会话来自外部消息平台，网页端仅允许查看",
     "MSG_SESSION_UPDATED": "会话设置已更新",
     "ERR_NO_VALID_CHANNEL": "未配置有效的模型渠道",
