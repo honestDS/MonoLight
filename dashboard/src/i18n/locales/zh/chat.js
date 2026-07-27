@@ -48,6 +48,7 @@ export default {
   stream: '流式',
   input_placeholder: '输入消息或粘贴截图...',
   external_session_read_only: '外部消息平台会话，输入框发送的新引导会在下次回复时替换当前引导',
+  external_session_auto_pull: '自动拉取',
   guidance: '引导',
   guidance_placeholder: '输入永久引导',
   guidance_created: '引导已添加',

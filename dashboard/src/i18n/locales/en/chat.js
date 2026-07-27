@@ -48,6 +48,7 @@ export default {
   stream: 'Stream',
   input_placeholder: 'Type a message or paste a screenshot...',
   external_session_read_only: 'External message platform session. New guidance sent from the input replaces the current guidance on the next reply.',
+  external_session_auto_pull: 'Auto fetch',
   guidance: 'Guidance',
   guidance_placeholder: 'Enter permanent guidance',
   guidance_created: 'Guidance added',

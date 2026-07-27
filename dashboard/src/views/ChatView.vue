@@ -79,7 +79,11 @@
           <el-button type="primary" @click="createNewSession" class="new-session-btn">
             <i class="el-icon-plus"></i> {{ $t('chat.new_session') }}
           </el-button>
-          
+
+          <el-checkbox v-if="isCurrentSessionReadOnly" v-model="externalSessionAutoPullEnabled">
+            {{ $t('chat.external_session_auto_pull') }}
+          </el-checkbox>
+
           <!-- 上传按钮移到模式选择之前 -->
           <div class="upload-trigger-btn">
             <el-upload
@@ -262,6 +266,7 @@ const {
   transportMode,
   attachments,
   isCurrentSessionReadOnly,
+  externalSessionAutoPullEnabled,
   isContextSummarizing,
   llmRequestMetadata,
   historyLoading,

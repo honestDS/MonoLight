@@ -13,8 +13,6 @@ import i18n from '../../i18n'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
-const HTTP_HISTORY_IDLE_SYNC_INTERVAL_MS = 15000
-const HTTP_HISTORY_FAST_SYNC_WINDOW_MS = 120000
 
 const normalizeHistoryMessage = (message) => {
   const normalizedMessage = {
@@ -144,6 +142,29 @@ export function useChatSession() {
   const isCurrentSessionReadOnly = computed(() => {
     const source = currentSession.value?.source
     return Boolean(source && !['http', 'ws'].includes(source))
+  })
+  const externalSessionAutoPullSessionIds = ref(new Set())
+  const externalSessionAutoPullEnabled = computed({
+    get: () => {
+      const sessionId = sessionManager.currentSessionId.value
+      return Boolean(
+        sessionId
+        && isCurrentSessionReadOnly.value
+        && externalSessionAutoPullSessionIds.value.has(sessionId)
+      )
+    },
+    set: (enabled) => {
+      const sessionId = sessionManager.currentSessionId.value
+      if (!sessionId || !isCurrentSessionReadOnly.value) return
+
+      const nextSessionIds = new Set(externalSessionAutoPullSessionIds.value)
+      if (enabled) {
+        nextSessionIds.add(sessionId)
+      } else {
+        nextSessionIds.delete(sessionId)
+      }
+      externalSessionAutoPullSessionIds.value = nextSessionIds
+    }
   })
 
   // 3. 通信层
@@ -292,13 +313,24 @@ export function useChatSession() {
 
   let httpHistorySyncTimer = null
   let isHttpHistorySyncing = false
-  let httpHistoryFastSyncUntil = 0
   let backgroundTaskSessionId = null
   let httpHistorySyncVersion = 0
 
-  const shouldSyncCurrentSessionHistory = () => (
-    transport.transportMode.value === 'http' || isCurrentSessionReadOnly.value
+  const canSyncCurrentSessionHistory = () => (
+    (!isCurrentSessionReadOnly.value && transport.transportMode.value === 'http')
+    || (isCurrentSessionReadOnly.value && externalSessionAutoPullEnabled.value)
   )
+
+  const shouldContinuouslySyncCurrentSessionHistory = () => {
+    const sessionId = sessionManager.currentSessionId.value
+    return Boolean(sessionId) && (
+      (isCurrentSessionReadOnly.value && externalSessionAutoPullEnabled.value) || (
+        !isCurrentSessionReadOnly.value
+        && transport.transportMode.value === 'http'
+        && backgroundTaskSessionId === sessionId
+      )
+    )
+  }
 
   const stopHttpHistorySync = () => {
     httpHistorySyncVersion += 1
@@ -307,14 +339,13 @@ export function useChatSession() {
       httpHistorySyncTimer = null
     }
     isHttpHistorySyncing = false
-    httpHistoryFastSyncUntil = 0
     backgroundTaskSessionId = null
   }
 
   const syncCurrentHttpSessionHistory = async () => {
     const sessionId = sessionManager.currentSessionId.value
     if (
-      !shouldSyncCurrentSessionHistory()
+      !canSyncCurrentSessionHistory()
       || !sessionId
       || chatState.loading.value
       || isHttpHistorySyncing
@@ -326,7 +357,7 @@ export function useChatSession() {
       await mergeLatestSessionHistory(sessionId)
       if (
         syncVersion !== httpHistorySyncVersion
-        || !shouldSyncCurrentSessionHistory()
+        || !canSyncCurrentSessionHistory()
         || sessionId !== sessionManager.currentSessionId.value
         || backgroundTaskSessionId !== sessionId
       ) return
@@ -338,7 +369,7 @@ export function useChatSession() {
       })
       if (
         syncVersion !== httpHistorySyncVersion
-        || !shouldSyncCurrentSessionHistory()
+        || !canSyncCurrentSessionHistory()
         || sessionId !== sessionManager.currentSessionId.value
       ) return
 
@@ -367,13 +398,9 @@ export function useChatSession() {
     }
 
     const sessionId = sessionManager.currentSessionId.value
-    if (!shouldSyncCurrentSessionHistory() || !sessionId) return
+    if (!shouldContinuouslySyncCurrentSessionHistory() || !sessionId) return
 
     const syncVersion = httpHistorySyncVersion
-    const hasKnownBackgroundTasks = backgroundTaskSessionId === sessionId
-    const delay = isCurrentSessionReadOnly.value || Date.now() < httpHistoryFastSyncUntil || hasKnownBackgroundTasks
-      ? HTTP_HISTORY_FAST_SYNC_INTERVAL_MS
-      : HTTP_HISTORY_IDLE_SYNC_INTERVAL_MS
 
     httpHistorySyncTimer = setTimeout(async () => {
       if (syncVersion !== httpHistorySyncVersion) return
@@ -382,35 +409,29 @@ export function useChatSession() {
       if (syncVersion === httpHistorySyncVersion) {
         scheduleNextHttpHistorySync()
       }
-    }, delay)
+    }, HTTP_HISTORY_FAST_SYNC_INTERVAL_MS)
   }
 
-  const activateHttpHistoryFastSync = (sessionId, hasBackgroundTasks = false) => {
+  const startHttpHistoryBackgroundTaskSync = (sessionId) => {
     if (
-      !shouldSyncCurrentSessionHistory()
+      transport.transportMode.value !== 'http'
       || !sessionId
       || sessionId !== sessionManager.currentSessionId.value
     ) return
 
-    httpHistoryFastSyncUntil = Math.max(
-      httpHistoryFastSyncUntil,
-      Date.now() + HTTP_HISTORY_FAST_SYNC_WINDOW_MS
-    )
-    if (hasBackgroundTasks) {
-      backgroundTaskSessionId = sessionId
-    }
+    backgroundTaskSessionId = sessionId
     scheduleNextHttpHistorySync()
   }
 
   watch(
-    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value],
+    () => [transport.transportMode.value, sessionManager.currentSessionId.value, isCurrentSessionReadOnly.value, externalSessionAutoPullEnabled.value],
     async ([, sessionId]) => {
       stopHttpHistorySync()
-      if (!shouldSyncCurrentSessionHistory() || !sessionId) return
+      if (!canSyncCurrentSessionHistory() || !sessionId) return
 
       const syncVersion = httpHistorySyncVersion
       await syncCurrentHttpSessionHistory()
-      if (syncVersion === httpHistorySyncVersion) {
+      if (syncVersion === httpHistorySyncVersion && shouldContinuouslySyncCurrentSessionHistory()) {
         scheduleNextHttpHistorySync()
       }
     },
@@ -637,7 +658,7 @@ export function useChatSession() {
       }
 
       if (response.has_background_tasks) {
-        activateHttpHistoryFastSync(requestSessionId, true)
+        startHttpHistoryBackgroundTaskSync(requestSessionId)
       }
 
       const auditConfirmation = parseAuditConfirmationResponse(response)
@@ -665,7 +686,6 @@ export function useChatSession() {
         if (!hasThinking) {
           chatState.loading.value = false
         }
-        activateHttpHistoryFastSync(requestSessionId)
       }
     }
   }
@@ -1177,6 +1197,7 @@ export function useChatSession() {
     sessionCreating: sessionManager.sessionCreating,
     currentSession,
     isCurrentSessionReadOnly,
+    externalSessionAutoPullEnabled,
     
     // 状态 - 通信相关
     transportMode: transport.transportMode,
