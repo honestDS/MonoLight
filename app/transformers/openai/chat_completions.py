@@ -1,26 +1,15 @@
-import asyncio
-import codecs
 import json
-import socket
 from collections.abc import AsyncGenerator
 from typing import (
     Any,
 )
 
-import aiohttp
-
 from app.core.constants import (
-    ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR,
-    ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
-    ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
-    ERR_LLM_FIRST_CHAR_TIMEOUT,
-    ERR_LLM_STREAM_TIMEOUT,
 )
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import (
     FilePart,
@@ -32,26 +21,13 @@ from app.models.message import (
     TextPart,
 )
 
-from ..base import BaseTransformer
+from .base import BaseOpenAITransformer
 
 logger = get_logger(__name__)
 
 
-def _is_timeout_exception(exc: Exception) -> bool:
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, socket.timeout)):
-        return True
-    if isinstance(exc, aiohttp.ServerTimeoutError):
-        return True
-    return False
-
-
-class OpenAIChatCompletionsTransformer(BaseTransformer):
+class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_chat_completions"
-
-    # 本转换器统一关闭 TLS 证书校验，以兼容自签名证书或证书链不完整的模型提供商。
-    @staticmethod
-    def _nonnegative_token_count(value: Any) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
     @classmethod
     def _normalize_usage(cls, usage: Any) -> dict[str, Any]:
@@ -67,43 +43,6 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
             }
         )
         return normalized
-
-    @classmethod
-    def _normalize_finish_reason(cls, raw_reason: Any) -> tuple[str | None, dict[str, Any] | None]:
-        if raw_reason is None:
-            return None, None
-
-        reason = str(raw_reason).strip().lower()
-        aliases = {
-            "stop": "stop",
-            "completed": "stop",
-            "complete": "stop",
-            "length": "length",
-            "max_tokens": "length",
-            "max_output_tokens": "length",
-            "tool_calls": "tool_calls",
-            "function_call": "tool_calls",
-            "content_filter": "content_filter",
-            "content-filter": "content_filter",
-            "safety": "content_filter",
-            "moderation": "content_filter",
-            "blocked": "content_filter",
-            "refusal": "refusal",
-            "refused": "refusal",
-            "error": "error",
-            "failed": "error",
-            "incomplete": "incomplete",
-            "cancelled": "incomplete",
-            "canceled": "incomplete",
-        }
-        normalized = aliases.get(reason)
-        if normalized is None and any(marker in reason for marker in ("content_filter", "safety", "moderation", "blocked", "guardrail")):
-            normalized = "content_filter"
-        elif normalized is None and any(marker in reason for marker in ("max_output", "max_token", "token_limit")):
-            normalized = "length"
-        elif normalized is None:
-            normalized = "incomplete"
-        return normalized, {"raw_finish_reason": raw_reason}
 
     @classmethod
     def _tool_call_provider_metadata(cls, tool_call: dict[str, Any]) -> dict[str, Any] | None:
@@ -144,54 +83,6 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
             "message": message_metadata["message"],
         }
 
-    async def list_models(
-        self,
-        api_key: str,
-        base_url: str,
-        timeout: float = 30.0,
-        http_proxy: str | None = None,
-        **kwargs,
-    ) -> list[dict[str, Any]]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"{base_url.rstrip('/')}/models"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.get(url, headers=headers, **proxy_kwargs) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    parsed = json.loads(txt)
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(base_url=base_url).error(t("LOG_MODEL_LIST_FAILED", error=str(e)))
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
-
-        raw_models = parsed.get("data")
-        if not isinstance(raw_models, list):
-            raise LLMException(ERR_CHANNEL_MODEL_LIST_FORMAT_ERROR)
-
-        models = []
-        for item in raw_models:
-            if not isinstance(item, dict) or not item.get("id"):
-                continue
-            models.append(
-                {
-                    "id": str(item["id"]),
-                    "owned_by": item.get("owned_by"),
-                    "created": item.get("created"),
-                }
-            )
-        return models
-
     async def generate(
         self,
         api_key: str,
@@ -225,28 +116,17 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
             payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        # 非流式：对整个请求设置整体超时
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    parsed = json.loads(txt)
-                    parsed["usage"] = self._normalize_usage(parsed.get("usage"))
-                    return parsed
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
-            if _is_timeout_exception(e):
-                raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
+        parsed = await self._post_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            model_id=model_id,
+            base_url=base_url,
+        )
+        parsed["usage"] = self._normalize_usage(parsed.get("usage"))
+        return parsed
 
     async def generate_stream(
         self,
@@ -280,79 +160,27 @@ class OpenAIChatCompletionsTransformer(BaseTransformer):
             payload["top_p"] = kwargs["top_p"]
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        # 流响应超时覆盖建立连接、等待响应头、首个有效输出及后续有效输出间隔。
-        # 仅成功解析且包含有效负载的数据块会重置超时截止时间。
-        # 空行、keep-alive、无法解析的数据及无有效负载的占位块均不重置。
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        try:
-            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=None),
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                resp_cm = session.post(url, headers=headers, json=payload, **proxy_kwargs)
-                # 等待响应头（含服务端首次有效输出前的思考时间）也纳入流响应超时
-                try:
-                    resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
-                except TimeoutError:
-                    raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
-                try:
-                    if resp.status != 200:
-                        txt = await resp.text()
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
+        async for parsed in self._stream_sse_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            model_id=model_id,
+            base_url=base_url,
+            normalize_event=self._normalize_stream_event,
+        ):
+            yield parsed
 
-                    buffer = ""
-                    chunk_iter = resp.content.iter_any().__aiter__()
-                    decoder = codecs.getincrementaldecoder("utf-8")()
-                    while True:
-                        try:
-                            line = await asyncio.wait_for(
-                                chunk_iter.__anext__(),
-                                timeout=max(deadline - loop.time(), 0.001),
-                            )
-                        except TimeoutError:
-                            raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
-                        except StopAsyncIteration:
-                            buffer += decoder.decode(b"", final=True)
-                            break
+    @classmethod
+    def _normalize_stream_event(cls, event: Any) -> tuple[dict[str, Any] | None, bool]:
+        if not isinstance(event, dict):
+            return None, False
 
-                        # iter_any() 返回任意大小的原始字节块，使用增量解码器保留跨块 UTF-8 字符。
-                        chunks = decoder.decode(line)
-                        buffer += chunks
-
-                        done = False
-                        while "\n" in buffer:
-                            raw_line, buffer = buffer.split("\n", 1)
-                            raw_line = raw_line.strip()
-                            if not raw_line:
-                                continue
-                            if raw_line.startswith("data: "):
-                                data_content = raw_line[6:]
-                                if data_content == "[DONE]":
-                                    done = True
-                                    break
-                                try:
-                                    parsed = json.loads(data_content)
-                                except Exception as json_err:
-                                    logger.bind(model_id=model_id, base_url=base_url).warning(t("LOG_OPENAI_SSE_PARSE_FAILED", raw_line=raw_line, error=str(json_err)))
-                                    continue
-                                if "usage" in parsed:
-                                    parsed["usage"] = self._normalize_usage(parsed.get("usage"))
-                                if self._stream_chunk_has_payload(parsed):
-                                    deadline = loop.time() + timeout
-                                yield parsed
-                        if done:
-                            break
-                finally:
-                    await resp_cm.__aexit__(None, None, None)
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
-            if _is_timeout_exception(e):
-                raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout) from e
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
+        parsed = dict(event)
+        if "usage" in parsed:
+            parsed["usage"] = cls._normalize_usage(parsed.get("usage"))
+        return parsed, cls._stream_chunk_has_payload(parsed)
 
     @staticmethod
     def _stream_chunk_has_payload(parsed: dict[str, Any]) -> bool:

@@ -6,6 +6,7 @@ import pytest
 from app.core.constants import ERR_LLM_STREAM_TIMEOUT
 from app.core.exceptions import LLMException
 from app.models.message import InternalMessage, MessageRole
+from app.transformers.openai import base as openai_base_module
 from app.transformers.openai import chat_completions as openai_module
 
 STREAM_TIMEOUT = 0.08
@@ -87,8 +88,8 @@ def _patch_http(monkeypatch, response_context: _FakeResponseContext) -> None:
     def client_session(**kwargs):
         return _FakeSession(response_context)
 
-    monkeypatch.setattr(openai_module.aiohttp, "ClientSession", client_session)
-    monkeypatch.setattr(openai_module.aiohttp, "TCPConnector", _FakeTCPConnector)
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", client_session)
+    monkeypatch.setattr(openai_base_module.aiohttp, "TCPConnector", _FakeTCPConnector)
 
 
 def _request_messages() -> list[InternalMessage]:

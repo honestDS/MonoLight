@@ -6,7 +6,7 @@ import pytest
 from app.api.v1 import channels as channels_module
 from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs, get_channel_http_proxy, normalize_http_proxy
 from app.transformers.openai import OpenAIChatCompletionsTransformer
-from app.transformers.openai import chat_completions as chat_completions_module
+from app.transformers.openai import base as openai_base_module
 
 
 class _FakeAiohttpResponse:
@@ -95,8 +95,8 @@ async def test_chat_completions_list_models_passes_normalized_proxy_to_fake_aioh
         sessions.append(session)
         return session
 
-    monkeypatch.setattr(chat_completions_module.aiohttp, "ClientSession", fake_client_session)
-    monkeypatch.setattr(chat_completions_module.aiohttp, "TCPConnector", lambda **_kwargs: object())
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(openai_base_module.aiohttp, "TCPConnector", lambda **_kwargs: object())
 
     models = await OpenAIChatCompletionsTransformer().list_models(
         api_key="key",

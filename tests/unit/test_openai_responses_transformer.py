@@ -1,4 +1,6 @@
 import json
+import typing
+from typing import Any
 
 import pytest
 
@@ -13,8 +15,10 @@ from app.models.message import (
     TextPart,
 )
 from app.providers.llm.client import LLMClient
+from app.transformers.base import BaseTransformer
 from app.transformers.openai import OpenAIChatCompletionsTransformer, OpenAIResponsesTransformer
-from app.transformers.openai import responses as openai_responses_module
+from app.transformers.openai import base as openai_base_module
+from app.transformers.openai.base import BaseOpenAITransformer
 
 
 class _AsyncBytesIterator:
@@ -118,6 +122,16 @@ def test_responses_usage_normalization() -> None:
     }
 
 
+def test_openai_transformers_share_base_without_inheriting_each_other() -> None:
+    assert issubclass(OpenAIChatCompletionsTransformer, BaseOpenAITransformer)
+    assert issubclass(OpenAIResponsesTransformer, BaseOpenAITransformer)
+    assert not issubclass(OpenAIResponsesTransformer, OpenAIChatCompletionsTransformer)
+
+
+def test_base_transformer_generate_returns_provider_response() -> None:
+    assert typing.get_type_hints(BaseTransformer.generate)["return"] is Any
+
+
 @pytest.mark.asyncio
 async def test_responses_generate_creates_connector_with_ssl_disabled(monkeypatch) -> None:
     connector_calls: list[dict] = []
@@ -152,8 +166,8 @@ async def test_responses_generate_creates_connector_with_ssl_disabled(monkeypatc
         session_calls.append(kwargs)
         return _FakeClientSession(response)
 
-    monkeypatch.setattr(openai_responses_module.aiohttp, "TCPConnector", fake_tcp_connector)
-    monkeypatch.setattr(openai_responses_module.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(openai_base_module.aiohttp, "TCPConnector", fake_tcp_connector)
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
     result = await OpenAIResponsesTransformer().generate(
         api_key="key",
@@ -192,7 +206,7 @@ async def test_responses_generate_passes_normalized_http_proxy_kwargs(monkeypatc
         sessions.append(session)
         return session
 
-    monkeypatch.setattr(openai_responses_module.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
     await OpenAIResponsesTransformer().generate(
         api_key="key",
@@ -228,8 +242,8 @@ async def test_responses_generate_stream_creates_connector_with_ssl_disabled(mon
         session_calls.append(kwargs)
         return _FakeClientSession(response)
 
-    monkeypatch.setattr(openai_responses_module.aiohttp, "TCPConnector", fake_tcp_connector)
-    monkeypatch.setattr(openai_responses_module.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(openai_base_module.aiohttp, "TCPConnector", fake_tcp_connector)
+    monkeypatch.setattr(openai_base_module.aiohttp, "ClientSession", fake_client_session)
 
     chunks = [
         chunk
@@ -1042,3 +1056,136 @@ def test_responses_completed_stream_event_reports_output_finish_reason(
             "output": [{"type": "message"}],
         }
     assert has_payload is False
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_argument_deltas_without_output_index_use_item_id(monkeypatch) -> None:
+    argument_delta_indexes: set[tuple[str, int | str | None]] = set()
+    argument_fallback_indexes: set[tuple[str, int | str | None]] = set()
+
+    first_added_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {
+                "type": "function_call",
+                "id": "item-1",
+                "call_id": "call-1",
+                "name": "lookup_a",
+            },
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+    first_arguments_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-1",
+            "delta": '{"value":"a"}',
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+    second_added_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.output_item.added",
+            "output_index": 2,
+            "item": {
+                "type": "function_call",
+                "id": "item-2",
+                "call_id": "call-2",
+                "name": "lookup_b",
+            },
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+    second_arguments_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-2",
+            "delta": '{"value":"b"}',
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+
+    assert first_added_chunk is not None
+    assert first_arguments_chunk is not None
+    assert second_added_chunk is not None
+    assert second_arguments_chunk is not None
+    argument_deltas = [first_arguments_chunk, second_arguments_chunk]
+    assert [chunk["choices"][0]["delta"]["tool_calls"][0]["index"] for chunk in argument_deltas] == [None, None]
+    assert [chunk["choices"][0]["delta"]["tool_calls"][0]["id"] for chunk in argument_deltas] == ["item-1", "item-2"]
+
+    chunks = [first_added_chunk, first_arguments_chunk, second_added_chunk, second_arguments_chunk]
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(_content: str) -> None:
+        return None
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai_responses",
+    )
+
+    assert response.message.tool_calls is not None
+    assert [(tool_call.name, tool_call.arguments) for tool_call in response.message.tool_calls] == [
+        ("lookup_a", {"value": "a"}),
+        ("lookup_b", {"value": "b"}),
+    ]
+
+    first_done_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-1",
+                "call_id": "call-1",
+                "arguments": '{"value":"a"}',
+            },
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+    second_done_chunk, _ = OpenAIResponsesTransformer._normalize_stream_event(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-2",
+                "call_id": "call-2",
+                "arguments": '{"value":"b"}',
+            },
+        },
+        argument_delta_indexes=argument_delta_indexes,
+        argument_fallback_indexes=argument_fallback_indexes,
+    )
+
+    assert first_done_chunk is not None
+    assert second_done_chunk is not None
+    chunks.extend([first_done_chunk, second_done_chunk])
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai_responses",
+    )
+
+    assert response.message.tool_calls is not None
+    assert [(tool_call.name, tool_call.arguments) for tool_call in response.message.tool_calls] == [
+        ("lookup_a", {"value": "a"}),
+        ("lookup_b", {"value": "b"}),
+    ]

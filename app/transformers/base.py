@@ -41,7 +41,8 @@ class BaseTransformer(ABC):
         http_proxy: str | None = None,
         custom_headers: dict[str, str] | None = None,
         **kwargs,
-    ) -> InternalResponse:
+    ) -> Any:
+        """返回厂商原始响应，由 to_internal_response 统一封装。"""
         pass
 
     @abstractmethod

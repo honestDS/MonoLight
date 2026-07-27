@@ -1,31 +1,23 @@
-import asyncio
-import codecs
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import aiohttp
-
 from app.core.constants import (
-    ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
-    ERR_LLM_FIRST_CHAR_TIMEOUT,
-    ERR_LLM_STREAM_TIMEOUT,
 )
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
-from app.core.utils.http_proxy import build_aiohttp_proxy_kwargs
 from app.core.utils.model_request_headers import build_model_request_headers
 from app.models.message import FilePart, ImagePart, InternalMessage, InternalResponse, InternalToolCall, MessageRole, TextPart
 
-from .chat_completions import OpenAIChatCompletionsTransformer, _is_timeout_exception
+from .base import BaseOpenAITransformer
 
 logger = get_logger(__name__)
 
 
-class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
+class OpenAIResponsesTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_responses"
 
     async def generate(
@@ -55,27 +47,17 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
             top_p=kwargs.get("top_p"),
         )
         url = f"{base_url.rstrip('/')}/responses"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        try:
-            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
-            async with aiohttp.ClientSession(
-                timeout=client_timeout,
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
-                    parsed = json.loads(txt)
-                    parsed["usage"] = self._normalize_responses_usage(parsed.get("usage"))
-                    return parsed
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=False).error(t("LOG_OPENAI_CHAT_FAILED", error=str(e)))
-            if _is_timeout_exception(e):
-                raise LLMException(ERR_LLM_FIRST_CHAR_TIMEOUT, timeout=timeout) from e
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
+        parsed = await self._post_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            model_id=model_id,
+            base_url=base_url,
+        )
+        parsed["usage"] = self._normalize_responses_usage(parsed.get("usage"))
+        return parsed
 
     async def generate_stream(
         self,
@@ -104,87 +86,35 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
             top_p=kwargs.get("top_p"),
         )
         url = f"{base_url.rstrip('/')}/responses"
-        argument_delta_indexes: set[int | str | None] = set()
-        argument_fallback_indexes: set[int | str | None] = set()
+        argument_delta_indexes: set[tuple[str, int | str | None]] = set()
+        argument_fallback_indexes: set[tuple[str, int | str | None]] = set()
         text_delta_indexes: set[tuple[int | str | None, int | str | None]] = set()
         text_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
         refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] = set()
         refusal_fallback_indexes: set[tuple[int | str | None, int | str | None]] = set()
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        try:
-            proxy_kwargs = build_aiohttp_proxy_kwargs(http_proxy)
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=None),
-                connector=aiohttp.TCPConnector(ssl=False),
-            ) as session:
-                resp_cm = session.post(url, headers=headers, json=payload, **proxy_kwargs)
-                try:
-                    resp = await asyncio.wait_for(resp_cm.__aenter__(), timeout=max(deadline - loop.time(), 0.001))
-                except TimeoutError:
-                    raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
-                try:
-                    if resp.status != 200:
-                        txt = await resp.text()
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=txt)
 
-                    buffer = ""
-                    chunk_iter = resp.content.iter_any().__aiter__()
-                    decoder = codecs.getincrementaldecoder("utf-8")()
-                    while True:
-                        try:
-                            raw_bytes = await asyncio.wait_for(
-                                chunk_iter.__anext__(),
-                                timeout=max(deadline - loop.time(), 0.001),
-                            )
-                        except TimeoutError:
-                            raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout)
-                        except StopAsyncIteration:
-                            buffer += decoder.decode(b"", final=True)
-                            break
+        def normalize_event(event: Any) -> tuple[dict[str, Any] | None, bool]:
+            return self._normalize_stream_event(
+                event,
+                argument_delta_indexes=argument_delta_indexes,
+                argument_fallback_indexes=argument_fallback_indexes,
+                text_delta_indexes=text_delta_indexes,
+                text_fallback_indexes=text_fallback_indexes,
+                refusal_delta_indexes=refusal_delta_indexes,
+                refusal_fallback_indexes=refusal_fallback_indexes,
+            )
 
-                        buffer += decoder.decode(raw_bytes)
-                        done = False
-                        while "\n" in buffer:
-                            raw_line, buffer = buffer.split("\n", 1)
-                            raw_line = raw_line.strip()
-                            if not raw_line or not raw_line.startswith("data:"):
-                                continue
-                            data_content = raw_line[5:].lstrip()
-                            if data_content == "[DONE]":
-                                done = True
-                                break
-                            try:
-                                event = json.loads(data_content)
-                            except Exception as json_err:
-                                logger.bind(model_id=model_id, base_url=base_url).warning(t("LOG_OPENAI_SSE_PARSE_FAILED", raw_line=raw_line, error=str(json_err)))
-                                continue
-
-                            chunk, has_payload = self._normalize_stream_event(
-                                event,
-                                argument_delta_indexes=argument_delta_indexes,
-                                argument_fallback_indexes=argument_fallback_indexes,
-                                text_delta_indexes=text_delta_indexes,
-                                text_fallback_indexes=text_fallback_indexes,
-                                refusal_delta_indexes=refusal_delta_indexes,
-                                refusal_fallback_indexes=refusal_fallback_indexes,
-                            )
-                            if chunk is None:
-                                continue
-                            if has_payload:
-                                deadline = loop.time() + timeout
-                            yield chunk
-                        if done:
-                            break
-                finally:
-                    await resp_cm.__aexit__(None, None, None)
-        except LLMException:
-            raise
-        except Exception as e:
-            logger.bind(model_id=model_id, base_url=base_url, stream=True).error(t("LOG_OPENAI_STREAM_CHAT_FAILED", error=str(e)))
-            if _is_timeout_exception(e):
-                raise LLMException(ERR_LLM_STREAM_TIMEOUT, timeout=timeout) from e
-            raise LLMException(ERR_LLM_CONNECTION_FAILED, detail=str(e))
+        async for chunk in self._stream_sse_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+            http_proxy=http_proxy,
+            model_id=model_id,
+            base_url=base_url,
+            normalize_event=normalize_event,
+        ):
+            yield chunk
 
     @classmethod
     def to_provider(cls, internal_messages: list[InternalMessage], **kwargs) -> list[dict[str, Any]]:
@@ -549,8 +479,8 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         cls,
         event: Any,
         *,
-        argument_delta_indexes: set[int | str | None],
-        argument_fallback_indexes: set[int | str | None],
+        argument_delta_indexes: set[tuple[str, int | str | None]],
+        argument_fallback_indexes: set[tuple[str, int | str | None]],
         text_delta_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
         text_fallback_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
         refusal_delta_indexes: set[tuple[int | str | None, int | str | None]] | None = None,
@@ -609,18 +539,21 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
             if not isinstance(item, dict) or item.get("type") != "function_call":
                 return None, False
             output_index = cls._output_index(event)
+            tool_call_id = cls._tool_call_identity(event, item)
             tool_call = {
                 "index": output_index,
-                "id": item.get("call_id") or item.get("id"),
                 "type": "function",
                 "function": {"name": item.get("name")},
                 "provider_metadata": cls._responses_tool_call_provider_metadata(item),
             }
+            if tool_call_id is not None:
+                tool_call["id"] = tool_call_id
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
         if event_type == "response.function_call_arguments.delta":
             output_index = cls._output_index(event)
-            argument_delta_indexes.add(output_index)
+            argument_key = cls._argument_event_key(event)
+            argument_delta_indexes.add(argument_key)
             delta = event.get("delta")
             if not isinstance(delta, str):
                 delta = cls._stringify(delta) if delta is not None else ""
@@ -629,6 +562,9 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
                 "type": "function",
                 "function": {"arguments": delta},
             }
+            tool_call_id = cls._tool_call_identity(event)
+            if tool_call_id is not None:
+                tool_call["id"] = tool_call_id
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
         if event_type == "response.output_item.done":
@@ -636,14 +572,18 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
             if not isinstance(item, dict) or item.get("type") != "function_call":
                 return None, False
             output_index = cls._output_index(event)
+            argument_key = cls._argument_event_key(event, item)
             tool_call = {
                 "index": output_index,
                 "type": "function",
                 "provider_metadata": cls._responses_tool_call_provider_metadata(item),
             }
-            if output_index in argument_delta_indexes or output_index in argument_fallback_indexes:
+            tool_call_id = cls._tool_call_identity(event, item)
+            if tool_call_id is not None:
+                tool_call["id"] = tool_call_id
+            if argument_key in argument_delta_indexes or argument_key in argument_fallback_indexes:
                 return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, False
-            argument_fallback_indexes.add(output_index)
+            argument_fallback_indexes.add(argument_key)
             arguments = item.get("arguments")
             if not isinstance(arguments, str):
                 arguments = cls._stringify(arguments) if arguments is not None else ""
@@ -652,9 +592,10 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
 
         if event_type == "response.function_call_arguments.done":
             output_index = cls._output_index(event)
-            if output_index in argument_delta_indexes or output_index in argument_fallback_indexes:
+            argument_key = cls._argument_event_key(event)
+            if argument_key in argument_delta_indexes or argument_key in argument_fallback_indexes:
                 return None, False
-            argument_fallback_indexes.add(output_index)
+            argument_fallback_indexes.add(argument_key)
             arguments = event.get("arguments")
             if not isinstance(arguments, str):
                 arguments = cls._stringify(arguments) if arguments is not None else ""
@@ -663,6 +604,9 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
                 "type": "function",
                 "function": {"arguments": arguments},
             }
+            tool_call_id = cls._tool_call_identity(event)
+            if tool_call_id is not None:
+                tool_call["id"] = tool_call_id
             return {"choices": [{"delta": {"tool_calls": [tool_call]}}]}, True
 
         if event_type in {"response.completed", "response.incomplete"}:
@@ -691,6 +635,27 @@ class OpenAIResponsesTransformer(OpenAIChatCompletionsTransformer):
         if isinstance(output_index, (int, str)) or output_index is None:
             return output_index
         return str(output_index)
+
+    @staticmethod
+    def _tool_call_identity(event: dict[str, Any], item: dict[str, Any] | None = None) -> str | None:
+        for value in (
+            item.get("id") if item is not None else None,
+            event.get("item_id"),
+            event.get("call_id"),
+            item.get("call_id") if item is not None else None,
+        ):
+            if value is not None:
+                identity = str(value)
+                if identity:
+                    return identity
+        return None
+
+    @classmethod
+    def _argument_event_key(cls, event: dict[str, Any], item: dict[str, Any] | None = None) -> tuple[str, int | str | None]:
+        tool_call_id = cls._tool_call_identity(event, item)
+        if tool_call_id is not None:
+            return "id", tool_call_id
+        return "index", cls._output_index(event)
 
     @classmethod
     def _content_part_index(cls, event: dict[str, Any]) -> tuple[int | str | None, int | str | None]:
