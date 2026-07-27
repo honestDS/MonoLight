@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.prompts import CONTEXT_SUMMARY_WRAPPER
+from app.core.prompts import (
+    CONTEXT_SUMMARY_WRAPPER,
+    SYSTEM_CONTEXT_WRAPPER,
+    SYSTEM_RUNTIME_CONTEXT_POLICY,
+)
 from app.core.utils.context_summary.common import ContextSummaryState
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import (
@@ -14,6 +18,13 @@ from app.core.utils.dispatcher.markdown_instruction import (
 from app.models.message import InternalMessage, MessageRole
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
+
+
+def test_runtime_context_prompts_allow_tools_for_actual_user_requests():
+    assert "This policy does not restrict tool use required to fulfill the user's actual request." in SYSTEM_RUNTIME_CONTEXT_POLICY
+    assert "It does not restrict tool use needed to fulfill the user's actual request." in SYSTEM_CONTEXT_WRAPPER
+    assert "Do not call tools to query, verify, or update" not in SYSTEM_RUNTIME_CONTEXT_POLICY
+    assert "DO NOT call any tools or execute any commands" not in SYSTEM_CONTEXT_WRAPPER
 
 
 @pytest.mark.asyncio
@@ -127,6 +138,47 @@ async def test_prepare_messages_only_reads_existing_summary_state(monkeypatch):
     ]
     assert runtime_instruction_calls == [512]
     assert get_messages_calls[0]["reserved_tokens"] == 150
+
+
+@pytest.mark.asyncio
+async def test_prepare_messages_appends_additional_system_prompt_and_reserves_its_tokens(monkeypatch):
+    get_messages_calls = []
+    combined_system_prompt = "base system prompt\n\nchannel instruction"
+
+    async def build_system_prompt(_db, _profile):
+        return "base system prompt"
+
+    async def build_runtime_instructions(_db, _session_id, _max_tokens):
+        return ""
+
+    async def get_summary_state(*_args, **_kwargs):
+        return ContextSummaryState(content=None, message_id=None)
+
+    async def get_messages(*_args, **kwargs):
+        get_messages_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(prepare_module, "build_system_prompt", build_system_prompt)
+    monkeypatch.setattr(prepare_module, "build_user_runtime_instructions", build_runtime_instructions)
+    monkeypatch.setattr(prepare_module, "get_context_summary_state", get_summary_state)
+    monkeypatch.setattr(prepare_module.ContextManager, "get_messages", get_messages)
+    monkeypatch.setattr(prepare_module, "estimate_tokens", lambda content: 123 if content == combined_system_prompt else 0)
+
+    messages = await prepare_module.prepare_messages(
+        object(),
+        "session-1",
+        "user-1",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        None,
+        "",
+        False,
+        additional_system_prompt=" channel instruction ",
+    )
+
+    assert get_messages_calls[0]["reserved_tokens"] == 123
+    assert messages[0].role == MessageRole.SYSTEM
+    assert messages[0].content == combined_system_prompt
 
 
 @pytest.mark.asyncio

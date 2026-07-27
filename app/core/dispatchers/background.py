@@ -134,6 +134,8 @@ class BackgroundDispatcherMixin:
         allow_tools: bool,
         extra_messages: list[InternalMessage] | None = None,
         submission_context: list[InternalMessage] | None = None,
+        additional_system_prompt: str | None = None,
+        persist_response: bool = True,
         initial_trigger_mode: ContextSummaryTriggerMode | None = None,
         initial_fixed_upper_message_id: int | None = None,
         restrict_tools_to_background_allowlist: bool = True,
@@ -149,6 +151,7 @@ class BackgroundDispatcherMixin:
         chat_channel = cfg.channel.chat_channel
         chat_cursor_key = f"{profile.id}:CHAT"
         messages: list[InternalMessage] = []
+        cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
 
         tools = None
         allowed_knowledge_base_ids = None
@@ -177,9 +180,12 @@ class BackgroundDispatcherMixin:
                     context_window_k=chat_params["context_window_k"],
                     max_tokens=chat_params["max_tokens"],
                     tools=tools,
+                    additional_system_prompt=cleaned_additional_system_prompt or None,
                 )
             else:
                 system_prompt = await build_system_prompt(db, profile)
+                if cleaned_additional_system_prompt:
+                    system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
                 messages = inject_system_prompt_text(
                     [message.model_copy(deep=True) for message in submission_context],
                     system_prompt,
@@ -325,14 +331,15 @@ class BackgroundDispatcherMixin:
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
         turn_messages = [ai_msg]
-        await save_assistant_message(
-            db,
-            session_id,
-            uid,
-            profile.id,
-            ai_msg,
-            dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
-        )
+        if persist_response:
+            await save_assistant_message(
+                db,
+                session_id,
+                uid,
+                profile.id,
+                ai_msg,
+                dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls else None,
+            )
         if not allow_tools or not ai_msg.tool_calls:
             return ai_msg, turn_messages, []
 
@@ -644,14 +651,15 @@ class BackgroundDispatcherMixin:
             final_msg.content = build_assistant_files_content(final_text, files_to_user)
         messages.append(final_msg)
         turn_messages.append(final_msg)
-        await save_assistant_message(
-            db,
-            session_id,
-            uid,
-            profile.id,
-            final_msg,
-            dedupe_key=final_message_dedupe_key,
-        )
+        if persist_response:
+            await save_assistant_message(
+                db,
+                session_id,
+                uid,
+                profile.id,
+                final_msg,
+                dedupe_key=final_message_dedupe_key,
+            )
         return final_msg, turn_messages, files_to_user
 
     @classmethod

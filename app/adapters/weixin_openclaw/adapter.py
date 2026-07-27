@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.base import BaseChatAdapter
 from app.adapters.weixin_openclaw.client import WeixinOpenClawClient
 from app.adapters.weixin_openclaw.config import WeixinOpenClawConfig
+from app.adapters.weixin_openclaw.constants import (
+    WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
+)
 from app.adapters.weixin_openclaw.media import WeixinOpenClawMediaMixin
 from app.adapters.weixin_openclaw.message import (
     build_session_id,
@@ -23,6 +26,7 @@ from app.adapters.weixin_openclaw.message import (
     text_item,
     update_sync_buf,
 )
+from app.adapters.weixin_openclaw.outbound import build_weixin_openclaw_concise_output_system_prompt
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
 from app.core.audit.confirmation import message_has_quote
@@ -37,10 +41,15 @@ from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.message_platforms.outbound_text import split_outbound_text_by_newline
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.core.utils.session import generate_session_title_for_active_profile
 
 logger = get_logger(__name__)
+
+
+def _get_outbound_text_metrics(text: str) -> tuple[int, int]:
+    return len(text), len(text.encode("utf-8"))
 
 
 class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
@@ -133,7 +142,14 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
 
         any_sent = False
         if text:
-            any_sent = await self.reply_text(user_id, text)
+            text_parts = split_outbound_text_by_newline(
+                text,
+                utf8_byte_limit=WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
+            )
+            if text_parts is not None:
+                any_sent = await self.reply_text_parts(user_id, text_parts)
+            else:
+                any_sent = await self.reply_text(user_id, text)
         for file_item in files:
             any_sent = await self.reply_file_item(user_id, file_item) or any_sent
 
@@ -157,7 +173,15 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
             profile = await profile_crud.get_active(db, uid=uid)
-            await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
+            await ChatDispatcher.validate_initial_message_before_save(
+                db,
+                message,
+                uid,
+                session_id,
+                profile,
+                attachments,
+                additional_system_prompt=build_weixin_openclaw_concise_output_system_prompt(),
+            )
             await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
@@ -167,6 +191,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 attachments=attachments,
                 source="weixin-openclaw",
                 has_quote=has_quote,
+                additional_system_prompt=build_weixin_openclaw_concise_output_system_prompt(),
             )
             return WeixinOpenClawChatResult()
         except BaseBusinessException as exc:
@@ -209,7 +234,30 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         return messages
 
     async def reply_text(self, user_id: str, text: str, *, context_token: str = "") -> bool:
+        character_count, utf8_bytes = _get_outbound_text_metrics(text)
+        if utf8_bytes > WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT:
+            logger.bind(
+                user_id=user_id,
+                character_count=character_count,
+                utf8_bytes=utf8_bytes,
+                utf8_byte_limit=WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
+            ).warning(
+                t(
+                    "LOG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REJECTED",
+                    character_count=character_count,
+                    utf8_bytes=utf8_bytes,
+                    utf8_byte_limit=WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
+                )
+            )
+            return False
         return await self.reply_items(user_id, [text_item(text)], context_token=context_token)
+
+    async def reply_text_parts(self, user_id: str, text_parts: tuple[str, str], *, context_token: str = "") -> bool:
+        if not isinstance(text_parts, tuple) or len(text_parts) != 2:
+            return False
+        if any(not isinstance(text, str) or not text or len(text.encode("utf-8")) > WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT for text in text_parts):
+            return False
+        return await self.reply_items(user_id, [text_item(text) for text in text_parts], context_token=context_token)
 
     async def reply_items(self, user_id: str, item_list: list[dict[str, Any]], *, context_token: str = "") -> bool:
         token = context_token or self.context_tokens.get(user_id, "")

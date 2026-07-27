@@ -126,6 +126,7 @@ class InteractiveDispatcherMixin:
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
+        additional_system_prompt: str | None = None,
         dispatcher_mode: Literal["non_stream", "stream"] = "non_stream",
     ):
         try:
@@ -214,6 +215,7 @@ class InteractiveDispatcherMixin:
                             max_tokens=chat_params["max_tokens"],
                             tools=tools,
                             history_before_id=history_before_id,
+                            additional_system_prompt=additional_system_prompt,
                         )
                         current_turn = 0
 

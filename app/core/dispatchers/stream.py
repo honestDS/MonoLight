@@ -120,6 +120,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
+        additional_system_prompt: str | None = None,
         raise_errors: bool = False,
     ) -> AsyncGenerator[dict[str, Any]]:
         event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=100)
@@ -151,6 +152,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
             "execution_checkpoint_callback": execution_checkpoint_callback,
             "context_summary_work_validity_checker": context_summary_work_validity_checker,
             "expose_tool_call_content": expose_tool_call_content,
+            "additional_system_prompt": additional_system_prompt,
             "dispatcher_mode": "stream",
         }
         dispatch_task = asyncio.create_task(

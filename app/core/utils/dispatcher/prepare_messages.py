@@ -37,10 +37,14 @@ async def prepare_messages(
     max_tokens: int = 0,
     tools: list[dict] | None = None,
     history_before_id: int | None = None,
+    additional_system_prompt: str | None = None,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为历史消息加载的预留量。
     # 总结阈值与硬窗口由模型调用前的统一检查点按完整请求重新计算。
     system_prompt = await build_system_prompt(db, profile)
+    cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
+    if cleaned_additional_system_prompt:
+        system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
     user_runtime_instructions = await build_user_runtime_instructions(db, session_id, max_tokens) if is_first_iter else ""
     current_msg = initial_msg.model_copy(deep=True) if is_first_iter and initial_msg is not None else None
     if current_msg is not None:

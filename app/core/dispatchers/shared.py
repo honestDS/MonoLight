@@ -28,6 +28,7 @@ class DispatcherValidationMixin:
         session_id: str,
         profile,
         attachments: list[str] | None = None,
+        additional_system_prompt: str | None = None,
     ) -> None:
         dispatcher_module = import_module("app.core.dispatcher")
         validate_profile = getattr(dispatcher_module, "validate_profile_and_cfg", validate_profile_and_cfg)
@@ -47,6 +48,9 @@ class DispatcherValidationMixin:
         img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
         chat_params = resolve_chat_params(model_entry, chat_channel)
         system_prompt = await build_prompt(db, profile)
+        cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
+        if cleaned_additional_system_prompt:
+            system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
         tools, _allowed_knowledge_base_ids = await get_profile_tools(db, profile)
 
         validation_msg = InternalMessage(role=MessageRole.USER, content=copy.deepcopy(message), attachments=copy.deepcopy(attachments))

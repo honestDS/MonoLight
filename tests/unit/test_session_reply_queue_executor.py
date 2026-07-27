@@ -46,7 +46,11 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         status=SessionReplyWorkStatus.RUNNING,
         locked_by="worker-1",
         input_message_ids=[1],
-        execution_state={"stream_requested": False, "dispatcher_checkpoint": checkpoint},
+        execution_state={
+            "stream_requested": False,
+            "dispatcher_checkpoint": checkpoint,
+            "additional_system_prompt": "channel instruction",
+        },
     )
     dispatch_kwargs = {}
     checkpoint_updates = []
@@ -115,6 +119,7 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     assert response == {"choices": []}
     assert dispatch_kwargs["execution_resume_state"] == checkpoint
     assert dispatch_kwargs["message"] == "original"
+    assert dispatch_kwargs["additional_system_prompt"] == "channel instruction"
     assert checkpoint_updates[0]["values"]["execution_state"]["stream_requested"] is False
     assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["messages"][0]["content"] == "updated"
 
@@ -134,7 +139,10 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
         status=SessionReplyWorkStatus.RUNNING,
         locked_by="worker-1",
         input_message_ids=[11],
-        execution_state={"audit_decision_response": True},
+        execution_state={
+            "audit_decision_response": True,
+            "additional_system_prompt": "channel instruction",
+        },
     )
     captured = {}
     metadata_updates = []
@@ -192,6 +200,7 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
     ]
     assert executor_module._event_for_work(work, response)["llm_request_metadata"] == expected_request_metadata
     assert captured["allow_tools"] is False
+    assert captured["additional_system_prompt"] == "channel instruction"
     assert "extra_messages" not in captured
     assert "submission_context" not in captured
     assert captured["final_message_dedupe_key"] == executor_module._result_message_dedupe_key(work)

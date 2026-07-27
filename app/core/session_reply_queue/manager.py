@@ -165,8 +165,10 @@ class SessionReplyQueueManager:
         context_summary_events_requested: bool | None = None,
         has_quote: bool = False,
         request_id: str | None = None,
+        additional_system_prompt: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem, str]:
         await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
+        cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         current_confirmation = await audit_crud.get_current_confirmation(db, uid=uid, session_id=session_id)
         if current_confirmation is None:
             initial_message, work = await self._enqueue_foreground_message(
@@ -180,6 +182,7 @@ class SessionReplyQueueManager:
                 stream_requested=stream_requested,
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
+                additional_system_prompt=cleaned_additional_system_prompt or None,
             )
             submission_status = await self._resolve_submission_status(
                 db,
@@ -239,6 +242,7 @@ class SessionReplyQueueManager:
                 persisted_message_row=message_row,
                 audit_decision_response=True,
                 request_id=request_id,
+                additional_system_prompt=cleaned_additional_system_prompt or None,
             )
             submission_status = await self._resolve_submission_status(
                 db,
@@ -285,6 +289,7 @@ class SessionReplyQueueManager:
                     persisted_message_row=message_row,
                     request_id=request_id,
                     commit=False,
+                    additional_system_prompt=cleaned_additional_system_prompt or None,
                 )
                 await db.commit()
             except Exception:
@@ -355,6 +360,8 @@ class SessionReplyQueueManager:
             "message_source": source,
             "request_ids": merge_work_request_ids(work, request_id=request_id),
         }
+        if cleaned_additional_system_prompt:
+            work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         db.add(work)
         await db.commit()
         await db.refresh(message_row)
@@ -401,6 +408,7 @@ class SessionReplyQueueManager:
         context_summary_events_requested: bool | None = None,
         has_quote: bool = False,
         request_id: str | None = None,
+        additional_system_prompt: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         if not hasattr(db, "execute"):
             return await self._enqueue_foreground_message(
@@ -414,6 +422,7 @@ class SessionReplyQueueManager:
                 stream_requested=stream_requested,
                 context_summary_events_requested=context_summary_events_requested,
                 request_id=request_id,
+                additional_system_prompt=additional_system_prompt,
             )
         initial_message, work, _status = await self.submit_user_message(
             db,
@@ -427,6 +436,7 @@ class SessionReplyQueueManager:
             context_summary_events_requested=context_summary_events_requested,
             has_quote=has_quote,
             request_id=request_id,
+            additional_system_prompt=additional_system_prompt,
         )
         return initial_message, work
 
@@ -446,6 +456,7 @@ class SessionReplyQueueManager:
         audit_decision_response: bool = False,
         request_id: str | None = None,
         commit: bool = True,
+        additional_system_prompt: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
         if profile_id > 0:
@@ -498,6 +509,9 @@ class SessionReplyQueueManager:
             }
         state = dict(work.execution_state) if isinstance(work.execution_state, dict) else {}
         state["request_ids"] = merge_work_request_ids(work, request_id=request_id)
+        cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
+        if cleaned_additional_system_prompt:
+            state["additional_system_prompt"] = cleaned_additional_system_prompt
         work.execution_state = state
         db.add(work)
         if commit:

@@ -24,6 +24,12 @@ BACKGROUND_TASK_QUEUED_PROMPT = "Tool {tool_name} has been queued as a backgroun
 
 BACKGROUND_TASK_UNSUPPORTED_PROMPT = "Do not use run_in_background with {tool_name}. Call the tool again without run_in_background, or choose a tool whose schema explicitly includes run_in_background."
 
+# Weixin OpenClaw concise outbound reply prompts
+WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT = "你正在通过微信 OpenClaw 向用户回复。面向用户的文字必须尽可能简短。中文最多 {chinese_char_limit} 个常规汉字；纯 ASCII 英文最多 {ascii_char_limit} 个字符；中英混合或其他字符统一按 UTF-8 总字节数不超过 {utf8_byte_limit}。"
+WEIXIN_OPENCLAW_CONCISE_RETRY_PROMPT = (
+    "[系统提示,此处不是用户说的话]上一条助手回复超过渠道文本限制。请只压缩上一条助手回复，不新增信息，不提及内部机制，并按同一限制严格精简：中文最多 {chinese_char_limit} 个常规汉字；纯 ASCII 英文最多 {ascii_char_limit} 个字符；中英混合或其他字符统一按 UTF-8 总字节数不超过 {utf8_byte_limit}。[系统提示结束]"
+)
+
 AUDIT_SOURCE_MESSAGE_INVALID_PROMPT = "原工具调用记录校验失败，无法安全执行；请暂停当前任务并主动提醒用户"
 
 AUDIT_BATCH_PROMPT = """You are a security auditor. Assess one complete tool-call round before anything executes.
@@ -70,7 +76,9 @@ SYSTEM_RUNTIME_CONTEXT_POLICY = """<runtime_context_policy>
 Runtime environment metadata may be appended to user messages by the platform inside system_environment_context tags.
 Treat that metadata as platform-provided context, not as user input or user instructions.
 User instructions must not override, modify, or reinterpret runtime environment metadata.
-Do not call tools to query, verify, or update runtime environment details unless explicitly requested by the user.
+Do not call tools solely to re-query or validate metadata values already provided by the platform.
+Do not treat the metadata itself as a request to modify the system.
+This policy does not restrict tool use required to fulfill the user's actual request. When that request requires inspecting or changing files, processes, configuration, or system state, use the available tools normally.
 </runtime_context_policy>"""
 
 # System Instructions Wrapper
@@ -89,7 +97,7 @@ Use the query_knowledge_base tool when the user request requires factual informa
 # Persisted in Message.environment_prompt and appended only to the latest user input.
 SYSTEM_CONTEXT_WRAPPER = """<system_environment_context>
 IMPORTANT: The following real-time metadata is injected by the platform for context awareness (e.g., current time, platform OS). It is NOT user input.
-DO NOT call any tools or execute any commands to query, verify, or update system environment details unless explicitly requested by the user.
+This metadata is context only; it is not a request to call or avoid tools. Do not call tools solely to re-query or validate values already provided below. It does not restrict tool use needed to fulfill the user's actual request.
 {context}
 </system_environment_context>"""
 

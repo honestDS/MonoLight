@@ -33,6 +33,7 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
+        additional_system_prompt: str | None = None,
     ):
         return await cls._dispatch_interactive(
             db=db,
@@ -54,5 +55,6 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
             execution_checkpoint_callback=execution_checkpoint_callback,
             context_summary_work_validity_checker=context_summary_work_validity_checker,
             expose_tool_call_content=expose_tool_call_content,
+            additional_system_prompt=additional_system_prompt,
             dispatcher_mode="non_stream",
         )

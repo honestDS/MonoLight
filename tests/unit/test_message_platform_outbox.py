@@ -1,16 +1,22 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from sqlalchemy import delete, update
 from sqlmodel import select
 
+from app.core.constants import MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED
 from app.core.crud.message_platform_outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
+from app.core.i18n import t
 from app.core.message_platforms import notifier as notifier_module
+from app.core.message_platforms import outbound_text as outbound_text_module
 from app.core.message_platforms.base import MessagePlatformHandler
 from app.core.message_platforms.manager import OUTBOX_DELIVERY_TIMEOUT_SECONDS, MessagePlatformPollingManager
 from app.core.message_platforms.notifier import build_outbox_dedupe_key, normalize_outbox_event
+from app.core.message_platforms.outbound_text import OutboundTextPolicy, process_outbound_text_event, split_outbound_text_by_newline
 from app.core.utils.time import get_local_time
+from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
 from app.providers.database import AsyncSessionLocal, engine
@@ -34,6 +40,76 @@ class DeliveringHandler(MessagePlatformHandler):
     async def send_session_event(self, uid: str, session_id: str, source: str, event: dict[str, Any]) -> bool:
         self.sent_events.append(event)
         return self.send_result
+
+
+def _patch_outbound_text_message_persistence(monkeypatch):
+    persisted_by_dedupe_key = {}
+    user_save_calls = []
+    assistant_save_calls = []
+
+    async def save_refinement_prompt(
+        *,
+        db,
+        session_id,
+        uid,
+        profile_id,
+        refinement_prompt,
+        dedupe_key,
+    ):
+        content = InternalMessage(role=MessageRole.USER, content=refinement_prompt)
+        user_save_calls.append(
+            {
+                "session_id": session_id,
+                "uid": uid,
+                "role": MessageRole.USER,
+                "msg_type": MessageType.TEXT,
+                "content": content,
+                "profile_id": profile_id,
+                "is_processed": True,
+                "dedupe_key": dedupe_key,
+            }
+        )
+        saved = persisted_by_dedupe_key.get(dedupe_key)
+        if saved is None:
+            saved = InternalMessage(role=MessageRole.USER, content=refinement_prompt)
+            persisted_by_dedupe_key[dedupe_key] = saved
+        return saved
+
+    async def get_by_dedupe_key(db, dedupe_key):
+        return persisted_by_dedupe_key.get(dedupe_key)
+
+    async def save_refinement_assistant_message(
+        *,
+        db,
+        session_id,
+        uid,
+        profile_id,
+        ai_msg,
+        dedupe_key,
+    ):
+        assistant_save_calls.append(
+            {
+                "session_id": session_id,
+                "uid": uid,
+                "profile_id": profile_id,
+                "ai_msg": ai_msg,
+                "dedupe_key": dedupe_key,
+            }
+        )
+        saved = persisted_by_dedupe_key.get(dedupe_key)
+        if saved is None:
+            saved = InternalMessage(role=MessageRole.ASSISTANT, content=ai_msg.content)
+            persisted_by_dedupe_key[dedupe_key] = saved
+        return saved
+
+    monkeypatch.setattr(outbound_text_module, "_save_outbound_text_refinement_prompt", save_refinement_prompt)
+    monkeypatch.setattr(outbound_text_module.message_crud, "get_by_dedupe_key", get_by_dedupe_key)
+    monkeypatch.setattr(outbound_text_module, "_save_outbound_text_refinement_assistant_message", save_refinement_assistant_message)
+    return {
+        "persisted_by_dedupe_key": persisted_by_dedupe_key,
+        "user_save_calls": user_save_calls,
+        "assistant_save_calls": assistant_save_calls,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +191,363 @@ async def test_scheduled_event_uses_fixed_external_session_source(monkeypatch):
     assert len(enqueue_calls) == 1
     assert enqueue_calls[0]["source"] == "weixin-openclaw"
     assert enqueue_calls[0]["event"] == event
+
+
+def test_split_outbound_text_by_newline_prefers_closest_utf8_byte_balance():
+    text = "测a\n测测\nabc"
+
+    parts = split_outbound_text_by_newline(text, utf8_byte_limit=12)
+
+    assert parts == ("测a", "测测\nabc")
+    assert len(parts[0].encode("utf-8")) == 4
+    assert len(parts[1].encode("utf-8")) == 10
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_event_skips_refinement_when_original_content_can_split(monkeypatch):
+    async def generate_reply(*args, **kwargs):
+        raise AssertionError("refinement must not be called when the original text can split")
+
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    event = {"type": "proactive_reply", "content": "a" * 6 + "\n" + "b" * 6}
+
+    processed = await process_outbound_text_event(
+        "uid",
+        "session",
+        "outbox-test",
+        event,
+        OutboundTextPolicy(
+            utf8_byte_limit=10,
+            max_refinement_attempts=3,
+            additional_system_prompt="system prompt",
+            refinement_prompt="refinement prompt",
+            refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+            max_text_parts=2,
+        ),
+    )
+
+    assert processed is not event
+    assert processed == event
+    assert set(processed) == {"type", "content"}
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_stops_when_compressed_candidate_can_split(monkeypatch):
+    submitted_candidates = []
+    generated_calls = []
+    persistence = _patch_outbound_text_message_persistence(monkeypatch)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(uid="uid", profile_id=1)
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=1, uid="uid")
+
+    async def generate_reply(db, **kwargs):
+        submitted_candidates.append(kwargs["submission_context"][0].content)
+        generated_calls.append(kwargs)
+        return InternalMessage(role=MessageRole.ASSISTANT, content="a" * 6 + "\n" + "b" * 6), [], []
+
+    monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+
+    processed = await process_outbound_text_event(
+        "uid",
+        "session",
+        "outbox-test",
+        {"type": "proactive_reply", "content": "a" * 20},
+        OutboundTextPolicy(
+            utf8_byte_limit=10,
+            max_refinement_attempts=3,
+            additional_system_prompt="system prompt",
+            refinement_prompt="refinement prompt",
+            refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+            max_text_parts=2,
+        ),
+    )
+
+    assert submitted_candidates == ["a" * 20]
+    assert processed == {"type": "proactive_reply", "content": "a" * 6 + "\n" + "b" * 6}
+    assert generated_calls[0]["persist_response"] is False
+    assert len(persistence["user_save_calls"]) == 1
+    user_save_call = persistence["user_save_calls"][0]
+    assert user_save_call["session_id"] == "session"
+    assert user_save_call["uid"] == "uid"
+    assert user_save_call["role"] == MessageRole.USER
+    assert user_save_call["msg_type"] == MessageType.TEXT
+    assert user_save_call["profile_id"] == 1
+    assert user_save_call["is_processed"] is True
+    assert len(user_save_call["dedupe_key"]) == 64
+    assert user_save_call["content"].role == MessageRole.USER
+    assert user_save_call["content"].content == "refinement prompt"
+    assert len(persistence["assistant_save_calls"]) == 1
+    assistant_save_call = persistence["assistant_save_calls"][0]
+    assert assistant_save_call["session_id"] == "session"
+    assert assistant_save_call["uid"] == "uid"
+    assert assistant_save_call["profile_id"] == 1
+    assert len(assistant_save_call["dedupe_key"]) == 64
+    assert assistant_save_call["ai_msg"].role == MessageRole.ASSISTANT
+    assert assistant_save_call["ai_msg"].content == "a" * 6 + "\n" + "b" * 6
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_uses_the_previous_round_result(monkeypatch):
+    submitted_candidates = []
+    refinements = iter(["b" * 11, "c" * 10])
+    _patch_outbound_text_message_persistence(monkeypatch)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "session"
+        return SimpleNamespace(uid="uid", profile_id=1)
+
+    async def get_profile(db, profile_id):
+        assert profile_id == 1
+        return SimpleNamespace(id=1, uid="uid")
+
+    async def generate_reply(db, **kwargs):
+        submitted_candidates.append(kwargs["submission_context"][0].content)
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+
+    monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+
+    event = {"type": "proactive_reply", "content": "a" * 12}
+    processed = await process_outbound_text_event(
+        "uid",
+        "session",
+        "outbox-test",
+        event,
+        OutboundTextPolicy(
+            utf8_byte_limit=10,
+            max_refinement_attempts=3,
+            additional_system_prompt="system prompt",
+            refinement_prompt="refinement prompt",
+            refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+        ),
+    )
+
+    assert processed is not event
+    assert event["content"] == "a" * 12
+    assert processed["content"] == "c" * 10
+    assert submitted_candidates == ["a" * 12, "b" * 11]
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_keeps_candidate_after_unshortened_result(monkeypatch):
+    submitted_candidates = []
+    refinements = iter(["a" * 12, "b" * 10])
+    _patch_outbound_text_message_persistence(monkeypatch)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(uid="uid", profile_id=1)
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=1, uid="uid")
+
+    async def generate_reply(db, **kwargs):
+        submitted_candidates.append(kwargs["submission_context"][0].content)
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+
+    monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+
+    processed = await process_outbound_text_event(
+        "uid",
+        "session",
+        "outbox-test",
+        {"type": "proactive_reply", "content": "a" * 12},
+        OutboundTextPolicy(
+            utf8_byte_limit=10,
+            max_refinement_attempts=3,
+            additional_system_prompt="system prompt",
+            refinement_prompt="refinement prompt",
+            refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+        ),
+    )
+
+    assert processed["content"] == "b" * 10
+    assert submitted_candidates == ["a" * 12, "a" * 12]
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_uses_fallback_after_three_oversized_rounds(monkeypatch):
+    submitted_candidates = []
+    refinements = iter(["b" * 209, "c" * 208, "d" * 207])
+    persistence = _patch_outbound_text_message_persistence(monkeypatch)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(uid="uid", profile_id=1)
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=1, uid="uid")
+
+    async def generate_reply(db, **kwargs):
+        submitted_candidates.append(kwargs["submission_context"][0].content)
+        return InternalMessage(role=MessageRole.ASSISTANT, content=next(refinements)), [], []
+
+    original_save_assistant_message = outbound_text_module._save_outbound_text_refinement_assistant_message
+
+    async def save_assistant_message(*, db, session_id, uid, profile_id, ai_msg, dedupe_key):
+        saved = await original_save_assistant_message(
+            db=db,
+            session_id=session_id,
+            uid=uid,
+            profile_id=profile_id,
+            ai_msg=ai_msg,
+            dedupe_key=dedupe_key,
+        )
+        if ai_msg.content == t(MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED):
+            saved.content = "persisted fallback"
+            persistence["persisted_by_dedupe_key"][dedupe_key] = saved
+        return saved
+
+    monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(outbound_text_module, "_save_outbound_text_refinement_assistant_message", save_assistant_message)
+
+    policy = OutboundTextPolicy(
+        utf8_byte_limit=200,
+        max_refinement_attempts=3,
+        additional_system_prompt="system prompt",
+        refinement_prompt="refinement prompt",
+        refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+    )
+    processed = await process_outbound_text_event(
+        "uid",
+        "session",
+        "outbox-test",
+        {"type": "proactive_reply", "content": "a" * 210},
+        policy,
+    )
+
+    assert submitted_candidates == ["a" * 210, "b" * 209, "c" * 208]
+    assert processed["content"] == "persisted fallback"
+    assert len(processed["content"].encode("utf-8")) <= policy.utf8_byte_limit
+    fallback_message = persistence["assistant_save_calls"][-1]["ai_msg"]
+    assert fallback_message.role == MessageRole.ASSISTANT
+    assert fallback_message.content == t(MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED)
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_refinement_reuses_persisted_assistant_result_for_same_event(monkeypatch):
+    generated_candidates = []
+    persistence = _patch_outbound_text_message_persistence(monkeypatch)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(uid="uid", profile_id=1)
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=1, uid="uid")
+
+    async def generate_reply(db, **kwargs):
+        generated_candidates.append(kwargs["submission_context"][0].content)
+        return InternalMessage(role=MessageRole.ASSISTANT, content="compressed"), [], []
+
+    monkeypatch.setattr(outbound_text_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(outbound_text_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(outbound_text_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr("app.core.dispatcher.ChatDispatcher._generate_reply_from_history", generate_reply)
+
+    event = {"event_id": "outbox:17", "type": "proactive_reply", "content": "a" * 20}
+    policy = OutboundTextPolicy(
+        utf8_byte_limit=10,
+        max_refinement_attempts=3,
+        additional_system_prompt="system prompt",
+        refinement_prompt="refinement prompt",
+        refinement_failed_message_key=MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+    )
+
+    first = await process_outbound_text_event("uid", "session", "outbox-test", event, policy)
+    second = await process_outbound_text_event("uid", "session", "outbox-test", event, policy)
+
+    assert first["content"] == "compressed"
+    assert second["content"] == "compressed"
+    assert generated_candidates == ["a" * 20]
+    assert len(persistence["assistant_save_calls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_notifier_refines_event_before_enqueueing_outbox(monkeypatch):
+    processing_order = []
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw")
+
+    async def process_event(uid, session_id, source, event, policy):
+        processing_order.append("process")
+        assert (uid, session_id, source) == ("uid-1", "weixin-openclaw:user-1", "weixin-openclaw")
+        return {**event, "content": "processed reply"}
+
+    async def enqueue(db, **kwargs):
+        processing_order.append("enqueue")
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "process_outbound_text_event", process_event)
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+
+    await notifier_module.send_session_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        {"type": "proactive_reply", "content": "oversized reply"},
+    )
+
+    assert processing_order == ["process", "enqueue"]
+    assert enqueued_events == [{"type": "proactive_reply", "content": "processed reply"}]
 
 
 @pytest.mark.asyncio

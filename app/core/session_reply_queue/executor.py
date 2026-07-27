@@ -514,6 +514,11 @@ async def _generate_reply_with_request_metadata(
     latest_request_metadata = None
     session_total_output_tokens = 0
     work_output_tokens = 0
+    if "additional_system_prompt" not in kwargs:
+        execution_state = getattr(work, "execution_state", None)
+        additional_system_prompt = execution_state.get("additional_system_prompt") if isinstance(execution_state, dict) else None
+        if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+            kwargs["additional_system_prompt"] = additional_system_prompt.strip()
     if hasattr(db, "execute"):
         session = await session_crud.get_by_session_id(db, work.session_id)
         if session is not None:
@@ -640,6 +645,9 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         ),
         "expose_tool_call_content": expose_tool_call_content,
     }
+    additional_system_prompt = execution_state.get("additional_system_prompt")
+    if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+        dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
     if not stream_requested:
         response = await ChatDispatcher.dispatch(
             **dispatch_kwargs,

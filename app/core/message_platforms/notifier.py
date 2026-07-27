@@ -1,15 +1,29 @@
 import hashlib
 import json
+from functools import lru_cache
 from typing import Any
 
 from app.core.crud.message_platform_outbox import message_platform_outbox_crud
 from app.core.crud.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.message_platforms.outbound_text import (
+    build_outbound_text_policy_registry,
+    process_outbound_text_event,
+)
 from app.core.session_notifier import session_notifier
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_outbound_text_policy_registry():
+    from app.adapters.weixin_openclaw.outbound import WEIXIN_OPENCLAW_OUTBOUND_TEXT_POLICY
+
+    return build_outbound_text_policy_registry(
+        ("weixin-openclaw", WEIXIN_OPENCLAW_OUTBOUND_TEXT_POLICY),
+    )
 
 
 def normalize_outbox_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -54,24 +68,28 @@ async def send_session_event(uid: str, session_id: str, event: dict[str, Any]) -
         session = await session_crud.get_by_session_id(db, session_id)
         source = session.source if session and session.source else "http"
 
-        normalized_event = normalize_outbox_event(event)
-        dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
-        if source in {"http", "ws"}:
-            created = await session_notifier.notify(
-                uid,
-                session_id,
-                normalized_event,
-                dedupe_key=dedupe_key,
-            )
-            logger.bind(
-                uid=uid,
-                session_id=session_id,
-                event_type=event.get("type"),
-                session_source=source,
-                session_event_created=created,
-            ).debug("WebSocket session event notified")
-            return
+    normalized_event = normalize_outbox_event(event)
+    policy = get_outbound_text_policy_registry().get(source)
+    if policy is not None:
+        normalized_event = await process_outbound_text_event(uid, session_id, source, normalized_event, policy)
+    dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
+    if source in {"http", "ws"}:
+        created = await session_notifier.notify(
+            uid,
+            session_id,
+            normalized_event,
+            dedupe_key=dedupe_key,
+        )
+        logger.bind(
+            uid=uid,
+            session_id=session_id,
+            event_type=event.get("type"),
+            session_source=source,
+            session_event_created=created,
+        ).debug("WebSocket session event notified")
+        return
 
+    async with AsyncSessionLocal() as db:
         outbox_item, created = await message_platform_outbox_crud.enqueue(
             db,
             dedupe_key=dedupe_key,
