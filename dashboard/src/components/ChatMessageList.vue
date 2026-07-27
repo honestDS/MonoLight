@@ -531,8 +531,13 @@ let unreadTrackingReady = false
 let unreadTrackingGeneration = 0
 let visibilityFrameId = null
 
-const isIncomingMessage = message => message.type === 'tool_group' || !['user', 'thinking'].includes(message.role)
+const isIncomingMessage = message => message.type === 'tool_group' || (
+  message.role !== 'thinking' && (message.role !== 'user' || props.currentSessionReadOnly)
+)
 const isLlmOutputMessage = message => message.type === 'tool_group' || ['assistant', 'tool'].includes(message.role)
+const isFollowableIncomingMessage = message => (
+  isLlmOutputMessage(message) || (props.currentSessionReadOnly && message.role === 'user')
+)
 const OUTPUT_FOLLOW_BOTTOM_TOLERANCE = 24
 let messageListAtBottom = true
 const setOutputFollowState = (shouldFollow) => {
@@ -560,7 +565,7 @@ const updateMessageListBottomState = (offset) => {
   return messageListAtBottom
 }
 const calculateLatestLlmMessageVisible = () => {
-  const latestMessage = [...displayMessages.value].reverse().find(isLlmOutputMessage)
+  const latestMessage = [...displayMessages.value].reverse().find(isFollowableIncomingMessage)
   const listElement = virtualList.value?.$el
   if (!latestMessage || !listElement) return messageListAtBottom
 
@@ -657,7 +662,7 @@ const getChangedIncomingMessages = (messages) => {
 
 const handleChangedIncomingMessages = async (changedMessages, replaceUnread = false) => {
   if (changedMessages.length === 0) return
-  const shouldFollowOutput = canFollowOutput() && changedMessages.some(isLlmOutputMessage)
+  const shouldFollowOutput = canFollowOutput() && changedMessages.some(isFollowableIncomingMessage)
   const changedKeys = changedMessages.map(getDisplayKey)
   if (!shouldFollowOutput) {
     unreadMessageKeys.value = replaceUnread
