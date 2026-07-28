@@ -2,11 +2,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL, ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
-from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
 from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
+from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.http_proxy import get_channel_http_proxy
@@ -104,7 +104,13 @@ async def generate_session_title(
         return None
 
 
-async def generate_session_title_for_active_profile(db: AsyncSession, uid: str, session_id: str, first_message: str) -> str | None:
+async def generate_session_title_for_selected_profile(
+    db: AsyncSession,
+    uid: str,
+    session_id: str,
+    first_message: str,
+    message_platform_id: int | None = None,
+) -> str | None:
     first_message = first_message.strip()
     if not first_message:
         return None
@@ -114,7 +120,12 @@ async def generate_session_title_for_active_profile(db: AsyncSession, uid: str, 
         if session and session.title:
             return session.title
 
-        profile = await profile_crud.get_active(db, uid=uid)
+        profile = await resolve_profile_for_session(
+            db,
+            uid=uid,
+            session_id=session_id,
+            message_platform_id=message_platform_id,
+        )
         if not profile:
             logger.bind(uid=uid, session_id=session_id).warning(t("LOG_TITLE_CHANNEL_FAILED", error=t(ERR_NO_VALID_CHANNEL)))
             return None

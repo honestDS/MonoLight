@@ -118,7 +118,13 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     return False
 
             async with AsyncSessionLocal() as db:
-                await adapter.handle_message(db, message, uid=uid, runtime_validator=runtime_validator)
+                await adapter.handle_message(
+                    db,
+                    message,
+                    uid=uid,
+                    runtime_validator=runtime_validator,
+                    message_platform_id=platform_id,
+                )
         except Exception:
             logger.bind(uid=uid, session_id=message.session_id).exception("message platform message handling failed")
 

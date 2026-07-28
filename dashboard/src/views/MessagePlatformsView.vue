@@ -53,6 +53,8 @@
       :platform-types="platformTypes"
       :users="users"
       :users-loading="usersLoading"
+      :profiles="profiles"
+      :profiles-loading="profilesLoading"
       :type-label="typeLabel"
       :submitting="submitting"
       @submit="submitForm" />
@@ -74,7 +76,7 @@ import QRCode from 'qrcode'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import MessagePlatformFormDialog from '../components/MessagePlatformFormDialog.vue'
 import WeixinOcLoginDialog from '../components/weixin_oc/WeixinOcLoginDialog.vue'
-import { adminApi, messagePlatformApi } from '../api'
+import { adminApi, messagePlatformApi, profileApi } from '../api'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 
 const { t } = useI18n()
@@ -83,6 +85,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const checkingLogin = ref(false)
 const usersLoading = ref(false)
+const profilesLoading = ref(false)
 const recoveringId = ref(null)
 const dialogVisible = ref(false)
 const loginDialogVisible = ref(false)
@@ -94,6 +97,7 @@ const total = ref(0)
 const platforms = ref([])
 const platformTypes = ref([])
 const users = ref([])
+const profiles = ref([])
 const loginData = ref(null)
 const loginPlatformId = ref(null)
 const qrcodeImageUrl = ref('')
@@ -104,6 +108,7 @@ const defaultForm = () => ({
   platform_type: 'WEIXIN_OPENCLAW',
   is_enabled: true,
   uid: '',
+  profile_id: null,
   config: {
     api_timeout_ms: 15000,
     long_poll_timeout_ms: 30000,
@@ -163,6 +168,19 @@ const fetchUsers = async () => {
   }
 }
 
+const fetchProfiles = async () => {
+  profilesLoading.value = true
+  try {
+    const res = await profileApi.list({ page: 1, size: 1000 })
+    profiles.value = res.data.data?.items || []
+  } catch {
+    profiles.value = []
+    ElMessage.error(t('messagePlatforms.load_profiles_failed'))
+  } finally {
+    profilesLoading.value = false
+  }
+}
+
 const handleRefresh = () => {
   currentPage.value = 1
   fetchPlatforms()
@@ -188,6 +206,7 @@ const handleEdit = (row) => {
   form.platform_type = row.platform_type
   form.is_enabled = row.is_enabled
   form.uid = row.uid || ''
+  form.profile_id = row.profile_id ?? null
   form.config = { ...defaultForm().config, ...(row.config || {}) }
   dialogVisible.value = true
 }
@@ -197,6 +216,7 @@ const buildPayload = () => ({
   platform_type: form.platform_type,
   is_enabled: form.is_enabled,
   uid: form.uid || null,
+  profile_id: form.profile_id ?? null,
   config: {
     api_timeout_ms: form.config.api_timeout_ms || 15000,
     long_poll_timeout_ms: form.config.long_poll_timeout_ms || 30000,
@@ -307,6 +327,7 @@ const { handleDelete } = useDeleteConfirm(messagePlatformApi.delete, fetchPlatfo
 onMounted(() => {
   fetchTypes()
   fetchUsers()
+  fetchProfiles()
   fetchPlatforms()
 })
 

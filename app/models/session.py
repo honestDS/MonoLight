@@ -18,6 +18,7 @@ class ChatSession(SQLModel, table=True):
     session_id: str = Field(primary_key=True, max_length=100, index=True)
     uid: str = Field(index=True, max_length=100)
     profile_id: int | None = Field(default=None, index=True)
+    profile_override_id: int | None = Field(default=None, gt=0, index=True)
     source: str = Field(default="http", max_length=50, index=True)
     reply_target_source: str = Field(
         default="http",

@@ -245,7 +245,7 @@ class Profile(ProfileBase, table=True):
 
     __tablename__ = "profile"
     id: int | None = Field(default=None, primary_key=True, index=True)
-    is_active: bool = Field(default=False)
+    is_default: bool = Field(default=False)
 
 
 class ProfileCreate(ProfileBase):
@@ -269,7 +269,7 @@ class ProfileResponse(ProfileBase):
     """Profile 响应模型"""
 
     id: int
-    is_active: bool
+    is_default: bool
     username: str | None = None
     knowledge_base_ids: list[int] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)

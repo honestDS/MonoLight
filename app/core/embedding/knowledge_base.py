@@ -94,7 +94,7 @@ async def embed_chunks_with_knowledge_base_config(
 
 
 async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> list[KnowledgeBase]:
-    """查询当前激活 Profile 可用的知识库"""
+    """查询当前所选 Profile 可用的知识库"""
     query = select(KnowledgeBase).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.knowledge_base_id == KnowledgeBase.id).where(KnowledgeBaseProfileBinding.profile_id == profile.id).order_by(KnowledgeBase.created_at.desc())
     result = await db.execute(query)
     return list(result.scalars().all())

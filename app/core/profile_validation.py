@@ -1,0 +1,107 @@
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.constants import (
+    ERR_CHANNEL_MODEL_NOT_FOUND,
+    ERR_CHANNEL_NOT_FOUND,
+    ERR_CHANNEL_USAGE_MISMATCH,
+    ERR_PROFILE_AUDIT_MODEL_NOT_CHAT,
+    ERR_PROFILE_CHANNEL_CONFIG_INVALID,
+    ERR_PROFILE_NO_CHAT_CHANNEL,
+    ERR_PROFILE_NOT_FOUND,
+    ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL,
+)
+from app.core.crud.channel import channel_crud
+from app.core.crud.profile import profile_crud
+from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.models.channel import ChannelConfig, ModelUsage
+from app.models.profile import Profile, ProfileConfig
+
+
+async def validate_audit_model_config(db: AsyncSession, security_config: dict) -> None:
+    """校验安全审计模型必须指向渠道下的 CHAT 模型。"""
+    audit_channel_id = security_config.get("audit_channel_id")
+    audit_model_id = security_config.get("audit_model_id")
+    if not audit_channel_id or not audit_model_id:
+        return
+
+    channel = await channel_crud.get(db, audit_channel_id)
+    if not channel:
+        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+
+    is_chat_model = any(item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT for item in (channel.model_ids or []))
+    if not is_chat_model:
+        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
+
+
+async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: ChannelConfig, expected_usage: ModelUsage) -> None:
+    """校验渠道规则引用的模型条目用途与所在配置组一致。"""
+    for rule in channel_config_obj.rules:
+        channel = await channel_crud.get(db, rule.channel_id)
+        if not channel:
+            raise ParameterException(ERR_CHANNEL_NOT_FOUND)
+
+        matched_model = None
+        for item in channel.model_ids or []:
+            if str(item.get("model_id")) == rule.model_id:
+                matched_model = item
+                if str(item.get("usage")) == expected_usage.value:
+                    break
+
+        if not matched_model:
+            raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
+
+        actual_usage = str(matched_model.get("usage"))
+        if actual_usage != expected_usage.value:
+            raise ParameterException(ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
+
+
+async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> None:
+    """校验 channel 配置中的渠道配置合法性。
+
+    - chat_channel：至少需要一条启用规则
+    - context_summary_channel：可选，有配置则按 CHAT 用途校验
+    - rerank_channel：可选，有配置则校验
+    - image_generation_channel：可选，有配置则校验
+    - 每条规则必须引用对应用途的模型条目
+    """
+    channel_usage_map = {
+        "chat_channel": ModelUsage.CHAT,
+        "context_summary_channel": ModelUsage.CHAT,
+        "rerank_channel": ModelUsage.RERANK,
+        "image_generation_channel": ModelUsage.IMAGE_GENERATION,
+    }
+
+    for channel_key, expected_usage in channel_usage_map.items():
+        channel_raw = channel_config.get(channel_key)
+        if not channel_raw:
+            continue
+
+        try:
+            channel_config_obj = ChannelConfig.model_validate(channel_raw)
+        except Exception as e:
+            raise ParameterException(
+                ERR_PROFILE_CHANNEL_CONFIG_INVALID,
+                channel_key=channel_key,
+                error=str(e),
+            ) from e
+
+        await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
+
+        if expected_usage == ModelUsage.RERANK and channel_config_obj.rerank_candidate_k < channel_config_obj.kb_query_top_k:
+            raise ParameterException(ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
+
+
+async def validate_profile_for_assignment(db: AsyncSession, profile: Profile) -> ProfileConfig:
+    cfg = ProfileConfig.model_validate(profile.configs)
+    if not cfg.channel.chat_channel.rules:
+        raise ParameterException(ERR_PROFILE_NO_CHAT_CHANNEL)
+    await validate_channel_configs(db, cfg.channel.model_dump())
+    return cfg
+
+
+async def get_validated_profile_for_assignment(db: AsyncSession, *, profile_id: int, uid: str | None) -> Profile:
+    profile = await profile_crud.get_with_relations(db, profile_id)
+    if not profile or profile.uid != uid:
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+    await validate_profile_for_assignment(db, profile)
+    return profile

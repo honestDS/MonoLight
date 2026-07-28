@@ -389,6 +389,63 @@ async def test_user_sessions_include_llm_request_metadata(db_session: AsyncSessi
     }
 
 
+@pytest.mark.asyncio
+async def test_user_sessions_include_owned_empty_sessions(db_session: AsyncSession):
+    db_session.add_all(
+        [
+            User(uid="user-1", username="alice"),
+            User(uid="user-2", username="bob"),
+            ChatSession(
+                session_id="empty-session",
+                uid="user-1",
+                profile_id=3,
+                profile_override_id=4,
+            ),
+            ChatSession(
+                session_id="other-empty-session",
+                uid="user-2",
+                profile_id=5,
+                profile_override_id=6,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    sessions = await message_crud.get_user_sessions(db_session, uid="user-1")
+
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "empty-session"
+    assert sessions[0].last_active is not None
+    assert sessions[0].profile_id == 3
+    assert sessions[0].profile_override_id == 4
+
+
+@pytest.mark.asyncio
+async def test_admin_user_sessions_include_messages_and_empty_sessions_for_all_users(db_session: AsyncSession):
+    db_session.add_all(
+        [
+            User(uid="user-1", username="alice"),
+            User(uid="user-2", username="bob"),
+            ChatSession(session_id="active-session", uid="user-1"),
+            ChatSession(session_id="empty-session", uid="user-2"),
+            Message(
+                session_id="active-session",
+                uid="user-1",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="hello",
+                profile_id=1,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    sessions = await message_crud.get_user_sessions(db_session, is_admin=True)
+
+    assert {session.session_id for session in sessions} == {"active-session", "empty-session"}
+    assert {session.uid for session in sessions} == {"user-1", "user-2"}
+
+
 async def _seed_messages(db: AsyncSession) -> None:
     for message_id in range(1, 9):
         db.add(

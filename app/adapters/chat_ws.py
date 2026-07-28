@@ -7,11 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import BaseChatAdapter
 from app.core.constants import ERR_LLM_UNEXPECTED_ERROR, ERR_SESSION_ID_REQUIRED
-from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.profile_selection import resolve_profile_for_session
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.models.message import MessageRole
@@ -42,7 +42,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
-            profile = await profile_crud.get_active(db, uid=uid)
+            profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
             _initial_message, work, submission_status = await session_reply_queue_manager.submit_user_message(
                 db,

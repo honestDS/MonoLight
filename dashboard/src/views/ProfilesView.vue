@@ -36,14 +36,14 @@
       </el-table-column>
       <el-table-column :resizable="false" :label="$t('profiles.status')" align="center" sortable>
         <template #default="scope">
-          <StatusTag :status="scope.row.is_active" :active-text="$t('profiles.active')" :inactive-text="$t('profiles.inactive')" />
+          <StatusTag :status="scope.row.is_default" :active-text="$t('profiles.default')" :inactive-text="$t('profiles.not_default')" />
         </template>
       </el-table-column>
 
       <el-table-column :resizable="false" :label="$t('profiles.actions')" width="380" align="center" fixed="right">
         <template #default="scope">
           <div class="action-buttons">
-            <el-button v-if="canActivateProfile(scope.row)" :type="scope.row.is_active ? 'info' : 'success'" size="small" :disabled="scope.row.is_active" @click="handleActivate(scope.row.id)">{{ $t('profiles.activate') }}</el-button>
+            <el-button v-if="canSetDefaultProfile(scope.row)" :type="scope.row.is_default ? 'info' : 'success'" size="small" :disabled="scope.row.is_default" @click="handleSetDefault(scope.row.id)">{{ $t('profiles.set_default') }}</el-button>
             <el-button type="primary" size="small" @click="showDialog('edit', scope.row)">{{ $t('profiles.edit') }}</el-button>
             <el-button type="danger" size="small" @click="handleDelete(scope.row.id, scope.row.name)">{{ $t('profiles.delete') }}</el-button>
           </div>
@@ -194,7 +194,7 @@ watch(() => form.uid, () => {
   form.knowledge_base_ids = form.knowledge_base_ids.filter(id => knowledgeBaseOptions.value.some(item => item.value === id))
 })
 
-const canActivateProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
+const canSetDefaultProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
 
 const auditModelKey = computed({
   get() {
@@ -372,13 +372,13 @@ const migrateSecurityConfig = (securityConfig) => {
   return normalized
 }
 
-const handleActivate = async (id) => {
+const handleSetDefault = async (id) => {
   try {
-    const res = await profileApi.activate(id)
-    ElMessage.success(res.data.message || t('profiles.activate_success'))
+    const res = await profileApi.setDefault(id)
+    ElMessage.success(res.data.message || t('profiles.set_default_success'))
     loadProfiles()
   } catch (err) {
-    ElMessage.error(err.message || t('profiles.activate_failed'))
+    ElMessage.error(err.message || t('profiles.set_default_failed'))
   }
 }
 

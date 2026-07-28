@@ -31,6 +31,7 @@ class MessagePlatformBase(SQLModel):
     status: MessagePlatformStatus = Field(default=MessagePlatformStatus.DISCONNECTED, nullable=False, index=True)
     account_id: str | None = Field(default=None, max_length=255)
     uid: str | None = Field(default=None, index=True, max_length=100)
+    profile_id: int | None = Field(default=None, gt=0, index=True)
     config: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON), description="Platform private config such as secrets and runtime settings")
     state: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON), description="Platform runtime state such as sync_buf and qrcode status")
     last_error: str | None = Field(default=None, max_length=1000)
@@ -87,6 +88,7 @@ class MessagePlatformCreate(SQLModel):
     platform_type: MessagePlatformType = MessagePlatformType.WEIXIN_OPENCLAW
     is_enabled: bool = False
     uid: str | None = None
+    profile_id: int | None = PydanticField(None, gt=0)
     account_id: str | None = None
     config: dict[str, Any] = PydanticField(default_factory=dict)
     state: dict[str, Any] = PydanticField(default_factory=dict)
@@ -96,6 +98,7 @@ class MessagePlatformUpdate(SQLModel):
     name: str | None = PydanticField(None, min_length=1, max_length=100)
     is_enabled: bool | None = None
     uid: str | None = None
+    profile_id: int | None = PydanticField(None, gt=0)
     account_id: str | None = None
     config: dict[str, Any] | None = None
     state: dict[str, Any] | None = None
@@ -109,6 +112,7 @@ class MessagePlatformResponse(BaseModel):
     status: MessagePlatformStatus
     account_id: str | None
     uid: str | None
+    profile_id: int | None
     config: dict[str, Any]
     state: dict[str, Any]
     last_error: str | None

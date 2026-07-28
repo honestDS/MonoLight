@@ -931,7 +931,7 @@ async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
         yield {"type": "done", "response": {"history": [], "files": None}}
 
     monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
-    monkeypatch.setattr(chat_web_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(chat_web_module, "resolve_profile_for_session", get_profile)
     monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_stream", wait_for_stream)
@@ -987,7 +987,7 @@ async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch
         )
 
     monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
-    monkeypatch.setattr(chat_web_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(chat_web_module, "resolve_profile_for_session", get_profile)
     monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
     monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_result", wait_for_result)

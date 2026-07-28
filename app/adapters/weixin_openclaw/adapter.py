@@ -36,14 +36,14 @@ from app.core.constants import (
     ERR_SESSION_ID_REQUIRED,
     ERR_WEIXIN_OPENCLAW_GET_UPDATES_FAILED,
 )
-from app.core.crud.profile import profile_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.outbound_text import split_outbound_text_by_newline
+from app.core.profile_selection import resolve_profile_for_session
 from app.core.session_reply_queue.manager import session_reply_queue_manager
-from app.core.utils.session import generate_session_title_for_active_profile
+from app.core.utils.session import generate_session_title_for_selected_profile
 
 logger = get_logger(__name__)
 
@@ -168,11 +168,17 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         attachments: list[str] | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
         has_quote: bool = False,
+        message_platform_id: int | None = None,
     ) -> WeixinOpenClawChatResult:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
         try:
-            profile = await profile_crud.get_active(db, uid=uid)
+            profile = await resolve_profile_for_session(
+                db,
+                uid=uid,
+                session_id=session_id,
+                message_platform_id=message_platform_id,
+            )
             await ChatDispatcher.validate_initial_message_before_save(
                 db,
                 message,
@@ -294,6 +300,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         uid: str | None = None,
         active_tasks: MutableSet[asyncio.Task] | None = None,
         runtime_validator: Callable[[], Awaitable[bool]] | None = None,
+        message_platform_id: int | None = None,
     ) -> bool:
         resolved_uid = uid or message.user_id
         try:
@@ -310,6 +317,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 attachments=message.attachments or None,
                 active_tasks=active_tasks,
                 has_quote=message_has_quote(getattr(message, "raw", None)),
+                message_platform_id=message_platform_id,
             )
             if result.text or result.files:
                 sent = False
@@ -323,11 +331,12 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 logger.bind(uid=resolved_uid, session_id=message.session_id).warning(t("LOG_WEIXIN_OPENCLAW_RUNTIME_INVALID_BEFORE_REPLY"))
                 return False
 
-            await generate_session_title_for_active_profile(
+            await generate_session_title_for_selected_profile(
                 db=db,
                 uid=resolved_uid,
                 session_id=message.session_id,
                 first_message=dispatch_text,
+                message_platform_id=message_platform_id,
             )
             return True
         except BaseBusinessException as exc:

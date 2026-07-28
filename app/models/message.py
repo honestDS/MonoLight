@@ -161,3 +161,4 @@ class ChatCompletionRequest(BaseModel):
     session_id: str | None = None
     request_id: str | None = None
     stream: bool | None = False
+    profile_override_id: int | None = PyField(default=None, gt=0)

@@ -8,6 +8,7 @@ import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessag
 import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.js'
 import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop, stopAgentLoop } from './workLifecycleTracker.js'
 import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys, findMessageReplacementIndex, mergeRemoteMessage, mergeRemoteMessageIntoList } from '../../utils'
+import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
@@ -124,6 +125,7 @@ export function useChatSession() {
   
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
+  const newSessionProfileOverrideId = ref(null)
   
   // 2. 会话管理
   const sessionManager = useSessionManager()
@@ -582,13 +584,18 @@ export function useChatSession() {
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
-    await performHttpSend(text, attachmentsToSent, userMsgId, sessionManager.currentSessionId.value, requestId)
+    const requestSessionId = sessionManager.currentSessionId.value
+    const newProfileOverrideId = getNewSessionProfileOverrideId(
+      requestSessionId,
+      newSessionProfileOverrideId.value
+    )
+    await performHttpSend(text, attachmentsToSent, userMsgId, requestSessionId, requestId, newProfileOverrideId)
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null) => {
+  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null) => {
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
     let finalResponseProcessed = false
     try {
@@ -597,6 +604,7 @@ export function useChatSession() {
         sessionId: requestSessionId,
         attachments: attachmentsToSent,
         requestId,
+        profileOverrideId,
         callbacks: {
           ...createLifecycleCallbacks(isCurrentRequestSession),
           deferAgentLoopOutput: true,
@@ -634,18 +642,18 @@ export function useChatSession() {
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
         // 1. 设置当前会话 ID (静默选择)
-        sessionManager.selectSession({ session_id: newId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        sessionManager.selectSession({ session_id: newId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value, profile_override_id: profileOverrideId }, null, false, false)
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
-          chatApi.updateSessionSetting(newId, true).catch(() => {})
+          chatApi.updateSessionSetting(newId, { enable_markdown: true }).catch(() => {})
         }
         
         // 2. 收到 ID 后立即调用标题生成
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId)
+        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -730,6 +738,10 @@ export function useChatSession() {
     nextTick(() => chatState.scrollToBottom())
 
     let requestSessionId = sessionManager.currentSessionId.value
+    const newProfileOverrideId = getNewSessionProfileOverrideId(
+      requestSessionId,
+      newSessionProfileOverrideId.value
+    )
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
 
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
@@ -827,11 +839,11 @@ export function useChatSession() {
         requestSessionId = newSessionId
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
-        sessionManager.selectSession({ session_id: newSessionId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value }, null, false, false)
+        sessionManager.selectSession({ session_id: newSessionId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value, profile_override_id: newProfileOverrideId }, null, false, false)
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
-          chatApi.updateSessionSetting(newSessionId, true).catch(() => {})
+          chatApi.updateSessionSetting(newSessionId, { enable_markdown: true }).catch(() => {})
         }
         
         // 2. 收到 ID 后立即调用标题生成
@@ -1078,6 +1090,7 @@ export function useChatSession() {
         sessionId: requestSessionId,
         attachments: attachmentsToSent,
         requestId,
+        profileOverrideId: newProfileOverrideId,
         callbacks
       })
       if (!sent) handleWsSendFailure()
@@ -1112,6 +1125,7 @@ export function useChatSession() {
     sessionManager.createNewSession(transport.disconnectWebSocket)
     chatState.clearMessages()
     chatState.inputMsg.value = ''
+    newSessionProfileOverrideId.value = null
     // 新建会话时重置加载状态，解除模式锁定
     chatState.loading.value = false
   }
@@ -1185,6 +1199,7 @@ export function useChatSession() {
     // 新增附件状态导出
     attachments,
     enableMarkdownDefault,
+    newSessionProfileOverrideId,
 
     // 状态 - 会话相关
     sessions: sessionManager.sessions,

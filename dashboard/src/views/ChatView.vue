@@ -80,6 +80,27 @@
             <i class="el-icon-plus"></i> {{ $t('chat.new_session') }}
           </el-button>
 
+          <div class="session-profile-setting">
+            <span class="session-profile-setting-label">{{ $t('chat.profile') }}</span>
+            <el-select
+              class="session-profile-setting-select"
+              :model-value="currentSessionProfileDisplayId"
+              clearable
+              filterable
+              :loading="profilesLoading"
+              :disabled="profileSettingSubmitting"
+              :placeholder="currentSessionProfilePlaceholder"
+              @change="updateSessionProfileOverride"
+            >
+              <el-option
+                v-for="profile in currentSessionProfileOptions"
+                :key="profile.id"
+                :label="formatProfileOptionLabel(profile, $t('chat.default_profile_suffix'))"
+                :value="profile.id"
+              />
+            </el-select>
+          </div>
+
           <el-checkbox v-if="isCurrentSessionReadOnly" v-model="externalSessionAutoPullEnabled">
             {{ $t('chat.external_session_auto_pull') }}
           </el-checkbox>
@@ -198,11 +219,22 @@ import { Refresh } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
-import { fileApi, chatApi } from '../api'
+import { fileApi, chatApi, profileApi } from '../api'
+import {
+  filterProfilesByUid,
+  formatProfileOptionLabel,
+  resolveSessionProfileDisplayId,
+  resolveSessionProfilePlaceholder,
+  resolveProfileOwnerUid
+} from '../utils/profileOptions'
 
 const { t } = useI18n()
 
 const chat = useChatSession()
+const profiles = ref([])
+const currentUid = ref(null)
+const profilesLoading = ref(false)
+const profileSettingSubmitting = ref(false)
 
 // 获取当前会话的 Markdown 开关状态
 const currentSessionEnableMarkdown = computed({
@@ -238,7 +270,7 @@ const toggleMarkdown = async (val) => {
   }
   
   try {
-    await chatApi.updateSessionSetting(currentSessionId.value, val)
+    await chatApi.updateSessionSetting(currentSessionId.value, { enable_markdown: val })
   } catch (error) {
     ElMessage.error(error.message || t('chat.setting_failed'))
     // 回退状态
@@ -263,6 +295,7 @@ const {
   currentSessionId,
   typingSessionId,
   activeCollapse,
+  currentSession,
   transportMode,
   attachments,
   isCurrentSessionReadOnly,
@@ -270,8 +303,61 @@ const {
   isContextSummarizing,
   llmRequestMetadata,
   historyLoading,
-  initialHistoryLoaded
+  initialHistoryLoaded,
+  newSessionProfileOverrideId
 } = chat
+
+const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
+  currentSession.value,
+  newSessionProfileOverrideId.value
+))
+const currentSessionProfileOptions = computed(() => filterProfilesByUid(
+  profiles.value,
+  resolveProfileOwnerUid(currentSession.value, currentUid.value)
+))
+const currentSessionProfilePlaceholder = computed(() => resolveSessionProfilePlaceholder(
+  currentSessionProfileOptions.value,
+  isCurrentSessionReadOnly.value,
+  t('chat.default_profile_suffix'),
+  t('chat.inherited_profile')
+))
+
+const loadProfiles = async () => {
+  profilesLoading.value = true
+  try {
+    const res = await profileApi.list({ page: 1, size: 1000 })
+    profiles.value = res.data.data.items || []
+    currentUid.value = res.data.data.meta?.current_uid || null
+  } catch (error) {
+    ElMessage.error(t('chat.load_profiles_failed'))
+  } finally {
+    profilesLoading.value = false
+  }
+}
+
+const updateSessionProfileOverride = async (profileId) => {
+  const sessionId = currentSessionId.value
+  if (!sessionId) {
+    newSessionProfileOverrideId.value = profileId ?? null
+    return
+  }
+  if (profileSettingSubmitting.value) return
+
+  const previousProfileOverrideId = currentSession.value?.profile_override_id ?? null
+  profileSettingSubmitting.value = true
+  try {
+    await chatApi.updateSessionSetting(sessionId, { profile_override_id: profileId ?? null })
+    const session = sessions.value.find(item => item.session_id === sessionId)
+    if (session) session.profile_override_id = profileId ?? null
+    ElMessage.success(t('chat.profile_setting_saved'))
+  } catch (error) {
+    const session = sessions.value.find(item => item.session_id === sessionId)
+    if (session) session.profile_override_id = previousProfileOverrideId
+    ElMessage.error(t('chat.setting_failed'))
+  } finally {
+    profileSettingSubmitting.value = false
+  }
+}
 
 // 解构方法
 const {
@@ -468,6 +554,7 @@ const handlePaste = (e) => {
 
 onMounted(() => {
   loadSessions()
+  loadProfiles()
   if (messageList.value) {
     messageList.value.addEventListener('scroll', handleScroll)
   }

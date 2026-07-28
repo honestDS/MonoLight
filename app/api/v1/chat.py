@@ -12,7 +12,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
@@ -41,11 +41,10 @@ from app.core.constants import (
 )
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.message import message_crud
-from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
 from app.core.crud.system_setting import system_setting_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
-from app.core.exceptions import BaseBusinessException, LLMException
+from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import normalize_locale
@@ -55,6 +54,8 @@ from app.core.log import (
     reset_system_log_locale,
     set_system_log_locale,
 )
+from app.core.profile_selection import resolve_profile_for_session
+from app.core.profile_validation import get_validated_profile_for_assignment
 from app.core.security import get_current_user
 from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
@@ -69,6 +70,7 @@ from app.models.message import (
     MessageResponse,
     MessageRole,
 )
+from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, get_db
 from app.schemas.response import (
     LLMChoice,
@@ -111,12 +113,49 @@ async def _http_event_stream(
         yield json.dumps(event, ensure_ascii=False) + "\n"
 
 
+async def _create_new_web_session_with_profile_override(
+    db: AsyncSession,
+    session_id: str,
+    uid: str | None,
+    source: str,
+    profile_override_id: int | None,
+) -> None:
+    if profile_override_id is None:
+        return
+
+    existing_session = await session_crud.get_by_session_id(db, session_id)
+    if existing_session:
+        if existing_session.uid != uid:
+            raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+        return
+
+    profile = await get_validated_profile_for_assignment(
+        db,
+        profile_id=profile_override_id,
+        uid=uid,
+    )
+    db.add(
+        ChatSession(
+            session_id=session_id,
+            uid=uid,
+            profile_override_id=profile.id,
+            source=source,
+            reply_target_source=source,
+        )
+    )
+    await db.commit()
+
+
 @dataclass
 class _WebSocketChatState:
     active_task: asyncio.Task | None = None
     active_tasks: weakref.WeakSet = field(default_factory=weakref.WeakSet)
     current_session_id: str | None = None
     notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
+
+
+class NewSessionProfileSetting(BaseModel):
+    profile_override_id: int | None = Field(default=None, gt=0)
 
 
 async def _cancel_websocket_chat_tasks(state: _WebSocketChatState):
@@ -217,6 +256,13 @@ async def chat_completions(
     # 如果 session_id 为空，直接生成并返回，由前端发起二次请求
     if not request.session_id:
         new_session_id = str(uuid.uuid4())
+        await _create_new_web_session_with_profile_override(
+            db,
+            session_id=new_session_id,
+            uid=uid,
+            source="http",
+            profile_override_id=request.profile_override_id,
+        )
         return LLMResponse(
             choices=[
                 LLMChoice(
@@ -264,10 +310,13 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
         data.append(
             {
                 "session_id": row.session_id,
+                "uid": row.uid,
                 "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
+                "profile_id": row.profile_id,
+                "profile_override_id": row.profile_override_id,
                 "source": row.source or "http",
                 "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
                 "llm_request_metadata": row.llm_request_metadata,
@@ -304,6 +353,7 @@ class SessionSettingRequest(BaseModel):
 
     session_id: str
     enable_markdown: bool | None = None
+    profile_override_id: int | None = Field(default=None, gt=0)
 
 
 class SessionGuidanceRequest(BaseModel):
@@ -368,11 +418,21 @@ async def update_session_setting(
 
     if not is_admin and session.uid != uid:
         return StandardResponse.error(message=ERR_SESSION_NO_PERMISSION)
-    if session.source not in {"http", "ws"}:
+    if request.enable_markdown is not None and session.source not in {"http", "ws"}:
         return StandardResponse.error(code=403, message=ERR_SESSION_READ_ONLY)
 
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
+    if "profile_override_id" in request.model_fields_set:
+        if request.profile_override_id is None:
+            session.profile_override_id = None
+        else:
+            profile = await get_validated_profile_for_assignment(
+                db,
+                profile_id=request.profile_override_id,
+                uid=session.uid,
+            )
+            session.profile_override_id = profile.id
     await db.commit()
 
     return StandardResponse.success(message=MSG_SESSION_UPDATED)
@@ -400,7 +460,7 @@ async def generate_title(
     except BaseBusinessException as exc:
         return StandardResponse.error(code=exc.code, message=exc.message)
 
-    profile = await profile_crud.get_active(db, uid=uid)
+    profile = await resolve_profile_for_session(db, uid=uid, session_id=request.session_id)
     if not profile:
         return StandardResponse.error(message=ERR_NO_VALID_CHANNEL)
 
@@ -543,6 +603,7 @@ async def chat_websocket(
             session_id = data.get("session_id")
             attachments = data.get("attachments")
             request_id = data.get("request_id")
+            profile_override_id = data.get("profile_override_id")
 
             action = data.get("action")
 
@@ -567,7 +628,41 @@ async def chat_websocket(
             if not session_id:
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
                 if not state.active_task or state.active_task.done():
-                    state.current_session_id = str(uuid.uuid4())
+                    try:
+                        profile_setting = NewSessionProfileSetting.model_validate({"profile_override_id": profile_override_id})
+                    except ValidationError as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": str(exc),
+                                "session_id": state.current_session_id,
+                                "request_id": request_id,
+                            }
+                        )
+                        continue
+
+                    new_session_id = str(uuid.uuid4())
+                    try:
+                        async with AsyncSessionLocal() as db:
+                            await _create_new_web_session_with_profile_override(
+                                db,
+                                session_id=new_session_id,
+                                uid=uid,
+                                source="ws",
+                                profile_override_id=profile_setting.profile_override_id,
+                            )
+                    except BaseBusinessException as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": t(exc.message, **exc.kwargs),
+                                "session_id": state.current_session_id,
+                                "request_id": request_id,
+                            }
+                        )
+                        continue
+
+                    state.current_session_id = new_session_id
                     await websocket.send_json(
                         {
                             "type": "session_id",
@@ -598,13 +693,13 @@ async def chat_websocket(
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
                     async with AsyncSessionLocal() as db:
-                        profile = await profile_crud.get_active(db, uid=uid)
                         try:
                             await ensure_web_session_writable(
                                 db,
                                 session_id=session_id,
                                 uid=uid,
                             )
+                            profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
                             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
                         except BaseBusinessException as exc:
                             await websocket.send_json(

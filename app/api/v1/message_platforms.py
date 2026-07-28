@@ -21,6 +21,7 @@ from app.core.constants import (
 )
 from app.core.crud.message_platform import message_platform_crud
 from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.core.profile_validation import get_validated_profile_for_assignment
 from app.models.message_platform import (
     MessagePlatformCreate,
     MessagePlatformResponse,
@@ -110,6 +111,12 @@ async def create_message_platform(platform_in: MessagePlatformCreate, db: AsyncS
     payload = _normalize_create_payload(platform_in)
     payload["uid"] = _normalize_uid(payload.get("uid") or getattr(admin, "uid", None))
     _ensure_uid_for_enabled(bool(payload.get("is_enabled")), payload.get("uid"))
+    if payload.get("profile_id") is not None:
+        await get_validated_profile_for_assignment(
+            db,
+            profile_id=payload["profile_id"],
+            uid=payload["uid"],
+        )
     platform = await message_platform_crud.create(db, obj_in=payload)
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_CREATED)
 
@@ -133,7 +140,14 @@ async def update_message_platform(platform_id: int, platform_in: MessagePlatform
         data["last_error"] = ""
     next_is_enabled = bool(data["is_enabled"]) if "is_enabled" in data else platform.is_enabled
     next_uid = data["uid"] if "uid" in data else platform.uid
+    next_profile_id = data["profile_id"] if "profile_id" in data else platform.profile_id
     _ensure_uid_for_enabled(next_is_enabled, next_uid)
+    if ("uid" in data or "profile_id" in data) and next_profile_id is not None:
+        await get_validated_profile_for_assignment(
+            db,
+            profile_id=next_profile_id,
+            uid=next_uid,
+        )
     platform = await message_platform_crud.update(db, db_obj=platform, obj_in=data)
     return StandardResponse.success(data=MessagePlatformResponse.model_validate(platform), message=MSG_MESSAGE_PLATFORM_UPDATED)
 

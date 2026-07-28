@@ -10,13 +10,10 @@ import sys
 import sysconfig
 
 from app.core.constants import ERR_TOOL_COMMAND_TIMEOUT, ERR_TOOL_SHELL_BLACKLISTED
-from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
 from app.core.utils.system import get_full_system_context
-from app.models.profile import ProfileConfig
-from app.providers.database import AsyncSessionLocal
 
 from .base import BaseExecutor
 
@@ -166,13 +163,9 @@ class ShellExecutor(BaseExecutor):
         return parts
 
     async def _get_profile_timeout(self) -> float:
-        """从已激活的 Profile 中获取超时配置"""
+        """从当前执行配置获取超时配置"""
         try:
-            async with AsyncSessionLocal() as session:
-                profile = await profile_crud.get_active(session, uid=self.uid)
-                if profile and profile.configs:
-                    cfg = ProfileConfig.model_validate(profile.configs)
-                    return cfg.tool.tool_timeout
+            return self.cfg.tool.tool_timeout
         except Exception as e:
             self.logger.error(t("LOG_SHELL_PROFILE_TIMEOUT_FAILED", error=str(e)))
         return 30.0

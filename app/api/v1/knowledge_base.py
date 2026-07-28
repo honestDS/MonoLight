@@ -297,7 +297,7 @@ async def query_test_knowledge_base(
 ):
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
-    profile = await profile_crud.get_active(db, uid=kb.uid)
+    profile = await profile_crud.get_default(db, uid=kb.uid)
     if not profile:
         raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
 

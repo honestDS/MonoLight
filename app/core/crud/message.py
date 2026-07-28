@@ -2,7 +2,7 @@ from typing import (
     Any,
 )
 
-from sqlalchemy import update
+from sqlalchemy import and_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -317,31 +317,43 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.scalars().all()
 
     async def get_user_sessions(self, db: AsyncSession, uid: str = None, is_admin: bool = False) -> list[Any]:
-        activity_stmt = select(
+        session_activity_stmt = select(
             Message.session_id.label("session_id"),
             func.max(Message.created_at).label("last_active"),
             Message.uid.label("uid"),
         )
         if not is_admin:
-            activity_stmt = activity_stmt.where(Message.uid == uid)
-        session_activity = activity_stmt.group_by(Message.session_id, Message.uid).subquery()
+            session_activity_stmt = session_activity_stmt.where(Message.uid == uid)
+        session_activity = session_activity_stmt.group_by(Message.session_id, Message.uid).subquery()
+        last_active = func.coalesce(session_activity.c.last_active, ChatSession.created_at).label("last_active")
 
         stmt = (
             select(
-                session_activity.c.session_id,
-                session_activity.c.last_active,
-                session_activity.c.uid,
+                ChatSession.session_id,
+                last_active,
+                ChatSession.uid,
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
+                ChatSession.profile_id,
+                ChatSession.profile_override_id,
                 ChatSession.source,
                 ChatSession.created_at,
                 ChatSession.llm_request_metadata,
             )
-            .join(User, session_activity.c.uid == User.uid)
-            .join(ChatSession, session_activity.c.session_id == ChatSession.session_id, isouter=True)
-            .order_by(desc(session_activity.c.last_active))
+            .join(User, ChatSession.uid == User.uid)
+            .join(
+                session_activity,
+                and_(
+                    session_activity.c.session_id == ChatSession.session_id,
+                    session_activity.c.uid == ChatSession.uid,
+                ),
+                isouter=True,
+            )
+            .order_by(desc(last_active))
         )
+        if not is_admin:
+            stmt = stmt.where(ChatSession.uid == uid)
         result = await db.execute(stmt)
         return result.all()
 

@@ -81,7 +81,7 @@ async def db_session() -> AsyncSession:
 def entry_dependencies(monkeypatch):
     profile = Profile(id=1, uid="owner", name="test", configs={})
 
-    async def get_active(*_args, **_kwargs):
+    async def resolve_profile(*_args, **_kwargs):
         return profile
 
     async def validate(*_args, **_kwargs):
@@ -100,12 +100,12 @@ def entry_dependencies(monkeypatch):
         return None
 
     for module_name in ("app.adapters.chat_web", "app.adapters.chat_ws", "app.adapters.weixin_openclaw.adapter"):
-        monkeypatch.setattr(f"{module_name}.profile_crud.get_active", get_active)
+        monkeypatch.setattr(f"{module_name}.resolve_profile_for_session", resolve_profile)
         monkeypatch.setattr(f"{module_name}.ChatDispatcher.validate_initial_message_before_save", validate)
     monkeypatch.setattr("app.adapters.chat_web.ensure_web_session_writable", ensure_writable)
     monkeypatch.setattr("app.core.session_reply_queue.manager.session_crud.upsert_profile", upsert_profile)
     monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
-    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_active_profile", generate_title)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
     return profile
 
 
@@ -983,7 +983,7 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     monkeypatch.setattr(chat_api.ChatDispatcher, "validate_initial_message_before_save", _noop_async)
     monkeypatch.setattr(chat_api.session_notifier, "register", _noop_async)
     monkeypatch.setattr(chat_api.session_notifier, "unregister", _noop_async)
-    monkeypatch.setattr(chat_api.profile_crud, "get_active", _active_profile)
+    monkeypatch.setattr(chat_api, "resolve_profile_for_session", _active_profile)
     monkeypatch.setattr(chat_api.ws_chat_adapter, "chat", held_chat)
 
     websocket = FakeWebSocket()

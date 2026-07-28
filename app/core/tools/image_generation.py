@@ -38,7 +38,7 @@ IMAGE_GENERATION_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "generate_image",
-        "description": "Generate one image using the active profile's configured image generation model. Use it when the user asks to create, draw, render, or generate an image.",
+        "description": "Generate one image using the selected profile's configured image generation model. Use it when the user asks to create, draw, render, or generate an image.",
         "parameters": {
             "type": "object",
             "properties": {

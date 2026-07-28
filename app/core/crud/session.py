@@ -13,6 +13,10 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))
         return result.scalars().first()
 
+    async def has_profile_override(self, db: AsyncSession, profile_id: int) -> bool:
+        result = await db.execute(select(ChatSession.session_id).where(ChatSession.profile_override_id == profile_id).limit(1))
+        return result.scalar() is not None
+
     async def create_or_update_title(self, db: AsyncSession, session_id: str, uid: str, title: str) -> ChatSession:
         session = await self.get_by_session_id(db, session_id)
         if session:

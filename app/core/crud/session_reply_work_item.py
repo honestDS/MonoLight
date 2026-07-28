@@ -618,7 +618,10 @@ class CRUDSessionReplyWorkItem:
                 SessionReplyWorkItem.session_id == work.session_id,
                 SessionReplyWorkItem.sequence_no > work.sequence_no,
                 SessionReplyWorkItem.status.not_in(_TERMINAL_STATUS_VALUES),
-                SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
+                or_(
+                    SessionReplyWorkItem.work_type != SessionReplyWorkType.FOREGROUND_REPLY,
+                    SessionReplyWorkItem.profile_id != work.profile_id,
+                ),
             )
             .order_by(SessionReplyWorkItem.sequence_no)
             .limit(1)
@@ -628,6 +631,7 @@ class CRUDSessionReplyWorkItem:
             SessionReplyWorkItem.session_id == work.session_id,
             SessionReplyWorkItem.sequence_no >= work.sequence_no,
             SessionReplyWorkItem.work_type == SessionReplyWorkType.FOREGROUND_REPLY,
+            SessionReplyWorkItem.profile_id == work.profile_id,
             SessionReplyWorkItem.status.in_(
                 [
                     SessionReplyWorkStatus.READY_FOR_LLM,

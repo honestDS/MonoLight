@@ -28,6 +28,10 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name))
         return result.scalars().first()
 
+    async def has_profile_assignment(self, db: AsyncSession, profile_id: int) -> bool:
+        result = await db.execute(select(MessagePlatform.id).where(MessagePlatform.profile_id == profile_id).limit(1))
+        return result.scalar() is not None
+
     async def list_platforms(self, db: AsyncSession, *, skip: int = 0, limit: int = 100) -> list[MessagePlatform]:
         result = await db.execute(select(MessagePlatform).order_by(MessagePlatform.id.desc()).offset(skip).limit(limit))
         return result.scalars().all()

@@ -154,7 +154,7 @@ export const chatApi = {
   // 创建外部会话引导
   createGuidance: (data) => request.post('/chat/sessions/guidance', data),
   // 更新会话设置
-  updateSessionSetting: (sessionId, enableMarkdown) => request.post('/chat/sessions/setting', { session_id: sessionId, enable_markdown: enableMarkdown }),
+  updateSessionSetting: (sessionId, settings) => request.post('/chat/sessions/setting', { session_id: sessionId, ...settings }),
   // 后台任务列表
   backgroundTasks: (params) => request.get('/chat/background-tasks', { params }),
 }
@@ -162,7 +162,7 @@ export const chatApi = {
 export const profileApi = {
   list: (params) => request.get('/profiles/list', { params }),
   create: (data) => request.post('/profiles/create', data),
-  activate: (id) => request.post(`/profiles/activate?profile_id=${id}`),
+  setDefault: (id) => request.post(`/profiles/set-default?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),
   delete: (id) => request.post(`/profiles/delete?profile_id=${id}`),
   types: () => request.get('/profiles/types'),

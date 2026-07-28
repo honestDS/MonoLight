@@ -510,7 +510,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     async def get_user(db, uid):
         return SimpleNamespace(username="admin")
 
-    async def get_profile(db, uid):
+    async def get_profile(db, *, uid, session_id):
         return profile
 
     async def validate_profile(db, current_profile):
@@ -563,7 +563,7 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
     monkeypatch.setattr(stream_module, "logger", logger)
     monkeypatch.setattr(interactive_module, "get_logger", lambda _name: logger)
     monkeypatch.setattr(interactive_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(interactive_module.profile_crud, "get_active", get_profile)
+    monkeypatch.setattr(interactive_module, "resolve_profile_for_session", get_profile)
     monkeypatch.setattr(interactive_module, "validate_profile_and_cfg", validate_profile)
     monkeypatch.setattr(interactive_module, "save_initial_message", save_initial)
     monkeypatch.setattr(interactive_module, "mark_initial_message_processed", mark_processed)

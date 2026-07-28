@@ -156,7 +156,7 @@ MESSAGES = {
     "ERR_TOOL_FIRECRAWL_AUTH_FAILED": "Firecrawl API Key 认证失败或已失效，请检查并更新配置",
     "ERR_TOOL_FIRECRAWL_NETWORK_FAILED": "Firecrawl 服务调用失败，请检查网络连接或服务状态",
     "ERR_TOOL_IMAGE_PROMPT_REQUIRED": "缺少图片生成提示词 prompt",
-    "ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED": "当前激活配置中未配置图片生成渠道",
+    "ERR_TOOL_IMAGE_CHANNEL_NOT_CONFIGURED": "当前所选配置中未配置图片生成渠道",
     "ERR_TOOL_IMAGE_CHANNEL_UNAVAILABLE": "当前没有可用的图片生成渠道",
     "ERR_TOOL_IMAGE_EMPTY_RESPONSE": "图片生成模型未返回图片",
     "ERR_TOOL_IMAGE_INVALID_ITEM": "图片生成模型返回的图片项缺少 url 或 b64_json",

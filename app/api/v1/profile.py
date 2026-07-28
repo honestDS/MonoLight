@@ -1,6 +1,6 @@
 """Profile API：渠道管理架构适配版
 
-CRUD 支持对话、上下文总结、重排和图像生成渠道；activate 校验适配
+CRUD 支持对话、上下文总结、重排和图像生成渠道；default 校验适配
 """
 
 from fastapi import (
@@ -11,29 +11,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import (
-    ERR_ACTIVATE_NO_CHANNEL,
-    ERR_CHANNEL_MODEL_NOT_FOUND,
-    ERR_CHANNEL_NOT_FOUND,
-    ERR_CHANNEL_USAGE_MISMATCH,
-    ERR_DELETE_ACTIVE_PROFILE,
+    ERR_DELETE_BOUND_PROFILE,
+    ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
     ERR_KB_NOT_FOUND,
     ERR_ONLY_ADMIN_ALLOWED,
-    ERR_PROFILE_AUDIT_MODEL_NOT_CHAT,
-    ERR_PROFILE_CHANNEL_CONFIG_INVALID,
     ERR_PROFILE_NAME_EXISTS,
     ERR_PROFILE_NOT_FOUND,
-    ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL,
     ERR_PROMPT_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
-    MSG_PROFILE_ACTIVATED,
     MSG_PROFILE_CREATED,
     MSG_PROFILE_DELETED,
+    MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
-from app.core.crud.channel import channel_crud
+from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
+from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
     ForbiddenException,
@@ -41,8 +36,12 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.i18n import t
+from app.core.profile_validation import (
+    validate_audit_model_config,
+    validate_channel_configs,
+    validate_profile_for_assignment,
+)
 from app.core.security import get_current_user
-from app.models.channel import ChannelConfig, ModelUsage
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding
 from app.models.profile import (
     ProfileConfig,
@@ -119,80 +118,6 @@ async def check_admin_privilege(current_user=Depends(get_current_user)):
     return current_user
 
 
-async def validate_audit_model_config(db: AsyncSession, security_config: dict) -> None:
-    """校验安全审计模型必须指向渠道下的 CHAT 模型。"""
-    audit_channel_id = security_config.get("audit_channel_id")
-    audit_model_id = security_config.get("audit_model_id")
-    if not audit_channel_id or not audit_model_id:
-        return
-
-    channel = await channel_crud.get(db, audit_channel_id)
-    if not channel:
-        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
-
-    is_chat_model = any(item.get("model_id") == audit_model_id and item.get("usage") == ModelUsage.CHAT for item in (channel.model_ids or []))
-    if not is_chat_model:
-        raise ParameterException(ERR_PROFILE_AUDIT_MODEL_NOT_CHAT)
-
-
-async def validate_channel_rule_usage(db: AsyncSession, channel_config_obj: ChannelConfig, expected_usage: ModelUsage) -> None:
-    """校验渠道规则引用的模型条目用途与所在配置组一致。"""
-    for rule in channel_config_obj.rules:
-        channel = await channel_crud.get(db, rule.channel_id)
-        if not channel:
-            raise ParameterException(ERR_CHANNEL_NOT_FOUND)
-
-        matched_model = None
-        for item in channel.model_ids or []:
-            if str(item.get("model_id")) == rule.model_id:
-                matched_model = item
-                if str(item.get("usage")) == expected_usage.value:
-                    break
-
-        if not matched_model:
-            raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
-
-        actual_usage = str(matched_model.get("usage"))
-        if actual_usage != expected_usage.value:
-            raise ParameterException(ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
-
-
-async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> None:
-    """校验 channel 配置中的渠道配置合法性。
-
-    - chat_channel：至少需要一条启用规则
-    - context_summary_channel：可选，有配置则按 CHAT 用途校验
-    - rerank_channel：可选，有配置则校验
-    - image_generation_channel：可选，有配置则校验
-    - 每条规则必须引用对应用途的模型条目
-    """
-    channel_usage_map = {
-        "chat_channel": ModelUsage.CHAT,
-        "context_summary_channel": ModelUsage.CHAT,
-        "rerank_channel": ModelUsage.RERANK,
-        "image_generation_channel": ModelUsage.IMAGE_GENERATION,
-    }
-
-    for channel_key, expected_usage in channel_usage_map.items():
-        channel_raw = channel_config.get(channel_key)
-        if not channel_raw:
-            continue
-
-        try:
-            channel_config_obj = ChannelConfig.model_validate(channel_raw)
-        except Exception as e:
-            raise ParameterException(
-                ERR_PROFILE_CHANNEL_CONFIG_INVALID,
-                channel_key=channel_key,
-                error=str(e),
-            ) from e
-
-        await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
-
-        if expected_usage == ModelUsage.RERANK and channel_config_obj.rerank_candidate_k < channel_config_obj.kb_query_top_k:
-            raise ParameterException(ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
-
-
 @router.post("/create", response_model=StandardResponse[ProfileResponse])
 async def create_profile(
     profile_in: ProfileCreate,
@@ -266,8 +191,8 @@ async def list_profiles(
     return StandardResponse.success(data=page_data)
 
 
-@router.post("/activate")
-async def activate_profile(
+@router.post("/set-default")
+async def set_default_profile(
     profile_id: int,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -278,17 +203,12 @@ async def activate_profile(
     if profile.uid != current_user.uid:
         raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
-    # 校验 chat_channel 配置存在
-    channel_config = profile.configs.get("channel", {})
-    chat_channel = channel_config.get("chat_channel")
-    if not chat_channel or not chat_channel.get("rules"):
-        raise ParameterException(ERR_ACTIVATE_NO_CHANNEL)
-    await validate_channel_configs(db, channel_config)
+    await validate_profile_for_assignment(db, profile)
 
-    await profile_crud.deactivate_by_uid(db, profile.uid)
-    profile.is_active = True
+    await profile_crud.clear_default_by_uid(db, profile.uid)
+    profile.is_default = True
     await db.commit()
-    return StandardResponse.success(message=MSG_PROFILE_ACTIVATED)
+    return StandardResponse.success(message=MSG_PROFILE_SET_DEFAULT)
 
 
 @router.post("/update", response_model=StandardResponse[ProfileResponse])
@@ -346,8 +266,12 @@ async def delete_profile(
     if count <= 1:
         raise ParameterException(ERR_DELETE_LAST_PROFILE)
 
-    if db_profile.is_active:
-        raise ParameterException(ERR_DELETE_ACTIVE_PROFILE)
+    if db_profile.is_default:
+        raise ParameterException(ERR_DELETE_DEFAULT_PROFILE)
+    has_session_override = await session_crud.has_profile_override(db, profile_id)
+    has_platform_assignment = await message_platform_crud.has_profile_assignment(db, profile_id)
+    if has_session_override or has_platform_assignment:
+        raise ParameterException(ERR_DELETE_BOUND_PROFILE)
 
     binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
     for binding in binding_result.scalars().all():

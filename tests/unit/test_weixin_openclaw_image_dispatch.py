@@ -68,7 +68,7 @@ async def test_converted_referenced_image_reaches_chat_dispatch(monkeypatch):
 
     monkeypatch.setattr(adapter, "resolve_inbound_image", resolve_inbound_image)
     monkeypatch.setattr(adapter, "chat", chat)
-    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_active_profile", generate_title)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
 
     converted = await adapter.convert_message(
         {
@@ -129,7 +129,7 @@ async def test_failed_chat_does_not_generate_title(monkeypatch):
 
     monkeypatch.setattr(adapter, "chat", chat)
     monkeypatch.setattr(adapter, "reply_text", reply_text)
-    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_active_profile", generate_title)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
 
     handled = await adapter.handle_message(
         SimpleNamespace(),
@@ -180,8 +180,9 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
     profile = SimpleNamespace(id=1, uid="owner")
     captured = {}
 
-    async def get_active(db, *, uid):
+    async def resolve_profile(db, *, uid, session_id, message_platform_id=None):
         assert uid == "owner"
+        assert message_platform_id == 7
         return profile
 
     async def validate_initial_message_before_save(*args, **kwargs):
@@ -191,7 +192,7 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
     async def submit_user_message(*args, **kwargs):
         captured["submit_kwargs"] = kwargs
 
-    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.profile_crud.get_active", get_active)
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.resolve_profile_for_session", resolve_profile)
     monkeypatch.setattr(
         "app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save",
         validate_initial_message_before_save,
@@ -206,6 +207,7 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
         "hello",
         "owner",
         "weixin-openclaw:weixin-user",
+        message_platform_id=7,
     )
 
     expected_system_prompt = WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT.format(

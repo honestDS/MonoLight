@@ -59,7 +59,7 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
             "uid": uid,
             "prompt_id": prompt_obj.id,
             "configs": build_default_profile_configs(),
-            "is_active": True,
+            "is_default": True,
         },
     )
 

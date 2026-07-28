@@ -184,6 +184,40 @@
   overflow-wrap: anywhere;
 }
 
+.chat-main .input-area .toolbar-row .session-profile-setting {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.session-profile-setting-label {
+  flex: 0 0 auto;
+  color: #606266;
+  font-size: 12px;
+  line-height: 32px;
+  white-space: nowrap;
+}
+
+.session-profile-setting-select {
+  width: clamp(160px, 20vw, 260px);
+  max-width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .chat-main .input-area .toolbar-row .session-profile-setting {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .session-profile-setting-select {
+    flex: 1 1 0;
+    width: auto;
+  }
+}
+
 .chat-main .message-list .message-item.guidance {
   align-items: center;
   width: min(640px, 100%);

@@ -49,15 +49,15 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         result = await db.execute(select(func.count()).select_from(Profile))
         return result.scalar()
 
-    async def get_active(self, db: AsyncSession, uid: str | None = None) -> Profile | None:
-        stmt = select(Profile).where(Profile.uid == uid).where(Profile.is_active)
+    async def get_default(self, db: AsyncSession, uid: str | None = None) -> Profile | None:
+        stmt = select(Profile).where(Profile.uid == uid).where(Profile.is_default)
         result = await db.execute(stmt)
         return result.scalars().first()
 
-    async def deactivate_by_uid(self, db: AsyncSession, uid: str | None) -> None:
+    async def clear_default_by_uid(self, db: AsyncSession, uid: str | None) -> None:
         profiles = await self.get_multi(db, uid=uid)
         for profile in profiles:
-            profile.is_active = False
+            profile.is_default = False
             db.add(profile)
 
     async def get_multi_by_prompt_id(self, db: AsyncSession, prompt_id: int) -> list[Profile]:

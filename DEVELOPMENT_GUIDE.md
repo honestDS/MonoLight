@@ -43,13 +43,20 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
    - 迁移脚本中应使用 `sqlalchemy.text` 或现有 CRUD/模型完成数据修正，并自行处理 SQLite/PostgreSQL 等数据库方言差异。
 
 ## 六、 新增功能与测试要求
-- **目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。
-- **测试框架**：统一使用 `pytest` 与 `pytest-asyncio`。
-- **编写指南**：
+- **后端目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。
+- **后端测试框架**：统一使用 `pytest` 与 `pytest-asyncio`。
+- **后端编写指南**：
   - 每个新增的 API 路由必须在 `tests/integration` 中拥有对应的异步请求测试。
   - 使用 `conftest.py` 中定义的 `db_session` fixture 进行数据库隔离测试。
   - 测试中的 Mock 逻辑必须基于 `InternalResponse` 等标准对象，严禁使用旧版字典结构。
-- **禁止项**：禁止编写和使用前端测试，前端相关测试应由用户自行进行。
+- **前端目录结构**：前端单元测试统一存放在 `dashboard/tests`，测试文件使用 `*.test.js` 命名。
+- **前端测试框架**：使用 Node.js 内置的 `node:test` 与 `node:assert/strict`，测试代码使用 ES Module 导入方式；未经项目统一调整，不得自行引入其他前端测试框架。
+- **前端编写指南**：
+  - 优先测试可脱离浏览器运行的纯 JavaScript 逻辑，例如消息状态流转、事件顺序、重复事件处理和清理逻辑。
+  - 修改已有受测模块或新增同类状态逻辑时，必须补充正常流程、边界输入及幂等性测试。
+  - 测试必须基于目标源码的实际行为编写；编写测试前应完整阅读目标实现，严禁凭假设构造断言或 Mock。
+  - 当前测试环境不提供 DOM、Vue 组件挂载或端到端浏览器能力；涉及这些行为时仍需完成实际页面验证，不得用纯函数测试替代交互验证。
+- **前端测试命令**：进入 `dashboard` 目录执行 `npm test`，该命令会运行 `tests/*.test.js`。
 
 ## 七、 异常处理规范
 1. 业务异常必须继承自 `app.core.exceptions` 中的 `BaseBusinessException`。

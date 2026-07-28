@@ -181,6 +181,23 @@ async def _seed_session_data(db: AsyncSession) -> tuple[int, int, int]:
 
 
 @pytest.mark.asyncio
+async def test_delete_session_data_removes_empty_session_for_owner(db_session: AsyncSession):
+    db_session.add(ChatSession(session_id="empty-session", uid="user-1", profile_id=1))
+    await db_session.commit()
+
+    deleted = await delete_session_data(
+        db_session,
+        session_id="empty-session",
+        uid="user-1",
+        is_admin=False,
+    )
+    await db_session.commit()
+
+    assert deleted is True
+    assert await db_session.get(ChatSession, "empty-session") is None
+
+
+@pytest.mark.asyncio
 async def test_delete_session_data_rejects_non_owner_without_changes(db_session: AsyncSession):
     await _seed_session_data(db_session)
 

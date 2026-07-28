@@ -34,6 +34,7 @@ from app.core.crud.user import user_crud
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import channel_log_extra, get_logger
+from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
 from app.core.tools.send_file_to_user import sanitize_files_to_user_result
@@ -133,7 +134,7 @@ class InteractiveDispatcherMixin:
             dispatch_logger = logger if dispatcher_mode == "non_stream" else get_logger("app.core.dispatchers.stream")
             user = await user_crud.get_by_uid(db, uid)
             username = user.username if user else "Unknown"
-            profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await profile_crud.get_active(db, uid=uid)
+            profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await resolve_profile_for_session(db, uid=uid, session_id=session_id)
 
             if execution_resume_state is None:
                 dispatch_logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))

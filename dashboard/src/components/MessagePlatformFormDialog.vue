@@ -22,6 +22,11 @@
           <el-option v-for="user in users" :key="user.uid" :label="user.username" :value="user.uid" />
         </el-select>
       </el-form-item>
+      <el-form-item :label="$t('messagePlatforms.profile')">
+        <el-select v-model="localForm.profile_id" class="full-width-input" clearable filterable :loading="profilesLoading" :disabled="!localForm.uid" :placeholder="$t('messagePlatforms.inherited_profile')">
+          <el-option v-for="profile in profileOptions" :key="profile.id" :label="formatProfileOptionLabel(profile, $t('messagePlatforms.default_profile_suffix'))" :value="profile.id" />
+        </el-select>
+      </el-form-item>
       <el-form-item :label="$t('messagePlatforms.api_timeout_ms')">
         <el-input-number v-model="localForm.config.api_timeout_ms" :min="1000" :max="120000" />
       </el-form-item>
@@ -43,7 +48,8 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import { filterProfilesByUid, formatProfileOptionLabel } from '../utils/profileOptions'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -52,6 +58,8 @@ const props = defineProps({
   platformTypes: { type: Array, default: () => [] },
   users: { type: Array, default: () => [] },
   usersLoading: { type: Boolean, default: false },
+  profiles: { type: Array, default: () => [] },
+  profilesLoading: { type: Boolean, default: false },
   typeLabel: { type: Function, required: true },
   submitting: { type: Boolean, default: false }
 })
@@ -59,4 +67,16 @@ const props = defineProps({
 const emit = defineEmits(['update:visible', 'submit'])
 
 const localForm = computed(() => props.form)
+
+const profileOptions = computed(() => filterProfilesByUid(props.profiles, localForm.value.uid))
+
+watch(
+  () => localForm.value.uid,
+  () => {
+    if (localForm.value.profile_id !== null) {
+      localForm.value.profile_id = null
+    }
+  },
+  { flush: 'sync' }
+)
 </script>

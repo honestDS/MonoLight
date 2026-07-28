@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1 import profile as profile_api
+from app.core import profile_validation as profile_validation_module
 from app.core.constants import ERR_CHANNEL_USAGE_MISMATCH
 from app.core.exceptions import ParameterException
 from app.core.utils import channel_profile_sync as channel_profile_sync_module
@@ -120,7 +121,7 @@ async def test_context_summary_channel_rules_are_validated_as_chat_models(monkey
         assert channel_id == 7
         return channel
 
-    monkeypatch.setattr(profile_api.channel_crud, "get", get_channel)
+    monkeypatch.setattr(profile_validation_module.channel_crud, "get", get_channel)
 
     await profile_api.validate_channel_configs(
         object(),
@@ -148,7 +149,7 @@ async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
         assert channel_id == 7
         return channel
 
-    monkeypatch.setattr(profile_api.channel_crud, "get", get_channel)
+    monkeypatch.setattr(profile_validation_module.channel_crud, "get", get_channel)
 
     with pytest.raises(ParameterException) as exc_info:
         await profile_api.validate_channel_configs(
