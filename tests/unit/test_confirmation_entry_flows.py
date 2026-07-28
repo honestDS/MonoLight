@@ -41,6 +41,7 @@ from app.models.audit import (
     AuditExecutionRecord,
     AuditRecord,
     AuditRecordStatus,
+    AuditToolConclusion,
     AuditToolDetail,
     AuditToolResultVersion,
 )
@@ -109,7 +110,13 @@ def entry_dependencies(monkeypatch):
     return profile
 
 
-async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", session_id: str = "session-1") -> AuditRecord:
+async def add_pending_confirmation(
+    db: AsyncSession,
+    *,
+    uid: str = "owner",
+    session_id: str = "session-1",
+    high_risk: bool = False,
+) -> AuditRecord:
     source_message = Message(
         session_id=session_id,
         uid=uid,
@@ -140,6 +147,20 @@ async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", sess
     )
     db.add(record)
     await db.flush()
+    if high_risk:
+        db.add(
+            AuditToolDetail(
+                audit_record_id=record.id,
+                original_tool_call_id="call-1",
+                turn_index=0,
+                tool_name="execute_shell",
+                conclusion=AuditToolConclusion.PENDING,
+                score=8,
+                reason="测试高危操作需要确认",
+                arguments_hash="a" * 64,
+                arguments_summary="{}",
+            )
+        )
     db.add(AuditConfirmationClaim(uid=uid, session_id=session_id, audit_record_id=record.id))
     db.add(
         Message(
@@ -170,7 +191,14 @@ async def add_pending_confirmation(db: AsyncSession, *, uid: str = "owner", sess
             profile_id=1,
             role=MessageRole.ASSISTANT,
             type=MessageType.AUDIT_CONFIRMATION,
-            content=json.dumps({"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"}),
+            content=json.dumps(
+                {
+                    "type": "audit_confirmation",
+                    "audit_record_id": record.id,
+                    "status": "pending",
+                    "confirmation_mode": "standard",
+                }
+            ),
             is_processed=True,
         )
     )
@@ -697,6 +725,7 @@ async def test_pending_confirmation_bundle_rolls_back_all_rows_when_activation_f
     [
         ("同意", None, AuditRecordStatus.EXECUTING, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION),
         ("拒绝", None, AuditRecordStatus.REJECTED, SessionReplyWorkType.FOREGROUND_REPLY),
+        ("忽略", None, AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
         ("继续做别的事", None, AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
         ("同意", ["attachment.txt"], AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
         ("同意执行", None, AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
@@ -762,6 +791,54 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
         assert tool_result_payload["confirmation_status"] == "invalid_input"
         assert "用户未正确输入安全审计确认关键词" in tool_result_payload["error"]
         assert "安全审计已阻止本轮工具调用" not in tool_result_payload["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_status", "expected_work_type"),
+    [
+        ("同意", AuditRecordStatus.CANCELLED, SessionReplyWorkType.FOREGROUND_REPLY),
+        ("忽略", AuditRecordStatus.EXECUTING, SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION),
+    ],
+)
+async def test_web_entry_uses_audit_detail_for_high_risk_confirmation_mode(
+    db_session: AsyncSession,
+    entry_dependencies,
+    monkeypatch,
+    message,
+    expected_status,
+    expected_work_type,
+):
+    record = await add_pending_confirmation(db_session, high_risk=True)
+    assert (await get_confirmation_payload(db_session))["confirmation_mode"] == "standard"
+
+    async def wait_for_result(work_id):
+        return {"work_id": work_id, "choices": []}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_result", wait_for_result)
+    response = await web_chat_adapter.chat(
+        db_session,
+        message,
+        uid="owner",
+        session_id="session-1",
+    )
+
+    assert response["choices"] == []
+    await refresh_record(db_session, record)
+    works = await list_work(db_session)
+    tool_result_payload = await get_tool_result_payload(db_session)
+    assert record.status == expected_status
+    assert (await get_confirmation_payload(db_session))["status"] == expected_status.value
+    assert len(works) == 1
+    assert works[0].work_type == expected_work_type
+    if message == "同意":
+        assert tool_result_payload["status"] == AuditRecordStatus.CANCELLED.value
+        assert tool_result_payload["confirmation_status"] == "invalid_input"
+        assert "忽略" in tool_result_payload["error"]
+    else:
+        assert works[0].source_id == str(record.id)
+        assert tool_result_payload["confirmation_status"] == "ignore"
+        assert tool_result_payload["confirmation_decision"] == "忽略"
 
 
 @pytest.mark.asyncio
@@ -1086,7 +1163,8 @@ async def test_repeated_weixin_approval_cannot_create_second_confirmed_execution
 
 
 @pytest.mark.asyncio
-async def test_weixin_platform_flushes_old_batch_before_independent_decision(monkeypatch):
+@pytest.mark.parametrize("decision_text", ["同意", "继续", "拒绝", "忽略"])
+async def test_weixin_platform_flushes_old_batch_before_independent_decision(monkeypatch, decision_text):
     handler = WeixinOpenClawPlatformHandler()
     platform = SimpleNamespace(
         id=1,
@@ -1101,7 +1179,7 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
     )
     disabled_platform = SimpleNamespace(**{**platform.__dict__, "status": MessagePlatformStatus.DISCONNECTED})
     old_message = WeixinOpenClawMessage(user_id="weixin-user", text="旧批次", session_id="session-1")
-    decision_message = WeixinOpenClawMessage(user_id="weixin-user", text="同意", session_id="session-1")
+    decision_message = WeixinOpenClawMessage(user_id="weixin-user", text=decision_text, session_id="session-1")
     order: list[str] = []
 
     class FakeAdapter:
@@ -1144,4 +1222,4 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
 
     await handler.run(1)
 
-    assert order == ["旧批次", "同意"]
+    assert order == ["旧批次", decision_text]

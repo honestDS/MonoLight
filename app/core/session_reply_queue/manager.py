@@ -20,6 +20,7 @@ from app.core.audit.confirmation import (
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
     ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
+    ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_PERSISTED_USER_MESSAGE_MISMATCH,
     ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT,
@@ -192,10 +193,15 @@ class SessionReplyQueueManager:
             )
             return initial_message, work, submission_status
 
+        requires_high_risk_override = await audit_crud.requires_high_risk_override(
+            db,
+            current_confirmation.id,
+        )
         decision = parse_confirmation_decision(
             message,
             attachments=attachments,
             has_quote=has_quote,
+            requires_high_risk_override=requires_high_risk_override,
         )
         if decision == ConfirmationDecision.REJECT:
             profile_id = profile.id if profile and profile.id else -1
@@ -267,7 +273,10 @@ class SessionReplyQueueManager:
             db.add(message_row)
             try:
                 await db.flush()
-                invalid_input_feedback = t(ERR_AUDIT_CONFIRMATION_INVALID_INPUT, locale=current_confirmation.language)
+                invalid_input_feedback = t(
+                    ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT if requires_high_risk_override else ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
+                    locale=current_confirmation.language,
+                )
                 cancellation = await cancel_persisted_pending_confirmation_bundle(
                     db,
                     audit_record_id=current_confirmation.id,

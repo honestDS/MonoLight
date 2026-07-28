@@ -123,8 +123,11 @@
           <div class="message-header">
             <span class="message-time">{{ formatTimestamp(getMessageTimestamp(msg)) }}</span>
           </div>
-          <div class="content audit-confirmation-card">
-            <div class="audit-confirmation-title">{{ $t('chat.audit_confirmation_title') }}</div>
+          <div :class="['content', 'audit-confirmation-card', { 'audit-confirmation-card--high-risk': isHighRiskAuditConfirmation(msg) }]">
+            <div class="audit-confirmation-title">
+              <WarningFilled v-if="isHighRiskAuditConfirmation(msg)" class="audit-confirmation-warning-icon" />
+              {{ $t(isHighRiskAuditConfirmation(msg) ? 'chat.audit_high_risk_warning_title' : 'chat.audit_confirmation_title') }}
+            </div>
             <div class="audit-confirmation-summary">{{ getAuditConfirmation(msg).summary }}</div>
             <div class="audit-confirmation-meta">
               <span>{{ $t('chat.audit_status', { status: getAuditStatusLabel(msg) }) }}</span>
@@ -133,10 +136,10 @@
             </div>
             <div class="audit-confirmation-actions">
               <el-button
-                type="primary"
+                :type="isHighRiskAuditConfirmation(msg) ? 'danger' : 'primary'"
                 :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
-                @click="submitAuditDecision(msg, 'approve')"
-              >{{ $t('chat.audit_approve') }}</el-button>
+                @click="submitAuditDecision(msg, isHighRiskAuditConfirmation(msg) ? 'ignore' : 'approve')"
+              >{{ isHighRiskAuditConfirmation(msg) ? $t('chat.audit_ignore_and_allow') : $t('chat.audit_approve') }}</el-button>
               <el-button
                 :disabled="currentSessionReadOnly || isAuditDecisionPending(msg) || getAuditConfirmation(msg).status !== 'pending' || isAuditConfirmationExpired(msg)"
                 @click="submitAuditDecision(msg, 'reject')"
@@ -283,6 +286,8 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
+import { ElMessageBox } from 'element-plus'
+import { WarningFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
@@ -301,6 +306,7 @@ import {
   isToolCall,
   isToolResult
 } from '../utils'
+import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -916,6 +922,20 @@ const parseAuditConfirmation = (content) => {
     return null
   }
 }
+const hasAuditRecordId = value => value !== null && value !== undefined && String(value).trim() !== ''
+const hasSameAuditRecordId = (left, right) => hasAuditRecordId(left) && hasAuditRecordId(right) && String(left) === String(right)
+const findLatestAuditConfirmation = (auditRecordId) => {
+  if (!hasAuditRecordId(auditRecordId)) return null
+
+  for (let index = props.messages.length - 1; index >= 0; index -= 1) {
+    const message = props.messages[index]
+    if (message?.type !== 'audit_confirmation') continue
+
+    const confirmation = parseAuditConfirmation(message.content)
+    if (hasSameAuditRecordId(confirmation?.audit_record_id, auditRecordId)) return { message, confirmation }
+  }
+  return null
+}
 const getAuditConfirmation = (message) => {
   const payload = parseAuditConfirmation(message?.content) || {}
   const localStatus = auditDecisionStatuses.value.get(payload.audit_record_id)
@@ -924,6 +944,7 @@ const getAuditConfirmation = (message) => {
   if (localStatus) return { ...payload, status: localStatus }
   return payload
 }
+const isHighRiskAuditConfirmation = message => getAuditConfirmation(message).confirmation_mode === 'high_risk_override'
 const getAuditRemainingSeconds = (message) => {
   const expiresAt = Date.parse(getAuditConfirmation(message).expires_at || '')
   if (!Number.isFinite(expiresAt)) return null
@@ -955,13 +976,44 @@ const getAuditStatusLabel = message => {
   const status = getAuditConfirmation(message).status || 'pending'
   return t(`chat.audit_status_${status === 'pending' && isAuditConfirmationExpired(message) ? 'expired' : status}`)
 }
-const submitAuditDecision = (message, decision) => {
+const submitAuditDecision = async (message, decision) => {
   const auditRecordId = getAuditConfirmation(message).audit_record_id
   if (!auditRecordId || pendingAuditDecisions.value.has(auditRecordId)) return
+
+  if (decision === 'ignore') {
+    pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
+    try {
+      await ElMessageBox.confirm(
+        t('chat.audit_high_risk_warning'),
+        t('chat.audit_high_risk_warning_title'),
+        {
+          type: 'error',
+          confirmButtonText: t('chat.audit_ignore_and_allow'),
+          cancelButtonText: t('common.cancel')
+        }
+      )
+    } catch {
+      pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value].filter(id => id !== auditRecordId))
+      return
+    }
+
+    const latestAuditConfirmation = findLatestAuditConfirmation(auditRecordId)
+    const now = Date.now()
+    if (
+      props.currentSessionReadOnly ||
+      !latestAuditConfirmation ||
+      !hasSameAuditRecordId(latestAuditConfirmation.confirmation.audit_record_id, auditRecordId) ||
+      !isAuditConfirmationActionable(latestAuditConfirmation.confirmation, now)
+    ) {
+      pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value].filter(id => id !== auditRecordId))
+      return
+    }
+  }
+
   pendingAuditDecisions.value = new Set([...pendingAuditDecisions.value, auditRecordId])
   auditDecisionStatuses.value = new Map([
     ...auditDecisionStatuses.value,
-    [auditRecordId, decision === 'approve' ? 'executing' : 'rejected']
+    [auditRecordId, ['approve', 'ignore'].includes(decision) ? 'executing' : 'rejected']
   ])
   emit('audit-decision', { auditRecordId, decision })
 }

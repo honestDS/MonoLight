@@ -202,6 +202,15 @@ MESSAGES = {
     "MSG_AUDIT_WAITING_CONFIRMATION": "Waiting for user confirmation",
     "MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK": "Run tool operations that require confirmation",
     "MSG_AUDIT_CONFIRMATION_IM": "Confirmation required\nAction: {summary}\nRisk score: {score}\nExpires in {expires_in_seconds} seconds\nReply only “approve” or “continue” to run it, or “reject” to cancel.",
+    "MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM": (
+        "High-risk operation confirmation\n"
+        "The security audit classified this operation as high risk. Ignoring the audit result and allowing it may cause irreversible data loss, system damage, or sensitive information disclosure. "
+        "Continue only if the risk is acceptable.\n"
+        "Action: {summary}\n"
+        "Risk score: {score}\n"
+        "Expires in {expires_in_seconds} seconds\n"
+        'Reply only "ignore" to allow it, or "reject" to cancel.'
+    ),
     "MSG_AUDIT_CONFIRMATION_STATUS_IM": "Confirmation status updated\nAction: {summary}\nStatus: {status}",
     "MSG_AUDIT_CONFIRMATION_CANCELLED_BY_USER_MESSAGE": "The pending operation was cancelled because a new user message was received. Re-evaluate it using the latest user message.",
     "MSG_AUDIT_CONFIRMATION_SUPERSEDED": "The pending audit was superseded by a new tool call",
@@ -228,6 +237,7 @@ MESSAGES = {
     "ERR_AUDIT_SOURCE_MESSAGE_VERIFICATION_FAILED": "The original tool-call record failed verification",
     "ERR_AUDIT_CONFIRMATION_UNAVAILABLE": "The pending confirmation was already handled or expired",
     "ERR_AUDIT_CONFIRMATION_INVALID_INPUT": "The user did not enter a valid security-audit confirmation keyword, so this tool-call round was not executed. This is not a security-audit block. Ask the user to start the operation again, then reply only 'approve' or 'continue' to execute it, or 'reject' to cancel it.",
+    "ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT": "The user did not enter a valid high-risk security-audit confirmation keyword, so this tool-call round was not executed. Only 'ignore' can allow it; 'approve' or 'continue' cannot allow it. Reply 'reject' to cancel. Ask the user to start the operation again.",
     "ERR_AUDIT_CONFIRMATION_EXPIRED": "The security-audit confirmation expired, so this tool-call round was not executed. Ask the user to start the operation again.",
     "ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER": "The user rejected this tool-call round, so it was not executed. This is not an automatic security-audit block.",
     "ERR_PERSISTED_USER_MESSAGE_MISMATCH": "The persisted user message does not belong to this user and session",

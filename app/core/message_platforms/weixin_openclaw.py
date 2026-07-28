@@ -5,7 +5,7 @@ from typing import Any
 from app.adapters.weixin_openclaw import DEFAULT_BASE_URL, DEFAULT_BOT_TYPE, DEFAULT_CHANNEL_VERSION, WeixinOpenClawAdapter, WeixinOpenClawConfig, WeixinOpenClawMessage, normalize_weixin_openclaw_config
 from app.adapters.weixin_openclaw.constants import INBOUND_COLLECTION_MAX_WAIT_SECONDS, INBOUND_COLLECTION_QUIET_PERIOD_SECONDS
 from app.adapters.weixin_openclaw.message import merge_message_pair
-from app.core.audit.confirmation import message_has_quote, parse_confirmation_decision
+from app.core.audit.confirmation import is_confirmation_candidate, message_has_quote
 from app.core.crud.message_platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -75,7 +75,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     assert collector is not None
                     for message in messages:
                         collector_key = (message.user_id, message.session_id)
-                        if parse_confirmation_decision(
+                        if is_confirmation_candidate(
                             message.text,
                             attachments=message.attachments,
                             has_quote=message_has_quote(message.raw),

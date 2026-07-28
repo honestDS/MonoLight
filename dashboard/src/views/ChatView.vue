@@ -438,7 +438,11 @@ const send = async () => {
 
 const handleAuditDecision = async ({ decision }) => {
   if (isCurrentSessionReadOnly.value || loading.value) return
-  inputMsg.value = decision === 'approve' ? (t('chat.audit_approve_word')) : (t('chat.audit_reject_word'))
+  inputMsg.value = decision === 'approve'
+    ? t('chat.audit_approve_word')
+    : decision === 'ignore'
+      ? t('chat.audit_ignore_word')
+      : t('chat.audit_reject_word')
   attachments.value = []
   await originalSend()
 }

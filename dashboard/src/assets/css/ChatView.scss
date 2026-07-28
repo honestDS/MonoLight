@@ -132,16 +132,27 @@
 
 .audit-confirmation-card {
   width: min(520px, 100%);
+  max-width: 100%;
   padding: 16px;
+  box-sizing: border-box;
   border: 1px solid #e6a23c;
   border-radius: 8px;
   background: #fffdf6;
 }
 
 .audit-confirmation-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #303133;
   font-size: 16px;
   font-weight: 600;
+}
+
+.audit-confirmation-warning-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
 }
 
 .audit-confirmation-summary {
@@ -164,6 +175,30 @@
   display: flex;
   gap: 8px;
   margin-top: 14px;
+}
+
+.audit-confirmation-card--high-risk {
+  border: 1px solid #9f1239;
+}
+
+.audit-confirmation-card--high-risk .audit-confirmation-title,
+.audit-confirmation-card--high-risk .audit-confirmation-warning-icon {
+  color: #881337;
+}
+
+.audit-confirmation-card--high-risk .audit-confirmation-title {
+  font-weight: 700;
+}
+
+.audit-confirmation-card--high-risk .audit-confirmation-summary {
+  color: #3f2028;
+}
+
+.audit-confirmation-card--high-risk .audit-confirmation-meta {
+  padding-top: 10px;
+  color: #9f1239;
+  font-weight: 600;
+  border-top: 1px solid #f3c1ca;
 }
 
 .chat-main .input-area .read-only-notice {

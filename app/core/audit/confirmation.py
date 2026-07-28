@@ -36,11 +36,14 @@ from app.models.message import InternalMessage, Message, MessageRole, MessageTyp
 
 class ConfirmationDecision(StrEnum):
     APPROVE = "approve"
+    IGNORE = "ignore"
     REJECT = "reject"
 
 
 _APPROVE_WORDS = {"同意", "继续", "approve", "continue"}
+_IGNORE_WORDS = {"忽略", "ignore"}
 _REJECT_WORDS = {"拒绝", "reject"}
+_CONFIRMATION_CANDIDATE_WORDS = _APPROVE_WORDS | _IGNORE_WORDS | _REJECT_WORDS
 CONFIRMATION_DECISION_FIELD = "confirmation_decision"
 REJECTION_SOURCE_FIELD = "rejection_source"
 _STATUS_TEXT_KEYS = {
@@ -253,22 +256,55 @@ async def persist_cancelled_pending_audit_results(
         raise
 
 
-def parse_confirmation_decision(
+def _normalize_confirmation_message(
     message: object,
     *,
     attachments: list[str] | None = None,
     has_quote: bool = False,
-) -> ConfirmationDecision | None:
+) -> str | None:
     if not isinstance(message, str) or attachments or has_quote:
         return None
     normalized = message.strip()
     if not normalized:
         return None
-    lowered = normalized.lower()
-    if lowered in _APPROVE_WORDS:
-        return ConfirmationDecision.APPROVE
+    return normalized.lower()
+
+
+def is_confirmation_candidate(
+    message: object,
+    *,
+    attachments: list[str] | None = None,
+    has_quote: bool = False,
+) -> bool:
+    lowered = _normalize_confirmation_message(
+        message,
+        attachments=attachments,
+        has_quote=has_quote,
+    )
+    return lowered in _CONFIRMATION_CANDIDATE_WORDS if lowered is not None else False
+
+
+def parse_confirmation_decision(
+    message: object,
+    *,
+    attachments: list[str] | None = None,
+    has_quote: bool = False,
+    requires_high_risk_override: bool = False,
+) -> ConfirmationDecision | None:
+    lowered = _normalize_confirmation_message(
+        message,
+        attachments=attachments,
+        has_quote=has_quote,
+    )
+    if lowered is None:
+        return None
     if lowered in _REJECT_WORDS:
         return ConfirmationDecision.REJECT
+    if requires_high_risk_override:
+        if lowered in _IGNORE_WORDS:
+            return ConfirmationDecision.IGNORE
+    elif lowered in _APPROVE_WORDS:
+        return ConfirmationDecision.APPROVE
     return None
 
 
@@ -681,7 +717,7 @@ async def update_confirmation_tool_results_for_decision(
     decision: ConfirmationDecision,
     raw_message: str,
 ) -> int:
-    status = AuditRecordStatus.PENDING if decision == ConfirmationDecision.APPROVE else AuditRecordStatus.REJECTED
+    status = AuditRecordStatus.PENDING if decision in {ConfirmationDecision.APPROVE, ConfirmationDecision.IGNORE} else AuditRecordStatus.REJECTED
     return await _update_confirmation_tool_results(
         db,
         audit_record_id=audit_record_id,

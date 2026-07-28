@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import (
+    AUDIT_HIGH_RISK_SCORE,
     ERR_AUDIT_EXECUTION_END_STATUS_INVALID,
     ERR_AUDIT_EXECUTION_RESULT_MISMATCH,
     ERR_AUDIT_EXECUTIONS_RUNNING,
@@ -148,6 +149,17 @@ class CRUDAudit:
     async def list_tool_details(self, db: AsyncSession, audit_record_id: int) -> list[AuditToolDetail]:
         result = await db.execute(select(AuditToolDetail).where(AuditToolDetail.audit_record_id == audit_record_id).order_by(AuditToolDetail.turn_index, AuditToolDetail.id))
         return list(result.scalars().all())
+
+    async def requires_high_risk_override(self, db: AsyncSession, audit_record_id: int) -> bool:
+        result = await db.execute(
+            select(AuditToolDetail.id)
+            .where(
+                AuditToolDetail.audit_record_id == audit_record_id,
+                AuditToolDetail.score >= AUDIT_HIGH_RISK_SCORE,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def list_records_by_status(self, db: AsyncSession, status: AuditRecordStatus) -> list[AuditRecord]:
         result = await db.execute(select(AuditRecord).where(AuditRecord.status == status).order_by(AuditRecord.id).execution_options(populate_existing=True))

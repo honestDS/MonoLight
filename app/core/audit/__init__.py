@@ -29,6 +29,7 @@ __all__ = [
     "canonical_json_dumps",
     "cleanup_audit_storage",
     "create_file_integrity_snapshot",
+    "is_confirmation_candidate",
     "message_has_quote",
     "parse_confirmation_decision",
     "persist_prepared_audit_round",
@@ -48,6 +49,7 @@ __all__ = [
 ]
 from app.core.audit.confirmation import (
     ConfirmationDecision,
+    is_confirmation_candidate,
     message_has_quote,
     notify_confirmation_tool_results,
     parse_confirmation_decision,

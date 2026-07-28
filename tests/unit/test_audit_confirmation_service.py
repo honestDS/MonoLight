@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.weixin_openclaw.response import extract_event_reply
-from app.core.audit.confirmation import ConfirmationDecision, message_has_quote, parse_confirmation_decision
+from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
 from app.core.audit.service import (
     _call_auditor,
     _collect_append_file_snapshots,
@@ -21,7 +21,7 @@ from app.core.audit.service import (
     classify_audit_score,
     is_audit_configured,
 )
-from app.core.constants import ERR_AUDIT_ROUND_BLOCKED, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
+from app.core.constants import MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
@@ -56,8 +56,8 @@ def _profile_config() -> ProfileConfig:
         (7, 5, AuditToolConclusion.PENDING),
         (0, 0, AuditToolConclusion.PASSED),
         (7, 0, AuditToolConclusion.PASSED),
-        (8, 0, AuditToolConclusion.BLOCKED),
-        (10, 7, AuditToolConclusion.BLOCKED),
+        (8, 0, AuditToolConclusion.PENDING),
+        (10, 7, AuditToolConclusion.PENDING),
     ],
 )
 def test_audit_score_conclusion_uses_configured_confirmation_threshold(score, threshold, expected):
@@ -71,10 +71,17 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "does not classify commands" in AUDIT_BATCH_PROMPT
     assert "script_execution marker" in AUDIT_BATCH_PROMPT
     assert "credential-stealing" not in AUDIT_BATCH_PROMPT
-    assert "may transmit passwords to an external destination" in AUDIT_BATCH_PROMPT
-    assert "its score must not be lower than 1" in AUDIT_BATCH_PROMPT
-    assert "Score script execution from 1 through 7 according to its actual behavior" in AUDIT_BATCH_PROMPT
-    assert "score 7 is appropriate" in AUDIT_BATCH_PROMPT
+    assert "Script behavior that clearly transmits passwords without authorization or steals credentials must be scored 8-10" in AUDIT_BATCH_PROMPT
+    assert "Otherwise, score password transmission according to its actual risk, but never lower than 1" in AUDIT_BATCH_PROMPT
+    assert "only when its behavior has been verified as non-high-risk" in AUDIT_BATCH_PROMPT
+    assert "clearly high-risk script behavior must be scored 8-10" in AUDIT_BATCH_PROMPT
+    assert "must never be capped at 7 merely because it is a script" in AUDIT_BATCH_PROMPT
+    assert "platform mismatch, insufficient permission, or another environmental condition may prevent them from succeeding" in AUDIT_BATCH_PROMPT
+    assert "score 7 is appropriate when the uncertainty cannot be narrowed" in AUDIT_BATCH_PROMPT
+    assert "writes, overwrites, or appends a script, source code, or loadable configuration" in AUDIT_BATCH_PROMPT
+    assert "must be scored 8-10" in AUDIT_BATCH_PROMPT
+    assert "prepares the file on disk and does not execute its contents" in AUDIT_BATCH_PROMPT
+    assert "Score the preparation of high-risk content" in AUDIT_BATCH_PROMPT
     assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
     assert "marked script_execution" not in AUDIT_BATCH_PROMPT
 
@@ -201,6 +208,7 @@ async def test_pending_audit_uses_configured_confirmation_timeout(monkeypatch):
     expected_expires_at = fixed_now + timedelta(seconds=25)
     assert captured["expires_at"] == expected_expires_at
     assert result.confirmation_payload["expires_at"] == expected_expires_at.isoformat()
+    assert result.confirmation_payload["confirmation_mode"] == "standard"
     assert "25 秒后失效" in result.confirmation_payload["plain_text"]
     assert expected_expires_at.isoformat() not in result.confirmation_payload["plain_text"]
 
@@ -302,6 +310,105 @@ async def test_configured_audit_skips_safe_tool_round_without_side_effects(monke
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_shell_blacklist_blocks_audit_round_without_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_cancellation(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("locally blocked shell commands must not call the auditor or summary model")
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", unexpected_call)
+    monkeypatch.setattr(service, "_summarize_pending", unexpected_call)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=_profile_config(),
+        tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": 'powershell -NoProfile -Command "Write-Host ok"'})],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "blocked"
+    assert result.confirmation_payload is None
+    assert captured["tool_details"][0]["conclusion"] == "blocked"
+    assert json.loads(result.tool_results[0].content)["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_same_round_file_write_conflict_blocks_without_confirmation(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    captured = {}
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def no_cancellation(*_args, **_kwargs):
+        return None
+
+    async def create_preparing(*_args, **_kwargs):
+        return SimpleNamespace(id=123)
+
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("locally blocked file conflicts must not call the auditor or summary model")
+
+    async def persist(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "cancel_confirmation_by_session", no_cancellation)
+    monkeypatch.setattr(service.audit_crud, "create_preparing", create_preparing)
+    monkeypatch.setattr(service, "_call_auditor", unexpected_call)
+    monkeypatch.setattr(service, "_summarize_pending", unexpected_call)
+    monkeypatch.setattr(service, "persist_prepared_audit_round", persist)
+
+    result = await service.audit_tool_round(
+        FakeDb(),
+        cfg=_profile_config(),
+        tool_calls=[
+            InternalToolCall(id="call-1", name="write_file", arguments={"file_path": "result.txt", "content": "first"}),
+            InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "result.txt", "content": "second"}),
+        ],
+        source_assistant_message_id=1,
+        uid="u1",
+        operator_username="tester",
+        session_id="session-1",
+        source="web",
+        language="en",
+        working_directory=tmp_path,
+    )
+
+    assert result.status.value == "blocked"
+    assert result.confirmation_payload is None
+    assert [detail["conclusion"] for detail in captured["tool_details"]] == ["blocked", "blocked"]
+    assert [json.loads(tool_result.content)["status"] for tool_result in result.tool_results] == ["blocked", "blocked"]
 
 
 @pytest.mark.asyncio
@@ -491,6 +598,31 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
 
 
 @pytest.mark.parametrize(
+    ("text", "attachments", "has_quote", "expected"),
+    [
+        (" 同意 ", None, False, True),
+        ("\t继续\n", None, False, True),
+        (" 拒绝 ", None, False, True),
+        ("\t忽略\n", None, False, True),
+        (" APPROVE ", None, False, True),
+        ("\tCoNtInUe\n", None, False, True),
+        (" ReJeCt ", None, False, True),
+        ("\tIGNORE\n", None, False, True),
+        ("同意执行", None, False, False),
+        ("忽略并放行", None, False, False),
+        ("approve continue", None, False, False),
+        ("", None, False, False),
+        (None, None, False, False),
+        ([{"type": "text", "text": "同意"}], None, False, False),
+        ("同意", ["file.txt"], False, False),
+        ("同意", None, True, False),
+    ],
+)
+def test_confirmation_candidate_requires_one_exact_unquoted_text_word(text, attachments, has_quote, expected):
+    assert is_confirmation_candidate(text, attachments=attachments, has_quote=has_quote) is expected
+
+
+@pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("同意", ConfirmationDecision.APPROVE),
@@ -500,11 +632,25 @@ async def test_persistence_failure_does_not_reaccess_expired_record(monkeypatch,
         ("Reject", ConfirmationDecision.REJECT),
         ("同意执行", None),
         ("approve continue", None),
+        ("忽略", None),
         ("", None),
     ],
 )
 def test_confirmation_words_are_strict(text, expected):
     assert parse_confirmation_decision(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("忽略", ConfirmationDecision.IGNORE),
+        ("IGNORE", ConfirmationDecision.IGNORE),
+        ("同意", None),
+        ("拒绝", ConfirmationDecision.REJECT),
+    ],
+)
+def test_high_risk_confirmation_words_are_strict(text, expected):
+    assert parse_confirmation_decision(text, requires_high_risk_override=True) == expected
 
 
 def test_confirmation_rejects_attachments_and_non_text():
@@ -1003,7 +1149,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_score", "audit_threshold", "expected_status"),
-    [(1, 5, "passed"), (7, 5, "pending"), (8, 5, "blocked")],
+    [(1, 5, "passed"), (7, 5, "pending"), (8, 5, "pending")],
 )
 async def test_service_does_not_classify_dynamic_script_command_or_change_model_score(monkeypatch, tmp_path, model_score, audit_threshold, expected_status):
     import app.core.audit.service as service
@@ -1061,14 +1207,13 @@ async def test_service_does_not_classify_dynamic_script_command_or_change_model_
     assert captured["tool_details"][0]["file_snapshots"] == []
     assert captured["tool_details"][0]["score"] == model_score
     assert captured["tool_details"][0]["conclusion"] == expected_status
-    if expected_status == "blocked":
-        tool_result = json.loads(result.tool_results[0].content)
-        assert tool_result["status"] == "blocked"
-        assert tool_result["error"] == t(ERR_AUDIT_ROUND_BLOCKED)
-        assert tool_result["reason"] == "model assessed command"
-        assert "rejection_source" not in tool_result
-        assert "confirmation_status" not in tool_result
-        assert "confirmation_decision" not in tool_result
+    if expected_status == "pending":
+        expected_mode = "high_risk_override" if model_score == 8 else "standard"
+        assert result.confirmation_payload["confirmation_mode"] == expected_mode
+    if model_score == 8:
+        plain_text = result.confirmation_payload["plain_text"].lower()
+        assert "high-risk" in plain_text or "high risk" in plain_text or "高危" in plain_text
+        assert "ignore" in plain_text or "忽略" in plain_text
 
 
 @pytest.mark.asyncio

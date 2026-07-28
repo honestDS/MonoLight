@@ -14,6 +14,7 @@ from app.core.audit.integrity import build_tool_round_integrity_snapshot, create
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.channel_router import get_model_entry
 from app.core.constants import (
+    AUDIT_HIGH_RISK_SCORE,
     ERR_AUDIT_CHANNEL_UNAVAILABLE,
     ERR_AUDIT_CONFIG_MISSING,
     ERR_AUDIT_FILE_CHECKS_INVALID,
@@ -32,6 +33,7 @@ from app.core.constants import (
     ERR_TOOL_SHELL_BLACKLISTED,
     MSG_AUDIT_CONFIRMATION_IM,
     MSG_AUDIT_CONFIRMATION_SUMMARY_FALLBACK,
+    MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM,
     MSG_AUDIT_ROUND_SKIPPED,
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
@@ -366,8 +368,8 @@ def _evidence_confirmation_reason(
 
 
 def classify_audit_score(score: int, threshold: int) -> AuditToolConclusion:
-    if score >= 8:
-        return AuditToolConclusion.BLOCKED
+    if score >= AUDIT_HIGH_RISK_SCORE:
+        return AuditToolConclusion.PENDING
     if threshold > 0 and score >= threshold:
         return AuditToolConclusion.PENDING
     return AuditToolConclusion.PASSED
@@ -567,6 +569,7 @@ async def audit_tool_round(
         workdir,
     )
     server_confirmation_reasons: dict[str, list[dict[str, Any]]] = {}
+    server_blocked_tool_call_ids: set[str] = set()
     snapshot = build_tool_round_integrity_snapshot(tool_calls=payload_calls, uid=uid, session_id=session_id, working_directory=workdir)
     record = await audit_crud.create_preparing(
         db,
@@ -617,9 +620,11 @@ async def audit_tool_round(
     response_context: dict[str, Any] = {}
     file_reads: list[dict[str, Any]] = []
     read_file_snapshots: dict[str, list[dict[str, Any]]] = {}
+    high_risk_override = False
     try:
         conflict_ids = _round_conflict_ids(audited_tool_calls, workdir)
         if conflict_ids:
+            server_blocked_tool_call_ids.update(conflict_ids)
             response_context = {"local_block": "same-round file write conflict"}
             audited_results = [
                 {
@@ -635,6 +640,7 @@ async def audit_tool_round(
                 if item.name == "execute_shell":
                     blacklisted = ShellExecutor.check_blacklist(str((item.arguments or {}).get("command", "")))
                     if blacklisted:
+                        server_blocked_tool_call_ids.add(item.id)
                         response_context = {"local_block": blacklisted}
                         audited_results = [
                             {
@@ -667,6 +673,7 @@ async def audit_tool_round(
             )
             for tool_call in tool_calls
         ]
+        high_risk_override = any(isinstance(item.get("score"), int) and not isinstance(item["score"], bool) and item["score"] >= AUDIT_HIGH_RISK_SCORE for item in parsed_results)
         conclusions = []
         file_reads = response_context.get("file_reads", []) if isinstance(response_context, dict) else []
         expected_tool_call_ids = audited_tool_call_id_set
@@ -706,9 +713,12 @@ async def audit_tool_round(
             result["reason"] = _redact_file_content(result["reason"], tool_file_reads)
             if local_reasons:
                 result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
-            conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
-            if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
-                conclusion = AuditToolConclusion.PENDING
+            if tool_call.id in server_blocked_tool_call_ids:
+                conclusion = AuditToolConclusion.BLOCKED
+            else:
+                conclusion = classify_audit_score(result["score"], cfg.security.audit_threshold)
+                if cfg.security.audit_threshold > 0 and (local_reasons or requires_confirmation) and conclusion != AuditToolConclusion.BLOCKED:
+                    conclusion = AuditToolConclusion.PENDING
             conclusions.append(conclusion)
         status = _aggregate(conclusions)
     except Exception as exc:
@@ -817,9 +827,11 @@ async def audit_tool_round(
             "summary": intent_summary,
             "risk": risk_score,
             "status": status.value,
+            "confirmation_mode": "high_risk_override" if high_risk_override else "standard",
             "expires_at": expires_at_text,
             "plain_text": t(
-                MSG_AUDIT_CONFIRMATION_IM,
+                MSG_AUDIT_HIGH_RISK_CONFIRMATION_IM if high_risk_override else MSG_AUDIT_CONFIRMATION_IM,
+                locale=language,
                 summary=intent_summary,
                 score=risk_score,
                 expires_in_seconds=timeout_seconds,
