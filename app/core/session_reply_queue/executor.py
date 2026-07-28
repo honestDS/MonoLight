@@ -179,14 +179,14 @@ def _metadata_with_work_order(
 
 
 @dataclass
-class _ForegroundStreamEventState:
+class _InteractiveWorkStreamEventState:
     work: SessionReplyWorkItem
     next_sequence: int
     dequeued_request_ids: set[str]
 
 
-async def _persist_foreground_stream_event(
-    stream_state: _ForegroundStreamEventState,
+async def _persist_interactive_work_stream_event(
+    stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> None:
     work = stream_state.work
@@ -221,9 +221,9 @@ async def _persist_foreground_stream_event(
     stream_state.next_sequence += 1
 
 
-async def _publish_foreground_stream_event(
+async def _publish_interactive_work_stream_event(
     db,
-    stream_state: _ForegroundStreamEventState,
+    stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
 ) -> None:
     work = stream_state.work
@@ -231,7 +231,7 @@ async def _publish_foreground_stream_event(
         await db.refresh(work)
         request_ids = [request_id for request_id in get_work_request_ids(work) if request_id not in stream_state.dequeued_request_ids]
         if request_ids:
-            await _persist_foreground_stream_event(
+            await _persist_interactive_work_stream_event(
                 stream_state,
                 {
                     "type": "input_dequeued",
@@ -241,7 +241,7 @@ async def _publish_foreground_stream_event(
                 },
             )
             stream_state.dequeued_request_ids.update(request_ids)
-    await _persist_foreground_stream_event(stream_state, event)
+    await _persist_interactive_work_stream_event(stream_state, event)
 
 
 async def _fetch_additional_foreground_user_messages(
@@ -257,7 +257,7 @@ async def _fetch_additional_foreground_user_messages(
     )
 
 
-async def _check_foreground_work_validity(
+async def _check_interactive_work_validity(
     *,
     work: SessionReplyWorkItem,
     worker_id: str,
@@ -274,7 +274,7 @@ async def _check_foreground_work_validity(
     return (work.id, worker_id) in active_claims and session is not None and session.uid == work.uid and session.profile_id == work.profile_id
 
 
-async def _save_foreground_execution_checkpoint(
+async def _save_interactive_work_execution_checkpoint(
     db,
     checkpoint: dict[str, Any],
     *,
@@ -422,19 +422,19 @@ def get_bound_audit_execution(work: SessionReplyWorkItem) -> tuple[int, str] | N
     state_value = getattr(work, "execution_state", None)
     state = state_value if isinstance(state_value, dict) else {}
     work_type = getattr(work, "work_type", None)
-    if work_type in {
-        SessionReplyWorkType.FOREGROUND_REPLY,
-        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
-        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
-    }:
-        binding = state.get(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY)
-        if not isinstance(binding, dict):
-            return None
+    binding = state.get(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY)
+    if isinstance(binding, dict):
         audit_record_id = binding.get("audit_record_id")
         claim_token = binding.get("claim_token")
     elif work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION:
         audit_record_id = getattr(work, "source_id", None)
         claim_token = state.get("audit_claim_token")
+    elif work_type in {
+        SessionReplyWorkType.FOREGROUND_REPLY,
+        SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY,
+        SessionReplyWorkType.SCHEDULED_TASK_SUMMARY,
+    }:
+        return None
     else:
         return None
 
@@ -560,6 +560,110 @@ async def _generate_reply_with_request_metadata(
     return ai_msg, turn_messages, files, latest_request_metadata
 
 
+async def _dispatch_interactive_work(
+    db,
+    *,
+    work: SessionReplyWorkItem,
+    worker_id: str,
+    message: str,
+    initial_message: InternalMessage,
+    history_before_id: int,
+    frozen_user_message_ids: list[int],
+    attachments: list[str] | None,
+    allow_additional_user_messages: bool,
+    execution_resume_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    execution_state = work.execution_state or {}
+    stream_requested = bool((work.execution_state or {}).get("stream_requested"))
+    context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
+    async with AsyncSessionLocal() as event_db:
+        next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
+    stream_state = _InteractiveWorkStreamEventState(
+        work=work,
+        next_sequence=next_stream_sequence,
+        dequeued_request_ids=set(),
+    )
+
+    expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
+
+    dispatch_kwargs = {
+        "db": db,
+        "message": message,
+        "uid": work.uid,
+        "session_id": work.session_id,
+        "attachments": attachments or None,
+        "session_source": str(execution_state.get("message_source") or "queue"),
+        "persisted_initial_message": initial_message,
+        "history_before_id": history_before_id,
+        "frozen_user_message_ids": frozen_user_message_ids,
+        "final_message_dedupe_key": _result_message_dedupe_key(work),
+        "persisted_profile_id": work.profile_id,
+        "additional_user_messages_fetcher": partial(
+            _fetch_additional_foreground_user_messages,
+            db,
+            work=work,
+            worker_id=worker_id,
+        )
+        if allow_additional_user_messages
+        else None,
+        "execution_resume_state": execution_resume_state,
+        "execution_checkpoint_callback": partial(
+            _save_interactive_work_execution_checkpoint,
+            db,
+            work=work,
+            worker_id=worker_id,
+        ),
+        "context_summary_work_validity_checker": partial(
+            _check_interactive_work_validity,
+            work=work,
+            worker_id=worker_id,
+        ),
+        "expose_tool_call_content": expose_tool_call_content,
+    }
+    additional_system_prompt = execution_state.get("additional_system_prompt")
+    if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
+        dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
+    if not stream_requested:
+        response = await ChatDispatcher.dispatch(
+            **dispatch_kwargs,
+            context_summary_lifecycle_callback=partial(
+                _publish_interactive_work_stream_event,
+                db,
+                stream_state,
+            )
+            if context_summary_events_requested
+            else None,
+        )
+        if isinstance(response.get("llm_request_metadata"), dict):
+            response["llm_request_metadata"] = _metadata_with_work_order(work, response["llm_request_metadata"])
+            await session_crud.update_llm_request_metadata(
+                db,
+                session_id=work.session_id,
+                uid=work.uid,
+                metadata=response["llm_request_metadata"],
+                commit=False,
+            )
+        return response
+
+    response = None
+    async for event in ChatDispatcher.dispatch_stream(
+        **dispatch_kwargs,
+        context_summary_events_requested=context_summary_events_requested,
+        raise_errors=True,
+    ):
+        event_type = event.get("type")
+        if event_type == "done":
+            response = event.get("response")
+        elif event_type == "error":
+            error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
+            raise RuntimeError(error_message)
+        else:
+            await _publish_interactive_work_stream_event(db, stream_state, event)
+    if not isinstance(response, dict):
+        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
+    return response
+
+
 async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) -> dict[str, Any]:
     content, attachments, message_ids = await session_reply_queue_manager.freeze_foreground_input(db, work=work, worker_id=worker_id)
     await db.refresh(work)
@@ -604,95 +708,22 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
         if llm_request_metadata is not None:
             response["llm_request_metadata"] = llm_request_metadata
         return response
-    stream_requested = bool((work.execution_state or {}).get("stream_requested"))
-    context_summary_events_requested = bool((work.execution_state or {}).get("context_summary_events_requested"))
-    async with AsyncSessionLocal() as event_db:
-        next_stream_sequence = await session_reply_stream_event_crud.get_latest_sequence(event_db, work_id=work.id) + 1
-    stream_state = _ForegroundStreamEventState(
-        work=work,
-        next_sequence=next_stream_sequence,
-        dequeued_request_ids=set(),
-    )
 
-    expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
     resume_state = execution_state.get("dispatcher_checkpoint")
     if not isinstance(resume_state, dict) or not isinstance(resume_state.get("messages"), list):
         resume_state = None
-
-    dispatch_kwargs = {
-        "db": db,
-        "message": content,
-        "uid": work.uid,
-        "session_id": work.session_id,
-        "attachments": attachments or None,
-        "session_source": str(execution_state.get("message_source") or "queue"),
-        "persisted_initial_message": initial_message,
-        "history_before_id": message_ids[0],
-        "frozen_user_message_ids": message_ids,
-        "final_message_dedupe_key": _result_message_dedupe_key(work),
-        "persisted_profile_id": work.profile_id,
-        "additional_user_messages_fetcher": partial(
-            _fetch_additional_foreground_user_messages,
-            db,
-            work=work,
-            worker_id=worker_id,
-        ),
-        "execution_resume_state": resume_state,
-        "execution_checkpoint_callback": partial(
-            _save_foreground_execution_checkpoint,
-            db,
-            work=work,
-            worker_id=worker_id,
-        ),
-        "context_summary_work_validity_checker": partial(
-            _check_foreground_work_validity,
-            work=work,
-            worker_id=worker_id,
-        ),
-        "expose_tool_call_content": expose_tool_call_content,
-    }
-    additional_system_prompt = execution_state.get("additional_system_prompt")
-    if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
-        dispatch_kwargs["additional_system_prompt"] = additional_system_prompt.strip()
-    if not stream_requested:
-        response = await ChatDispatcher.dispatch(
-            **dispatch_kwargs,
-            context_summary_lifecycle_callback=partial(
-                _publish_foreground_stream_event,
-                db,
-                stream_state,
-            )
-            if context_summary_events_requested
-            else None,
-        )
-        if isinstance(response.get("llm_request_metadata"), dict):
-            response["llm_request_metadata"] = _metadata_with_work_order(work, response["llm_request_metadata"])
-            await session_crud.update_llm_request_metadata(
-                db,
-                session_id=work.session_id,
-                uid=work.uid,
-                metadata=response["llm_request_metadata"],
-                commit=False,
-            )
-        return response
-
-    response = None
-    async for event in ChatDispatcher.dispatch_stream(
-        **dispatch_kwargs,
-        context_summary_events_requested=context_summary_events_requested,
-        raise_errors=True,
-    ):
-        event_type = event.get("type")
-        if event_type == "done":
-            response = event.get("response")
-        elif event_type == "error":
-            error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
-            raise RuntimeError(error_message)
-        else:
-            await _publish_foreground_stream_event(db, stream_state, event)
-    if not isinstance(response, dict):
-        raise RuntimeError(t(ERR_LLM_UNEXPECTED_ERROR))
-    return response
+    return await _dispatch_interactive_work(
+        db,
+        work=work,
+        worker_id=worker_id,
+        message=content,
+        initial_message=initial_message,
+        history_before_id=message_ids[0],
+        frozen_user_message_ids=message_ids,
+        attachments=attachments or None,
+        allow_additional_user_messages=True,
+        execution_resume_state=resume_state,
+    )
 
 
 async def _source_invalid_confirmed_tool_response(
@@ -769,6 +800,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     claim_token = str((work.execution_state or {}).get("audit_claim_token") or "")
     record = await audit_crud.get_record(db, audit_record_id)
     details = await audit_crud.list_tool_details(db, audit_record_id)
+    execution_state = work.execution_state or {}
+    decision_message_id = execution_state.get("decision_message_id")
+    decision_raw_message = getattr(record, "decision_raw_message", None)
     source_message = await db.get(Message, record.source_assistant_message_id) if record is not None else None
     source_tool_calls: list[InternalToolCall] = []
     source_valid = bool(
@@ -781,6 +815,12 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         and source_message.session_id == work.session_id
         and source_message.role == MessageRole.ASSISTANT
         and source_message.type == MessageType.TOOL_CALL
+        and isinstance(decision_message_id, int)
+        and not isinstance(decision_message_id, bool)
+        and decision_message_id > 0
+        and getattr(record, "decision_message_id", None) == decision_message_id
+        and isinstance(decision_raw_message, str)
+        and decision_raw_message.strip()
     )
     if source_valid:
         try:
@@ -821,13 +861,12 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
 
     cfg = await validate_profile_and_cfg(db, profile)
     files_changed = _confirmed_file_snapshots_changed(details, working_directory=record.working_directory)
-    decision_message_id = (work.execution_state or {}).get("decision_message_id")
     pending_tool_results = await get_pending_tool_results(
         db,
         uid=work.uid,
         session_id=work.session_id,
         source_assistant_message_id=source_message.id,
-        before_message_id=decision_message_id if isinstance(decision_message_id, int) else None,
+        before_message_id=decision_message_id,
         tool_call_ids=[tool_call.id for tool_call in source_tool_calls],
         audit_record_id=audit_record_id,
     )
@@ -1060,21 +1099,36 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
         if replacement_state.replaced_tool_results and status_updated is False:
             await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
-    ai_msg, final_messages, files, llm_request_metadata = await _generate_reply_with_request_metadata(
+
+    guidance_prompt = (work.execution_state or {}).get("guidance_prompt")
+    initial_message = InternalMessage(
+        id=decision_message_id,
+        role=MessageRole.USER,
+        content=decision_raw_message,
+        guidance_prompt=guidance_prompt if isinstance(guidance_prompt, str) else None,
+    )
+    interactive_response = await _dispatch_interactive_work(
         db,
         work=work,
-        uid=work.uid,
-        session_id=work.session_id,
-        profile=profile,
-        call_context="confirmed_tool_final_reply",
-        allow_tools=False,
-        reply_source="confirmed_tool_execution",
-        final_message_dedupe_key=_result_message_dedupe_key(work),
+        worker_id=worker_id,
+        message=decision_raw_message,
+        initial_message=initial_message,
+        history_before_id=decision_message_id,
+        frozen_user_message_ids=[decision_message_id],
+        attachments=None,
+        allow_additional_user_messages=False,
+        execution_resume_state=None,
     )
-    content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
-    response = {"content": content, "history": dump_background_proactive_history([*turn_messages, *final_messages]), "files": files}
-    if llm_request_metadata is not None:
-        response["llm_request_metadata"] = llm_request_metadata
+    content, _untrusted_files = parse_assistant_files_content(_response_content(interactive_response))
+    history = interactive_response.get("history", [])
+    files = interactive_response.get("files") or []
+    response = {
+        "content": content,
+        "history": history if isinstance(history, list) else [],
+        "files": files if isinstance(files, list) else [],
+    }
+    if interactive_response.get("llm_request_metadata") is not None:
+        response["llm_request_metadata"] = interactive_response["llm_request_metadata"]
     return response
 
 

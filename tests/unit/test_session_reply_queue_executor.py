@@ -678,6 +678,27 @@ def test_audit_execution_binding_supports_foreground_and_confirmed_work():
     assert not executor_module.work_has_active_audit_execution(confirmed)
 
 
+def test_confirmed_work_prefers_active_audit_execution_binding_before_falling_back():
+    """确认执行工作应优先恢复后续工具轮的活动审计绑定。"""
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id="42",
+        execution_state={
+            "audit_claim_token": "original-token",
+            SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY: {
+                "audit_record_id": 99,
+                "claim_token": "active-token",
+            },
+        },
+    )
+
+    assert executor_module.get_bound_audit_execution(work) == (99, "active-token")
+
+    work.execution_state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY)
+
+    assert executor_module.get_bound_audit_execution(work) == (42, "original-token")
+
+
 def test_confirmed_execution_rechecks_missing_append_target_before_running(tmp_path):
     target = tmp_path / "append.txt"
     snapshot = executor_module.create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
@@ -1084,6 +1105,8 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         operator_username="tester",
         source="confirmed_tool_execution",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     new_record = SimpleNamespace(operator_username="tester")
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
@@ -1142,8 +1165,12 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     async def finish_round(db, **kwargs):
         return True
 
-    async def generate_reply(db, **kwargs):
-        return InternalMessage(role=MessageRole.ASSISTANT, content="重审完成"), [], []
+    async def dispatch_interactive_work(*args, **kwargs):
+        return {
+            "choices": [{"message": {"content": "重审完成"}}],
+            "history": [],
+            "files": [],
+        }
 
     async def cancel_reaudit(*args, **kwargs):
         return True
@@ -1171,7 +1198,7 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
     monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
     monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
     monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
@@ -1210,6 +1237,8 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         operator_username="tester",
         source="confirmed_tool_execution",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
     work = SimpleNamespace(
@@ -1293,6 +1322,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(executor_module, "dump_background_proactive_history", dump_history)
     monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("pending re-audit must not execute tools"))
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("pending re-audit must not continue interactively"))
 
     response = await executor_module._execute_confirmed_tools(FakeDb(), work)
 
@@ -1333,6 +1363,8 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
         working_directory=".",
         operator_username="tester",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     details = [
         SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64),
@@ -1350,6 +1382,7 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     created_attempts = []
     process_calls = []
     replaced_results = []
+    interactive_dispatch_kwargs = {}
 
     class FakeDb:
         async def get(self, model, item_id):
@@ -1399,8 +1432,14 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     async def update_confirmation(db, *, audit_record_id):
         return None
 
-    async def generate_reply(db, **kwargs):
-        return InternalMessage(role=MessageRole.ASSISTANT, content="完成"), [], []
+    async def dispatch_interactive_work(*args, **kwargs):
+        interactive_dispatch_kwargs.update(kwargs)
+        return {
+            "choices": [{"message": {"content": "完成"}}],
+            "history": [{"role": "assistant", "content": "完成"}],
+            "files": ["report.txt"],
+            "llm_request_metadata": {"input_tokens": 17},
+        }
 
     monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
     monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
@@ -1418,10 +1457,13 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
     response = await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
 
     assert response["content"] == "完成"
+    assert response["history"] == [{"role": "assistant", "content": "完成"}]
+    assert response["files"] == ["report.txt"]
+    assert response["llm_request_metadata"] == {"input_tokens": 17}
     assert len(created_attempts) == 2
     fresh_ids = [call["new_tool_call_id"] for call in created_attempts]
     assert len(set(fresh_ids)) == 2
@@ -1432,6 +1474,15 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     assert [message.role for message in process_calls[1][1]] == [MessageRole.ASSISTANT, MessageRole.TOOL]
     assert process_calls[1][1][0].tool_calls[0].id == fresh_ids[0]
     assert process_calls[1][1][1].tool_call_id == fresh_ids[0]
+    assert interactive_dispatch_kwargs["message"] == "同意"
+    assert interactive_dispatch_kwargs["initial_message"].id == 4
+    assert interactive_dispatch_kwargs["initial_message"].role == MessageRole.USER
+    assert interactive_dispatch_kwargs["initial_message"].content == "同意"
+    assert interactive_dispatch_kwargs["history_before_id"] == 4
+    assert interactive_dispatch_kwargs["frozen_user_message_ids"] == [4]
+    assert interactive_dispatch_kwargs["attachments"] is None
+    assert interactive_dispatch_kwargs["allow_additional_user_messages"] is False
+    assert interactive_dispatch_kwargs["execution_resume_state"] is None
 
 
 @pytest.mark.asyncio
@@ -1455,6 +1506,8 @@ async def test_confirmed_execution_does_not_run_without_complete_pending_results
         working_directory=".",
         operator_username="tester",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     work = SimpleNamespace(
         source_id="42",
@@ -1507,12 +1560,114 @@ async def test_confirmed_execution_does_not_run_without_complete_pending_results
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
     monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("invalid pending results must not execute tools"))
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("invalid pending results must not continue interactively"))
     monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", lambda *args, **kwargs: pytest.fail("invalid pending results must not create executions"))
 
     response = await executor_module._execute_confirmed_tools(FakeDb(), work)
 
     assert response["content"] == "原调用记录无效"
     assert invalidated[0]["audit_record_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_confirmed_execution_rejects_mismatched_decision_message_boundary(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[InternalToolCall(id="original-1", name="safe_tool", arguments={})],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="claim-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=5,
+    )
+    work = SimpleNamespace(
+        source_id="42",
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+        dedupe_key="confirmed-audit:42",
+    )
+    invalidated = []
+    execution_attempt_calls = []
+    process_calls = []
+    interactive_dispatch_calls = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            assert item_id == 1
+            return source_message
+
+    async def get_record(db, audit_record_id):
+        assert audit_record_id == 42
+        return record
+
+    async def list_details(db, audit_record_id):
+        return [SimpleNamespace(original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def mark_invalid(db, **kwargs):
+        invalidated.append(kwargs)
+        return True
+
+    async def update_confirmation(db, *, audit_record_id):
+        assert audit_record_id == 42
+
+    async def generate_reply(db, **kwargs):
+        return InternalMessage(role=MessageRole.ASSISTANT, content="原调用记录无效"), [], []
+
+    async def get_pending(db, **kwargs):
+        pytest.fail("mismatched decision message must reject the source before pending lookup")
+
+    async def create_execution(db, **kwargs):
+        execution_attempt_calls.append(kwargs)
+
+    async def process_tool(*args, **kwargs):
+        process_calls.append((args, kwargs))
+
+    async def dispatch_interactive_work(*args, **kwargs):
+        interactive_dispatch_calls.append((args, kwargs))
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_source_message_invalid", mark_invalid)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
+
+    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+
+    assert response["content"] == "原调用记录无效"
+    assert invalidated == [
+        {
+            "audit_record_id": 42,
+            "claim_token": "claim-token",
+            "error_reason": "原工具调用记录校验失败",
+        }
+    ]
+    assert execution_attempt_calls == []
+    assert process_calls == []
+    assert interactive_dispatch_calls == []
 
 
 @pytest.mark.asyncio
@@ -1533,11 +1688,13 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         working_directory=".",
         operator_username="tester",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     details = [SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64)]
     work = SimpleNamespace(
         source_id="42",
-        execution_state={"audit_claim_token": "claim-token"},
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -1569,8 +1726,12 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
         complete_calls.append(kwargs)
         raise AssertionError("precheck failure must close the round as failed directly")
 
-    async def generate_reply(db, **kwargs):
-        return InternalMessage(role=MessageRole.ASSISTANT, content="工具预检失败"), [], []
+    async def dispatch_interactive_work(*args, **kwargs):
+        return {
+            "choices": [{"message": {"content": "工具预检失败"}}],
+            "history": [],
+            "files": [],
+        }
 
     def prevalidate(calls, *args, **kwargs):
         return {calls[0].id: json.dumps({"status": "failed", "tool_name": calls[0].name, "error": "bad args"})}
@@ -1608,7 +1769,7 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
@@ -1652,6 +1813,8 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         working_directory=".",
         operator_username="tester",
         round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
     )
     details = [
         SimpleNamespace(id=11, original_tool_call_id="original-1", turn_index=0, tool_name="safe_tool", arguments_hash="b" * 64),
@@ -1659,7 +1822,7 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     ]
     work = SimpleNamespace(
         source_id="42",
-        execution_state={"audit_claim_token": "claim-token"},
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
         uid="user-1",
         session_id="session-1",
         profile_id=3,
@@ -1707,8 +1870,12 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
         complete_calls.append(kwargs)
         raise AssertionError("partial attempt creation must not use normal round completion")
 
-    async def generate_reply(db, **kwargs):
-        return InternalMessage(role=MessageRole.ASSISTANT, content="工具执行未完成"), [], []
+    async def dispatch_interactive_work(*args, **kwargs):
+        return {
+            "choices": [{"message": {"content": "工具执行未完成"}}],
+            "history": [],
+            "files": [],
+        }
 
     async def update_confirmation(db, *, audit_record_id):
         return None
@@ -1734,7 +1901,7 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
     monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)

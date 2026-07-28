@@ -655,6 +655,8 @@ async def _run_audited_interactive_dispatch(
     supersede_pending_confirmation_bundle_handler=None,
     response_usages=None,
     execution_resume_state=None,
+    response_messages=None,
+    audit_calls_target=None,
 ):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
@@ -674,12 +676,18 @@ async def _run_audited_interactive_dispatch(
         name="execute_shell",
         arguments={"command": "echo 1"},
     )
-    responses = [
-        InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
-        InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
-    ]
+    responses = (
+        list(response_messages)
+        if response_messages is not None
+        else [
+            InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ]
+    )
     saved_message_id = 10
     response_usage_iterator = iter(response_usages or [])
+    next_audit_record_id = 42
+    audit_details_by_record_id = {}
 
     async def get_user(db, uid):
         return SimpleNamespace(username="operator")
@@ -724,13 +732,22 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(id=200)
 
     async def audit_round(*args, **kwargs):
+        nonlocal next_audit_record_id
+        audit_record_id = next_audit_record_id
+        next_audit_record_id += 1
+        round_tool_calls = [tool_call.model_copy(deep=True) for tool_call in kwargs["tool_calls"]]
+        if audit_calls_target is not None:
+            audit_calls_target.append(round_tool_calls)
+        audit_details_by_record_id[audit_record_id] = [SimpleNamespace(original_tool_call_id=tool_call.id, id=(audit_record_id * 100) + index) for index, tool_call in enumerate(round_tool_calls, start=1)]
         if audit_waiter is not None:
             await audit_waiter()
         if audit_result is not _DEFAULT_AUDIT_RESULT:
+            if audit_result is not None:
+                audit_details_by_record_id[audit_result.audit_record_id] = audit_details_by_record_id[audit_record_id]
             return audit_result
         return SimpleNamespace(
             may_execute=True,
-            audit_record_id=42,
+            audit_record_id=audit_record_id,
             tool_results=[],
             confirmation_payload=None,
         )
@@ -762,7 +779,7 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(execution_claim_token="claim-token"), "claim-token"
 
     async def list_details(db, audit_record_id):
-        return [SimpleNamespace(original_tool_call_id="call-1", id=7)]
+        return audit_details_by_record_id[audit_record_id]
 
     async def create_execution(db, **kwargs):
         if audit_result is None:
@@ -1079,6 +1096,52 @@ async def test_interactive_persists_audit_binding_before_tool_and_clears_after_r
         "claim_token": "claim-token",
     }
     assert SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in persisted_states[-1]
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_audits_each_successive_tool_round_before_execution(monkeypatch):
+    checkpoints = []
+    tool_names = []
+    audit_calls = []
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(tool_call, *args, **kwargs):
+        tool_names.append(tool_call.name)
+        return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content='{"status":"success"}')
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        response_messages=[
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="call-1", name="execute_shell", arguments={"command": "echo 1"})],
+            ),
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=[InternalToolCall(id="call-2", name="write_file", arguments={"file_path": "note.txt", "content": "done"})],
+            ),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ],
+        audit_calls_target=audit_calls,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert tool_names == ["execute_shell", "write_file"]
+    assert [[tool_call.name for tool_call in tool_calls] for tool_calls in audit_calls] == [
+        ["execute_shell"],
+        ["write_file"],
+    ]
+    assert [checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] for checkpoint in checkpoints if SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint] == [
+        {"audit_record_id": 42, "claim_token": "claim-token"},
+        None,
+        {"audit_record_id": 43, "claim_token": "claim-token"},
+        None,
+    ]
     assert unknown_calls == []
 
 

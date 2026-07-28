@@ -56,4 +56,8 @@ def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_executi
         "audit_tool_round(",
         "prevalidate_tool_round(",
         "process_single_tool(",
+        "_dispatch_interactive_work(",
     )
+    interactive_source = inspect.getsource(executor_module._dispatch_interactive_work)
+    assert "ChatDispatcher.dispatch(" in interactive_source
+    assert "ChatDispatcher.dispatch_stream(" in interactive_source
