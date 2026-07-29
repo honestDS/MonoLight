@@ -682,8 +682,7 @@ class SessionReplyQueueManager:
         source_message_ids = [int(item.source_id) for item in contiguous]
         message_types = [MessageType.AUDIT_DECISION] if bool((work.execution_state or {}).get("audit_decision_response")) else [MessageType.TEXT]
         message_result = await db.execute(
-            select(Message)
-            .where(
+            select(Message).where(
                 Message.id.in_(source_message_ids),
                 Message.uid == work.uid,
                 Message.session_id == work.session_id,
@@ -691,31 +690,42 @@ class SessionReplyQueueManager:
                 Message.type.in_(message_types),
                 Message.is_processed == False,  # noqa: E712
             )
-            .order_by(Message.id)
         )
-        messages = list(message_result.scalars().all())
-        message_ids = [message.id for message in messages if message.id is not None]
-        if not message_ids:
+        messages = self._reorder_messages_by_ids(
+            list(message_result.scalars().all()),
+            source_message_ids,
+        )
+        if messages is None or not messages:
             if work.input_message_ids:
                 return await self._load_frozen_input(db, work.input_message_ids)
             raise RuntimeError(t(ERR_SESSION_REPLY_NO_FOREGROUND_INPUT))
+        message_ids = list(source_message_ids)
 
-        await db.execute(update(Message).where(Message.id.in_(message_ids)).values(is_processed=True))
         merged_ids = [item.id for item in contiguous[1:] if item.id is not None]
+        if len(merged_ids) != len(contiguous[1:]):
+            await db.rollback()
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
         if merged_ids:
-            await db.execute(
-                update(SessionReplyWorkItem)
-                .where(
-                    SessionReplyWorkItem.id.in_(merged_ids),
-                    SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
-                )
-                .values(
-                    status=SessionReplyWorkStatus.MERGED,
-                    merged_into_id=work.id,
-                    locked_by=None,
-                    lock_until=None,
-                )
+            updated_merged_ids = await session_reply_work_item_crud.merge_ready_foreground(
+                db,
+                work_ids=merged_ids,
+                merged_into_id=work.id,
             )
+            if updated_merged_ids is None or len(updated_merged_ids) != len(merged_ids) or set(updated_merged_ids) != set(merged_ids):
+                await db.rollback()
+                raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
+
+        message_update_result = await db.execute(
+            update(Message)
+            .where(
+                Message.id.in_(message_ids),
+                Message.is_processed == False,  # noqa: E712
+            )
+            .values(is_processed=True)
+        )
+        if (message_update_result.rowcount or 0) != len(message_ids):
+            await db.rollback()
+            raise RuntimeError(t(ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT))
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
         context_summary_events_requested = any(bool((item.execution_state or {}).get("context_summary_events_requested")) for item in contiguous)
         show_tool_calls = all(bool((item.execution_state or {}).get("show_tool_calls", True)) for item in contiguous)
@@ -760,7 +770,16 @@ class SessionReplyQueueManager:
         worker_id: str,
     ) -> UserInputBatch | None:
         work = await session_reply_work_item_crud.get(db, work_id)
-        if work is None or work.status != SessionReplyWorkStatus.RUNNING or work.locked_by != worker_id or work.work_type != SessionReplyWorkType.FOREGROUND_REPLY:
+        if (
+            work is None
+            or work.status != SessionReplyWorkStatus.RUNNING
+            or work.locked_by != worker_id
+            or work.work_type
+            not in {
+                SessionReplyWorkType.FOREGROUND_REPLY,
+                SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+            }
+        ):
             return None
         if bool((work.execution_state or {}).get("audit_decision_response")):
             return None
@@ -779,9 +798,10 @@ class SessionReplyQueueManager:
             return None
 
         source_work_message_ids = [int(item.source_id) for item in additional_work]
+        if len(set(source_work_message_ids)) != len(source_work_message_ids):
+            return None
         message_result = await db.execute(
-            select(Message)
-            .where(
+            select(Message).where(
                 Message.id.in_(source_work_message_ids),
                 Message.uid == work.uid,
                 Message.session_id == work.session_id,
@@ -789,28 +809,38 @@ class SessionReplyQueueManager:
                 Message.type == MessageType.TEXT,
                 Message.is_processed == False,  # noqa: E712
             )
-            .order_by(Message.id)
         )
-        messages = list(message_result.scalars().all())
-        message_ids = [message.id for message in messages if message.id is not None]
-        if not message_ids:
+        messages = self._reorder_messages_by_ids(
+            list(message_result.scalars().all()),
+            source_work_message_ids,
+        )
+        if messages is None:
+            return None
+        message_ids = list(source_work_message_ids)
+
+        merged_work_ids = [item.id for item in additional_work if item.id is not None]
+        if len(merged_work_ids) != len(additional_work):
+            return None
+        updated_merged_work_ids = await session_reply_work_item_crud.merge_ready_foreground(
+            db,
+            work_ids=merged_work_ids,
+            merged_into_id=work.id,
+        )
+        if updated_merged_work_ids is None or len(updated_merged_work_ids) != len(merged_work_ids) or set(updated_merged_work_ids) != set(merged_work_ids):
+            await db.rollback()
             return None
 
-        await db.execute(update(Message).where(Message.id.in_(message_ids)).values(is_processed=True))
-        merged_work_ids = [item.id for item in additional_work if item.id is not None]
-        await db.execute(
-            update(SessionReplyWorkItem)
+        message_update_result = await db.execute(
+            update(Message)
             .where(
-                SessionReplyWorkItem.id.in_(merged_work_ids),
-                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+                Message.id.in_(message_ids),
+                Message.is_processed == False,  # noqa: E712
             )
-            .values(
-                status=SessionReplyWorkStatus.MERGED,
-                merged_into_id=work.id,
-                locked_by=None,
-                lock_until=None,
-            )
+            .values(is_processed=True)
         )
+        if (message_update_result.rowcount or 0) != len(message_ids):
+            await db.rollback()
+            return None
         frozen_message_ids = list(work.input_message_ids or [])
         merged_work = [work, *additional_work]
         execution_state = {
@@ -867,9 +897,20 @@ class SessionReplyQueueManager:
             source_message_ids=source_message_ids,
         )
 
+    @staticmethod
+    def _reorder_messages_by_ids(messages: list[Message], message_ids: list[int]) -> list[Message] | None:
+        if len(set(message_ids)) != len(message_ids):
+            return None
+        messages_by_id = {message.id: message for message in messages if message.id is not None}
+        if len(messages) != len(message_ids) or len(messages_by_id) != len(message_ids) or set(messages_by_id) != set(message_ids):
+            return None
+        return [messages_by_id[message_id] for message_id in message_ids]
+
     async def _load_frozen_input(self, db: AsyncSession, message_ids: list[int]) -> tuple[str, list[str], list[int]]:
-        result = await db.execute(select(Message).where(Message.id.in_(message_ids)).order_by(Message.id))
-        messages = list(result.scalars().all())
+        result = await db.execute(select(Message).where(Message.id.in_(message_ids)))
+        messages = self._reorder_messages_by_ids(list(result.scalars().all()), message_ids)
+        if messages is None:
+            raise RuntimeError(t(ERR_SESSION_REPLY_NO_FOREGROUND_INPUT))
         content, attachments, _ids = self._merge_messages(messages)
         return content, attachments, message_ids
 
@@ -935,11 +976,14 @@ class SessionReplyQueueManager:
                     if not isinstance(response, dict):
                         response = await self.wait_for_result(target_work_id)
                     identified_response = build_identified_work_response(work, response)
+                    response_id = identified_response.get("response_id")
+                    if not isinstance(response_id, str) or not response_id:
+                        response_id = f"session-reply-work:{target_work_id}"
                     done_event = {
                         "type": "done",
                         "session_id": work.session_id,
                         "work_id": target_work_id,
-                        "response_id": f"session-reply-work:{target_work_id}",
+                        "response_id": response_id,
                         "history": identified_response.get("history", []),
                         "files": identified_response.get("files"),
                         "response": identified_response,

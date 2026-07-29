@@ -359,33 +359,47 @@ async def test_checkpoint_keeps_an_entire_merged_user_batch_after_its_earliest_p
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_passes_previous_provider_usage_override(monkeypatch):
+async def test_checkpoint_refreshes_same_work_content_version_when_provider_metadata_exists(monkeypatch):
     captured = {}
     previous_metadata = {
         "input_tokens": 7500,
         "input_tokens_source": "provider",
     }
+    session = SimpleNamespace(
+        context_summary_revision=2,
+        context_content_revision=3,
+        llm_request_metadata=None,
+    )
+
+    class FakeDb:
+        def __init__(self):
+            self.refreshed_sessions = []
+
+        async def refresh(self, refreshed_session):
+            self.refreshed_sessions.append(refreshed_session)
+            refreshed_session.context_summary_revision = 5
+            refreshed_session.context_content_revision = 7
+
+    db = FakeDb()
 
     async def get_session(_db, _session_id):
-        return SimpleNamespace(
-            context_summary_revision=2,
-            context_content_revision=3,
-            llm_request_metadata=None,
-        )
+        return session
 
     async def ensure_summary(_db, **kwargs):
         captured.update(kwargs)
         return ContextSummaryState(content=None, message_id=None)
 
-    def estimate_incremental(*_args, **_kwargs):
-        return 7600
+    def estimate_incremental(_messages, _tools, metadata, **kwargs):
+        captured["estimate_metadata"] = metadata
+        captured["estimate_kwargs"] = kwargs
+        return kwargs["context_summary_revision"] * 1000 + kwargs["context_content_revision"]
 
     monkeypatch.setattr(checkpoint_module.session_crud, "get_by_session_id", get_session)
     monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
     monkeypatch.setattr(checkpoint_module, "estimate_incremental_input_tokens", estimate_incremental)
 
     await checkpoint_module.apply_context_summary_checkpoint(
-        object(),
+        db,
         session_id="session-1",
         uid="user-1",
         profile=object(),
@@ -406,4 +420,8 @@ async def test_checkpoint_passes_previous_provider_usage_override(monkeypatch):
         previous_llm_request_metadata=previous_metadata,
     )
 
-    assert captured["required_input_tokens_override"] == 7600
+    assert db.refreshed_sessions == [session]
+    assert captured["estimate_metadata"] is previous_metadata
+    assert captured["estimate_kwargs"]["context_summary_revision"] == 5
+    assert captured["estimate_kwargs"]["context_content_revision"] == 7
+    assert captured["required_input_tokens_override"] == 5007

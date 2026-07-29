@@ -37,9 +37,8 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import get_tools_for_profile
-from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.assistant_files import build_assistant_files_content as build_assistant_content
-from app.core.utils.background_task_result import sanitize_execution_summary
+from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.context_summary.common import (
     ContextSummaryWorkValidityChecker,
@@ -138,7 +137,14 @@ class InteractiveDispatcherMixin:
             profile = await profile_crud.get_with_relations(db, persisted_profile_id) if persisted_profile_id is not None else await resolve_profile_for_session(db, uid=uid, session_id=session_id)
 
             if execution_resume_state is None:
-                dispatch_logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_USER_MESSAGE", username=username, message=message, attachments=str(attachments)))
+                dispatch_logger.bind(uid=uid, session_id=session_id).info(
+                    t(
+                        "LOG_DISPATCHER_USER_MESSAGE",
+                        username=username,
+                        message=message,
+                        attachments=str(attachments),
+                    )
+                )
 
             await cls.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
 
@@ -481,6 +487,9 @@ class InteractiveDispatcherMixin:
                                 "type": "turn_end",
                                 "response_id": response_id,
                             }
+                            saved_message_id = getattr(saved_msg, "id", None)
+                            if saved_message_id is not None:
+                                turn_end_event["message_id"] = saved_message_id
                             turn_end_values = {
                                 "content": turn_end_content,
                                 "finish_reason": response_finish_reason,
@@ -591,7 +600,7 @@ class InteractiveDispatcherMixin:
                                                 {
                                                     "type": "tool_end",
                                                     "name": tool_call.name if tool_call else "unknown",
-                                                    "result": sanitize_files_to_user_result(stored_tool_result.content),
+                                                    "result": stored_tool_result.content,
                                                     "tool_call_id": stored_tool_result.tool_call_id,
                                                     "response_id": response_id,
                                                 }
@@ -628,7 +637,7 @@ class InteractiveDispatcherMixin:
                                                 {
                                                     "type": "tool_end",
                                                     "name": tool_call.name if tool_call else "unknown",
-                                                    "result": sanitize_files_to_user_result(stored_tool_result.content),
+                                                    "result": stored_tool_result.content,
                                                     "tool_call_id": stored_tool_result.tool_call_id,
                                                     "response_id": response_id,
                                                 }
@@ -647,7 +656,7 @@ class InteractiveDispatcherMixin:
                                             {
                                                 "type": "tool_end",
                                                 "name": tool_call.name if tool_call else "unknown",
-                                                "result": sanitize_files_to_user_result(tool_result.content),
+                                                "result": tool_result.content,
                                                 "tool_call_id": tool_result.tool_call_id,
                                                 "response_id": response_id,
                                             }
@@ -661,7 +670,7 @@ class InteractiveDispatcherMixin:
                                             {
                                                 "type": "tool_end",
                                                 "name": tool_call.name if tool_call else "unknown",
-                                                "result": sanitize_files_to_user_result(tool_result.content),
+                                                "result": tool_result.content,
                                                 "tool_call_id": tool_result.tool_call_id,
                                                 "response_id": response_id,
                                             }
@@ -759,7 +768,7 @@ class InteractiveDispatcherMixin:
                                                 {
                                                     "type": "tool_end",
                                                     "name": tool_call.name,
-                                                    "result": sanitize_files_to_user_result(tool_result.content),
+                                                    "result": tool_result.content,
                                                     "tool_call_id": tool_call.id,
                                                     "response_id": response_id,
                                                 }
@@ -818,12 +827,16 @@ class InteractiveDispatcherMixin:
                                     if queued_task_id is None:
                                         execution_succeeded = _tool_result_succeeded(tool_res.content)
                                         audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                                        result_summary = serialize_execution_summary(
+                                            tool_res.content,
+                                            max_chars=1000,
+                                        )
                                         await audit_crud.finish_execution_attempt(
                                             db,
                                             execution_record_id=execution_id,
                                             status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
-                                            result_summary=sanitize_execution_summary(tool_res.content, redact_text=True),
-                                            error=None if execution_succeeded else sanitize_execution_summary(tool_res.content, redact_text=True),
+                                            result_summary=result_summary,
+                                            error=None if execution_succeeded else result_summary,
                                         )
                                     elif audit_execution_checkpoint_state is not None:
                                         audit_execution_checkpoint_state["handoff_state"] = "persisted"
@@ -848,7 +861,7 @@ class InteractiveDispatcherMixin:
                                         {
                                             "type": "tool_end",
                                             "name": tool_call.name if tool_call else "unknown",
-                                            "result": sanitize_files_to_user_result(tool_res.content),
+                                            "result": tool_res.content,
                                             "tool_call_id": tool_res.tool_call_id,
                                             "response_id": response_id,
                                         }

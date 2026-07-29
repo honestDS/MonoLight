@@ -142,12 +142,14 @@ async def _seed_bound_tasks(session_factory, count=1):
 
 
 @pytest.mark.asyncio
-async def test_runner_updates_bound_execution_only_after_real_tool_call_and_sanitizes_result(audit_task_database, monkeypatch):
+async def test_runner_updates_bound_execution_only_after_real_tool_call_and_preserves_audit_result(audit_task_database, monkeypatch):
     async with audit_task_database() as db:
         record_id, tasks, executions = await _seed_bound_tasks(audit_task_database)
         task_id = tasks[0].id
         execution_id = executions[0].id
         observed_statuses = []
+        long_stdout = "visible output " * 200
+        raw_result = json.dumps({"status": "success", "token": "SECRET_VALUE", "stdout": long_stdout})
 
         class Executor:
             def __init__(self, **kwargs):
@@ -162,7 +164,7 @@ async def test_runner_updates_bound_execution_only_after_real_tool_call_and_sani
             async def execute(self, **kwargs):
                 current = await db.get(AuditExecutionRecord, execution_id)
                 observed_statuses.append(current.status)
-                return json.dumps({"status": "success", "token": "SECRET_VALUE", "stdout": "visible output"})
+                return raw_result
 
         monkeypatch.setattr(runner_module, "AsyncSessionLocal", lambda: SessionContext(db))
         monkeypatch.setattr(runner_module.profile_crud, "get", _get_profile)
@@ -177,9 +179,11 @@ async def test_runner_updates_bound_execution_only_after_real_tool_call_and_sani
         assert stored_execution.status == AuditExecutionStatus.SUCCEEDED
         assert stored_record.status == AuditRecordStatus.SUCCEEDED
         assert stored_task.status == BackgroundTaskStatus.SUCCEEDED
-        assert "SECRET_VALUE" not in (stored_execution.result_summary or "")
-        assert "visible output" not in (stored_execution.result_summary or "")
-        assert "SECRET_VALUE" not in json.dumps(stored_task.result, ensure_ascii=False)
+        audit_result_summary = stored_execution.result_summary or ""
+        assert len(audit_result_summary) <= 1000
+        assert len(audit_result_summary) < len(raw_result)
+        assert "SECRET_VALUE" in audit_result_summary
+        assert "visible output" in audit_result_summary
 
 
 @pytest.mark.asyncio
@@ -216,7 +220,7 @@ async def test_runner_persists_explicit_tool_failure(audit_task_database, monkey
         stored_record = await db.get(AuditRecord, record_id)
         assert stored_execution.status == execution_status
         assert stored_record.status == record_status
-        assert "SECRET_VALUE" not in (stored_execution.result_summary or "")
+        assert "SECRET_VALUE" in (stored_execution.result_summary or "")
 
 
 @pytest.mark.asyncio

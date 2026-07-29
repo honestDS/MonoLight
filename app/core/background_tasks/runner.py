@@ -15,7 +15,7 @@ from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
-from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result, sanitize_execution_summary, sanitize_execution_value
+from app.core.utils.background_task_result import build_background_task_failure_result, build_background_task_success_result, serialize_execution_summary
 from app.models.audit import AuditExecutionStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskStatus
 from app.models.profile import ProfileConfig
@@ -75,17 +75,17 @@ def _build_success_result(task: BackgroundTask, raw_result: Any) -> dict[str, An
             value = json.loads(raw_result)
         except (TypeError, ValueError):
             value = raw_result
-    content = _limit_result_content(sanitize_execution_value(_to_json_compatible(value)))
+    content = _limit_result_content(_to_json_compatible(value))
     return build_background_task_success_result(task.tool_name, content)
 
 
 def _build_failure_result(task: BackgroundTask, error: str) -> dict[str, Any]:
-    return build_background_task_failure_result(task.tool_name, str(sanitize_execution_value(error)))
+    return build_background_task_failure_result(task.tool_name, error)
 
 
 def _safe_exception_message(exc: Exception) -> str:
     if isinstance(exc, BaseBusinessException):
-        return str(sanitize_execution_value(exc.render_message()))
+        return str(exc.render_message())
     return t(ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN)
 
 
@@ -147,7 +147,7 @@ async def _renew_task_lease(task_id: int, worker_id: str, log: Any) -> bool:
             log.error(
                 t(
                     "LOG_BACKGROUND_TASK_LEASE_RENEW_FAILED",
-                    error=str(sanitize_execution_value(str(exc))),
+                    error=str(exc),
                     retry_seconds=max(0, remaining),
                 ),
                 exc_info=True,
@@ -175,7 +175,7 @@ async def _release_task_claim(task_id: int, worker_id: str, log: Any, expected_l
         raise
     except Exception as exc:
         log.error(
-            t("LOG_BACKGROUND_TASK_CLAIM_RELEASE_FAILED", error=str(sanitize_execution_value(str(exc)))),
+            t("LOG_BACKGROUND_TASK_CLAIM_RELEASE_FAILED", error=str(exc)),
             exc_info=True,
         )
 
@@ -305,13 +305,17 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
 
             audit_record_id, execution_record_id, claim_token = binding
             execution_status = AuditExecutionStatus.SUCCEEDED if _tool_result_succeeded(raw_result) else AuditExecutionStatus.FAILED
-            result_summary = sanitize_execution_summary(raw_result, redact_text=True)
+            audit_result_summary = serialize_execution_summary(
+                raw_result,
+                max_chars=1000,
+            )
+            result_summary = audit_result_summary
             execution_finished = await audit_crud.finish_execution_attempt(
                 db,
                 execution_record_id=execution_record_id,
                 status=execution_status,
-                result_summary=result_summary,
-                error=None if execution_status == AuditExecutionStatus.SUCCEEDED else result_summary,
+                result_summary=audit_result_summary,
+                error=None if execution_status == AuditExecutionStatus.SUCCEEDED else audit_result_summary,
                 commit=False,
             )
             if not execution_finished:
@@ -366,13 +370,16 @@ async def _execute_claimed_background_task(task_id: int, worker: str, log: Any) 
             log.error(t("LOG_BACKGROUND_TASK_FAILED", error=error_message), exc_info=True)
             if binding is not None:
                 audit_record_id, execution_record_id, claim_token = binding
-                result_summary = sanitize_execution_summary(error_message, redact_text=True)
+                audit_error_summary = serialize_execution_summary(
+                    error_message,
+                    max_chars=1000,
+                )
                 execution_finished = await audit_crud.finish_execution_attempt(
                     db,
                     execution_record_id=execution_record_id,
                     status=AuditExecutionStatus.FAILED,
-                    result_summary=result_summary,
-                    error=result_summary,
+                    result_summary=audit_error_summary,
+                    error=audit_error_summary,
                     commit=False,
                 )
                 if not execution_finished:

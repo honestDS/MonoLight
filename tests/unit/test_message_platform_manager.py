@@ -3,9 +3,10 @@ from typing import Any
 
 import pytest
 
+import app.models.message_platform as message_platform_model
 from app.core.message_platforms.base import MessagePlatformHandler
 from app.core.message_platforms.manager import MessagePlatformPollingManager
-from app.models.message_platform import MessagePlatform, MessagePlatformType
+from app.models.message_platform import MessagePlatform, MessagePlatformResponse, MessagePlatformType
 
 
 class StubMessagePlatformHandler(MessagePlatformHandler):
@@ -41,6 +42,61 @@ def test_manager_accepts_empty_handler_registry():
     manager = MessagePlatformPollingManager(())
 
     assert manager.get_handler(MessagePlatformType.WEIXIN_OPENCLAW) is None
+
+
+def test_message_platform_response_decrypts_config_secrets(monkeypatch):
+    monkeypatch.setattr(
+        message_platform_model,
+        "decrypt_api_key",
+        lambda value: {"encrypted-token": "plain-token", "encrypted-bot-token": "plain-bot-token"}[value],
+    )
+    platform = MessagePlatform(
+        id=1,
+        name="platform",
+        platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+        config={
+            "token": "enc:v1:encrypted-token",
+            "bot_token": "enc:v1:encrypted-bot-token",
+            "base_url": "https://example.com",
+        },
+    )
+
+    response = MessagePlatformResponse.model_validate(platform)
+
+    assert response.config == {
+        "token": "plain-token",
+        "bot_token": "plain-bot-token",
+        "base_url": "https://example.com",
+    }
+
+
+@pytest.mark.parametrize(
+    ("config", "decrypt_api_key", "expected"),
+    [
+        (
+            {"token": "plain-token", "bot_token": "plain-bot-token", "base_url": "https://example.com"},
+            lambda value: pytest.fail(f"unexpected decryption: {value}"),
+            {"token": "plain-token", "bot_token": "plain-bot-token", "base_url": "https://example.com"},
+        ),
+        (
+            {"token": "enc:v1:bad-token", "bot_token": "enc:v1:bad-bot-token"},
+            lambda value: (_ for _ in ()).throw(ValueError(value)),
+            {"token": "", "bot_token": ""},
+        ),
+    ],
+)
+def test_message_platform_response_preserves_plaintext_and_clears_failed_decryption(monkeypatch, config, decrypt_api_key, expected):
+    monkeypatch.setattr(message_platform_model, "decrypt_api_key", decrypt_api_key)
+    platform = MessagePlatform(
+        id=1,
+        name="platform",
+        platform_type=MessagePlatformType.WEIXIN_OPENCLAW,
+        config=config,
+    )
+
+    response = MessagePlatformResponse.model_validate(platform)
+
+    assert response.config == expected
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,6 @@ from app.core.exceptions import BaseBusinessException, LLMException, ServerExcep
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.tools import TOOL_EXECUTOR_MAP
-from app.core.utils.background_task_result import sanitize_execution_summary
 from app.core.utils.message_assembler import MessageAssembler
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.providers.database import AsyncSessionLocal
@@ -40,7 +39,7 @@ def format_exception_message(exc: Exception) -> str:
         return exc.render_message()
     logger.bind(
         exception_type=type(exc).__name__,
-        exception_message=sanitize_execution_summary(str(exc)),
+        exception_message=str(exc),
     ).opt(exception=exc).error(t("LOG_DISPATCHER_UNKNOWN_EXCEPTION"))
     return t(ERR_INTERNAL_SERVER_ERROR)
 
@@ -126,12 +125,7 @@ def dump_output_history(
     *,
     show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
-    output_messages = messages if show_tool_calls else [
-        message
-        for message in messages
-        if message.role != MessageRole.TOOL
-        and not (message.role == MessageRole.ASSISTANT and message.tool_calls)
-    ]
+    output_messages = messages if show_tool_calls else [message for message in messages if message.role != MessageRole.TOOL and not (message.role == MessageRole.ASSISTANT and message.tool_calls)]
     return [message.model_dump(exclude_none=True) for message in output_messages]
 
 

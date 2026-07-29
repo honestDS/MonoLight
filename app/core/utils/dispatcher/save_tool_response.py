@@ -2,7 +2,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
-from app.core.tools.send_file_to_user import sanitize_files_to_user_result
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (
     InternalMessage,
@@ -22,7 +21,6 @@ async def save_tool_response(
     audit_record_id: int | None = None,
 ) -> InternalMessage:
     stored_tool_res = tool_res.model_copy()
-    stored_tool_res.content = sanitize_files_to_user_result(stored_tool_res.content)
 
     saved_msg = await save_message(
         db,

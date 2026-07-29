@@ -67,6 +67,8 @@ MESSAGES = {
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "Background proactive reply still attempted unsupported tool calls; falling back to text-only reply",
     "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY": "Background proactive final stage returned tool calls; ignoring them and guiding the model to regenerate plain text",
     "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_IGNORED": "Background proactive final stage still returned tool calls after correction; ignoring them and using safe fallback content",
+    "LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTING": "Tools are disabled, but the model returned tool calls; correcting to a text-only reply",
+    "LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTION_TOOL_IGNORED": "The corrected reply still contains tool calls; ignoring the calls and preserving the text content",
     "LOG_SCHEDULED_TASK_DISPATCH_FAILED": "Scheduled task dispatch failed",
     "LOG_SCHEDULED_TASK_SESSION_MISSING": "Scheduled task skipped: session is missing or inaccessible",
     "LOG_SCHEDULED_TASK_PROFILE_MISSING": "Scheduled task skipped: session profile is missing",

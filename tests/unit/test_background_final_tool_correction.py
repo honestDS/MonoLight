@@ -4,7 +4,7 @@ import pytest
 
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
-from app.core.prompts import BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT
+from app.core.prompts import BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT, TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 
 
@@ -184,3 +184,126 @@ async def test_final_tool_call_is_corrected_to_text_without_user_visible_error(m
         assert correction_tool_message.role == MessageRole.TOOL
         assert correction_tool_message.tool_call_id == repeated_tool_call.id
         assert BACKGROUND_PROACTIVE_FINAL_TOOL_CORRECTION_PROMPT in correction_tool_message.content
+
+
+@pytest.mark.asyncio
+async def test_tools_disabled_reply_corrects_illegal_tool_calls_without_persisting_them(monkeypatch):
+    profile = SimpleNamespace(id=1)
+    cfg = SimpleNamespace(channel=SimpleNamespace(chat_channel=object()))
+    initial_tool_call = InternalToolCall(
+        id="call-illegal-initial",
+        name="execute_shell",
+        arguments={"command": "do not run"},
+    )
+    repeated_tool_call = InternalToolCall(
+        id="call-illegal-corrected",
+        name="execute_shell",
+        arguments={"command": "still do not run"},
+    )
+    initial_message = InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[initial_tool_call])
+    corrected_message = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        content="已根据现有上下文直接回复。",
+        tool_calls=[repeated_tool_call],
+    )
+    responses = [
+        InternalResponse(message=initial_message, model="test-model"),
+        InternalResponse(message=corrected_message, model="test-model"),
+    ]
+    requests = []
+    saved_messages = []
+    tool_execution_called = False
+
+    async def fake_get_user(_db, _uid):
+        return SimpleNamespace(username="tester")
+
+    async def fake_validate_profile_and_cfg(_db, _profile):
+        return cfg
+
+    async def fake_prepare_messages(*_args, **_kwargs):
+        return [InternalMessage(role=MessageRole.USER, content="请直接回答")]
+
+    async def fake_generate_chat_with_fallback(_db, **kwargs):
+        request_messages = kwargs["request_builder"](
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            }
+        )
+        if hasattr(request_messages, "__await__"):
+            request_messages = await request_messages
+        requests.append(
+            {
+                "call_context": kwargs["call_context"],
+                "tools": kwargs["tools"],
+                "require_content": kwargs.get("require_content"),
+                "request_metadata_callback": kwargs.get("request_metadata_callback"),
+                "messages": request_messages,
+            }
+        )
+        return (
+            responses.pop(0),
+            None,
+            {},
+            None,
+            {
+                "context_window_k": 128,
+                "max_tokens": 256,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_timeout": 30,
+            },
+        )
+
+    async def fake_save(_db, _session_id, _uid, _profile_id, message, *, dedupe_key=None):
+        saved_messages.append((message, dedupe_key))
+
+    async def fake_process_single_tool(*_args, **_kwargs):
+        nonlocal tool_execution_called
+        tool_execution_called = True
+        raise AssertionError("tools must not execute when allow_tools is False")
+
+    async def request_metadata_callback(_metadata):
+        return None
+
+    monkeypatch.setattr(background_module.user_crud, "get_by_uid", fake_get_user)
+    monkeypatch.setattr(background_module, "validate_profile_and_cfg", fake_validate_profile_and_cfg)
+    monkeypatch.setattr(background_module, "prepare_messages", fake_prepare_messages)
+    monkeypatch.setattr(background_module, "generate_chat_with_fallback", fake_generate_chat_with_fallback)
+    monkeypatch.setattr(background_module, "save_assistant_message", fake_save)
+    monkeypatch.setattr(background_module, "process_single_tool_with_isolated_db", fake_process_single_tool)
+
+    final_msg, turn_messages, files = await BackgroundDispatcherMixin._generate_reply_from_history(
+        object(),
+        uid="u1",
+        session_id="s1",
+        profile=profile,
+        call_context="session_reply",
+        allow_tools=False,
+        final_message_dedupe_key="result-key",
+        request_metadata_callback=request_metadata_callback,
+    )
+
+    assert len(requests) == 2
+    assert requests[1]["call_context"] == "session_reply_text_only_tool_correction"
+    assert requests[1]["tools"] is None
+    assert requests[1]["require_content"] is True
+    assert requests[1]["request_metadata_callback"] is request_metadata_callback
+    correction_messages = requests[1]["messages"]
+    assert correction_messages[-2].role == MessageRole.ASSISTANT
+    assert correction_messages[-2].tool_calls == [initial_tool_call]
+    correction_tool_message = correction_messages[-1]
+    assert correction_tool_message.role == MessageRole.TOOL
+    assert correction_tool_message.tool_call_id == initial_tool_call.id
+    assert '"type": "background_proactive_tools_disabled_tool_correction"' in correction_tool_message.content
+    assert '"error": "Tool calls are disabled for this reply."' in correction_tool_message.content
+    assert TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT in correction_tool_message.content
+    assert tool_execution_called is False
+    assert final_msg.content == "已根据现有上下文直接回复。"
+    assert final_msg.tool_calls == []
+    assert turn_messages == [final_msg]
+    assert files == []
+    assert saved_messages == [(final_msg, "result-key")]

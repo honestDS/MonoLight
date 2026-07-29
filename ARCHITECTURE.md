@@ -116,7 +116,7 @@ app/core/
 ├── channel_router.py       # 模型渠道选择
 ├── constants.py            # 常量与消息键
 ├── context.py              # 对话上下文构建
-├── crypto.py               # API Key 加解密与脱敏
+├── crypto.py               # API Key 加解密
 ├── dispatch_context.py     # 工具执行上下文
 ├── dispatcher.py           # 对话分发入口
 ├── exceptions.py           # 业务异常

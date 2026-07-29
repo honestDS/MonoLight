@@ -1288,6 +1288,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         yield {
             "type": "done",
             "response": {"history": [], "files": None},
+            "response_id": "response-turn-2",
         }
 
     monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
@@ -1321,7 +1322,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     db = FakeDb()
     result = await _execute_foreground(db, work, "worker-1")
 
-    assert result == {"history": [], "files": None}
+    assert result == {"history": [], "files": None, "response_id": "response-turn-2"}
     assert dispatch_kwargs["expose_tool_call_content"] is False
     assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert [event["type"] for _sequence_no, event in published] == [

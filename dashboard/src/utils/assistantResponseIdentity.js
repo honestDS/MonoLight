@@ -64,7 +64,10 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
   for (const [field, value] of identities) {
     if (!hasIdentity(value)) continue
     const stableValue = String(value)
-    const replacementIndex = messages.findIndex(message => {
+    const findIndex = field === 'work_id' || field === 'request_id'
+      ? messages.findLastIndex.bind(messages)
+      : messages.findIndex.bind(messages)
+    const replacementIndex = findIndex(message => {
       if (!isPlainAssistantResponse(message)) return false
       const messageDbId = getMessageDbId(message)
       if (incomingDbId !== null && field !== 'db_id' && messageDbId !== null && messageDbId !== incomingDbId) return false

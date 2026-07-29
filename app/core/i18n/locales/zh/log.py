@@ -67,6 +67,8 @@ MESSAGES = {
     "LOG_BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_TEXT_ONLY": "后台主动回复重试后仍尝试调用不支持的工具，降级为纯文本回复",
     "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_RETRY": "后台主动回复最终阶段仍返回工具调用，已忽略调用并引导模型重新生成纯文本",
     "LOG_BACKGROUND_PROACTIVE_FINAL_TOOL_IGNORED": "后台主动回复最终阶段纠正后仍返回工具调用，已忽略调用并使用安全兜底内容",
+    "LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTING": "工具已禁用，但模型仍返回工具调用，正在纠正为纯文本回复",
+    "LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTION_TOOL_IGNORED": "纠正后的回复仍包含工具调用，已忽略调用并保留正文",
     "LOG_SCHEDULED_TASK_DISPATCH_FAILED": "定时任务调度失败",
     "LOG_SCHEDULED_TASK_SESSION_MISSING": "定时任务跳过：会话不存在或无权访问",
     "LOG_SCHEDULED_TASK_PROFILE_MISSING": "定时任务跳过：会话 Profile 缺失",

@@ -88,11 +88,16 @@ def _encrypt_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return encrypted
 
 
-def _public_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    public = dict(config or {})
+def _decrypted_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    decrypted = dict(config or {})
     for key in ("token", "bot_token"):
-        public.pop(key, None)
-    return public
+        value = decrypted.get(key)
+        if isinstance(value, str) and value and value.startswith(ENCRYPTED_SECRET_PREFIX):
+            try:
+                decrypted[key] = decrypt_api_key(value[len(ENCRYPTED_SECRET_PREFIX) :])
+            except Exception:
+                decrypted[key] = ""
+    return decrypted
 
 
 @event.listens_for(MessagePlatform, "before_insert")
@@ -153,7 +158,7 @@ class MessagePlatformResponse(BaseModel):
     def model_validate(cls, obj, **kwargs):
         if hasattr(obj, "config"):
             data = obj.model_dump()
-            data["config"] = _public_config(obj.config)
+            data["config"] = _decrypted_config(obj.config)
             return super().model_validate(data, **kwargs)
         return super().model_validate(obj, **kwargs)
 

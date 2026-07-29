@@ -714,6 +714,9 @@ def test_file_checks_are_bound_to_the_actual_read_snapshot(tmp_path):
     snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
     valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated")}
 
+    assert snapshots[0]["content"] == read["content"]
+    assert snapshots[0]["bytes_read"] == read["bytes_read"]
+    assert snapshots[0]["tool_call_id"] == read["tool_call_id"]
     assert _file_checks_are_sufficient(snapshots, [read], [valid_check])
     assert not _file_checks_are_sufficient(snapshots, [read], [{**valid_check, "sha256": "0" * 64}])
     assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), snapshots, [read], [])
@@ -1139,11 +1142,13 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     assert result.status.value == "pending"
     first_detail, second_detail = captured["tool_details"]
     assert first_detail["file_snapshots"][0]["sha256"] == read["sha256"]
-    assert "content" not in first_detail["file_snapshots"][0]
+    assert first_detail["file_snapshots"][0]["content"] == read["content"]
+    assert first_detail["file_snapshots"][0]["bytes_read"] == read["bytes_read"]
+    assert first_detail["file_snapshots"][0]["tool_call_id"] == read["tool_call_id"]
     assert second_detail["file_snapshots"] == []
     assert first_detail["server_confirmation_reasons"][0]["code"] == "file_evidence_insufficient"
     assert first_detail["score"] == 0
-    assert "review me" not in first_detail["reason"]
+    assert "review me" in first_detail["reason"]
 
 
 @pytest.mark.asyncio

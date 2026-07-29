@@ -13,6 +13,7 @@ from app.core.dispatchers import stream as stream_module
 from app.core.exceptions import LLMException
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import build_max_output_tokens_instruction
+from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.schemas.response import LLMChoice, LLMChoiceMessage, LLMResponse
 
@@ -652,6 +653,7 @@ async def _run_audited_interactive_dispatch(
     stream_dispatch=False,
     additional_user_messages_fetcher=None,
     persist_pending_confirmation_bundle_handler=None,
+    persist_cancelled_pending_audit_results_handler=None,
     supersede_pending_confirmation_bundle_handler=None,
     response_usages=None,
     execution_resume_state=None,
@@ -838,6 +840,12 @@ async def _run_audited_interactive_dispatch(
         "persist_pending_confirmation_bundle",
         persist_pending_confirmation_bundle_handler or persist_confirmation_bundle,
     )
+    if persist_cancelled_pending_audit_results_handler is not None:
+        monkeypatch.setattr(
+            interactive_module,
+            "persist_cancelled_pending_audit_results",
+            persist_cancelled_pending_audit_results_handler,
+        )
     if supersede_pending_confirmation_bundle_handler is not None:
         monkeypatch.setattr(
             interactive_module,
@@ -1301,7 +1309,202 @@ async def test_streamed_tool_events_include_batch_order_for_parallel_tools(monke
 
 
 @pytest.mark.asyncio
-async def test_pending_audit_bundle_is_superseded_when_message_arrives_after_persistence(monkeypatch):
+async def test_pending_audit_cancels_unpersisted_confirmation_when_batch_arrives_during_audit(monkeypatch):
+    audit_started = asyncio.Event()
+    release_audit = asyncio.Event()
+    additional_messages_arrived = asyncio.Event()
+    queued_batch = UserInputBatch(
+        messages=(
+            InternalMessage(id=32, role=MessageRole.USER, content="first append"),
+            InternalMessage(id=30, role=MessageRole.USER, content="second append"),
+            InternalMessage(id=31, role=MessageRole.USER, content="third append"),
+        ),
+        source_message_ids=(32, 30, 31),
+    )
+    audit_result = SimpleNamespace(
+        may_execute=False,
+        audit_record_id=42,
+        tool_results=[
+            InternalMessage(
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+            )
+        ],
+        confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+    )
+    checkpoints = []
+    generated_calls = []
+    cancelled_audit_records = []
+    tool_calls = []
+    batch_delivery_count = 0
+    fetch_count = 0
+    none_fetch_count = 0
+
+    async def wait_during_audit():
+        audit_started.set()
+        await asyncio.wait_for(release_audit.wait(), timeout=1)
+
+    async def fetch_additional_messages():
+        nonlocal batch_delivery_count, fetch_count, none_fetch_count
+        fetch_count += 1
+        if additional_messages_arrived.is_set() and batch_delivery_count == 0:
+            batch_delivery_count += 1
+            return queued_batch
+        none_fetch_count += 1
+        return None
+
+    async def persist_pending_confirmation_bundle(*args, **kwargs):
+        raise AssertionError("new messages must cancel the pending audit before confirmation persistence")
+
+    async def persist_cancelled_pending_audit_results(
+        db,
+        *,
+        audit_record_id,
+        uid,
+        session_id,
+        profile_id,
+        tool_results,
+    ):
+        cancelled_audit_records.append(audit_record_id)
+        assert (uid, session_id, profile_id) == ("user-1", "session-1", 1)
+        assert [tool_result.tool_call_id for tool_result in tool_results] == ["call-1"]
+        return [
+            InternalMessage(
+                id=201,
+                role=MessageRole.TOOL,
+                tool_call_id="call-1",
+                content=json.dumps(
+                    {
+                        "status": "cancelled",
+                        "confirmation_status": "superseded",
+                        "tool_name": "execute_shell",
+                    }
+                ),
+            )
+        ]
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(tool_call, *args, **kwargs):
+        tool_calls.append(tool_call.id)
+        raise AssertionError("cancelled pending audit must not execute tools")
+
+    dispatch_task = asyncio.create_task(
+        _run_audited_interactive_dispatch(
+            monkeypatch,
+            save_checkpoint,
+            process_tool,
+            audit_result=audit_result,
+            audit_waiter=wait_during_audit,
+            generated_calls_target=generated_calls,
+            additional_user_messages_fetcher=fetch_additional_messages,
+            persist_pending_confirmation_bundle_handler=persist_pending_confirmation_bundle,
+            persist_cancelled_pending_audit_results_handler=persist_cancelled_pending_audit_results,
+        )
+    )
+
+    await asyncio.wait_for(audit_started.wait(), timeout=1)
+    additional_messages_arrived.set()
+    release_audit.set()
+    response, unknown_calls = await asyncio.wait_for(dispatch_task, timeout=1)
+
+    assert cancelled_audit_records == [42]
+    assert tool_calls == []
+    assert len(generated_calls) == 2
+    next_request = generated_calls[1]["messages"]
+    assert [tool_call.id for message in next_request if message.role == MessageRole.ASSISTANT and message.tool_calls for tool_call in message.tool_calls] == ["call-1"]
+    cancelled_results = [message for message in next_request if message.role == MessageRole.TOOL and message.tool_call_id == "call-1"]
+    assert len(cancelled_results) == 1
+    assert json.loads(cancelled_results[0].content)["status"] == "cancelled"
+    assert json.loads(cancelled_results[0].content)["confirmation_status"] == "superseded"
+    appended_message_ids = [message.id for message in next_request if message.role == MessageRole.USER and message.id in queued_batch.source_message_ids]
+    assert appended_message_ids == [32, 30, 31]
+    assert all(appended_message_ids.count(message_id) == 1 for message_id in queued_batch.source_message_ids)
+    assert fetch_count == 4
+    assert none_fetch_count == 3
+    assert batch_delivery_count == 1
+    assert checkpoints[-1]["current_turn"] == 0
+    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 30
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowed_tool_executes_once_before_appended_batch_reaches_next_model_round(monkeypatch):
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    additional_messages_arrived = asyncio.Event()
+    queued_batch = UserInputBatch(
+        messages=(
+            InternalMessage(id=52, role=MessageRole.USER, content="first append"),
+            InternalMessage(id=50, role=MessageRole.USER, content="second append"),
+            InternalMessage(id=51, role=MessageRole.USER, content="third append"),
+        ),
+        source_message_ids=(52, 50, 51),
+    )
+    generated_calls = []
+    tool_calls = []
+    batch_delivery_count = 0
+    fetch_count = 0
+    none_fetch_count = 0
+
+    async def fetch_additional_messages():
+        nonlocal batch_delivery_count, fetch_count, none_fetch_count
+        fetch_count += 1
+        if additional_messages_arrived.is_set() and batch_delivery_count == 0:
+            batch_delivery_count += 1
+            return queued_batch
+        none_fetch_count += 1
+        return None
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(tool_call, *args, **kwargs):
+        tool_calls.append(tool_call.id)
+        tool_started.set()
+        await asyncio.wait_for(release_tool.wait(), timeout=1)
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    dispatch_task = asyncio.create_task(
+        _run_audited_interactive_dispatch(
+            monkeypatch,
+            save_checkpoint,
+            process_tool,
+            generated_calls_target=generated_calls,
+            additional_user_messages_fetcher=fetch_additional_messages,
+        )
+    )
+
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+    additional_messages_arrived.set()
+    release_tool.set()
+    response, unknown_calls = await asyncio.wait_for(dispatch_task, timeout=1)
+
+    assert tool_calls == ["call-1"]
+    assert len(generated_calls) == 2
+    next_request = generated_calls[1]["messages"]
+    completed_results = [message for message in next_request if message.role == MessageRole.TOOL and message.tool_call_id == "call-1"]
+    assert len(completed_results) == 1
+    assert json.loads(completed_results[0].content)["status"] == "success"
+    appended_message_ids = [message.id for message in next_request if message.role == MessageRole.USER and message.id in queued_batch.source_message_ids]
+    assert appended_message_ids == [52, 50, 51]
+    assert all(appended_message_ids.count(message_id) == 1 for message_id in queued_batch.source_message_ids)
+    assert fetch_count == 3
+    assert none_fetch_count == 2
+    assert batch_delivery_count == 1
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_pending_audit_bundle_is_superseded_when_batch_arrives_during_persistence(monkeypatch):
     confirmation_payload = {
         "type": "audit_confirmation",
         "audit_record_id": 42,
@@ -1321,27 +1524,37 @@ async def test_pending_audit_bundle_is_superseded_when_message_arrives_after_per
         ],
         confirmation_payload=confirmation_payload,
     )
-    fetch_results = iter(
-        [
-            [],
-            [],
-            [InternalMessage(id=2, role=MessageRole.USER, content="continue without confirmation")],
-            [],
-            [],
-        ]
+    persistence_started = asyncio.Event()
+    release_persistence = asyncio.Event()
+    additional_messages_arrived = asyncio.Event()
+    queued_batch = UserInputBatch(
+        messages=(
+            InternalMessage(id=62, role=MessageRole.USER, content="continue first"),
+            InternalMessage(id=60, role=MessageRole.USER, content="continue second"),
+            InternalMessage(id=61, role=MessageRole.USER, content="continue third"),
+        ),
+        source_message_ids=(62, 60, 61),
     )
+    batch_delivery_count = 0
     fetch_count = 0
+    none_fetch_count = 0
     lifecycle = []
     checkpoints = []
     generated_calls = []
     tool_calls = []
 
     async def fetch_additional_messages():
-        nonlocal fetch_count
+        nonlocal batch_delivery_count, fetch_count, none_fetch_count
         fetch_count += 1
-        return next(fetch_results)
+        if additional_messages_arrived.is_set() and batch_delivery_count == 0:
+            batch_delivery_count += 1
+            return queued_batch
+        none_fetch_count += 1
+        return None
 
     async def persist_confirmation_bundle(db, *, tool_results, confirmation_payload, **kwargs):
+        persistence_started.set()
+        await asyncio.wait_for(release_persistence.wait(), timeout=1)
         lifecycle.append("persisted")
         stored_results = []
         for index, tool_result in enumerate(tool_results, start=1):
@@ -1379,29 +1592,63 @@ async def test_pending_audit_bundle_is_superseded_when_message_arrives_after_per
         tool_calls.append(tool_call.id)
         raise AssertionError("superseded pending audit must not execute tools")
 
-    response, unknown_calls = await _run_audited_interactive_dispatch(
-        monkeypatch,
-        save_checkpoint,
-        process_tool,
-        audit_result=audit_result,
-        generated_calls_target=generated_calls,
-        additional_user_messages_fetcher=fetch_additional_messages,
-        persist_pending_confirmation_bundle_handler=persist_confirmation_bundle,
-        supersede_pending_confirmation_bundle_handler=supersede_confirmation_bundle,
+    dispatch_task = asyncio.create_task(
+        _run_audited_interactive_dispatch(
+            monkeypatch,
+            save_checkpoint,
+            process_tool,
+            audit_result=audit_result,
+            generated_calls_target=generated_calls,
+            additional_user_messages_fetcher=fetch_additional_messages,
+            persist_pending_confirmation_bundle_handler=persist_confirmation_bundle,
+            supersede_pending_confirmation_bundle_handler=supersede_confirmation_bundle,
+            stream_dispatch=True,
+        )
     )
 
+    await asyncio.wait_for(persistence_started.wait(), timeout=1)
+    additional_messages_arrived.set()
+    release_persistence.set()
+    events, unknown_calls = await asyncio.wait_for(dispatch_task, timeout=1)
+
     assert fetch_count == 5
+    assert none_fetch_count == 4
+    assert batch_delivery_count == 1
     assert lifecycle == ["persisted", "superseded"]
     assert len(generated_calls) == 2
-    assert any(message.role == MessageRole.USER and "continue without confirmation" in str(message.content) for message in generated_calls[1]["messages"])
+    appended_message_ids = [message.id for message in generated_calls[1]["messages"] if message.role == MessageRole.USER and message.id in queued_batch.source_message_ids]
+    assert appended_message_ids == [62, 60, 61]
+    assert all(appended_message_ids.count(message_id) == 1 for message_id in queued_batch.source_message_ids)
     cancelled_result = next(message for message in generated_calls[1]["messages"] if message.role == MessageRole.TOOL)
     cancelled_payload = json.loads(cancelled_result.content)
     assert cancelled_payload["status"] == "cancelled"
     assert cancelled_payload["confirmation_status"] == "superseded"
     assert checkpoints[-1]["current_turn"] == 0
-    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 2
-    assert response["choices"][0]["message"]["content"] == "finished"
+    assert checkpoints[-1]["context_summary_fixed_upper_message_id"] == 60
     assert tool_calls == []
+    assert [event["type"] for event in events] == [
+        "task_start",
+        "llm_request_metadata",
+        "agent_loop_start",
+        "agent_loop_output",
+        "turn_end",
+        "tool_start",
+        "tool_end",
+        "llm_request_metadata",
+        "agent_loop_start",
+        "agent_loop_output",
+        "content",
+        "turn_end",
+        "done",
+    ]
+    first_round_response_id = events[1]["response_id"]
+    assert first_round_response_id == events[2]["response_id"] == events[3]["response_id"]
+    assert first_round_response_id == events[4]["response_id"] == events[5]["response_id"] == events[6]["response_id"]
+    final_round_response_id = events[7]["response_id"]
+    assert final_round_response_id == events[8]["response_id"] == events[9]["response_id"]
+    assert final_round_response_id == events[10]["response_id"] == events[11]["response_id"] == events[12]["response_id"]
+    assert first_round_response_id != final_round_response_id
+    assert events[-1]["response"]["choices"][0]["message"]["content"] == "finished"
     assert unknown_calls == []
 
 
@@ -1506,6 +1753,8 @@ async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatc
     assert events[1]["response_id"] == events[2]["response_id"]
     assert events[7]["response_id"] == events[8]["response_id"] == events[9]["response_id"]
     assert events[1]["response_id"] != events[7]["response_id"]
+    assert events[4]["message_id"] == 11
+    assert events[11]["message_id"] == 12
     assert json.loads(events[6]["result"])["status"] == "failed"
     assert events[6]["tool_call_id"] == events[5]["tool_call_id"] == "call-1"
     assert unknown_calls == []

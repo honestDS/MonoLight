@@ -34,10 +34,11 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_TEXT_ONLY_FALLBACK_PROMPT,
     BACKGROUND_PROACTIVE_TOOL_CORRECTION_PROMPT,
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
+    TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
-from app.core.utils.background_task_result import sanitize_execution_summary
+from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.channel_call import generate_chat_with_fallback
 from app.core.utils.dispatcher.context_summary_checkpoint import apply_context_summary_checkpoint
@@ -100,7 +101,7 @@ class BackgroundDispatcherMixin:
         return feedback_messages
 
     @staticmethod
-    async def _build_final_correction_request(
+    async def _build_text_only_correction_request(
         retry_chat_params,
         *,
         db: AsyncSession,
@@ -240,6 +241,54 @@ class BackgroundDispatcherMixin:
             request_metadata_callback=request_metadata_callback,
         )
         ai_msg = response.message
+
+        if not allow_tools and ai_msg.tool_calls:
+            ignored_tool_names = sorted({tool_call.name for tool_call in ai_msg.tool_calls})
+            logger.bind(
+                uid=uid,
+                session_id=session_id,
+                reply_source=reply_source,
+                ignored_tools=ignored_tool_names,
+            ).warning(t("LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTING"))
+            messages.extend(
+                cls._build_virtual_tool_feedback_messages(
+                    ai_msg,
+                    {
+                        "type": "background_proactive_tools_disabled_tool_correction",
+                        "error": "Tool calls are disabled for this reply.",
+                        "instruction": TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
+                        "ignored_tool_calls": ignored_tool_names,
+                    },
+                )
+            )
+            build_text_only_correction_request = partial(
+                cls._build_text_only_correction_request,
+                db=db,
+                messages=messages,
+                uid=uid,
+                session_id=session_id,
+            )
+            corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
+                db,
+                chat_channel=chat_channel,
+                request_builder=build_text_only_correction_request,
+                call_context=f"{call_context}_text_only_tool_correction",
+                cursor_key=chat_cursor_key,
+                uid=uid,
+                session_id=session_id,
+                tools=None,
+                require_content=True,
+                request_metadata_callback=request_metadata_callback,
+            )
+            ai_msg = corrected_response.message
+            if ai_msg.tool_calls:
+                logger.bind(
+                    uid=uid,
+                    session_id=session_id,
+                    reply_source=reply_source,
+                    ignored_tools=sorted({tool_call.name for tool_call in ai_msg.tool_calls}),
+                ).warning(t("LOG_BACKGROUND_PROACTIVE_TOOLS_DISABLED_CORRECTION_TOOL_IGNORED"))
+                ai_msg.tool_calls = []
 
         if allow_tools and ai_msg.tool_calls:
             unsupported_tool_names = get_unsupported_background_proactive_tool_names(ai_msg.tool_calls, allowed_tool_names=allowed_tool_names)
@@ -511,12 +560,16 @@ class BackgroundDispatcherMixin:
             for tool_response in tool_responses:
                 execution_succeeded = _tool_result_succeeded(tool_response.content)
                 audit_all_succeeded = audit_all_succeeded and execution_succeeded
+                result_summary = serialize_execution_summary(
+                    tool_response.content,
+                    max_chars=1000,
+                )
                 await audit_crud.finish_execution_attempt(
                     db,
                     execution_record_id=audit_execution_ids[tool_response.tool_call_id],
                     status=AuditExecutionStatus.SUCCEEDED if execution_succeeded else AuditExecutionStatus.FAILED,
-                    result_summary=sanitize_execution_summary(tool_response.content, redact_text=True),
-                    error=None if execution_succeeded else sanitize_execution_summary(tool_response.content, redact_text=True),
+                    result_summary=result_summary,
+                    error=None if execution_succeeded else result_summary,
                 )
             await audit_crud.finish_execution_round(
                 db,
@@ -617,8 +670,8 @@ class BackgroundDispatcherMixin:
                 },
             )
             final_correction_context_messages = [*messages, *final_correction_messages]
-            build_final_correction_request = partial(
-                cls._build_final_correction_request,
+            build_text_only_correction_request = partial(
+                cls._build_text_only_correction_request,
                 db=db,
                 messages=final_correction_context_messages,
                 uid=uid,
@@ -628,7 +681,7 @@ class BackgroundDispatcherMixin:
             corrected_response, _chat_channel_obj, model_entry, _channel_rule, chat_params = await generate_chat_with_fallback(
                 db,
                 chat_channel=chat_channel,
-                request_builder=build_final_correction_request,
+                request_builder=build_text_only_correction_request,
                 call_context=f"{call_context}_final_tool_correction",
                 cursor_key=chat_cursor_key,
                 uid=uid,

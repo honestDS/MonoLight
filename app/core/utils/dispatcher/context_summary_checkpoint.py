@@ -60,9 +60,10 @@ async def apply_context_summary_checkpoint(
     required_input_tokens_override = None
     if isinstance(model_id, str) and model_id.strip() and isinstance(protocol, str) and protocol.strip():
         session = await session_crud.get_by_session_id(db, session_id)
+        if session is not None and hasattr(db, "refresh"):
+            await db.refresh(session)
         metadata = previous_llm_request_metadata if isinstance(previous_llm_request_metadata, dict) and previous_llm_request_metadata.get("input_tokens_source") == "provider" else None
         if metadata is None and session is not None:
-            await db.refresh(session)
             metadata = session.llm_request_metadata
         required_input_tokens_override = estimate_incremental_input_tokens(
             messages,

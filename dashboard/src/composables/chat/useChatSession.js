@@ -6,6 +6,7 @@ import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.js'
+import { createHistoryMergeTracker } from './historyMergeTracker.js'
 import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop, stopAgentLoop } from './workLifecycleTracker.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, mergeRemoteMessageIntoList, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
@@ -122,6 +123,7 @@ export function useChatSession() {
   const contextSummaryRequestKeys = new Map()
   const llmRequestMetadataBySession = ref(new Map())
   const sessionEventSequenceBySession = new Map()
+  const historyMergeTracker = createHistoryMergeTracker()
   const initialHistoryLoaded = ref(true)
   
   // 默认 Markdown 开关状态（用于未选择会话时）
@@ -211,6 +213,7 @@ export function useChatSession() {
     )
   }
   const selectNewSession = (session) => {
+    historyMergeTracker.invalidate()
     const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === session.session_id)
     if (sessionIndex === -1) {
       sessionManager.sessions.value.unshift(session)
@@ -331,8 +334,9 @@ export function useChatSession() {
 
   const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
     if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
+    const requestId = historyMergeTracker.begin()
     const res = await chatApi.sessionsHistory(sessionId, 1, 20)
-    if (sessionId !== sessionManager.currentSessionId.value) return
+    if (sessionId !== sessionManager.currentSessionId.value || !historyMergeTracker.isLatest(requestId)) return
     const historyData = filterNewMessages(res.data?.data || [])
     if (!historyData.length) return
 
@@ -967,6 +971,7 @@ export function useChatSession() {
             : data.content !== undefined && data.content !== null) ||
             (typeof data.refusal === 'string' && Boolean(data.refusal.trim()))
           const responseFields = {
+            ...(data.message_id !== null && data.message_id !== undefined && data.message_id !== '' ? { db_id: data.message_id } : {}),
             ...(typeof data.finish_reason === 'string' && data.finish_reason ? { finish_reason: data.finish_reason } : {}),
             ...(data.finish_details && typeof data.finish_details === 'object' && Object.keys(data.finish_details).length > 0 ? { finish_details: data.finish_details } : {}),
             ...(typeof data.refusal === 'string' && data.refusal ? { refusal: data.refusal } : {}),
@@ -1152,6 +1157,7 @@ export function useChatSession() {
   
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
+    historyMergeTracker.invalidate()
     clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = false
@@ -1166,6 +1172,7 @@ export function useChatSession() {
    * 新建会话
    */
   const createNewSession = () => {    
+    historyMergeTracker.invalidate()
     clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
     chatState.messages.value = resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = true

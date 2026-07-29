@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
 from app.core.audit.confirmation import ConfirmationDecision, notify_confirmation_tool_results, update_confirmation_message_status, update_confirmation_tool_results_for_decision
-from app.core.audit.integrity import build_tool_round_integrity_snapshot, summarize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
+from app.core.audit.integrity import build_tool_round_integrity_snapshot, serialize_tool_arguments, verify_persisted_tool_round, verify_tool_round_integrity
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import AuditCleanupResult
@@ -61,7 +61,7 @@ def _tool_details(round_snapshot, conclusion="pending"):
             "score": 5 if conclusion == "pending" else 1,
             "reason": "test",
             "arguments_hash": item.arguments_sha256,
-            "arguments_summary": summarize_tool_arguments(item.arguments),
+            "arguments_summary": serialize_tool_arguments(item.arguments),
             "file_snapshots": [],
         }
         for item in round_snapshot.tool_calls
@@ -150,7 +150,7 @@ def test_round_integrity_binds_order_identity_and_arguments(tmp_path):
     changed = _tool_calls()
     changed[0]["arguments"] = {"command": "python changed.py"}
     assert not verify_tool_round_integrity(snapshot, tool_calls=changed, uid="u1", session_id="session-1", working_directory=tmp_path)
-    assert "python entry.py" not in summarize_tool_arguments(_tool_calls()[0]["arguments"])
+    assert json.loads(serialize_tool_arguments(_tool_calls()[0]["arguments"])) == _tool_calls()[0]["arguments"]
     persisted_calls = [
         {
             "original_tool_call_id": item.tool_call_id,
@@ -205,7 +205,7 @@ async def test_pending_round_is_claimed_only_once_and_records_each_execution(aud
                 "absolute_path": str((tmp_path / "entry.py").resolve()),
                 "sha256": "a" * 64,
                 "size": 10,
-                "content": "must not enter database",
+                "content": "persisted evidence content",
             }
         ]
         completed = await audit_crud.complete_preparation(
@@ -242,7 +242,7 @@ async def test_pending_round_is_claimed_only_once_and_records_each_execution(aud
 
     async with audit_database() as session:
         details = await audit_crud.list_tool_details(session, record.id)
-        assert "content" not in details[0].file_snapshots[0]
+        assert details[0].file_snapshots[0]["content"] == "persisted evidence content"
         executions = []
         for index, detail in enumerate(details):
             execution = await audit_crud.create_execution_attempt(

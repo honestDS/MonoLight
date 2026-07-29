@@ -91,25 +91,9 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def summarize_tool_arguments(arguments: dict[str, Any]) -> str:
+def serialize_tool_arguments(arguments: dict[str, Any]) -> str:
     _validate_json_value(arguments)
-
-    def describe(value: Any) -> dict[str, Any]:
-        if isinstance(value, str):
-            return {"length": len(value), "type": "string"}
-        if isinstance(value, bool):
-            return {"type": "boolean"}
-        if isinstance(value, int):
-            return {"type": "integer"}
-        if isinstance(value, float):
-            return {"type": "number"}
-        if value is None:
-            return {"type": "null"}
-        if isinstance(value, list):
-            return {"length": len(value), "type": "array"}
-        return {"keys": sorted(value), "type": "object"}
-
-    return canonical_json_dumps({key: describe(value) for key, value in arguments.items()})
+    return canonical_json_dumps(arguments)
 
 
 def build_tool_call_integrity_snapshot(

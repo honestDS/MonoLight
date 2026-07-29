@@ -448,6 +448,19 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
     await db_session.commit()
 
     assert await audit_crud.get_current_confirmation(db_session, uid="owner", session_id="session-1") is None
+    pending_content = {
+        "type": "files_to_user",
+        "status": AuditRecordStatus.PENDING.value,
+        "files": [
+            {
+                "id": "download-token",
+                "name": "report.pdf",
+                "download_url": "/api/v1/download-sent?token=download-token",
+            }
+        ],
+        "errors": [{"path": "/allowed/reports/missing.pdf", "error": "file not found"}],
+        "allowed_file_send_dirs": ["/allowed/reports"],
+    }
 
     stored_results, _card = await persist_pending_confirmation_bundle(
         db_session,
@@ -459,7 +472,7 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
             InternalMessage(
                 role=MessageRole.TOOL,
                 tool_call_id="call-atomic",
-                content=json.dumps({"status": "pending"}),
+                content=json.dumps(pending_content),
             )
         ],
         confirmation_payload={"type": "audit_confirmation", "audit_record_id": record.id, "status": "pending"},
@@ -469,6 +482,7 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
     current = await audit_crud.get_current_confirmation(db_session, uid="owner", session_id="session-1")
     assert current is not None
     assert [item.tool_call_id for item in stored_results] == ["call-atomic"]
+    assert json.loads(stored_results[0].content) == pending_content
     pending = await get_pending_tool_results(
         db_session,
         uid="owner",
@@ -481,18 +495,33 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
     assert pending is not None
     assert set(pending) == {"call-atomic"}
 
-    await replace_pending_tool_result(
+    replacement_content = {
+        "type": "files_to_user",
+        "status": "succeeded",
+        "files": [
+            {
+                "id": "download-token",
+                "name": "report.pdf",
+                "download_url": "/api/v1/download-sent?token=download-token",
+            }
+        ],
+        "errors": [{"path": "/allowed/reports/missing.pdf", "error": "file not found"}],
+        "allowed_file_send_dirs": ["/allowed/reports"],
+    }
+    replacement_content_json = json.dumps(replacement_content)
+    returned_content = await replace_pending_tool_result(
         db_session,
         pending_message=pending["call-atomic"],
         original_tool_call_id="call-atomic",
-        content=json.dumps({"status": "succeeded"}),
+        content=replacement_content_json,
         audit_record_id=record.id,
     )
+    assert returned_content == replacement_content_json
     await db_session.commit()
     versions = list((await db_session.execute(select(AuditToolResultVersion).where(AuditToolResultVersion.audit_record_id == record.id).order_by(AuditToolResultVersion.version_no))).scalars().all())
     assert [version.version_no for version in versions] == [0, 1]
-    assert json.loads(InternalMessage.model_validate_json(versions[0].content).content)["status"] == "pending"
-    assert json.loads(InternalMessage.model_validate_json(versions[1].content).content)["status"] == "succeeded"
+    assert json.loads(InternalMessage.model_validate_json(versions[0].content).content) == pending_content
+    assert json.loads(InternalMessage.model_validate_json(versions[1].content).content) == replacement_content
 
 
 @pytest.mark.asyncio

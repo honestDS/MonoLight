@@ -1,7 +1,7 @@
 import json
 
 from app.core import log as log_module
-from app.core.utils.background_task_result import sanitize_execution_summary, sanitize_execution_value
+from app.core.utils.background_task_result import normalize_execution_value, serialize_execution_summary
 from app.core.utils.dispatcher import helpers
 
 
@@ -24,7 +24,7 @@ class CapturingLogger:
         self.messages.append(message)
 
 
-def test_execution_summary_redacts_nested_secrets_and_shell_output():
+def test_execution_summary_keeps_nested_values_and_output():
     payload = {
         "status": "failed",
         "stdout": "SHELL_OUTPUT_SHOULD_NOT_BE_PERSISTED",
@@ -36,24 +36,24 @@ def test_execution_summary_redacts_nested_secrets_and_shell_output():
         },
     }
 
-    summary = sanitize_execution_summary(payload)
+    summary = serialize_execution_summary(payload)
 
-    assert "SHELL_OUTPUT_SHOULD_NOT_BE_PERSISTED" not in summary
-    assert "STDERR_OUTPUT_SHOULD_NOT_BE_PERSISTED" not in summary
-    assert "API_SECRET_VALUE" not in summary
-    assert "PASSWORD_SECRET_VALUE" not in summary
-    assert "TOKEN_SECRET_VALUE" not in summary
+    assert "SHELL_OUTPUT_SHOULD_NOT_BE_PERSISTED" in summary
+    assert "STDERR_OUTPUT_SHOULD_NOT_BE_PERSISTED" in summary
+    assert "API_SECRET_VALUE" in summary
+    assert "PASSWORD_SECRET_VALUE" in summary
+    assert "TOKEN_SECRET_VALUE" in summary
     assert '"status": "failed"' in summary
-    assert sanitize_execution_summary("RAW_PLAIN_SHELL_OUTPUT", redact_text=True) != "RAW_PLAIN_SHELL_OUTPUT"
+    assert serialize_execution_summary("RAW_PLAIN_SHELL_OUTPUT") == "RAW_PLAIN_SHELL_OUTPUT"
 
 
-def test_tool_result_conversion_keeps_non_sensitive_output_for_model_result():
+def test_execution_value_normalization_keeps_all_values():
     payload = {"stdout": "合法工具输出", "nested": {"api_key": "SECRET_VALUE"}}
 
-    result = sanitize_execution_value(payload)
+    result = normalize_execution_value(payload)
 
     assert result["stdout"] == "合法工具输出"
-    assert result["nested"]["api_key"] == "<redacted>"
+    assert result["nested"]["api_key"] == "SECRET_VALUE"
 
 
 def test_tool_result_log_keeps_json_output_and_nested_error(monkeypatch):
@@ -80,7 +80,7 @@ def test_tool_result_log_keeps_json_output_and_nested_error(monkeypatch):
     assert "RAW_TOKEN" in logger.messages[0]
 
 
-def test_exception_log_uses_the_same_safe_summary(monkeypatch):
+def test_exception_log_keeps_original_exception_message(monkeypatch):
     logger = CapturingLogger()
     monkeypatch.setattr(helpers, "logger", logger)
 
@@ -88,5 +88,5 @@ def test_exception_log_uses_the_same_safe_summary(monkeypatch):
 
     assert logger.bindings
     exception_message = logger.bindings[0]["exception_message"]
-    assert "RAW_SECRET" not in exception_message
-    assert "RAW_PASSWORD" not in exception_message
+    assert "RAW_SECRET" in exception_message
+    assert "RAW_PASSWORD" in exception_message

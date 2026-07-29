@@ -51,29 +51,17 @@ _FINAL_EXECUTION_STATUSES = {
     AuditRecordStatus.FAILED,
     AuditRecordStatus.EXECUTION_UNKNOWN,
 }
-_FILE_SNAPSHOT_DATABASE_FIELDS = {
-    "original_path",
-    "absolute_path",
-    "resolved_path",
-    "exists",
-    "file_type",
-    "size",
-    "sha256",
-    "truncated",
-    "status",
-    "error",
-}
 
 
-def _sanitize_file_snapshots(file_snapshots: Any) -> list[dict[str, Any]]:
+def _validate_file_snapshots(file_snapshots: Any) -> list[dict[str, Any]]:
     if not isinstance(file_snapshots, list):
         raise ValueError(t(ERR_AUDIT_FILE_SNAPSHOTS_INVALID))
-    sanitized: list[dict[str, Any]] = []
+    validated: list[dict[str, Any]] = []
     for item in file_snapshots:
         if not isinstance(item, dict):
             raise ValueError(t(ERR_AUDIT_FILE_SNAPSHOT_INVALID))
-        sanitized.append({key: value for key, value in item.items() if key in _FILE_SNAPSHOT_DATABASE_FIELDS})
-    return sanitized
+        validated.append(dict(item))
+    return validated
 
 
 def build_audit_status_update(audit_record_id: int, expected_status: AuditRecordStatus, **values: Any):
@@ -306,7 +294,7 @@ class CRUDAudit:
                     reason=str(detail.get("reason") or ""),
                     arguments_hash=str(detail["arguments_hash"]),
                     arguments_summary=str(detail.get("arguments_summary") or "")[:1000],
-                    file_snapshots=_sanitize_file_snapshots(detail.get("file_snapshots") or []),
+                    file_snapshots=_validate_file_snapshots(detail.get("file_snapshots") or []),
                 )
             )
         if seen_turn_indexes != set(range(record.tool_count)):

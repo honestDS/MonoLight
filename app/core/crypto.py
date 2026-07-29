@@ -98,17 +98,3 @@ def decrypt_api_key(encrypted_text: str) -> str:
         _raise_crypto_error(ERR_API_KEY_DECRYPT_EMPTY)
 
     return plain_text
-
-
-def mask_api_key(api_key: str) -> str:
-    """脱敏API密钥用于日志和响应
-
-    Args:
-        api_key: 原始API密钥（明文或密文）
-
-    Returns:
-        脱敏后的字符串
-    """
-    if not api_key or len(api_key) < 8:
-        return "****"
-    return api_key[:8] + "****"

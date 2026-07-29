@@ -50,7 +50,7 @@ from app.core.session_reply_queue.manager import (
 )
 from app.core.tools import get_tools_for_profile
 from app.core.utils.assistant_files import parse_assistant_files_content
-from app.core.utils.background_task_result import sanitize_execution_summary
+from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
 from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round, process_single_tool
@@ -694,6 +694,9 @@ async def _dispatch_interactive_work(
         event_type = event.get("type")
         if event_type == "done":
             response = event.get("response")
+            response_id = event.get("response_id")
+            if isinstance(response, dict) and isinstance(response_id, str) and response_id:
+                response = {**response, "response_id": response_id}
         elif event_type == "error":
             error_message = str(event.get("message") or t(ERR_LLM_UNEXPECTED_ERROR))
             raise RuntimeError(error_message)
@@ -984,7 +987,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 )
                 status_updated = await update_confirmation_message_status(db, audit_record_id=reaudit_round.audit_record_id)
                 if status_updated is False:
-                    await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
+                    await notify_confirmation_tool_results(db, audit_record_id=reaudit_round.audit_record_id)
                 turn_messages.append(InternalMessage(role=MessageRole.ASSISTANT, content=confirmation_content))
                 return {
                     "content": confirmation_content,
@@ -1124,12 +1127,16 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             if get_queued_background_task_id(tool_result.content) is None:
                 succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
                 all_succeeded = all_succeeded and succeeded
+                result_summary = serialize_execution_summary(
+                    tool_result.content,
+                    max_chars=1000,
+                )
                 await audit_crud.finish_execution_attempt(
                     db,
                     execution_record_id=execution.id,
                     status=AuditExecutionStatus.SUCCEEDED if succeeded else AuditExecutionStatus.FAILED,
-                    result_summary=sanitize_execution_summary(tool_result.content, redact_text=True),
-                    error=None if succeeded else sanitize_execution_summary(tool_result.content, redact_text=True),
+                    result_summary=result_summary,
+                    error=None if succeeded else result_summary,
                 )
 
     if execution_round_status is None:
@@ -1159,7 +1166,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         history_before_id=decision_message_id,
         frozen_user_message_ids=[decision_message_id],
         attachments=None,
-        allow_additional_user_messages=False,
+        allow_additional_user_messages=True,
         execution_resume_state=None,
     )
     content, _untrusted_files = parse_assistant_files_content(_response_content(interactive_response))
@@ -1172,6 +1179,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     }
     if interactive_response.get("llm_request_metadata") is not None:
         response["llm_request_metadata"] = interactive_response["llm_request_metadata"]
+    response_id = interactive_response.get("response_id")
+    if isinstance(response_id, str) and response_id:
+        response["response_id"] = response_id
     return response
 
 

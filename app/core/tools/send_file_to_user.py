@@ -23,8 +23,6 @@ from app.core.constants import (
     ERR_FILE_TOKEN_SIGNATURE_INVALID,
     ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED,
     MSG_FILE_COUNT_TRUNCATED,
-    MSG_TOOL_FILE_SEND_FAILED,
-    MSG_TOOL_FILE_SEND_SUCCESS,
 )
 from app.core.crypto import _get_encryption_key
 from app.core.i18n import t
@@ -137,48 +135,6 @@ def _normalize_blocked_extensions(extensions: list[str] | None = None) -> set[st
             normalized_extension = f".{normalized_extension}"
         blocked_extensions.add(normalized_extension)
     return blocked_extensions
-
-
-def summarize_files_to_user_result(content: str | None) -> str | None:
-    if not isinstance(content, str):
-        return content
-    try:
-        payload = json.loads(content)
-    except Exception:
-        return content
-    if not isinstance(payload, dict) or payload.get("type") != "files_to_user":
-        return content
-
-    files = payload.get("files") or []
-    success = bool(files)
-    if success:
-        message = t(MSG_TOOL_FILE_SEND_SUCCESS)
-    else:
-        error_messages = []
-        errors = payload.get("errors")
-        if isinstance(errors, list):
-            for item in errors:
-                if not isinstance(item, dict):
-                    continue
-                error = item.get("error")
-                if not isinstance(error, str):
-                    continue
-                error = error.strip()
-                if error and error not in error_messages:
-                    error_messages.append(error)
-        message = "\n".join(error_messages) if error_messages else t(MSG_TOOL_FILE_SEND_FAILED)
-
-    return json.dumps(
-        {
-            "type": "files_to_user_result",
-            "status": "success" if success else "failed",
-            "message": message,
-        },
-        ensure_ascii=False,
-    )
-
-
-sanitize_files_to_user_result = summarize_files_to_user_result
 
 
 class SendFileToUserExecutor(BaseExecutor):

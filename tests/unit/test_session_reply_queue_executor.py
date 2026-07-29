@@ -1264,6 +1264,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     pending_message = SimpleNamespace(id=2, content="pending")
     replaced_results = []
     saved_messages = []
+    notified_audit_record_ids = []
     memory_chains = []
 
     class FakeDb:
@@ -1311,7 +1312,10 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         return None
 
     async def update_confirmation(db, *, audit_record_id):
-        return None
+        return False
+
+    async def notify_confirmation_results(db, *, audit_record_id):
+        notified_audit_record_ids.append(audit_record_id)
 
     def dump_history(messages):
         memory_chains.append([message.model_copy(deep=True) for message in messages])
@@ -1329,6 +1333,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
     monkeypatch.setattr(executor_module, "save_message", save_confirmation)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "notify_confirmation_tool_results", notify_confirmation_results)
     monkeypatch.setattr(executor_module, "dump_background_proactive_history", dump_history)
     monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("pending re-audit must not execute tools"))
     monkeypatch.setattr(executor_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("pending re-audit must not continue interactively"))
@@ -1339,6 +1344,8 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert len(replaced_results) == 1
     assert replaced_results[0]["pending_message"].id == 2
     assert replaced_results[0]["original_tool_call_id"] == "original-1"
+    assert replaced_results[0]["audit_record_id"] == 99
+    assert notified_audit_record_ids == [99]
     assert len(saved_messages) == 1
     assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
@@ -1448,6 +1455,7 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
             "history": [{"role": "assistant", "content": "完成"}],
             "files": ["report.txt"],
             "llm_request_metadata": {"input_tokens": 17},
+            "response_id": "response-final",
         }
 
     monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
@@ -1473,6 +1481,7 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     assert response["history"] == [{"role": "assistant", "content": "完成"}]
     assert response["files"] == ["report.txt"]
     assert response["llm_request_metadata"] == {"input_tokens": 17}
+    assert response["response_id"] == "response-final"
     assert len(created_attempts) == 2
     fresh_ids = [call["new_tool_call_id"] for call in created_attempts]
     assert len(set(fresh_ids)) == 2
@@ -1490,7 +1499,7 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     assert interactive_dispatch_kwargs["history_before_id"] == 4
     assert interactive_dispatch_kwargs["frozen_user_message_ids"] == [4]
     assert interactive_dispatch_kwargs["attachments"] is None
-    assert interactive_dispatch_kwargs["allow_additional_user_messages"] is False
+    assert interactive_dispatch_kwargs["allow_additional_user_messages"] is True
     assert interactive_dispatch_kwargs["execution_resume_state"] is None
 
 

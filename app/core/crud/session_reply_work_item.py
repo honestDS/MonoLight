@@ -567,6 +567,33 @@ class CRUDSessionReplyWorkItem:
             await db.commit()
         return (result.rowcount or 0) == 1
 
+    async def merge_ready_foreground(
+        self,
+        db: AsyncSession,
+        *,
+        work_ids: list[int],
+        merged_into_id: int,
+    ) -> list[int]:
+        if not work_ids:
+            return []
+        result = await db.execute(
+            update(SessionReplyWorkItem)
+            .where(
+                SessionReplyWorkItem.id.in_(work_ids),
+                SessionReplyWorkItem.work_type == SessionReplyWorkType.FOREGROUND_REPLY,
+                SessionReplyWorkItem.status == SessionReplyWorkStatus.READY_FOR_LLM,
+            )
+            .values(
+                status=SessionReplyWorkStatus.MERGED,
+                merged_into_id=merged_into_id,
+                locked_by=None,
+                lock_until=None,
+                updated_at=get_local_time(),
+            )
+            .returning(SessionReplyWorkItem.id)
+        )
+        return [work_id for work_id in result.scalars().all() if work_id is not None]
+
     async def mark_terminal(
         self,
         db: AsyncSession,

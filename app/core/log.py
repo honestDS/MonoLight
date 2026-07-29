@@ -16,7 +16,7 @@ from app.core.i18n import t
 from app.core.i18n.context import reset_current_log_locale, set_current_log_locale
 from app.core.i18n.locale import DEFAULT_LOCALE
 from app.core.paths import DEFAULT_LOG_FILE_PATH, TOOLS_LOG_FILENAME
-from app.core.utils.background_task_result import sanitize_execution_summary
+from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.time import get_local_time
 
 
@@ -220,14 +220,14 @@ class LogManager:
             if line:
                 lines.append(line)
         log_cmd = lines if len(lines) > 1 else command.strip()
-        log_cmd = sanitize_execution_summary(log_cmd, max_chars=LOG_MESSAGE_MAX_LENGTH)
+        log_cmd = serialize_execution_summary(log_cmd, max_chars=LOG_MESSAGE_MAX_LENGTH)
         logger.bind(tool_call=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_CALL", turn=turn, tool_name=tool_name, args=log_cmd))
 
     @staticmethod
     def log_tool_result(turn: int, result: str, session_id: str = "default", uid: str = None):
         # 记录工具执行结果日志
-        safe_result = sanitize_execution_summary(result, max_chars=LOG_MESSAGE_MAX_LENGTH, redact_output=False, redact_sensitive=False)
-        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=safe_result))
+        result_summary = serialize_execution_summary(result, max_chars=LOG_MESSAGE_MAX_LENGTH)
+        logger.bind(tool_result=True, session_id=session_id, uid=uid).info(t("LOG_TOOL_RESULT", turn=turn, result=result_summary))
 
 
 def get_logger(name: str):

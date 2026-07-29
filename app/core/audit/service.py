@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.confirmation import cancel_confirmation_by_session
-from app.core.audit.integrity import build_tool_round_integrity_snapshot, create_file_integrity_snapshot, summarize_tool_arguments
+from app.core.audit.integrity import build_tool_round_integrity_snapshot, create_file_integrity_snapshot, serialize_tool_arguments
 from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.channel_router import get_model_entry
 from app.core.constants import (
@@ -47,7 +47,7 @@ from app.core.tools import tool_requires_audit
 from app.core.tools.file_writer import resolve_file_writer_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
 from app.core.tools.shell import ShellExecutor
-from app.core.utils.background_task_result import sanitize_execution_summary
+from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.time import get_local_time
@@ -194,8 +194,8 @@ async def _execute_audit_read_tool_call(
     original_tool_call_id = tool_call.arguments.get("tool_call_id")
     if not isinstance(requested_path, str) or not requested_path or not isinstance(original_tool_call_id, str) or not original_tool_call_id:
         return {"status": "invalid", "error": "path and tool_call_id are required"}
-    safe_args = sanitize_execution_summary(tool_call.arguments)
-    logger.bind(audit_llm_tool_call=True).info(t("LOG_AUDIT_LLM_TOOL_CALL", tool_name=tool_call.name, args=safe_args))
+    arguments_summary = serialize_execution_summary(tool_call.arguments)
+    logger.bind(audit_llm_tool_call=True).info(t("LOG_AUDIT_LLM_TOOL_CALL", tool_name=tool_call.name, args=arguments_summary))
     return await asyncio.to_thread(
         _read_for_audit_sync,
         requested_path,
@@ -204,20 +204,6 @@ async def _execute_audit_read_tool_call(
         working_directory,
         read_state,
     )
-
-
-_FILE_SNAPSHOT_FIELDS = {
-    "original_path",
-    "absolute_path",
-    "resolved_path",
-    "exists",
-    "file_type",
-    "size",
-    "sha256",
-    "truncated",
-    "status",
-    "error",
-}
 
 
 def _file_snapshots_from_reads(file_reads: list[dict[str, Any]], expected_tool_call_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -240,7 +226,7 @@ def _file_snapshots_from_reads(file_reads: list[dict[str, Any]], expected_tool_c
                 continue
         elif file_type != "missing" or file_read.get("size") is not None or file_read.get("sha256") is not None:
             continue
-        snapshot = {key: file_read.get(key) for key in _FILE_SNAPSHOT_FIELDS if key in file_read}
+        snapshot = dict(file_read)
         identity = tuple(snapshot.get(key) for key in ("absolute_path", "resolved_path", "size", "sha256", "truncated"))
         if identity in seen.setdefault(tool_call_id, set()):
             continue
@@ -251,15 +237,6 @@ def _file_snapshots_from_reads(file_reads: list[dict[str, Any]], expected_tool_c
 
 def _path_aliases(value: dict[str, Any]) -> set[str]:
     return {str(value[key]) for key in ("path", "original_path", "absolute_path", "resolved_path") if value.get(key)}
-
-
-def _redact_file_content(value: str, file_reads: list[dict[str, Any]]) -> str:
-    redacted = value
-    for file_read in file_reads:
-        content = file_read.get("content")
-        if isinstance(content, str) and content:
-            redacted = redacted.replace(content, "[file content omitted]")
-    return redacted
 
 
 def _file_checks_are_sufficient(
@@ -710,7 +687,6 @@ async def audit_tool_round(
                 )
             if local_reasons:
                 server_confirmation_reasons[tool_call.id] = local_reasons
-            result["reason"] = _redact_file_content(result["reason"], tool_file_reads)
             if local_reasons:
                 result["reason"] = f"{result['reason']}; {'; '.join(item['message'] for item in local_reasons)}"
             if tool_call.id in server_blocked_tool_call_ids:
@@ -755,7 +731,7 @@ async def audit_tool_round(
                 "score": result["score"],
                 "reason": result["reason"],
                 "arguments_hash": call_snapshot.arguments_sha256,
-                "arguments_summary": summarize_tool_arguments(call_snapshot.arguments),
+                "arguments_summary": serialize_tool_arguments(call_snapshot.arguments),
                 "file_snapshots": file_snapshots,
                 "server_confirmation_reasons": server_confirmation_reasons.get(call_snapshot.tool_call_id, []),
             }

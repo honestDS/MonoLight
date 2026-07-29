@@ -90,8 +90,6 @@ async def persist_pending_confirmation_bundle(
     confirmation_payload: dict[str, Any],
     dedupe_key: str | None,
 ) -> tuple[list[InternalMessage], InternalMessage]:
-    from app.core.tools.send_file_to_user import sanitize_files_to_user_result
-
     try:
         record = await audit_crud.get_record(db, audit_record_id)
         if record is None or record.source_assistant_message_id is None:
@@ -99,7 +97,6 @@ async def persist_pending_confirmation_bundle(
         stored_tool_results: list[InternalMessage] = []
         for tool_result in tool_results:
             stored_tool_result = tool_result.model_copy()
-            stored_tool_result.content = sanitize_files_to_user_result(stored_tool_result.content)
             saved_message = await save_message(
                 db,
                 session_id,
@@ -175,8 +172,6 @@ async def persist_cancelled_pending_audit_results(
     profile_id: int,
     tool_results: list[InternalMessage] | tuple[InternalMessage, ...],
 ) -> list[InternalMessage]:
-    from app.core.tools.send_file_to_user import sanitize_files_to_user_result
-
     try:
         record = await audit_crud.get_record(db, audit_record_id)
         if record is None or record.status != AuditRecordStatus.PENDING or record.uid != uid or record.session_id != session_id or record.source_assistant_message_id is None:
@@ -199,7 +194,7 @@ async def persist_cancelled_pending_audit_results(
                 confirmation_status="superseded",
                 error=cancellation_reason,
             )
-            stored_tool_result.content = sanitize_files_to_user_result(json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            stored_tool_result.content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             saved_message = await save_message(
                 db,
                 session_id,
@@ -411,9 +406,7 @@ async def replace_pending_tool_result(
     content: str | None,
     audit_record_id: int | None = None,
 ) -> str | None:
-    from app.core.tools.send_file_to_user import sanitize_files_to_user_result
-
-    sanitized_content = sanitize_files_to_user_result(content)
+    replacement_content = content
     confirmation_decision = None
     try:
         pending_tool_result = InternalMessage.model_validate_json(pending_message.content or "{}")
@@ -427,17 +420,17 @@ async def replace_pending_tool_result(
 
     if confirmation_decision is not None:
         try:
-            result_payload = json.loads(sanitized_content or "{}")
+            result_payload = json.loads(replacement_content or "{}")
         except (TypeError, ValueError):
             result_payload = None
         if isinstance(result_payload, dict):
             result_payload[CONFIRMATION_DECISION_FIELD] = confirmation_decision
-            sanitized_content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            replacement_content = json.dumps(result_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     stored_tool_result = InternalMessage(
         role=MessageRole.TOOL,
         tool_call_id=original_tool_call_id,
-        content=sanitized_content,
+        content=replacement_content,
     )
     serialized_content = stored_tool_result.model_dump_json(exclude_none=True)
     if audit_record_id is not None:
@@ -473,7 +466,7 @@ async def replace_pending_tool_result(
             commit=False,
         )
     await db.refresh(pending_message)
-    return sanitized_content
+    return replacement_content
 
 
 async def _update_confirmation_tool_results(
