@@ -8,6 +8,7 @@ from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
+from app.core.session_source import is_web_session_source
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
@@ -17,12 +18,6 @@ from app.providers.database import AsyncSessionLocal
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
-
-WEB_SESSION_SOURCES = frozenset({"http", "ws"})
-
-
-def is_web_session_source(source: str | None) -> bool:
-    return (source or "http") in WEB_SESSION_SOURCES
 
 
 async def ensure_web_session_writable(

@@ -60,6 +60,7 @@ from app.core.security import get_current_user
 from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
+from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
@@ -144,7 +145,7 @@ async def _create_new_web_session_with_profile_override(
             profile_override_id=profile.id if profile else None,
             source=source,
             reply_target_source=source,
-            show_tool_calls=show_tool_calls if show_tool_calls is not None else True,
+            show_tool_calls=show_tool_calls if show_tool_calls is not None else default_show_tool_calls_for_source(source),
         )
     )
     await db.commit()

@@ -36,6 +36,7 @@ from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
+from app.core.session_source import default_show_tool_calls_for_source
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.audit import AuditRecordStatus
@@ -88,10 +89,8 @@ def is_submission_queued(submission_status: str) -> bool:
 
 
 def get_tool_call_visibility(session: Any | None, source: str) -> tuple[bool, bool]:
-    if source in {"http", "ws"}:
-        show_tool_calls = session.show_tool_calls if session is not None else True
-        return show_tool_calls, show_tool_calls
-    return False, source != "weixin-openclaw"
+    show_tool_calls = session.show_tool_calls if session is not None else default_show_tool_calls_for_source(source)
+    return show_tool_calls, show_tool_calls
 
 
 def build_input_queued_event(
@@ -559,8 +558,6 @@ class SessionReplyQueueManager:
                 **(work.execution_state or {}),
                 "stream_requested": source == "ws" if stream_requested is None else stream_requested,
                 "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
-                # 微信 OpenClaw 对发送频率有限制，工具调用阶段的正文只保留在
-                # 数据库和日志中，不作为额外的用户可见消息发送到微信。
                 "show_tool_calls": show_tool_calls,
                 "expose_tool_call_content": expose_tool_call_content,
                 "language": get_current_locale(),

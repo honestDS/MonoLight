@@ -483,6 +483,7 @@ async def test_create_new_web_session_with_profile_override_persists_valid_overr
     assert session.uid == "user-1"
     assert session.source == "http"
     assert session.reply_target_source == "http"
+    assert session.show_tool_calls is True
     assert session.profile_override_id == 17
     assert session.profile_id is None
     assert db.commit_count == 1

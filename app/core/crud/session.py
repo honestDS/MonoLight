@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.session_source import default_show_tool_calls_for_source
 from app.models.session import ChatSession
 
 
@@ -216,6 +217,7 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
                 profile_id=profile_id,
                 source=source,
                 reply_target_source=source,
+                show_tool_calls=default_show_tool_calls_for_source(source),
             )
             db.add(session)
         await db.flush()

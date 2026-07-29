@@ -20,6 +20,7 @@ MESSAGES = {
     "MSG_NEW_SESSION": "新会话",
     "MSG_TITLE_GENERATE_FAILED": "无法生成标题，将使用默认标题",
     "MSG_MESSAGE_LIST_SUCCESS": "会话历史记录获取成功",
+    "MSG_MESSAGE_PLATFORM_TOOL_USED": "使用工具:{name}",
     "MSG_TOOL_RESULT_TRUNCATED": "\n\n[工具响应内容过大，已省略后半部分。请基于以上部分结果作答，或调整工具调用参数后重新查询]",
     "ERR_BACKGROUND_TASK_PROACTIVE_REPLY_FAILED": "后台任务主动回复失败：{error}",
     "MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES": "后台任务已完成，但未能生成最终说明，请查看本回复附带的任务结果",

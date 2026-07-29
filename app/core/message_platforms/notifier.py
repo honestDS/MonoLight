@@ -11,7 +11,9 @@ from app.core.message_platforms.outbound_text import (
     build_outbound_text_policy_registry,
     process_outbound_text_event,
 )
+from app.core.message_platforms.tool_output import combine_proactive_reply_tool_output
 from app.core.session_notifier import session_notifier
+from app.core.session_source import is_web_session_source
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -69,11 +71,13 @@ async def send_session_event(uid: str, session_id: str, event: dict[str, Any]) -
         source = session.source if session and session.source else "http"
 
     normalized_event = normalize_outbox_event(event)
+    if not is_web_session_source(source) and session is not None and session.show_tool_calls and normalized_event.get("type") == "proactive_reply":
+        normalized_event = combine_proactive_reply_tool_output(normalized_event)
     policy = get_outbound_text_policy_registry().get(source)
     if policy is not None:
         normalized_event = await process_outbound_text_event(uid, session_id, source, normalized_event, policy)
     dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
-    if source in {"http", "ws"}:
+    if is_web_session_source(source):
         created = await session_notifier.notify(
             uid,
             session_id,

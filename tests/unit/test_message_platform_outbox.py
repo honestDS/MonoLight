@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -6,7 +7,10 @@ import pytest
 from sqlalchemy import delete, update
 from sqlmodel import select
 
-from app.core.constants import MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED
+from app.core.constants import (
+    MSG_MESSAGE_PLATFORM_TOOL_USED,
+    MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
+)
 from app.core.crud.message_platform_outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
 from app.core.i18n import t
 from app.core.message_platforms import notifier as notifier_module
@@ -15,6 +19,7 @@ from app.core.message_platforms.base import MessagePlatformHandler
 from app.core.message_platforms.manager import OUTBOX_DELIVERY_TIMEOUT_SECONDS, MessagePlatformPollingManager
 from app.core.message_platforms.notifier import build_outbox_dedupe_key, normalize_outbox_event
 from app.core.message_platforms.outbound_text import OutboundTextPolicy, process_outbound_text_event, split_outbound_text_by_newline
+from app.core.message_platforms.tool_output import combine_proactive_reply_tool_output
 from app.core.utils.time import get_local_time
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformType
@@ -133,6 +138,7 @@ async def test_scheduled_event_uses_fixed_external_session_source(monkeypatch):
         {
             "source": "weixin-openclaw",
             "reply_target_source": "ws",
+            "show_tool_calls": True,
         },
     )()
     enqueue_calls = []
@@ -523,7 +529,7 @@ async def test_notifier_refines_event_before_enqueueing_outbox(monkeypatch):
 
     async def get_session(db, session_id):
         assert session_id == "weixin-openclaw:user-1"
-        return SimpleNamespace(source="weixin-openclaw")
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
 
     async def process_event(uid, session_id, source, event, policy):
         processing_order.append("process")
@@ -548,6 +554,201 @@ async def test_notifier_refines_event_before_enqueueing_outbox(monkeypatch):
 
     assert processing_order == ["process", "enqueue"]
     assert enqueued_events == [{"type": "proactive_reply", "content": "processed reply"}]
+
+
+@pytest.mark.asyncio
+async def test_notifier_keeps_external_event_unchanged_when_tool_calls_are_hidden(monkeypatch):
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=False)
+
+    async def enqueue(db, **kwargs):
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+    event = {
+        "event_id": "session-reply-work:1:event",
+        "type": "proactive_reply",
+        "content": "final reply",
+        "files": [{"id": "file-1"}],
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call-1", "name": "lookup", "arguments": "{}"}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "tool result"},
+        ],
+    }
+
+    await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+
+    assert enqueued_events == [event]
+
+
+@pytest.mark.asyncio
+async def test_notifier_combines_tool_output_before_external_text_policy(monkeypatch):
+    policy_events = []
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
+
+    async def process_event(uid, session_id, source, event, policy):
+        policy_events.append(event)
+        return event
+
+    async def enqueue(db, **kwargs):
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "process_outbound_text_event", process_event)
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+    event = {
+        "event_id": "session-reply-work:1:event",
+        "type": "proactive_reply",
+        "content": "final reply",
+        "files": [{"id": "file-1"}],
+        "history": [
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "lookup",
+                        "arguments": '{"z": 1, "a": [2]}',
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "tool result"},
+        ],
+    }
+
+    await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+
+    assert len(policy_events) == 1
+    content = policy_events[0]["content"]
+    assert content == f"checking\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='lookup')}\n\nfinal reply"
+    assert "history" not in policy_events[0]
+    assert policy_events[0]["event_id"] == "session-reply-work:1:event"
+    assert policy_events[0]["files"] == [{"id": "file-1"}]
+    assert enqueued_events == policy_events
+    assert "history" not in enqueued_events[0]
+    serialized_event = json.dumps(enqueued_events[0])
+    assert "arguments" not in serialized_event
+    assert "tool result" not in serialized_event
+
+
+@pytest.mark.asyncio
+async def test_notifier_does_not_combine_web_event_tool_output(monkeypatch):
+    notified_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        return SimpleNamespace(source="http", show_tool_calls=True)
+
+    async def notify(uid, session_id, event, **kwargs):
+        notified_events.append(event)
+        return True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module.session_notifier, "notify", notify)
+    event = {
+        "type": "proactive_reply",
+        "content": "final reply",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call-1", "name": "lookup", "arguments": "{}"}],
+            }
+        ],
+    }
+
+    await notifier_module.send_session_event("uid-1", "session-1", event)
+
+    assert notified_events == [event]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ('{"type": "audit_confirmation", "plain_text": "confirm this"}', "confirm this"),
+        ('{"type": "assistant_files", "text": "file reply", "files": [{"id": "file-1"}]}', "file reply"),
+    ],
+)
+def test_combine_tool_output_uses_structured_final_reply_text(content, expected):
+    combined = combine_proactive_reply_tool_output(
+        {
+            "event_id": "event-1",
+            "type": "proactive_reply",
+            "content": content,
+            "files": [{"id": "file-1"}],
+            "history": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call-1", "name": "lookup"}],
+                }
+            ],
+        }
+    )
+
+    assert combined["content"] == f"{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='lookup')}\n\n{expected}"
+    assert "history" not in combined
+    assert combined["event_id"] == "event-1"
+    assert combined["files"] == [{"id": "file-1"}]
+
+
+def test_combine_tool_output_lists_multiple_tools_without_round_content():
+    combined = combine_proactive_reply_tool_output(
+        {
+            "event_id": "event-1",
+            "type": "proactive_reply",
+            "content": "final reply",
+            "files": [{"id": "file-1"}],
+            "history": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call-1", "name": "first"},
+                        {"id": "call-2", "name": "second"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert combined["content"] == (f"{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='first')}\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='second')}\n\nfinal reply")
+    assert "history" not in combined
+    assert combined["event_id"] == "event-1"
+    assert combined["files"] == [{"id": "file-1"}]
 
 
 @pytest.mark.asyncio

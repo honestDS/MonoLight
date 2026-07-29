@@ -87,6 +87,56 @@ async def test_context_summary_update_compares_boundary_and_revision_atomically(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "expected_show_tool_calls"),
+    [
+        ("http", True),
+        ("ws", True),
+        ("weixin-openclaw", False),
+        ("future-platform", False),
+    ],
+)
+async def test_upsert_profile_sets_tool_call_visibility_by_source(
+    db_session: AsyncSession,
+    source: str,
+    expected_show_tool_calls: bool,
+):
+    session = await session_crud.upsert_profile(
+        db_session,
+        session_id=f"session-{source}",
+        uid="user-1",
+        profile_id=1,
+        source=source,
+    )
+
+    assert session.show_tool_calls is expected_show_tool_calls
+
+
+@pytest.mark.asyncio
+async def test_upsert_profile_preserves_existing_external_tool_call_visibility(db_session: AsyncSession):
+    session = await session_crud.upsert_profile(
+        db_session,
+        session_id="session-future-platform",
+        uid="user-1",
+        profile_id=1,
+        source="future-platform",
+    )
+    session.show_tool_calls = True
+    await db_session.flush()
+
+    updated_session = await session_crud.upsert_profile(
+        db_session,
+        session_id="session-future-platform",
+        uid="user-1",
+        profile_id=2,
+        source="future-platform",
+    )
+
+    assert updated_session.show_tool_calls is True
+    assert updated_session.profile_id == 2
+
+
+@pytest.mark.asyncio
 async def test_tool_result_version_invalidates_summary_and_preserves_previous_content(db_session: AsyncSession):
     message = Message(
         id=10,

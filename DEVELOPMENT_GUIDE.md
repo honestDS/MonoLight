@@ -23,6 +23,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
 5. ruff时禁止使用 --unsafe-fixes 选项。
 6. 禁止在任何时候使用全局变量存储状态,项目应该考虑在多WORKER环境下运行。
 7. 禁止在代码或规划中使用任何emoji表情。
+8. 开发/修复BUG的过程中禁止使用补丁式代码，尽可能彻底解决问题，如有必要可以重构。
 
 ## 四、 核心模型与协议
 1. **标准消息对象**：所有模块间的消息传递必须使用 `app.schemas.message` 中的 `InternalMessage`。

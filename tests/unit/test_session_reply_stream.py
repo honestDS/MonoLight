@@ -770,11 +770,12 @@ def test_dump_output_history_can_hide_tool_messages_without_mutating_messages():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("source", "stream_requested", "context_summary_events_requested", "expose_tool_call_content"),
+    ("source", "stream_requested", "context_summary_events_requested", "show_tool_calls"),
     [
         ("http", False, False, True),
         ("ws", True, True, True),
-        ("weixin-openclaw", False, False, False),
+        ("future-platform", False, False, False),
+        ("future-platform", False, False, True),
     ],
 )
 async def test_enqueue_foreground_controls_tool_call_content_by_source(
@@ -782,7 +783,7 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
     source,
     stream_requested,
     context_summary_events_requested,
-    expose_tool_call_content,
+    show_tool_calls,
 ):
     manager = SessionReplyQueueManager()
     work = SimpleNamespace(execution_state={}, id=7)
@@ -811,7 +812,7 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
                 instance.id = 11
 
     async def upsert_profile(*args, **kwargs):
-        return None
+        return SimpleNamespace(show_tool_calls=show_tool_calls)
 
     async def enqueue(*args, **kwargs):
         enqueue_calls.append(kwargs)
@@ -846,7 +847,8 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
 
     assert queued_work.execution_state["stream_requested"] is stream_requested
     assert queued_work.execution_state["context_summary_events_requested"] is context_summary_events_requested
-    assert queued_work.execution_state["expose_tool_call_content"] is expose_tool_call_content
+    assert queued_work.execution_state["show_tool_calls"] is show_tool_calls
+    assert queued_work.execution_state["expose_tool_call_content"] is show_tool_calls
     assert queued_work.execution_state["request_ids"] == ["request-1"]
     assert enqueue_calls[0]["dedupe_key"] == build_foreground_message_dedupe_key("session-1", 11)
 
