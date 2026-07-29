@@ -154,7 +154,19 @@ def summarize_files_to_user_result(content: str | None) -> str | None:
     if success:
         message = t(MSG_TOOL_FILE_SEND_SUCCESS)
     else:
-        message = t(MSG_TOOL_FILE_SEND_FAILED)
+        error_messages = []
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            for item in errors:
+                if not isinstance(item, dict):
+                    continue
+                error = item.get("error")
+                if not isinstance(error, str):
+                    continue
+                error = error.strip()
+                if error and error not in error_messages:
+                    error_messages.append(error)
+        message = "\n".join(error_messages) if error_messages else t(MSG_TOOL_FILE_SEND_FAILED)
 
     return json.dumps(
         {
