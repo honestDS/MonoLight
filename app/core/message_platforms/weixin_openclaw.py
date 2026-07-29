@@ -20,6 +20,8 @@ logger = get_logger(__name__)
 class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     platform_type = MessagePlatformType.WEIXIN_OPENCLAW
     sources = frozenset({"weixin-openclaw"})
+    # True 使用流式生成，False 使用非流式生成；最终回复仍由发件箱统一发送。
+    use_stream_dispatch = True
 
     async def run(self, platform_id: int) -> None:
         adapter: WeixinOpenClawAdapter | None = None
@@ -124,6 +126,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     uid=uid,
                     runtime_validator=runtime_validator,
                     message_platform_id=platform_id,
+                    stream_requested=self.use_stream_dispatch,
                 )
         except Exception:
             logger.bind(uid=uid, session_id=message.session_id).exception("message platform message handling failed")

@@ -10,7 +10,8 @@ from app.adapters.weixin_openclaw.constants import (
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,
 )
 from app.adapters.weixin_openclaw.message import extract_text_and_attachments
-from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult
+from app.adapters.weixin_openclaw.schemas import WeixinOpenClawChatResult, WeixinOpenClawMessage
+from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.prompts import WEIXIN_OPENCLAW_CONCISE_OUTPUT_SYSTEM_PROMPT
 
 
@@ -220,6 +221,85 @@ async def test_chat_passes_concise_system_prompt_to_preflight_and_queue(monkeypa
     assert "3000" in expected_system_prompt
     assert captured["preflight_kwargs"]["additional_system_prompt"] == expected_system_prompt
     assert captured["submit_kwargs"]["additional_system_prompt"] == expected_system_prompt
+    assert captured["submit_kwargs"]["stream_requested"] is False
+
+
+@pytest.mark.asyncio
+async def test_chat_passes_explicit_stream_request_to_queue(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    captured = {}
+
+    async def resolve_profile(*args, **kwargs):
+        return SimpleNamespace(id=1, uid="owner")
+
+    async def validate_initial_message_before_save(*args, **kwargs):
+        return None
+
+    async def submit_user_message(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.resolve_profile_for_session", resolve_profile)
+    monkeypatch.setattr(
+        "app.adapters.weixin_openclaw.adapter.ChatDispatcher.validate_initial_message_before_save",
+        validate_initial_message_before_save,
+    )
+    monkeypatch.setattr(
+        "app.adapters.weixin_openclaw.adapter.session_reply_queue_manager.submit_user_message",
+        submit_user_message,
+    )
+
+    result = await adapter.chat(
+        SimpleNamespace(),
+        "hello",
+        "owner",
+        "weixin-openclaw:weixin-user",
+        stream_requested=True,
+    )
+
+    assert result == WeixinOpenClawChatResult()
+    assert captured["stream_requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_platform_handler_passes_stream_dispatch_setting_to_adapter(monkeypatch):
+    handler = WeixinOpenClawPlatformHandler()
+    assert handler.use_stream_dispatch is True
+    captured = {}
+
+    class FakeAdapter:
+        async def handle_message(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+    async def save_context_token(*args, **kwargs):
+        return None
+
+    async def is_current_adapter(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(handler, "_save_context_token", save_context_token)
+    monkeypatch.setattr(handler, "_is_current_adapter", is_current_adapter)
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", lambda: SessionContext())
+
+    await handler._handle_message(
+        FakeAdapter(),
+        WeixinOpenClawMessage(
+            user_id="weixin-user",
+            text="hello",
+            session_id="weixin-openclaw:weixin-user",
+        ),
+        uid="owner",
+        platform_id=7,
+        adapter_signature=("adapter",),
+    )
+
+    assert captured["stream_requested"] is True
 
 
 @pytest.mark.asyncio

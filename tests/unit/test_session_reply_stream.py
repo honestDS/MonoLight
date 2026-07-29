@@ -1166,6 +1166,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     dispatch_kwargs: dict = {}
     metadata_updates = []
     event_db_commits = []
+    stream_event_calls = []
 
     class FakeDb:
         def __init__(self):
@@ -1210,6 +1211,16 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         )
         return True
 
+    async def send_session_stream_event(uid, session_id, event):
+        stream_event_calls.append(
+            {
+                "uid": uid,
+                "session_id": session_id,
+                "event": event,
+                "persisted_event_count": len(published),
+            }
+        )
+
     async def dispatch_stream(**kwargs):
         dispatch_kwargs.update(kwargs)
         yield {
@@ -1225,16 +1236,33 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
             "session_id": "session-1",
         }
         yield {
+            "type": "turn_end",
+            "content": "我先检查",
+            "turn": 1,
+            "response_id": "response-turn-1",
+        }
+        yield {
             "type": "tool_start",
-            "name": "search",
-            "arguments": {"query": "MonoLight"},
+            "name": "execute_shell",
+            "arguments": {"command": "echo 1"},
             "tool_call_id": "call-1",
             "response_id": "response-turn-1",
+            "tool_call_index": 0,
+            "tool_call_count": 2,
+        }
+        yield {
+            "type": "tool_start",
+            "name": "read_text_file",
+            "arguments": {"file_path": "note.txt"},
+            "tool_call_id": "call-2",
+            "response_id": "response-turn-1",
+            "tool_call_index": 1,
+            "tool_call_count": 2,
         }
         work.execution_state["request_ids"].append("request-2")
         yield {
             "type": "tool_end",
-            "name": "search",
+            "name": "execute_shell",
             "result": '{"status":"success"}',
             "tool_call_id": "call-1",
             "response_id": "response-turn-1",
@@ -1279,6 +1307,10 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
         "app.core.session_reply_queue.executor.session_crud.update_llm_request_metadata",
         update_llm_request_metadata,
     )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.executor.send_session_stream_event",
+        send_session_stream_event,
+    )
 
     async def unexpected_non_stream_dispatch(**_kwargs):
         raise AssertionError("stream work must not use ChatDispatcher.dispatch")
@@ -1291,11 +1323,13 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
 
     assert result == {"history": [], "files": None}
     assert dispatch_kwargs["expose_tool_call_content"] is False
-    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [sequence_no for sequence_no, _event in published] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert [event["type"] for _sequence_no, event in published] == [
         "llm_request_metadata",
         "input_dequeued",
         "agent_loop_start",
+        "turn_end",
+        "tool_start",
         "tool_start",
         "tool_end",
         "llm_request_metadata",
@@ -1308,16 +1342,21 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
     assert published[0][1]["work_sequence_no"] == 1
     assert published[0][1]["event_sequence_no"] == 1
     assert published[3][1]["response_id"] == "response-turn-1"
-    assert published[4][1]["tool_call_id"] == "call-1"
-    assert published[6][1]["request_ids"] == ["request-2"]
-    assert published[5][1]["response_id"] == "response-turn-2"
-    assert published[5][1]["work_sequence_no"] == 1
-    assert published[5][1]["event_sequence_no"] == 6
-    assert published[8][1]["response_id"] == "response-turn-2"
+    assert [event["tool_call_id"] for _sequence_no, event in published[4:6]] == ["call-1", "call-2"]
+    assert published[6][1]["tool_call_id"] == "call-1"
+    assert published[8][1]["request_ids"] == ["request-2"]
+    assert published[7][1]["response_id"] == "response-turn-2"
+    assert published[7][1]["work_sequence_no"] == 1
+    assert published[7][1]["event_sequence_no"] == 8
+    assert published[10][1]["response_id"] == "response-turn-2"
     assert all(event["session_id"] == "session-1" for _sequence_no, event in published)
     assert all(event["work_id"] == 7 for _sequence_no, event in published)
     assert db.flush_calls == 0
     assert len(event_db_commits) == len(published)
+    assert len(stream_event_calls) == 1
+    assert stream_event_calls[0]["event"]["tool_names"] == ["execute_shell", "read_text_file"]
+    assert stream_event_calls[0]["event"]["content"] == "我先检查"
+    assert stream_event_calls[0]["persisted_event_count"] == 6
     assert metadata_updates == [
         {
             "db_type": "EventDb",
@@ -1351,7 +1390,7 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
                 "session_id": "session-1",
                 "work_id": 7,
                 "work_sequence_no": 1,
-                "event_sequence_no": 6,
+                "event_sequence_no": 8,
             },
             "commit": False,
         },

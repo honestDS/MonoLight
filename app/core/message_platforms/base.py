@@ -7,6 +7,7 @@ from app.models.message_platform import MessagePlatform, MessagePlatformType
 class MessagePlatformHandler(ABC):
     platform_type: MessagePlatformType
     sources: frozenset[str]
+    use_stream_dispatch: bool = False
 
     @abstractmethod
     def is_pollable(self, platform: MessagePlatform | None) -> bool:

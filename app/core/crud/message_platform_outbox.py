@@ -67,7 +67,7 @@ class CRUDMessagePlatformOutbox(CRUDBase[MessagePlatformOutbox, MessagePlatformO
                     (MessagePlatformOutbox.status == MessagePlatformOutboxStatus.PROCESSING) & (MessagePlatformOutbox.lock_until < now),
                 )
             )
-            .order_by(MessagePlatformOutbox.created_at.asc())
+            .order_by(MessagePlatformOutbox.created_at.asc(), MessagePlatformOutbox.id.asc())
             .limit(limit)
         )
         return [item_id for item_id in result.scalars().all() if item_id is not None]

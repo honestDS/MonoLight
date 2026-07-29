@@ -598,6 +598,173 @@ async def test_notifier_keeps_external_event_unchanged_when_tool_calls_are_hidde
 
 
 @pytest.mark.asyncio
+async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_session(monkeypatch):
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
+
+    async def enqueue(db, **kwargs):
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+    event = {
+        "type": "tool_start",
+        "session_id": "weixin-openclaw:user-1",
+        "work_id": 17,
+        "event_sequence_no": 9,
+        "content": " 我先检查 ",
+        "tool_names": ["execute_shell", "read_text_file"],
+        "arguments": {"command": "type C:\\secret.txt", "access_token": "sensitive-token"},
+        "result": "sensitive tool result",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "execute_shell",
+                        "arguments": '{"command": "type C:\\\\secret.txt"}',
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "sensitive history result"},
+        ],
+        "tool_call_id": "call-1",
+    }
+
+    await notifier_module.send_session_stream_event("uid-1", "weixin-openclaw:user-1", event)
+
+    assert len(enqueued_events) == 1
+    enqueued_event = enqueued_events[0]
+    assert enqueued_event["type"] == "proactive_reply"
+    assert enqueued_event["content"] == (f"我先检查\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='execute_shell')}\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='read_text_file')}")
+    assert enqueued_event["event_id"] == "stream_tool_call:17:9"
+    assert enqueued_event["work_id"] == 17
+    assert enqueued_event["session_id"] == "weixin-openclaw:user-1"
+    serialized_event = json.dumps(enqueued_event)
+    assert "arguments" not in serialized_event
+    assert "result" not in serialized_event
+    assert "history" not in serialized_event
+    assert "tool_call_id" not in serialized_event
+
+
+@pytest.mark.asyncio
+async def test_notifier_does_not_enqueue_stream_tool_summary_when_tool_calls_are_hidden(monkeypatch):
+    enqueue_calls = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=False)
+
+    async def enqueue(db, **kwargs):
+        enqueue_calls.append(kwargs)
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+
+    await notifier_module.send_session_stream_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        {
+            "type": "tool_start",
+            "session_id": "weixin-openclaw:user-1",
+            "work_id": 17,
+            "event_sequence_no": 9,
+            "content": " 我先检查 ",
+            "tool_names": ["execute_shell", "read_text_file"],
+        },
+    )
+
+    assert enqueue_calls == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_uses_stream_terminal_content_without_combining_tool_history(monkeypatch):
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
+
+    async def enqueue(db, **kwargs):
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+    event = {
+        "event_id": "session-reply-work:17:event",
+        "type": "proactive_reply",
+        "session_id": "weixin-openclaw:user-1",
+        "work_id": 17,
+        "_stream_requested": True,
+        "content": "最终回复",
+        "files": [{"id": "file-1"}],
+        "request_ids": ["request-1"],
+        "history": [
+            {
+                "role": "assistant",
+                "content": " 我先检查 ",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "execute_shell",
+                        "arguments": '{"command": "type C:\\\\secret.txt"}',
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "sensitive tool result"},
+        ],
+    }
+
+    await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+
+    assert len(enqueued_events) == 1
+    enqueued_event = enqueued_events[0]
+    assert enqueued_event["content"] == "最终回复"
+    assert t(MSG_MESSAGE_PLATFORM_TOOL_USED, name="execute_shell") not in enqueued_event["content"]
+    assert "history" not in enqueued_event
+    assert "_stream_requested" not in enqueued_event
+    assert enqueued_event["files"] == [{"id": "file-1"}]
+    assert enqueued_event["request_ids"] == ["request-1"]
+    assert enqueued_event["event_id"] == "session-reply-work:17:event"
+    assert enqueued_event["work_id"] == 17
+    assert enqueued_event["session_id"] == "weixin-openclaw:user-1"
+
+
+@pytest.mark.asyncio
 async def test_notifier_combines_tool_output_before_external_text_policy(monkeypatch):
     policy_events = []
     enqueued_events = []

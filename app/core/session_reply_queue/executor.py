@@ -39,7 +39,7 @@ from app.core.crud.session_reply_stream_event import session_reply_stream_event_
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import get_current_locale, t
-from app.core.message_platforms.notifier import send_session_event
+from app.core.message_platforms.notifier import send_session_event, send_session_stream_event
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT, BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import (
     build_identified_work_response,
@@ -161,6 +161,8 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         event["background_task_id"] = int(work.source_id)
     elif work.work_type == SessionReplyWorkType.SCHEDULED_TASK_SUMMARY:
         event["trigger_message_id"] = int(work.source_id)
+    if isinstance(work.execution_state, dict) and work.execution_state.get("stream_requested"):
+        event["_stream_requested"] = True
     return event
 
 
@@ -186,12 +188,14 @@ class _InteractiveWorkStreamEventState:
     work: SessionReplyWorkItem
     next_sequence: int
     dequeued_request_ids: set[str]
+    turn_end_content_by_response_id: dict[str, str]
+    tool_names_by_response_id: dict[str, list[str]]
 
 
 async def _persist_interactive_work_stream_event(
     stream_state: _InteractiveWorkStreamEventState,
     event: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     work = stream_state.work
     persisted_event = {
         **event,
@@ -222,6 +226,7 @@ async def _persist_interactive_work_stream_event(
         )
         await event_db.commit()
     stream_state.next_sequence += 1
+    return persisted_event
 
 
 async def _publish_interactive_work_stream_event(
@@ -244,7 +249,35 @@ async def _publish_interactive_work_stream_event(
                 },
             )
             stream_state.dequeued_request_ids.update(request_ids)
-    await _persist_interactive_work_stream_event(stream_state, event)
+    persisted_event = await _persist_interactive_work_stream_event(stream_state, event)
+
+    response_id = event.get("response_id")
+    if event.get("type") == "turn_end":
+        content = event.get("content")
+        if isinstance(response_id, str) and response_id.strip() and isinstance(content, str) and content.strip():
+            stream_state.turn_end_content_by_response_id[response_id] = content.strip()
+        return
+
+    if event.get("type") != "tool_start" or not isinstance(response_id, str) or not response_id.strip():
+        return
+
+    name = event.get("name")
+    tool_names = stream_state.tool_names_by_response_id.setdefault(response_id, [])
+    tool_names.append(name if isinstance(name, str) else "")
+    tool_call_count = event.get("tool_call_count")
+    if not isinstance(tool_call_count, int) or isinstance(tool_call_count, bool) or tool_call_count <= 0:
+        tool_call_count = 1
+    if len(tool_names) < tool_call_count:
+        return
+
+    stream_event = {
+        **persisted_event,
+        "tool_names": stream_state.tool_names_by_response_id.pop(response_id),
+    }
+    content = stream_state.turn_end_content_by_response_id.pop(response_id, None)
+    if content is not None:
+        stream_event["content"] = content
+    await send_session_stream_event(work.uid, work.session_id, stream_event)
 
 
 async def _fetch_additional_foreground_user_messages(
@@ -585,6 +618,8 @@ async def _dispatch_interactive_work(
         work=work,
         next_sequence=next_stream_sequence,
         dequeued_request_ids=set(),
+        turn_end_content_by_response_id={},
+        tool_names_by_response_id={},
     )
 
     expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))

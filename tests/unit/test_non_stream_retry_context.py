@@ -1247,8 +1247,56 @@ async def test_streamed_pending_audit_publishes_tool_events_before_confirmation(
         "done",
     ]
     assert events[5]["tool_call_id"] == "call-1"
+    assert events[5]["tool_call_index"] == 0
+    assert events[5]["tool_call_count"] == 1
     assert json.loads(events[6]["result"])["status"] == "pending"
     assert json.loads(events[-1]["response"]["choices"][0]["message"]["content"]) == confirmation_payload
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_events_include_batch_order_for_parallel_tools(monkeypatch):
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    events, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_dispatch=True,
+        response_messages=[
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content="我先检查",
+                tool_calls=[
+                    InternalToolCall(
+                        id="call-1",
+                        name="execute_shell",
+                        arguments={"command": "echo 1"},
+                    ),
+                    InternalToolCall(
+                        id="call-2",
+                        name="read_text_file",
+                        arguments={"file_path": "note.txt"},
+                    ),
+                ],
+            ),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ],
+    )
+
+    tool_start_events = [event for event in events if event["type"] == "tool_start"]
+    assert [event["tool_call_index"] for event in tool_start_events] == [0, 1]
+    assert [event["tool_call_count"] for event in tool_start_events] == [2, 2]
+    assert tool_start_events[0]["response_id"] == tool_start_events[1]["response_id"]
     assert unknown_calls == []
 
 

@@ -169,6 +169,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
         has_quote: bool = False,
         message_platform_id: int | None = None,
+        stream_requested: bool = False,
     ) -> WeixinOpenClawChatResult:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)
@@ -198,6 +199,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 source="weixin-openclaw",
                 has_quote=has_quote,
                 additional_system_prompt=build_weixin_openclaw_concise_output_system_prompt(),
+                stream_requested=stream_requested,
             )
             return WeixinOpenClawChatResult()
         except BaseBusinessException as exc:
@@ -301,6 +303,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
         active_tasks: MutableSet[asyncio.Task] | None = None,
         runtime_validator: Callable[[], Awaitable[bool]] | None = None,
         message_platform_id: int | None = None,
+        stream_requested: bool = False,
     ) -> bool:
         resolved_uid = uid or message.user_id
         try:
@@ -318,6 +321,7 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
                 active_tasks=active_tasks,
                 has_quote=message_has_quote(getattr(message, "raw", None)),
                 message_platform_id=message_platform_id,
+                stream_requested=stream_requested,
             )
             if result.text or result.files:
                 sent = False
