@@ -15,6 +15,7 @@ from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.channel_router import get_model_entry
 from app.core.constants import (
     AUDIT_HIGH_RISK_SCORE,
+    CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_AUDIT_CHANNEL_UNAVAILABLE,
     ERR_AUDIT_CONFIG_MISSING,
     ERR_AUDIT_FILE_CHECKS_INVALID,
@@ -48,21 +49,23 @@ from app.core.tools.file_writer import resolve_file_writer_target_path
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
 from app.core.tools.shell import ShellExecutor
 from app.core.utils.background_task_result import serialize_execution_summary
+from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.time import get_local_time
+from app.core.utils.tokenizer import estimate_tokens, truncate_text_to_tokens
 from app.models.audit import AuditFailureType, AuditRecordStatus, AuditToolConclusion
 from app.models.channel import ModelUsage, resolve_model_protocol
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
-from app.providers.llm.client import LLMClient
+from app.providers.llm.client import LLMClient, estimate_request_context_tokens
 
 logger = get_logger(__name__)
 
-AUDIT_FILE_MAX_BYTES = 256 * 1024
-AUDIT_FILE_TOTAL_BYTES = 1024 * 1024
 AUDIT_FILE_MAX_CALLS = 10
 AUDIT_FILE_MAX_ROUNDS = 4
+AUDIT_CONTEXT_SAFETY_RATIO_PERCENT = 10
+AUDIT_CONTEXT_SAFETY_MIN_TOKENS = 256
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA = copy.deepcopy(READ_TEXT_FILE_TOOL_SCHEMA)
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["description"] = "Read any UTF-8 text file as evidence for one tool call in this audit round."
 AUDIT_READ_TEXT_FILE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tool_call_id"] = {
@@ -159,25 +162,104 @@ def _collect_append_file_snapshots(
     return database_snapshots
 
 
+def _audit_max_input_tokens(chat_params: dict[str, Any]) -> int:
+    try:
+        context_window_k = max(1, int(chat_params["context_window_k"]))
+    except (KeyError, TypeError, ValueError):
+        context_window_k = 4
+    try:
+        max_output_tokens = max(0, int(chat_params["max_tokens"]))
+    except (KeyError, TypeError, ValueError):
+        max_output_tokens = 0
+    context_window_tokens = context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+    safety_tokens = max(
+        AUDIT_CONTEXT_SAFETY_MIN_TOKENS,
+        context_window_tokens * AUDIT_CONTEXT_SAFETY_RATIO_PERCENT // 100,
+    )
+    return max(
+        0,
+        context_window_tokens - max_output_tokens - safety_tokens,
+    )
+
+
+def _audit_read_token_budget(messages: list[InternalMessage], chat_params: dict[str, Any]) -> tuple[int, int]:
+    request_context_tokens = estimate_request_context_tokens(messages, [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA])
+    return max(0, _audit_max_input_tokens(chat_params) - request_context_tokens), request_context_tokens
+
+
+def _audit_read_tool_message(tool_call_id: str, read_result: dict[str, Any]) -> InternalMessage:
+    return InternalMessage(
+        role=MessageRole.TOOL,
+        tool_call_id=tool_call_id,
+        content=json.dumps(read_result, ensure_ascii=False),
+    )
+
+
+def _fit_audit_read_result_to_context(
+    messages: list[InternalMessage],
+    tool_call_id: str,
+    read_result: dict[str, Any],
+    chat_params: dict[str, Any],
+) -> dict[str, Any]:
+    content = read_result.get("content")
+    if read_result.get("status") != "ok" or not isinstance(content, str):
+        return read_result
+
+    max_input_tokens = _audit_max_input_tokens(chat_params)
+    tools = [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA]
+    if (
+        estimate_request_context_tokens(
+            [*messages, _audit_read_tool_message(tool_call_id, read_result)],
+            tools,
+        )
+        <= max_input_tokens
+    ):
+        return read_result
+
+    low = 0
+    high = max(estimate_tokens(content), 1)
+    fitted_content = ""
+    while low < high:
+        candidate_tokens = (low + high + 1) // 2
+        candidate_content, _ = truncate_text_to_tokens(content, candidate_tokens)
+        candidate_result = {
+            **read_result,
+            "content": candidate_content,
+            "bytes_read": len(candidate_content.encode("utf-8")),
+            "truncated": True,
+        }
+        candidate_context_tokens = estimate_request_context_tokens(
+            [*messages, _audit_read_tool_message(tool_call_id, candidate_result)],
+            tools,
+        )
+        if candidate_context_tokens <= max_input_tokens:
+            low = candidate_tokens
+            fitted_content = candidate_content
+        else:
+            high = candidate_tokens - 1
+    return {
+        **read_result,
+        "content": fitted_content,
+        "bytes_read": len(fitted_content.encode("utf-8")),
+        "truncated": True,
+    }
+
+
 def _read_for_audit_sync(
     path: str,
     original_tool_call_id: str,
     expected_tool_call_ids: set[str],
     working_directory: Path,
     read_state: dict[str, int],
+    max_tokens: int,
 ) -> dict[str, Any]:
     read_state["calls"] += 1
     if read_state["calls"] > AUDIT_FILE_MAX_CALLS:
         return {"path": path, "tool_call_id": original_tool_call_id, "status": "limit_exceeded", "error": "audit file call limit exceeded"}
     if original_tool_call_id not in expected_tool_call_ids:
         return {"path": path, "tool_call_id": original_tool_call_id, "status": "invalid", "error": "tool_call_id does not belong to this audit round"}
-    remaining_bytes = max(0, AUDIT_FILE_TOTAL_BYTES - read_state["bytes"])
-    read_limit = min(AUDIT_FILE_MAX_BYTES, remaining_bytes)
-    if read_limit <= 0:
-        return {"path": path, "tool_call_id": original_tool_call_id, "status": "limit_exceeded", "truncated": True, "error": "audit file byte limit exceeded"}
     # 审计 LLM 必须拥有系统内最高且高于其他 LLM 的文件读取权限，否则可能因证据不可达而无法正常审计。
-    result = read_text_file(path, working_directory=working_directory, max_bytes=read_limit)
-    read_state["bytes"] += result.bytes_read
+    result = read_text_file(path, working_directory=working_directory, max_tokens=max_tokens)
     return {"path": path, "tool_call_id": original_tool_call_id, **result.to_dict()}
 
 
@@ -187,6 +269,7 @@ async def _execute_audit_read_tool_call(
     expected_tool_call_ids: set[str],
     working_directory: Path,
     read_state: dict[str, int],
+    max_tokens: int,
 ) -> dict[str, Any]:
     if tool_call.name != READ_TEXT_FILE_TOOL_SCHEMA["function"]["name"]:
         return {"status": "denied", "error": "only read_text_file is available"}
@@ -203,6 +286,7 @@ async def _execute_audit_read_tool_call(
         expected_tool_call_ids,
         working_directory,
         read_state,
+        max_tokens,
     )
 
 
@@ -248,20 +332,27 @@ def _file_checks_are_sufficient(
         return False
     remaining_checks = list(model_file_checks)
     for snapshot in snapshots:
-        if snapshot.get("status") != "ok" or snapshot.get("truncated") is not False:
+        if snapshot.get("status") != "ok":
             return False
         matching_checks = [check for check in remaining_checks if _path_aliases(snapshot) & _path_aliases(check)]
         if len(matching_checks) != 1:
             return False
         check = matching_checks[0]
         remaining_checks.remove(check)
-        if check.get("status") != "ok" or check.get("truncated") is not False:
+        if check.get("status") != "ok":
             return False
-        matching_reads = [read for read in file_reads if _path_aliases(snapshot) & _path_aliases(read) and read.get("status") == "ok" and read.get("truncated") is False and isinstance(read.get("content"), str)]
+        matching_reads = [
+            read
+            for read in file_reads
+            if _path_aliases(snapshot) & _path_aliases(read)
+            and read.get("status") == "ok"
+            and isinstance(read.get("content"), str)
+            and all(read.get(field) == snapshot.get(field) for field in ("original_path", "absolute_path", "resolved_path", "size", "sha256", "truncated", "bytes_read"))
+        ]
         if not matching_reads:
             return False
         server_result = matching_reads[0]
-        for field in ("sha256", "size", "file_type", "exists", "absolute_path", "resolved_path", "truncated"):
+        for field in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated", "bytes_read"):
             if field not in check or check[field] != server_result.get(field, snapshot.get(field)):
                 return False
     return not remaining_checks
@@ -318,7 +409,7 @@ def _requires_confirmation_from_evidence(
 ) -> bool:
     if not file_reads:
         return bool(snapshots) or bool(model_file_checks)
-    if any(item.get("status") != "ok" or item.get("truncated") is not False or not isinstance(item.get("content"), str) for item in file_reads):
+    if any(item.get("status") != "ok" or not isinstance(item.get("content"), str) for item in file_reads):
         return True
     if not snapshots:
         return True
@@ -395,24 +486,28 @@ async def _call_auditor(
         protocol = resolve_model_protocol(model_entry)
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE)) from exc
+    chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_BATCH_PROMPT),
         InternalMessage(role=MessageRole.USER, content=json.dumps(request_payload, ensure_ascii=False)),
     ]
     expected_tool_call_ids = {item.get("tool_call_id") for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)}
-    read_state = {"bytes": 0, "calls": 0}
+    read_state = {"calls": 0}
     read_results: list[dict[str, Any]] = []
     for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
         await db.commit()
+        _, request_context_tokens = _audit_read_token_budget(messages, chat_params)
         response = await LLMClient.generate(
             api_key=channel.get_decrypted_api_key(),
             base_url=channel.base_url,
             model_id=model_id,
             messages=messages,
             temperature=0.1,
-            timeout=cfg.channel.chat_channel.chat_timeout,
+            max_tokens=chat_params["max_tokens"],
+            timeout=chat_params["chat_timeout"],
             protocol=protocol,
             tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+            request_context_tokens=request_context_tokens,
             http_proxy=get_channel_http_proxy(channel),
             custom_headers=get_model_custom_headers(model_entry),
         )
@@ -428,20 +523,17 @@ async def _call_auditor(
             )
         messages.append(response.message)
         for tool_call in response.message.tool_calls:
+            read_max_tokens, _ = _audit_read_token_budget(messages, chat_params)
             read_result = await _execute_audit_read_tool_call(
                 tool_call,
                 expected_tool_call_ids=expected_tool_call_ids,
                 working_directory=working_directory,
                 read_state=read_state,
+                max_tokens=read_max_tokens,
             )
+            read_result = _fit_audit_read_result_to_context(messages, tool_call.id, read_result, chat_params)
             read_results.append(read_result)
-            messages.append(
-                InternalMessage(
-                    role=MessageRole.TOOL,
-                    tool_call_id=tool_call.id,
-                    content=json.dumps(read_result, ensure_ascii=False),
-                )
-            )
+            messages.append(_audit_read_tool_message(tool_call.id, read_result))
     raise RuntimeError(t(ERR_AUDIT_FILE_ROUNDS_EXCEEDED))
 
 
@@ -463,6 +555,7 @@ async def _summarize_pending(
         protocol = resolve_model_protocol(model_entry)
     except (KeyError, TypeError, ValueError):
         return fallback_summary, {"fallback": True}
+    chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
     workdir = Path(working_directory or os.getcwd()).resolve(strict=False)
     summary_payload = {
         "working_directory": str(workdir),
@@ -480,20 +573,23 @@ async def _summarize_pending(
         ),
     ]
     expected_tool_call_ids = {item.get("id") for item in tool_calls if isinstance(item, dict) and isinstance(item.get("id"), str)}
-    read_state = {"bytes": 0, "calls": 0}
+    read_state = {"calls": 0}
     read_results: list[dict[str, Any]] = []
     try:
         for _round_index in range(AUDIT_FILE_MAX_ROUNDS):
             await db.commit()
+            _, request_context_tokens = _audit_read_token_budget(messages, chat_params)
             response = await LLMClient.generate(
                 api_key=channel.get_decrypted_api_key(),
                 base_url=channel.base_url,
                 model_id=cfg.security.audit_model_id,
                 messages=messages,
                 temperature=0.1,
-                timeout=cfg.channel.chat_channel.chat_timeout,
+                max_tokens=chat_params["max_tokens"],
+                timeout=chat_params["chat_timeout"],
                 protocol=protocol,
                 tools=[AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+                request_context_tokens=request_context_tokens,
                 http_proxy=get_channel_http_proxy(channel),
                 custom_headers=get_model_custom_headers(model_entry),
             )
@@ -504,14 +600,17 @@ async def _summarize_pending(
                 break
             messages.append(response.message)
             for tool_call in response.message.tool_calls:
+                read_max_tokens, _ = _audit_read_token_budget(messages, chat_params)
                 read_result = await _execute_audit_read_tool_call(
                     tool_call,
                     expected_tool_call_ids=expected_tool_call_ids,
                     working_directory=workdir,
                     read_state=read_state,
+                    max_tokens=read_max_tokens,
                 )
+                read_result = _fit_audit_read_result_to_context(messages, tool_call.id, read_result, chat_params)
                 read_results.append(read_result)
-                messages.append(InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=json.dumps(read_result, ensure_ascii=False)))
+                messages.append(_audit_read_tool_message(tool_call.id, read_result))
     except Exception as exc:
         return fallback_summary, {"fallback": True, "error": str(exc)}
     return fallback_summary, {"fallback": True}

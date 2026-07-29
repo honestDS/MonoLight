@@ -5,6 +5,7 @@ import pytest
 
 from app.core.tools import get_registered_tool_names
 from app.core.tools.read_text_file import READ_TEXT_FILE_TOOL_SCHEMA, read_text_file
+from app.core.utils.tokenizer import estimate_tokens
 
 
 def test_read_text_file_accepts_absolute_and_working_directory_relative_paths(tmp_path):
@@ -12,8 +13,8 @@ def test_read_text_file_accepts_absolute_and_working_directory_relative_paths(tm
     source.parent.mkdir()
     source.write_text("audit evidence", encoding="utf-8")
 
-    absolute = read_text_file(source, working_directory=tmp_path / "other", max_bytes=100)
-    relative = read_text_file("nested/evidence.txt", working_directory=tmp_path, max_bytes=100)
+    absolute = read_text_file(source, working_directory=tmp_path / "other", max_tokens=100)
+    relative = read_text_file("nested/evidence.txt", working_directory=tmp_path, max_tokens=100)
 
     assert absolute.status == "ok"
     assert absolute.content == "audit evidence"
@@ -31,7 +32,7 @@ def test_read_text_file_resolves_symlink_to_a_regular_target(tmp_path):
     except OSError as exc:
         pytest.skip(f"symbolic links are unavailable: {exc}")
 
-    result = read_text_file(link, working_directory=tmp_path, max_bytes=100)
+    result = read_text_file(link, working_directory=tmp_path, max_tokens=100)
 
     assert result.status == "ok"
     assert result.file_type == "symlink"
@@ -40,7 +41,7 @@ def test_read_text_file_resolves_symlink_to_a_regular_target(tmp_path):
 
 
 def test_read_text_file_rejects_directories(tmp_path):
-    result = read_text_file(tmp_path, working_directory=tmp_path, max_bytes=100)
+    result = read_text_file(tmp_path, working_directory=tmp_path, max_tokens=100)
 
     assert result.status == "not_regular"
     assert result.file_type == "directory"
@@ -54,7 +55,7 @@ def test_read_text_file_rejects_symlink_to_non_regular_target(tmp_path):
     except OSError as exc:
         pytest.skip(f"symbolic links are unavailable: {exc}")
 
-    result = read_text_file(link, working_directory=tmp_path, max_bytes=100)
+    result = read_text_file(link, working_directory=tmp_path, max_tokens=100)
 
     assert result.status == "not_regular"
     assert result.file_type == "symlink"
@@ -63,16 +64,30 @@ def test_read_text_file_rejects_symlink_to_non_regular_target(tmp_path):
 
 def test_read_text_file_reports_truncation_and_keeps_full_snapshot_digest(tmp_path):
     source = tmp_path / "large.txt"
-    source.write_text("0123456789", encoding="utf-8")
+    content = "0123456789"
+    source.write_text(content, encoding="utf-8")
 
-    result = read_text_file(source, working_directory=tmp_path, max_bytes=4)
+    result = read_text_file(source, working_directory=tmp_path, max_tokens=1)
 
     assert result.status == "ok"
-    assert result.content == "0123"
-    assert result.bytes_read == 4
+    assert content.startswith(result.content)
+    assert estimate_tokens(result.content) <= 1
+    assert result.bytes_read == len(result.content.encode("utf-8"))
     assert result.truncated is True
-    assert result.size == 10
-    assert result.sha256 == hashlib.sha256(b"0123456789").hexdigest()
+    assert result.size == len(content.encode("utf-8"))
+    assert result.sha256 == hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def test_read_text_file_rejects_exhausted_token_budget(tmp_path):
+    source = tmp_path / "evidence.txt"
+    source.write_text("audit evidence", encoding="utf-8")
+
+    result = read_text_file(source, working_directory=tmp_path, max_tokens=0)
+
+    assert result.status == "limit_exceeded"
+    assert result.content is None
+    assert result.bytes_read == 0
+    assert result.truncated is True
 
 
 def test_read_text_file_is_not_registered_for_normal_models():

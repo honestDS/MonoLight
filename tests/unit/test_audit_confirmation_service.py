@@ -9,10 +9,15 @@ import pytest
 from app.adapters.weixin_openclaw.response import extract_event_reply
 from app.core.audit.confirmation import ConfirmationDecision, is_confirmation_candidate, message_has_quote, parse_confirmation_decision
 from app.core.audit.service import (
+    AUDIT_READ_TEXT_FILE_TOOL_SCHEMA,
+    _audit_max_input_tokens,
+    _audit_read_token_budget,
+    _audit_read_tool_message,
     _call_auditor,
     _collect_append_file_snapshots,
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
+    _fit_audit_read_result_to_context,
     _parse_results,
     _read_for_audit_sync,
     _requires_confirmation_from_evidence,
@@ -26,9 +31,11 @@ from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
 from app.core.utils.dispatcher.process_single_tool import prevalidate_tool_round
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.audit import AuditToolConclusion
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
 from app.models.profile import ProfileConfig
+from app.providers.llm.client import estimate_request_context_tokens
 
 
 def _profile_config() -> ProfileConfig:
@@ -71,8 +78,16 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "does not classify commands" in AUDIT_BATCH_PROMPT
     assert "script_execution marker" in AUDIT_BATCH_PROMPT
     assert "credential-stealing" not in AUDIT_BATCH_PROMPT
-    assert "Script behavior that clearly transmits passwords without authorization or steals credentials must be scored 8-10" in AUDIT_BATCH_PROMPT
-    assert "Otherwise, score password transmission according to its actual risk, but never lower than 1" in AUDIT_BATCH_PROMPT
+    assert "Ordinary read-only operations that do not read or access sensitive information are score 0" in AUDIT_BATCH_PROMPT
+    assert "Reading or accessing sensitive information is an exception" in AUDIT_BATCH_PROMPT
+    assert "Reading, extracting, accessing, copying, or externally transmitting sensitive information must score at least the supplied confirmation_threshold" in AUDIT_BATCH_PROMPT
+    assert "passwords, API keys, access tokens, cookies, private keys" in AUDIT_BATCH_PROMPT
+    assert "Clearly malicious credential theft, collection for unauthorized use, or unauthorized external transmission must still score 8-10" in AUDIT_BATCH_PROMPT
+    assert "must not be reduced because confirmation_threshold is lower" in AUDIT_BATCH_PROMPT
+    assert "Each file_checks entry must contain only original_path" in AUDIT_BATCH_PROMPT
+    assert "Do not return file content in file_checks" in AUDIT_BATCH_PROMPT
+    assert "For a successful truncated read" in AUDIT_BATCH_PROMPT
+    assert "For a failed read" in AUDIT_BATCH_PROMPT
     assert "only when its behavior has been verified as non-high-risk" in AUDIT_BATCH_PROMPT
     assert "clearly high-risk script behavior must be scored 8-10" in AUDIT_BATCH_PROMPT
     assert "must never be capped at 7 merely because it is a script" in AUDIT_BATCH_PROMPT
@@ -695,33 +710,107 @@ def test_batch_result_parser_requires_exact_call_mapping_and_file_results():
 def test_audit_file_reader_accepts_any_path_but_requires_round_tool_id(tmp_path):
     outside_file = tmp_path.parent / "audit-anywhere.txt"
     outside_file.write_text("unrestricted evidence", encoding="utf-8")
-    state = {"bytes": 0, "calls": 0}
+    state = {"calls": 0}
 
-    result = _read_for_audit_sync(str(outside_file), "call-1", {"call-1"}, tmp_path, state)
-    invalid = _read_for_audit_sync(str(outside_file), "other-call", {"call-1"}, tmp_path, state)
+    result = _read_for_audit_sync(str(outside_file), "call-1", {"call-1"}, tmp_path, state, 100)
+    invalid = _read_for_audit_sync(str(outside_file), "other-call", {"call-1"}, tmp_path, state, 100)
 
     assert result["status"] == "ok"
     assert result["content"] == "unrestricted evidence"
     assert result["tool_call_id"] == "call-1"
     assert invalid["status"] == "invalid"
-    assert state == {"bytes": len("unrestricted evidence"), "calls": 2}
+    assert state == {"calls": 2}
 
 
 def test_file_checks_are_bound_to_the_actual_read_snapshot(tmp_path):
     source = tmp_path / "entry.txt"
     source.write_text("evidence", encoding="utf-8")
-    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"calls": 0}, 100)
     snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
-    valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated")}
+    valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated", "bytes_read")}
 
     assert snapshots[0]["content"] == read["content"]
     assert snapshots[0]["bytes_read"] == read["bytes_read"]
     assert snapshots[0]["tool_call_id"] == read["tool_call_id"]
+    assert "content" not in valid_check
     assert _file_checks_are_sufficient(snapshots, [read], [valid_check])
     assert not _file_checks_are_sufficient(snapshots, [read], [{**valid_check, "sha256": "0" * 64}])
+    assert not _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), snapshots, [read], [valid_check])
     assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), snapshots, [read], [])
     assert _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [], [valid_check])
     assert not _requires_confirmation_from_evidence(InternalToolCall(id="call-1", name="execute_shell", arguments={}), [], [], [])
+
+
+def test_truncated_file_check_with_matching_metadata_does_not_require_confirmation(tmp_path):
+    source = tmp_path / "entry.txt"
+    source.write_text("alpha beta gamma delta", encoding="utf-8")
+    tool_call = InternalToolCall(id="call-1", name="execute_shell", arguments={})
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1"}, tmp_path, {"calls": 0}, 1)
+    snapshots = _file_snapshots_from_reads([read], {"call-1"})["call-1"]
+    valid_check = {key: read[key] for key in ("original_path", "absolute_path", "resolved_path", "exists", "file_type", "status", "size", "sha256", "truncated", "bytes_read")}
+
+    assert read["status"] == "ok"
+    assert read["truncated"] is True
+    assert not _requires_confirmation_from_evidence(tool_call, snapshots, [read], [valid_check])
+    assert _requires_confirmation_from_evidence(tool_call, snapshots, [read], [{**valid_check, "bytes_read": valid_check["bytes_read"] + 1}])
+    assert _requires_confirmation_from_evidence(tool_call, snapshots, [{**read, "status": "unreadable", "content": None}], [valid_check])
+
+
+def test_audit_read_token_budget_shrinks_as_messages_grow():
+    chat_params = {"context_window_k": 8, "max_tokens": 512}
+    messages = [InternalMessage(role=MessageRole.SYSTEM, content="audit")]
+
+    initial_budget, initial_context_tokens = _audit_read_token_budget(messages, chat_params)
+    messages.append(InternalMessage(role=MessageRole.USER, content="evidence " * 500))
+    later_budget, later_context_tokens = _audit_read_token_budget(messages, chat_params)
+
+    assert later_context_tokens > initial_context_tokens
+    assert later_budget < initial_budget
+
+
+def test_audit_max_input_tokens_uses_proportional_safety_margin_with_minimum():
+    assert _audit_max_input_tokens({"context_window_k": 8, "max_tokens": 512}) == 8000 - 512 - 800
+    assert _audit_max_input_tokens({"context_window_k": 1, "max_tokens": 512}) == 1000 - 512 - 256
+
+
+def test_audit_read_result_fits_escaped_json_within_input_budget():
+    content = '"\\\n' * 2000
+    read_result = {
+        "path": "evidence.txt",
+        "tool_call_id": "call-1",
+        "original_path": "evidence.txt",
+        "absolute_path": "C:/audit/evidence.txt",
+        "resolved_path": "C:/audit/evidence.txt",
+        "exists": True,
+        "file_type": "regular_file",
+        "size": len(content.encode("utf-8")),
+        "sha256": "a" * 64,
+        "status": "ok",
+        "truncated": False,
+        "content": content,
+        "bytes_read": len(content.encode("utf-8")),
+    }
+    chat_params = {"context_window_k": 2, "max_tokens": 256}
+    messages = [InternalMessage(role=MessageRole.SYSTEM, content="audit")]
+    max_input_tokens = _audit_max_input_tokens(chat_params)
+    original_context_tokens = estimate_request_context_tokens(
+        [*messages, _audit_read_tool_message("read-1", read_result)],
+        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+    )
+
+    fitted_result = _fit_audit_read_result_to_context(messages, "read-1", read_result, chat_params)
+    fitted_context_tokens = estimate_request_context_tokens(
+        [*messages, _audit_read_tool_message("read-1", fitted_result)],
+        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+    )
+
+    assert original_context_tokens > max_input_tokens
+    assert fitted_context_tokens <= max_input_tokens
+    assert content.startswith(fitted_result["content"])
+    assert fitted_result["bytes_read"] == len(fitted_result["content"].encode("utf-8"))
+    assert fitted_result["truncated"] is True
+    assert fitted_result["sha256"] == read_result["sha256"]
+    assert fitted_result["size"] == read_result["size"]
 
 
 def test_append_file_snapshot_records_missing_target_and_ignores_non_append_or_outside_paths(tmp_path):
@@ -848,6 +937,8 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     assert len(calls) == 2
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
     assert all(tool["function"]["name"] == "read_text_file" for tool in calls[1]["tools"])
+    assert all(call["max_tokens"] == 2048 for call in calls)
+    assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)
     assert json.loads(calls[0]["messages"][1].content)["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"}
     assert response_context["file_reads"][0]["content"] == "server evidence"
@@ -976,43 +1067,45 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
         assert result.confirmation_payload is None
 
 
-def test_audit_file_reader_enforces_total_bytes_and_call_count(monkeypatch, tmp_path):
+def test_audit_file_reader_enforces_token_truncation_and_call_count(monkeypatch, tmp_path):
     import app.core.audit.service as service
 
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
-    first.write_text("12345", encoding="utf-8")
-    second.write_text("abcdef", encoding="utf-8")
-    monkeypatch.setattr(service, "AUDIT_FILE_MAX_BYTES", 4)
-    monkeypatch.setattr(service, "AUDIT_FILE_TOTAL_BYTES", 6)
+    first.write_text("alpha beta gamma delta", encoding="utf-8")
+    second.write_text("one two three four", encoding="utf-8")
     monkeypatch.setattr(service, "AUDIT_FILE_MAX_CALLS", 2)
-    state = {"bytes": 0, "calls": 0}
+    state = {"calls": 0}
 
-    first_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state)
-    second_result = service._read_for_audit_sync(str(second), "call-1", {"call-1"}, tmp_path, state)
-    third_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state)
+    first_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state, 1)
+    second_result = service._read_for_audit_sync(str(second), "call-1", {"call-1"}, tmp_path, state, 1)
+    third_result = service._read_for_audit_sync(str(first), "call-1", {"call-1"}, tmp_path, state, 1)
 
-    assert first_result["content"] == "1234"
-    assert second_result["content"] == "ab"
+    assert "alpha beta gamma delta".startswith(first_result["content"])
+    assert "one two three four".startswith(second_result["content"])
+    assert estimate_tokens(first_result["content"]) <= 1
+    assert estimate_tokens(second_result["content"]) <= 1
+    assert first_result["bytes_read"] == len(first_result["content"].encode("utf-8"))
+    assert second_result["bytes_read"] == len(second_result["content"].encode("utf-8"))
     assert first_result["truncated"] is True
     assert second_result["truncated"] is True
     assert third_result["status"] == "limit_exceeded"
-    assert state == {"bytes": 6, "calls": 3}
+    assert state == {"calls": 3}
 
 
 @pytest.mark.parametrize("file_kind", ["missing", "truncated", "non_utf8"])
-def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(monkeypatch, tmp_path, file_kind):
+def test_read_failure_snapshots_are_rechecked_before_confirmed_execution(tmp_path, file_kind):
     import app.core.audit.service as service
     from app.core.session_reply_queue import executor as executor_module
 
-    monkeypatch.setattr(service, "AUDIT_FILE_MAX_BYTES", 4)
     target = tmp_path / f"{file_kind}.txt"
     if file_kind == "truncated":
         target.write_bytes(b"0123456789")
     elif file_kind == "non_utf8":
         target.write_bytes(b"\xff\xfe")
 
-    read = service._read_for_audit_sync(str(target), "call-1", {"call-1"}, tmp_path, {"bytes": 0, "calls": 0})
+    max_tokens = 1 if file_kind == "truncated" else 100
+    read = service._read_for_audit_sync(str(target), "call-1", {"call-1"}, tmp_path, {"calls": 0}, max_tokens)
     snapshots = service._file_snapshots_from_reads([read], {"call-1"})["call-1"]
     assert len(snapshots) == 1
     assert snapshots[0]["absolute_path"] == str(target)
@@ -1085,7 +1178,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     cfg = _profile_config()
     source = tmp_path / "evidence.txt"
     source.write_text("review me", encoding="utf-8")
-    read = _read_for_audit_sync(str(source), "call-1", {"call-1", "call-2"}, tmp_path, {"bytes": 0, "calls": 0})
+    read = _read_for_audit_sync(str(source), "call-1", {"call-1", "call-2"}, tmp_path, {"calls": 0}, 100)
     captured = {}
 
     class FakeDb:
@@ -1392,6 +1485,8 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert summary == "Run test.py, which deletes important.txt; execution is awaiting confirmation."
     assert len(calls) == 2
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
+    assert all(call["max_tokens"] == 2048 for call in calls)
+    assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     tool_payload = json.loads(calls[1]["messages"][-1].content)
     assert "Path('important.txt').unlink()" in tool_payload["content"]
     assert "locale code: en" in system_prompt

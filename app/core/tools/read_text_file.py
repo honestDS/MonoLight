@@ -1,9 +1,12 @@
+import codecs
 import hashlib
 import os
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from app.core.utils.tokenizer import truncate_text_to_tokens
 
 READ_TEXT_FILE_TOOL_SCHEMA = {
     "type": "function",
@@ -77,11 +80,11 @@ def _error_result(
     )
 
 
-def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes: int) -> TextFileReadResult:
+def read_text_file(path: str | Path, *, working_directory: str | Path, max_tokens: int) -> TextFileReadResult:
     """Read a regular UTF-8 file without applying a path allowlist.
 
     The returned digest covers the complete file, while ``content`` is limited
-    to ``max_bytes``. This lets the audit record detect changes even when the
+    to ``max_tokens``. This lets the audit record detect changes even when the
     model received truncated evidence.
     """
     original_path, absolute_path, resolved_path = _path_parts(path, working_directory)
@@ -151,20 +154,25 @@ def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes
             error="path target is not a regular file",
         )
 
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
-        return _error_result(
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
+        return TextFileReadResult(
             original_path=original_path,
-            absolute_path=absolute_path,
-            resolved_path=resolved_path,
+            absolute_path=str(absolute_path),
+            resolved_path=str(resolved_path),
             exists=True,
             file_type=file_type,
+            size=target_stat.st_size,
+            sha256=None,
             status="limit_exceeded",
-            error="file byte limit is exhausted",
+            truncated=target_stat.st_size > 0,
+            error="file token limit is exhausted",
         )
 
     digest = hashlib.sha256()
-    content_parts: list[bytes] = []
-    content_bytes = 0
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    content = ""
+    content_complete = True
+    encoding_error = False
     total_size = 0
     try:
         with absolute_path.open("rb") as file_handle:
@@ -179,14 +187,29 @@ def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes
                     status="not_regular",
                     error="path is not a regular file",
                 )
-            while chunk := file_handle.read(1024 * 1024):
+            while chunk := file_handle.read(64 * 1024):
                 digest.update(chunk)
                 total_size += len(chunk)
-                if content_bytes < max_bytes:
-                    selected = chunk[: max_bytes - content_bytes]
-                    content_parts.append(selected)
-                    content_bytes += len(selected)
-    except (OSError, UnicodeError):
+                if encoding_error or not content_complete:
+                    continue
+                try:
+                    decoded_chunk = decoder.decode(chunk, final=False)
+                except UnicodeDecodeError:
+                    encoding_error = True
+                    continue
+                if content_complete and decoded_chunk:
+                    content, truncated = truncate_text_to_tokens(content + decoded_chunk, max_tokens)
+                    content_complete = not truncated
+            if not encoding_error and content_complete:
+                try:
+                    decoded_tail = decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    encoding_error = True
+                else:
+                    if content_complete and decoded_tail:
+                        content, truncated = truncate_text_to_tokens(content + decoded_tail, max_tokens)
+                        content_complete = not truncated
+    except OSError:
         return _error_result(
             original_path=original_path,
             absolute_path=absolute_path,
@@ -197,10 +220,7 @@ def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes
             error="file could not be read",
         )
 
-    selected_content = b"".join(content_parts)
-    try:
-        content = selected_content.decode("utf-8")
-    except UnicodeDecodeError:
+    if encoding_error:
         return TextFileReadResult(
             original_path=original_path,
             absolute_path=str(absolute_path),
@@ -210,10 +230,11 @@ def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes
             size=total_size,
             sha256=digest.hexdigest(),
             status="unreadable",
-            truncated=total_size > max_bytes,
-            bytes_read=content_bytes,
+            truncated=total_size > 0,
             error="file is not valid UTF-8 text",
         )
+
+    content_bytes = content.encode("utf-8")
 
     return TextFileReadResult(
         original_path=original_path,
@@ -224,7 +245,7 @@ def read_text_file(path: str | Path, *, working_directory: str | Path, max_bytes
         size=total_size,
         sha256=digest.hexdigest(),
         status="ok",
-        truncated=total_size > max_bytes,
+        truncated=total_size > len(content_bytes),
         content=content,
-        bytes_read=content_bytes,
+        bytes_read=len(content_bytes),
     )
