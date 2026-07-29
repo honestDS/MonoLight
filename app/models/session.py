@@ -28,6 +28,7 @@ class ChatSession(SQLModel, table=True):
     )
     title: str | None = Field(default=None, max_length=255)
     enable_markdown: bool = Field(default=False)
+    show_tool_calls: bool = Field(default=True)
     context_summary: str | None = Field(default=None)
     context_summary_message_id: int | None = Field(default=None, index=True)
     context_summary_revision: int = Field(default=0, ge=0)

@@ -127,6 +127,7 @@ class InteractiveDispatcherMixin:
         execution_checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         context_summary_work_validity_checker: ContextSummaryWorkValidityChecker | None = None,
         expose_tool_call_content: bool = True,
+        show_tool_calls: bool = True,
         additional_system_prompt: str | None = None,
         dispatcher_mode: Literal["non_stream", "stream"] = "non_stream",
     ):
@@ -259,6 +260,7 @@ class InteractiveDispatcherMixin:
                             current_turn=current_turn,
                             response_id=response_id,
                             expose_tool_call_content=expose_tool_call_content,
+                            show_tool_calls=show_tool_calls,
                         )
 
                         while True:
@@ -404,8 +406,18 @@ class InteractiveDispatcherMixin:
                                 latest_llm_request_metadata.update(provider_token_metrics)
                                 if metadata_changed and stream_event_callback is not None:
                                     await stream_event_callback(dict(latest_llm_request_metadata))
-                                await _emit_agent_loop_output(stream_state)
-                                if stream_event_callback is not None and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content:
+                                hidden_tool_round = bool(ai_msg.tool_calls) and not show_tool_calls
+                                if not hidden_tool_round:
+                                    await _emit_agent_loop_output(stream_state)
+                                if (
+                                    stream_event_callback is not None
+                                    and show_tool_calls
+                                    and not hidden_tool_round
+                                    and expose_tool_call_content
+                                    and not stream_state.emitted_stream_content
+                                    and isinstance(ai_msg.content, str)
+                                    and ai_msg.content
+                                ):
                                     await stream_event_callback(
                                         {
                                             "type": "content",
@@ -415,8 +427,11 @@ class InteractiveDispatcherMixin:
                                         }
                                     )
                                     stream_state.emitted_stream_content = True
-                                if not expose_tool_call_content and not ai_msg.tool_calls:
-                                    for content_chunk in stream_state.buffered_content_chunks:
+                                if stream_event_callback is not None and (not expose_tool_call_content or not show_tool_calls) and not ai_msg.tool_calls:
+                                    buffered_content_chunks = stream_state.buffered_content_chunks or (
+                                        [ai_msg.content] if isinstance(ai_msg.content, str) and ai_msg.content else []
+                                    )
+                                    for content_chunk in buffered_content_chunks:
                                         await stream_event_callback(
                                             {
                                                 "type": "content",
@@ -468,7 +483,7 @@ class InteractiveDispatcherMixin:
                             dedupe_key=final_message_dedupe_key if not ai_msg.tool_calls and new_user_batch is None else None,
                             created_at=attempt_started_at if stream_event_callback is not None else None,
                         )
-                        if stream_event_callback is not None:
+                        if stream_event_callback is not None and not (ai_msg.tool_calls and not show_tool_calls):
                             turn_end_content = saved_msg.content if saved_msg is not None else ai_msg.content
                             if ai_msg.tool_calls:
                                 turn_end_content = ai_msg.content if expose_tool_call_content else None
@@ -540,7 +555,7 @@ class InteractiveDispatcherMixin:
                             await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                             continue
 
-                        if stream_event_callback is not None:
+                        if stream_event_callback is not None and show_tool_calls:
                             for tool_call in ai_msg.tool_calls:
                                 await stream_event_callback(
                                     {
@@ -578,7 +593,7 @@ class InteractiveDispatcherMixin:
                                     for stored_tool_result in stored_tool_results:
                                         messages.append(stored_tool_result)
                                         turn_messages.append(stored_tool_result)
-                                        if stream_event_callback is not None:
+                                        if stream_event_callback is not None and show_tool_calls:
                                             tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
                                             await stream_event_callback(
                                                 {
@@ -615,7 +630,7 @@ class InteractiveDispatcherMixin:
                                     for stored_tool_result in stored_tool_results:
                                         messages.append(stored_tool_result)
                                         turn_messages.append(stored_tool_result)
-                                        if stream_event_callback is not None:
+                                        if stream_event_callback is not None and show_tool_calls:
                                             tool_call = _find_tool_call_by_id(ai_msg.tool_calls, stored_tool_result.tool_call_id)
                                             await stream_event_callback(
                                                 {
@@ -634,7 +649,7 @@ class InteractiveDispatcherMixin:
                                 for tool_result, stored_tool_result in zip(audit_round.tool_results, stored_tool_results, strict=True):
                                     messages.append(stored_tool_result)
                                     turn_messages.append(stored_tool_result)
-                                    if stream_event_callback is not None:
+                                    if stream_event_callback is not None and show_tool_calls:
                                         tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_result.tool_call_id)
                                         await stream_event_callback(
                                             {
@@ -648,7 +663,7 @@ class InteractiveDispatcherMixin:
                             else:
                                 for tool_result in audit_round.tool_results:
                                     stored_tool_result = await save_tool_response(db, session_id, uid, profile.id, tool_result, messages, turn_messages)
-                                    if stream_event_callback is not None:
+                                    if stream_event_callback is not None and show_tool_calls:
                                         tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_result.tool_call_id)
                                         await stream_event_callback(
                                             {
@@ -665,7 +680,10 @@ class InteractiveDispatcherMixin:
                                 final_ai_content = confirmation_content
                                 response = LLMResponse(
                                     choices=[LLMChoice(message=LLMChoiceMessage(role=MessageRole.ASSISTANT, content=confirmation_content), finish_reason=True, created_at=time.time())],
-                                    history=dump_output_history(turn_messages),
+                                    history=dump_output_history(
+                                        turn_messages,
+                                        show_tool_calls=show_tool_calls,
+                                    ),
                                     files=files_to_user or None,
                                 ).model_dump()
                                 if latest_llm_request_metadata is not None:
@@ -744,7 +762,7 @@ class InteractiveDispatcherMixin:
                                             messages,
                                             turn_messages,
                                         )
-                                        if stream_event_callback is not None:
+                                        if stream_event_callback is not None and show_tool_calls:
                                             await stream_event_callback(
                                                 {
                                                     "type": "tool_end",
@@ -832,7 +850,7 @@ class InteractiveDispatcherMixin:
                                     )
                                 else:
                                     await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
-                                if stream_event_callback is not None:
+                                if stream_event_callback is not None and show_tool_calls:
                                     tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_res.tool_call_id)
                                     await stream_event_callback(
                                         {
@@ -907,7 +925,7 @@ class InteractiveDispatcherMixin:
                 ],
                 history=dump_output_history(
                     turn_messages,
-                    expose_tool_call_content=expose_tool_call_content,
+                    show_tool_calls=show_tool_calls,
                 ),
                 files=files_to_user or None,
             ).model_dump()

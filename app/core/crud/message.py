@@ -308,11 +308,23 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         )
         return result.scalars().all()
 
-    async def get_history_paged(self, db: AsyncSession, *, session_id: str, uid: str, limit: int = 20, offset: int = 0) -> list[Message]:
+    async def get_history_paged(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        limit: int = 20,
+        offset: int = 0,
+        include_tool_messages: bool = True,
+    ) -> list[Message]:
         """
         用于前端分页加载会话历史记录
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).order_by(Message.created_at.desc()).limit(limit).offset(offset)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+        if not include_tool_messages:
+            stmt = stmt.where(Message.type.notin_((MessageType.TOOL_CALL, MessageType.TOOL_RESULT)))
+        stmt = stmt.order_by(Message.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(stmt)
         return result.scalars().all()
 
@@ -335,6 +347,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
                 User.username,
                 ChatSession.title,
                 ChatSession.enable_markdown,
+                ChatSession.show_tool_calls,
                 ChatSession.profile_id,
                 ChatSession.profile_override_id,
                 ChatSession.source,

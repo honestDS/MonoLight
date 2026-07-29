@@ -44,6 +44,7 @@ export default {
   audit_high_risk_warning: '安全审计判定该操作为高风险，忽略审计结果并放行可能导致不可逆的数据损失、系统损坏或敏感信息泄露，仅在确认风险可接受时继续。',
   audit_high_risk_warning_title: '高风险操作确认',
   new_session: '新建会话',
+  tool_output: '工具信息',
   default_title: '新会话',
   profile: '配置文件',
   inherited_profile: '消息平台或默认配置',

@@ -7,8 +7,9 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.js'
 import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop, stopAgentLoop } from './workLifecycleTracker.js'
-import { formatTimestamp, isToolCall, isToolResult, getToolCalls, getToolCallName, getToolCallArguments, getToolCallContent, getToolResultName, getToolResultContent, getMessageTimestamp, normalizeMessageContent, getMessageDedupeKeys, findMessageReplacementIndex, mergeRemoteMessage, mergeRemoteMessageIntoList } from '../../utils'
+import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, mergeRemoteMessageIntoList, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
+import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 
@@ -42,13 +43,13 @@ const getAuditConfirmationRecordId = (message) => {
 }
 
 const parseAuditConfirmationResponse = (response) => {
-  const content = response?.choices?.[0]?.message?.content
-  try {
-    const payload = typeof content === 'string' ? JSON.parse(content) : content
-    return payload?.type === 'audit_confirmation' ? payload : null
-  } catch {
-    return null
+  for (const content of [response?.choices?.[0]?.message?.content, response?.content]) {
+    try {
+      const payload = typeof content === 'string' ? JSON.parse(content) : content
+      if (payload?.type === 'audit_confirmation') return payload
+    } catch {}
   }
+  return null
 }
 
 const normalizeLlmRequestMetadata = (metadata) => {
@@ -125,6 +126,7 @@ export function useChatSession() {
   
   // 默认 Markdown 开关状态（用于未选择会话时）
   const enableMarkdownDefault = ref(false)
+  const showToolCallsDefault = ref(true)
   const newSessionProfileOverrideId = ref(null)
   
   // 2. 会话管理
@@ -135,6 +137,28 @@ export function useChatSession() {
       session => session.session_id === sessionManager.currentSessionId.value
     ) || null
   )
+  const currentSessionShowToolCalls = computed({
+    get: () => {
+      if (!sessionManager.currentSessionId.value) return showToolCallsDefault.value
+      return currentSession.value?.show_tool_calls ?? true
+    },
+    set: (showToolCalls) => {
+      const enabled = Boolean(showToolCalls)
+      const sessionId = sessionManager.currentSessionId.value
+      if (!sessionId) {
+        showToolCallsDefault.value = enabled
+        return
+      }
+
+      const sessionIndex = sessionManager.sessions.value.findIndex(session => session.session_id === sessionId)
+      if (sessionIndex !== -1) {
+        sessionManager.sessions.value[sessionIndex] = {
+          ...sessionManager.sessions.value[sessionIndex],
+          show_tool_calls: enabled
+        }
+      }
+    }
+  })
   const llmRequestMetadata = computed(() => {
     const sessionId = sessionManager.currentSessionId.value
     if (!sessionId) return null
@@ -174,6 +198,30 @@ export function useChatSession() {
 
   // 4. 消息处理
   const messageProcessor = useMessageProcessor()
+  const filterNewMessages = (messages) => filterToolOutputMessages(
+    messages,
+    currentSessionShowToolCalls.value
+  )
+  const processAiResponse = (response, thinkingId = null, requestId = null) => {
+    messageProcessor.processAiResponse(
+      chatState.messages,
+      filterResponseHistoryToolOutput(response, currentSessionShowToolCalls.value),
+      thinkingId,
+      requestId
+    )
+  }
+  const selectNewSession = (session) => {
+    const sessionIndex = sessionManager.sessions.value.findIndex(item => item.session_id === session.session_id)
+    if (sessionIndex === -1) {
+      sessionManager.sessions.value.unshift(session)
+    } else {
+      sessionManager.sessions.value[sessionIndex] = {
+        ...sessionManager.sessions.value[sessionIndex],
+        ...session
+      }
+    }
+    sessionManager.selectSession(session, null, false, false)
+  }
 
   const applyLifecycleEvent = (updateMessages, event, isCurrentRequestSession) => {
     if (!isCurrentRequestSession()) return
@@ -246,21 +294,21 @@ export function useChatSession() {
 
   // ==================== 设置模块间连接 ====================
   
-  // 设置会话管理的历史记录加载回调
-  sessionManager.setLoadHistoryCallback(async (pageCount) => {
+  const loadInitialSessionHistory = async (pageCount) => {
     const requestedSessionId = sessionManager.currentSessionId.value
     const historyData = await sessionManager.loadSessionHistory(pageCount)
     if (requestedSessionId !== sessionManager.currentSessionId.value) return
 
     restoringHistoryScroll = true
     try {
-      if (historyData && historyData.length > 0) {
+      const visibleHistoryData = filterNewMessages(historyData)
+      if (visibleHistoryData.length > 0) {
         // 插入到消息列表开头
-        chatState.insertMessage(0, historyData.map(normalizeHistoryMessage), true)
+        chatState.insertMessage(0, visibleHistoryData.map(normalizeHistoryMessage), true)
       }
       initialHistoryLoaded.value = true
       await nextTick()
-      if (historyData && historyData.length > 0) {
+      if (visibleHistoryData.length > 0) {
         await chatState.scrollToBottom('auto')
       }
     } finally {
@@ -268,48 +316,76 @@ export function useChatSession() {
         restoringHistoryScroll = false
       })
     }
-  })
+  }
+
+  // 设置会话管理的历史记录加载回调
+  sessionManager.setLoadHistoryCallback((pageCount) => loadInitialSessionHistory(pageCount))
+
+  const reloadCurrentSessionHistory = async () => {
+    if (!sessionManager.currentSessionId.value) return
+    initialHistoryLoaded.value = false
+    chatState.clearMessages()
+    sessionManager.resetPagination()
+    await loadInitialSessionHistory(2)
+  }
 
   const mergeLatestSessionHistory = async (sessionId = sessionManager.currentSessionId.value) => {
     if (!sessionId || sessionId !== sessionManager.currentSessionId.value) return
     const res = await chatApi.sessionsHistory(sessionId, 1, 20)
     if (sessionId !== sessionManager.currentSessionId.value) return
-    const historyData = res.data?.data || []
+    const historyData = filterNewMessages(res.data?.data || [])
     if (!historyData.length) return
 
     const existingKeys = new Set(chatState.messages.value.flatMap(m => [...getMessageDedupeKeys(m)]))
-    const newMessages = []
+    let mergedMessages = [...chatState.messages.value]
+    let changed = false
     for (const item of historyData) {
       const message = normalizeHistoryMessage({ ...item, db_id: item.id })
+      if (isPlainAssistantResponse(message)) {
+        const replacementIndex = findAssistantResponseReplacementIndex(mergedMessages, message)
+        if (replacementIndex !== -1) {
+          mergedMessages = mergeAssistantResponseIntoList(mergedMessages, message)
+        } else {
+          mergedMessages.push(message)
+        }
+        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+        changed = true
+        continue
+      }
+
       const auditRecordId = getAuditConfirmationRecordId(message)
       if (auditRecordId) {
-        const existingIndex = chatState.messages.value.findIndex(existing => getAuditConfirmationRecordId(existing) === auditRecordId)
+        const existingIndex = mergedMessages.findIndex(existing => getAuditConfirmationRecordId(existing) === auditRecordId)
         if (existingIndex !== -1) {
-          chatState.messages.value[existingIndex] = mergeRemoteMessage(chatState.messages.value[existingIndex], message)
+          mergedMessages[existingIndex] = mergeRemoteMessage(mergedMessages[existingIndex], message)
           getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+          changed = true
           continue
         }
       }
-      const replacementIndex = findMessageReplacementIndex(chatState.messages.value, message)
+      const replacementIndex = findMessageReplacementIndex(mergedMessages, message)
       if (replacementIndex !== -1) {
-        chatState.messages.value[replacementIndex] = mergeRemoteMessage(chatState.messages.value[replacementIndex], message)
+        mergedMessages[replacementIndex] = mergeRemoteMessage(mergedMessages[replacementIndex], message)
         getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+        changed = true
         continue
       }
-      const transientIndex = findTransientHistoryMessageIndex(chatState.messages.value, message)
+      const transientIndex = findTransientHistoryMessageIndex(mergedMessages, message)
       if (transientIndex !== -1) {
-        const localMessage = chatState.messages.value[transientIndex]
-        chatState.messages.value[transientIndex] = mergeRemoteMessage(localMessage, message)
+        const localMessage = mergedMessages[transientIndex]
+        mergedMessages[transientIndex] = mergeRemoteMessage(localMessage, message)
         getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+        changed = true
         continue
       }
       const messageKeys = getMessageDedupeKeys(message)
       if ([...messageKeys].some(key => existingKeys.has(key))) continue
-      newMessages.push(message)
+      mergedMessages.push(message)
       messageKeys.forEach(key => existingKeys.add(key))
+      changed = true
     }
-    if (newMessages.length) {
-      chatState.messages.value.push(...newMessages)
+    if (changed) {
+      chatState.messages.value = mergedMessages
     }
   }
 
@@ -491,7 +567,7 @@ export function useChatSession() {
   const applyAuditToolResultsUpdate = (data, { skipSequenceGuard = false } = {}) => {
     if (!skipSequenceGuard && shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-    const messages = Array.isArray(data.messages) ? data.messages : []
+    const messages = filterNewMessages(Array.isArray(data.messages) ? data.messages : [])
     for (const remoteMessage of messages) {
       if (!remoteMessage || typeof remoteMessage !== 'object') continue
       const normalizedMessage = normalizeHistoryMessage({
@@ -589,13 +665,21 @@ export function useChatSession() {
       requestSessionId,
       newSessionProfileOverrideId.value
     )
-    await performHttpSend(text, attachmentsToSent, userMsgId, requestSessionId, requestId, newProfileOverrideId)
+    await performHttpSend(
+      text,
+      attachmentsToSent,
+      userMsgId,
+      requestSessionId,
+      requestId,
+      newProfileOverrideId,
+      currentSessionShowToolCalls.value
+    )
   }
 
   /**
    * 实际执行 HTTP 请求（支持自动二次请求）
    */
-  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null) => {
+  const performHttpSend = async (text, attachmentsToSent = [], userMsgId = null, requestSessionId = null, requestId = null, profileOverrideId = null, showToolCalls = true) => {
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
     let finalResponseProcessed = false
     try {
@@ -605,6 +689,7 @@ export function useChatSession() {
         attachments: attachmentsToSent,
         requestId,
         profileOverrideId,
+        showToolCalls,
         callbacks: {
           ...createLifecycleCallbacks(isCurrentRequestSession),
           deferAgentLoopOutput: true,
@@ -615,9 +700,11 @@ export function useChatSession() {
             const completedResponse = {
               ...responseData,
               ...(responseData?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
-              ...(responseData?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {})
+              ...(responseData?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {}),
+              ...(responseData?.message_id == null && data.message_id != null ? { message_id: data.message_id } : {}),
+              ...(responseData?.files == null && data.files != null ? { files: data.files } : {})
             }
-            messageProcessor.processAiResponse(chatState.messages, completedResponse, null, requestIdParam || requestId)
+            processAiResponse(completedResponse, null, requestIdParam || requestId)
             finalResponseProcessed = true
           },
           onContextSummaryStart: (data) => {
@@ -642,7 +729,13 @@ export function useChatSession() {
         console.log('HTTP 模式同步新会话 ID 并触发标题生成:', newId)
         
         // 1. 设置当前会话 ID (静默选择)
-        sessionManager.selectSession({ session_id: newId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value, profile_override_id: profileOverrideId }, null, false, false)
+        selectNewSession({
+          session_id: newId,
+          title: t('chat.default_title'),
+          enable_markdown: enableMarkdownDefault.value,
+          show_tool_calls: showToolCalls,
+          profile_override_id: profileOverrideId
+        })
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
@@ -653,7 +746,7 @@ export function useChatSession() {
         sessionManager.updateSessionTitle(newId, text)
         
         // 3. 自动发起第二次真实请求
-        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId)
+        return performHttpSend(text, attachmentsToSent, userMsgId, newId, requestId, profileOverrideId, showToolCalls)
       }
 
       if (requestSessionId !== sessionManager.currentSessionId.value) return
@@ -671,7 +764,7 @@ export function useChatSession() {
 
       const auditConfirmation = parseAuditConfirmationResponse(response)
       if (!finalResponseProcessed) {
-        messageProcessor.processAiResponse(chatState.messages, response, null, requestId)
+        processAiResponse(response, null, requestId)
       }
       if (auditConfirmation) {
         chatState.loading.value = false
@@ -742,6 +835,7 @@ export function useChatSession() {
       requestSessionId,
       newSessionProfileOverrideId.value
     )
+    const showToolCalls = currentSessionShowToolCalls.value
     const isCurrentRequestSession = () => requestSessionId === sessionManager.currentSessionId.value
 
     // 直接包装需要传递给 transport.wsSend 的 callbacks 选项
@@ -763,10 +857,12 @@ export function useChatSession() {
       },
       onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam, workId) => {
         if (!isCurrentRequestSession()) return
+        if (!currentSessionShowToolCalls.value) return
         messageProcessor.processStreamToolStart(chatState.messages, toolCall, null, responseId, requestIdParam, workId)
        },
        onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
          if (!isCurrentRequestSession()) return
+         if (!currentSessionShowToolCalls.value) return
          messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
@@ -793,13 +889,11 @@ export function useChatSession() {
           }, isCurrentRequestSession)
         }
         if (
-          data?.source === 'foreground' &&
           Array.isArray(data?.request_ids) &&
           data.request_ids.some(id => String(id) === String(requestId))
         ) return
         const workId = data.work_id
         if (
-          data.source === 'foreground' &&
           workId !== undefined &&
           workId !== null &&
           workId !== '' &&
@@ -839,7 +933,13 @@ export function useChatSession() {
         requestSessionId = newSessionId
         console.log('WS 模式同步新会话 ID 并触发标题生成:', newSessionId)
         // 1. 更新本地状态（静默同步）
-        sessionManager.selectSession({ session_id: newSessionId, title: t('chat.default_title'), enable_markdown: enableMarkdownDefault.value, profile_override_id: newProfileOverrideId }, null, false, false)
+        selectNewSession({
+          session_id: newSessionId,
+          title: t('chat.default_title'),
+          enable_markdown: enableMarkdownDefault.value,
+          show_tool_calls: showToolCalls,
+          profile_override_id: newProfileOverrideId
+        })
         
         // 同步新建会话的 Markdown 设置
         if (enableMarkdownDefault.value) {
@@ -988,7 +1088,7 @@ export function useChatSession() {
           const auditRecordId = String(auditConfirmation.audit_record_id || '')
           const existingIndex = chatState.messages.value.findIndex(message => getAuditConfirmationRecordId(message) === auditRecordId)
           if (existingIndex === -1) {
-            messageProcessor.processAiResponse(chatState.messages, completedResponse, null, requestIdParam)
+            processAiResponse(completedResponse, null, requestIdParam)
           } else {
             const existingMessage = chatState.messages.value[existingIndex]
             chatState.messages.value[existingIndex] = {
@@ -1003,67 +1103,14 @@ export function useChatSession() {
         }
 
         // 已确认工具执行通过独立 done 返回完整正文，不会再发送 content 增量事件。
-        if (!Array.isArray(completedResponse?.choices) && typeof completedResponse?.content === 'string' && completedResponse.content) {
-          const requestMessageIndex = requestIdParam
-            ? chatState.messages.value.findLastIndex(message => message.role === 'user' && message.request_id === requestIdParam)
-            : -1
-          const existingFinalIndex = chatState.messages.value.findLastIndex((message, index) =>
-            index > requestMessageIndex &&
-            message.role === 'assistant' &&
-            message.type !== 'audit_confirmation' &&
-            !isToolCall(message) &&
-            JSON.stringify(normalizeMessageContent(message.content)) === JSON.stringify(normalizeMessageContent(completedResponse.content))
-          )
-
-          if (existingFinalIndex !== -1) {
-            const existingFinal = chatState.messages.value[existingFinalIndex]
-            chatState.messages.value[existingFinalIndex] = {
-              ...existingFinal,
-              request_id: existingFinal.request_id || requestIdParam,
-              work_id: existingFinal.work_id || completedResponse.work_id || data.work_id,
-              response_id: existingFinal.response_id || completedResponse.response_id || data.response_id
-            }
-          } else {
-            messageProcessor.processAiResponse(
-              chatState.messages,
-              {
-                ...completedResponse,
-                work_id: completedResponse.work_id || data.work_id,
-                response_id: completedResponse.response_id || data.response_id
-              },
-              null,
-              requestIdParam
-            )
-          }
+        const finalResponse = {
+          ...completedResponse,
+          ...(completedResponse?.work_id == null && data.work_id != null ? { work_id: data.work_id } : {}),
+          ...(completedResponse?.response_id == null && data.response_id != null ? { response_id: data.response_id } : {}),
+          ...(completedResponse?.message_id == null && data.message_id != null ? { message_id: data.message_id } : {}),
+          ...(completedResponse?.files == null && data.files != null ? { files: data.files } : {})
         }
-
-        if (data.files && data.files.length > 0) {
-          const newMessages = [...chatState.messages.value]
-          let targetIdx = -1
-
-          if (data.response_id) {
-            targetIdx = newMessages.findLastIndex(m => m.response_id === data.response_id && m.role === 'assistant' && !isToolCall(m))
-          }
-
-          if (targetIdx === -1 && data.work_id) {
-            targetIdx = newMessages.findLastIndex(m => m.work_id === data.work_id && m.role === 'assistant' && !isToolCall(m))
-          }
-
-          if (targetIdx === -1 && requestIdParam) {
-            targetIdx = newMessages.findLastIndex(m => m.request_id === requestIdParam && m.role === 'assistant' && !isToolCall(m))
-          }
-
-          if (targetIdx === -1 && !data.response_id && !requestIdParam) {
-            targetIdx = newMessages.findLastIndex(m => m.role === 'assistant' && !isToolCall(m))
-          }
-
-          if (targetIdx !== -1) {
-            newMessages[targetIdx] = { ...newMessages[targetIdx], files: data.files }
-            chatState.messages.value = newMessages
-          } else {
-            messageProcessor.processAiResponse(chatState.messages, data.response || data, null, requestIdParam)
-          }
-        }
+        processAiResponse(finalResponse, null, requestIdParam ?? requestId)
 
       },
       setLoading: (val) => {
@@ -1091,6 +1138,7 @@ export function useChatSession() {
         attachments: attachmentsToSent,
         requestId,
         profileOverrideId: newProfileOverrideId,
+        showToolCalls,
         callbacks
       })
       if (!sent) handleWsSendFailure()
@@ -1126,6 +1174,7 @@ export function useChatSession() {
     chatState.clearMessages()
     chatState.inputMsg.value = ''
     newSessionProfileOverrideId.value = null
+    showToolCallsDefault.value = true
     // 新建会话时重置加载状态，解除模式锁定
     chatState.loading.value = false
   }
@@ -1144,7 +1193,7 @@ export function useChatSession() {
     if (!historyData?.length) return
 
     const existingKeys = new Set(chatState.messages.value.flatMap(message => [...getMessageDedupeKeys(message)]))
-    const uniqueMessages = historyData
+    const uniqueMessages = filterNewMessages(historyData)
       .map(normalizeHistoryMessage)
       .filter((message) => {
         const messageKeys = getMessageDedupeKeys(message)
@@ -1199,6 +1248,7 @@ export function useChatSession() {
     // 新增附件状态导出
     attachments,
     enableMarkdownDefault,
+    showToolCallsDefault,
     newSessionProfileOverrideId,
 
     // 状态 - 会话相关
@@ -1211,6 +1261,7 @@ export function useChatSession() {
     historyLoading: sessionManager.historyLoading,
     sessionCreating: sessionManager.sessionCreating,
     currentSession,
+    currentSessionShowToolCalls,
     isCurrentSessionReadOnly,
     externalSessionAutoPullEnabled,
     
@@ -1223,6 +1274,7 @@ export function useChatSession() {
     handleDeleteSession: sessionManager.handleDeleteSession,
     selectSession,
     createNewSession,
+    reloadCurrentSessionHistory,
     
     // 方法 - 发送
     send,

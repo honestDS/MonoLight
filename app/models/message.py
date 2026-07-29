@@ -162,3 +162,4 @@ class ChatCompletionRequest(BaseModel):
     request_id: str | None = None
     stream: bool | None = False
     profile_override_id: int | None = PyField(default=None, gt=0)
+    show_tool_calls: bool | None = None

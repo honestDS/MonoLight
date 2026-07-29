@@ -395,6 +395,7 @@ async def test_wait_for_result_returns_resolved_work_id(monkeypatch):
         source_id="1",
         dedupe_key="foreground-message:1",
         status=SessionReplyWorkStatus.SUCCEEDED,
+        result_message_id=9,
         execution_state={
             "response": {
                 "choices": [
@@ -426,7 +427,76 @@ async def test_wait_for_result_returns_resolved_work_id(monkeypatch):
     response = await manager.wait_for_result(9)
 
     assert response["work_id"] == 7
+    assert response["message_id"] == 9
     assert response["choices"][0]["message"]["content"] == "result"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_stream_returns_result_message_identity_in_done_event(monkeypatch):
+    manager = SessionReplyQueueManager()
+    resolved_work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_type=SessionReplySourceType.AUDIT_RECORD,
+        source_id="42",
+        dedupe_key="confirmed-audit:42",
+        status=SessionReplyWorkStatus.SUCCEEDED,
+        result_message_id=9,
+        execution_state={
+            "request_ids": ["request-1"],
+            "response": {
+                "content": "confirmed result",
+                "history": [],
+                "files": [],
+            },
+        },
+    )
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve_merged_target(db, work_id):
+        return resolved_work
+
+    async def list_after_sequence(db, *, work_id, after_sequence_no):
+        return []
+
+    monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "list_after_sequence", list_after_sequence)
+
+    events = [event async for event in manager.wait_for_stream(7)]
+
+    assert events == [
+        {
+            "type": "done",
+            "session_id": "session-1",
+            "work_id": 7,
+            "response_id": "session-reply-work:7",
+            "message_id": 9,
+            "history": [],
+            "files": [],
+            "response": {
+                "content": "confirmed result",
+                "history": [],
+                "files": [],
+                "work_id": 7,
+                "message_id": 9,
+            },
+            "request_ids": ["request-1"],
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -744,7 +744,7 @@ def test_foreground_message_dedupe_key_scopes_reused_message_id_to_session():
     assert len(first) <= 160
 
 
-def test_dump_output_history_can_hide_tool_call_content_without_mutating_messages():
+def test_dump_output_history_can_hide_tool_messages_without_mutating_messages():
     tool_message = InternalMessage(
         role=MessageRole.ASSISTANT,
         content="准备查询资料",
@@ -760,12 +760,11 @@ def test_dump_output_history_can_hide_tool_call_content_without_mutating_message
     visible_history = dump_output_history([tool_message])
     hidden_history = dump_output_history(
         [tool_message],
-        expose_tool_call_content=False,
+        show_tool_calls=False,
     )
 
     assert visible_history[0]["content"] == "准备查询资料"
-    assert "content" not in hidden_history[0]
-    assert hidden_history[0]["tool_calls"][0]["name"] == "search"
+    assert hidden_history == []
     assert tool_message.content == "准备查询资料"
 
 

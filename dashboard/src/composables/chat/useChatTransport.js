@@ -327,7 +327,7 @@ export function useChatTransport() {
 
   // ==================== 发送方法 ====================
 
-  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, callbacks = {} }) => {
+  const httpSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, callbacks = {} }) => {
     const finalCallbacks = { ...callbacks, requestId, sessionId }
     const payload = {
       message,
@@ -338,6 +338,9 @@ export function useChatTransport() {
     if (profileOverrideId !== null && profileOverrideId !== undefined) {
       payload.profile_override_id = profileOverrideId
     }
+    if (!sessionId && showToolCalls === false) {
+      payload.show_tool_calls = false
+    }
     if (!sessionId) {
       const res = await chatApi.completions({ ...payload, stream: false })
       return res.data
@@ -345,7 +348,7 @@ export function useChatTransport() {
     return chatApi.completionsStream(payload, event => handleWsMessage(event, finalCallbacks))
   }
 
-  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, callbacks = {} }) => {
+  const wsSend = async ({ message, sessionId, attachments, requestId, profileOverrideId, showToolCalls, callbacks = {} }) => {
     const token = localStorage.getItem('token')
     if (!token) throw new Error(t('chat.not_logged_in'))
 
@@ -377,6 +380,9 @@ export function useChatTransport() {
     }
     if (profileOverrideId !== null && profileOverrideId !== undefined) {
       wsData.profile_override_id = profileOverrideId
+    }
+    if (!sessionId && showToolCalls === false) {
+      wsData.show_tool_calls = false
     }
 
     if (!wsManager.sendMessage(wsData)) {

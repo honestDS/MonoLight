@@ -352,9 +352,11 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
     assert llm_calls == []
     assert update_calls[0]["values"]["result_message_id"] == 9
     assert update_calls[0]["values"]["execution_state"]["response"]["choices"][0]["message"]["content"] == "saved response"
+    assert update_calls[0]["values"]["execution_state"]["response"]["message_id"] == 9
     assert sent_events[0][2]["event_id"].startswith("session-reply-work:")
     assert sent_events[0][2]["event_id"].endswith(":event")
     assert sent_events[0][2]["event_id"] != "session-reply-work:7:event"
+    assert sent_events[0][2]["message_id"] == 9
     assert terminal_calls[0]["status"] == SessionReplyWorkStatus.SUCCEEDED
     assert terminal_calls[0]["result_message_id"] == 9
     assert terminal_calls[0]["event_sent"] is True
@@ -485,6 +487,7 @@ async def test_fail_executor_sends_event_before_marking_terminal(monkeypatch):
     )
 
     assert sent_events[0][2]["type"] == "proactive_reply_error"
+    assert sent_events[0][2]["message_id"] == 9
     assert call_order.index("event") < call_order.index("terminal")
     assert terminal_calls[0]["status"] == SessionReplyWorkStatus.FAILED
     assert terminal_calls[0]["error"] == "internal error"

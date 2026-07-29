@@ -1,5 +1,20 @@
 // 公共工具函数
 import i18n from '../i18n'
+import {
+  findAssistantResponseReplacementIndex,
+  getMessageDbId,
+  isPlainAssistantResponse,
+  mergeAssistantResponse,
+  mergeAssistantResponseIntoList
+} from './assistantResponseIdentity'
+
+export {
+  findAssistantResponseReplacementIndex,
+  getMessageDbId,
+  isPlainAssistantResponse,
+  mergeAssistantResponse,
+  mergeAssistantResponseIntoList
+}
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -27,11 +42,6 @@ export const normalizeMessageContent = (content) => {
     }
   }
   return content
-}
-
-export const getMessageDbId = (message) => {
-  const dbId = message?.db_id ?? (typeof message?.id === 'number' ? message.id : null)
-  return dbId === null || dbId === undefined || dbId === '' ? null : String(dbId)
 }
 
 export const getToolResultCallId = (message) => {
@@ -84,7 +94,7 @@ const stableStringify = (value) => {
 
 export const getMessageDedupeKeys = (message) => {
   const keys = new Set()
-  const dbId = message?.db_id || (typeof message?.id === 'number' ? message.id : null)
+  const dbId = getMessageDbId(message)
   if (dbId) keys.add(`db:${dbId}`)
 
   const content = normalizeMessageContent(message?.content)

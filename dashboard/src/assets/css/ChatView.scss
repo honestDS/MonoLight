@@ -241,6 +241,21 @@
   min-width: 0;
 }
 
+.chat-main .input-area .toolbar-row .tool-output-setting {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.tool-output-setting-label {
+  color: #606266;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
 @media (max-width: 640px) {
   .chat-main .input-area .toolbar-row .session-profile-setting {
     flex: 1 1 100%;
@@ -250,6 +265,11 @@
   .session-profile-setting-select {
     flex: 1 1 0;
     width: auto;
+  }
+
+  .chat-main .input-area .toolbar-row .tool-output-setting {
+    flex: 1 1 auto;
+    justify-content: space-between;
   }
 }
 

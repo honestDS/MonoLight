@@ -2,7 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
-import { isToolCall, isToolResult, normalizeMessageContent, getMessageDedupeKeys } from '../../utils'
+import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, normalizeMessageContent } from '../../utils'
 import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -437,23 +437,30 @@ export function useMessageProcessor() {
     if (history.length > 0) {
       const historyMessages = history
         .map((item, idx) => {
+          const id = `history_${Date.now()}_${idx}`
+          const dbId = item?.id ?? item?.db_id ?? item?.message_id
+          const requestIdForMessage = item?.request_id ?? requestId
           const backgroundPayload = parseBackgroundSystemMessage(item)
           if (backgroundPayload) {
             return {
-              id: `history_${Date.now()}_${idx}`,
+              ...item,
+              id,
+              ...(dbId !== null && dbId !== undefined && dbId !== '' ? { db_id: dbId } : {}),
               role: 'background_system',
               content: JSON.stringify(backgroundPayload),
               created_at: item.created_at || null,
-              ...(requestId ? { request_id: requestId } : {})
+              ...(requestIdForMessage ? { request_id: requestIdForMessage } : {})
             }
           }
           const isToolRelated = (item.tool_calls && item.tool_calls.length > 0) || item.role === 'tool'
           return {
-            id: `history_${Date.now()}_${idx}`,
+            ...item,
+            id,
+            ...(dbId !== null && dbId !== undefined && dbId !== '' ? { db_id: dbId } : {}),
             role: item.role,
             content: isToolRelated ? JSON.stringify(item) : item.content,
             created_at: item.created_at || null,
-            ...(requestId ? { request_id: requestId } : {})
+            ...(requestIdForMessage ? { request_id: requestIdForMessage } : {})
           }
         })
         .filter((item, idx) => {
@@ -474,14 +481,16 @@ export function useMessageProcessor() {
       if (parsed?.type === 'audit_confirmation') auditConfirmation = parsed
     } catch {}
 
+    const responseRequestId = response.request_id ?? requestId
+    const responseDbId = response.message_id ?? response.db_id
     if (auditConfirmation) {
-      finalAiMsg = { id: `audit_confirmation_${auditConfirmation.audit_record_id || requestId || Date.now()}`, role: 'assistant', type: 'audit_confirmation', content: JSON.stringify(auditConfirmation), created_at: aiCreatedAt, ...(requestId ? { request_id: requestId } : {}) }
+      finalAiMsg = { id: `audit_confirmation_${auditConfirmation.audit_record_id || responseRequestId || Date.now()}`, role: 'assistant', type: 'audit_confirmation', content: JSON.stringify(auditConfirmation), created_at: aiCreatedAt, ...(responseRequestId ? { request_id: responseRequestId } : {}) }
     } else if (isToolResult(tempMsg)) {
-      finalAiMsg = { id: `tool_result_${requestId || Date.now()}`, role: 'tool', content: aiContent, created_at: aiCreatedAt, ...(requestId ? { request_id: requestId } : {}) }
+      finalAiMsg = { id: `tool_result_${responseRequestId || Date.now()}`, role: 'tool', content: aiContent, created_at: aiCreatedAt, ...(responseRequestId ? { request_id: responseRequestId } : {}) }
     } else if (isToolCall(tempMsg)) {
-      finalAiMsg = { id: `tool_call_${requestId || Date.now()}`, role: 'assistant', content: aiContent, created_at: aiCreatedAt, ...(requestId ? { request_id: requestId } : {}) }
+      finalAiMsg = { id: `tool_call_${responseRequestId || Date.now()}`, role: 'assistant', content: aiContent, created_at: aiCreatedAt, ...(responseRequestId ? { request_id: responseRequestId } : {}) }
     } else {
-      finalAiMsg = { id: `assistant_${requestId || Date.now()}`, role: role, content: aiContent, created_at: aiCreatedAt, ...(requestId ? { request_id: requestId } : {}) }
+      finalAiMsg = { id: `assistant_${responseRequestId || Date.now()}`, role: role, content: aiContent, created_at: aiCreatedAt, ...(responseRequestId ? { request_id: responseRequestId } : {}) }
     }
 
     if (responseFiles.length > 0) {
@@ -492,6 +501,9 @@ export function useMessageProcessor() {
     }
     if (response.response_id) {
       finalAiMsg.response_id = response.response_id
+    }
+    if (responseDbId !== null && responseDbId !== undefined && responseDbId !== '') {
+      finalAiMsg.db_id = responseDbId
     }
     if (typeof finishReason === 'string' && finishReason) {
       finalAiMsg.finish_reason = finishReason
@@ -568,9 +580,37 @@ export function useMessageProcessor() {
   const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId, requestId = null, workId = null) => {
     if (!aiMessages || aiMessages.length === 0) return
     const existingKeys = new Set(messagesRef.value.flatMap(getToolMessageDedupeKeys))
-    const dedupedMessages = []
+    let dedupedMessages = []
 
     for (const message of aiMessages) {
+      if (isPlainAssistantResponse(message)) {
+        const replacementIndex = findAssistantResponseReplacementIndex(messagesRef.value, message)
+        if (replacementIndex !== -1) {
+          messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, message)
+          continue
+        }
+
+        const pendingReplacementIndex = findAssistantResponseReplacementIndex(dedupedMessages, message)
+        if (pendingReplacementIndex !== -1) {
+          dedupedMessages = mergeAssistantResponseIntoList(dedupedMessages, message)
+          continue
+        }
+
+        const displayContent = resolveAssistantDisplayContent(
+          message.content,
+          message.refusal,
+          message.finish_reason
+        )
+        const hasDisplayContent = typeof displayContent === 'string'
+          ? Boolean(displayContent.trim())
+          : displayContent !== undefined && displayContent !== null
+        const hasFiles = Array.isArray(message.files) && message.files.length > 0
+        if (!hasDisplayContent && !hasFiles) continue
+
+        dedupedMessages.push(message)
+        continue
+      }
+
       const messageKeys = getToolMessageDedupeKeys(message)
       if ([...messageKeys].some(key => existingKeys.has(key))) continue
       messageKeys.forEach(key => existingKeys.add(key))

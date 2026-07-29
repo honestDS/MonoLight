@@ -42,6 +42,7 @@ from app.core.i18n import get_current_locale, t
 from app.core.message_platforms.notifier import send_session_event
 from app.core.prompts import AUDIT_SOURCE_MESSAGE_INVALID_PROMPT, BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import (
+    build_identified_work_response,
     build_session_reply_work_event_id,
     build_session_reply_work_identity,
     get_work_request_ids,
@@ -153,6 +154,8 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
     }
     if response.get("llm_request_metadata") is not None:
         event["llm_request_metadata"] = response["llm_request_metadata"]
+    if response.get("message_id") is not None:
+        event["message_id"] = response["message_id"]
     if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
         event["task_id"] = int(work.source_id)
         event["background_task_id"] = int(work.source_id)
@@ -585,6 +588,7 @@ async def _dispatch_interactive_work(
     )
 
     expose_tool_call_content = bool(execution_state.get("expose_tool_call_content", True))
+    show_tool_calls = bool(execution_state.get("show_tool_calls", True))
 
     dispatch_kwargs = {
         "db": db,
@@ -619,6 +623,7 @@ async def _dispatch_interactive_work(
             worker_id=worker_id,
         ),
         "expose_tool_call_content": expose_tool_call_content,
+        "show_tool_calls": show_tool_calls,
     }
     additional_system_prompt = execution_state.get("additional_system_prompt")
     if isinstance(additional_system_prompt, str) and additional_system_prompt.strip():
@@ -702,7 +707,10 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
                     "created_at": time.time(),
                 }
             ],
-            "history": dump_output_history(turn_messages),
+            "history": dump_output_history(
+                turn_messages,
+                show_tool_calls=bool(execution_state.get("show_tool_calls", True)),
+            ),
             "files": files or None,
         }
         if llm_request_metadata is not None:
@@ -1290,7 +1298,8 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if result_message is None:
             raise RuntimeError(t(ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED))
 
-        state = {**(work.execution_state or {}), "response": response}
+        identified_response = build_identified_work_response(work, response, message_id=result_message.id)
+        state = {**(work.execution_state or {}), "response": identified_response}
         updated = await session_reply_work_item_crud.update_claimed(
             db,
             work_id=work_id,
@@ -1300,7 +1309,7 @@ async def execute_session_reply_work(work_id: int, worker_id: str) -> None:
         if not updated:
             return
 
-    await send_session_event(work.uid, work.session_id, _event_for_work(work, response))
+    await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response))
 
     async with AsyncSessionLocal() as db:
         if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
@@ -1348,8 +1357,13 @@ async def fail_session_reply_work(
             is_processed=True,
             dedupe_key=_error_message_dedupe_key(work),
         )
+        identified_response = build_identified_work_response(
+            work,
+            {"content": error_content},
+            message_id=error_message.id,
+        )
 
-    await send_session_event(work.uid, work.session_id, _event_for_work(work, {"content": error_content}, error=True))
+    await send_session_event(work.uid, work.session_id, _event_for_work(work, identified_response, error=True))
 
     async with AsyncSessionLocal() as db:
         if work.work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:

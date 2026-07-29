@@ -146,6 +146,7 @@ class _AgentLoopStreamState:
     current_turn: int
     response_id: str
     expose_tool_call_content: bool
+    show_tool_calls: bool
     emitted_agent_loop_output: bool = False
     emitted_stream_content: bool = False
     buffered_content_chunks: list[str] = field(default_factory=list)
@@ -165,10 +166,10 @@ async def _emit_agent_loop_output(state: _AgentLoopStreamState) -> None:
 
 
 async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> None:
-    await _emit_agent_loop_output(state)
-    if not state.expose_tool_call_content:
+    if not state.expose_tool_call_content or not state.show_tool_calls:
         state.buffered_content_chunks.append(content)
         return
+    await _emit_agent_loop_output(state)
     if state.callback is None:
         return
     await state.callback(

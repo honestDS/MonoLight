@@ -547,9 +547,9 @@ async def test_chat_completions_creates_new_session_with_profile_override(monkey
     db = FakeDb()
     helper_calls = []
 
-    async def create_new_session(db_arg, *, session_id, uid, source, profile_override_id):
+    async def create_new_session(db_arg, *, session_id, uid, source, profile_override_id, show_tool_calls):
         assert db_arg is db
-        helper_calls.append((session_id, uid, source, profile_override_id))
+        helper_calls.append((session_id, uid, source, profile_override_id, show_tool_calls))
 
     monkeypatch.setattr(chat_api, "_create_new_web_session_with_profile_override", create_new_session)
 
@@ -560,11 +560,12 @@ async def test_chat_completions_creates_new_session_with_profile_override(monkey
     )
 
     assert len(helper_calls) == 1
-    session_id, uid, source, profile_override_id = helper_calls[0]
+    session_id, uid, source, profile_override_id, show_tool_calls = helper_calls[0]
     assert session_id
     assert uid == "user-1"
     assert source == "http"
     assert profile_override_id == 17
+    assert show_tool_calls is None
     assert response["choices"][0]["finish_reason"] == "new_session"
 
 

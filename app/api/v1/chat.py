@@ -119,8 +119,9 @@ async def _create_new_web_session_with_profile_override(
     uid: str | None,
     source: str,
     profile_override_id: int | None,
+    show_tool_calls: bool | None = None,
 ) -> None:
-    if profile_override_id is None:
+    if profile_override_id is None and show_tool_calls is None:
         return
 
     existing_session = await session_crud.get_by_session_id(db, session_id)
@@ -129,18 +130,21 @@ async def _create_new_web_session_with_profile_override(
             raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
         return
 
-    profile = await get_validated_profile_for_assignment(
-        db,
-        profile_id=profile_override_id,
-        uid=uid,
-    )
+    profile = None
+    if profile_override_id is not None:
+        profile = await get_validated_profile_for_assignment(
+            db,
+            profile_id=profile_override_id,
+            uid=uid,
+        )
     db.add(
         ChatSession(
             session_id=session_id,
             uid=uid,
-            profile_override_id=profile.id,
+            profile_override_id=profile.id if profile else None,
             source=source,
             reply_target_source=source,
+            show_tool_calls=show_tool_calls if show_tool_calls is not None else True,
         )
     )
     await db.commit()
@@ -156,6 +160,7 @@ class _WebSocketChatState:
 
 class NewSessionProfileSetting(BaseModel):
     profile_override_id: int | None = Field(default=None, gt=0)
+    show_tool_calls: bool | None = None
 
 
 async def _cancel_websocket_chat_tasks(state: _WebSocketChatState):
@@ -262,6 +267,7 @@ async def chat_completions(
             uid=uid,
             source="http",
             profile_override_id=request.profile_override_id,
+            show_tool_calls=request.show_tool_calls,
         )
         return LLMResponse(
             choices=[
@@ -315,6 +321,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
+                "show_tool_calls": row.show_tool_calls,
                 "profile_id": row.profile_id,
                 "profile_override_id": row.profile_override_id,
                 "source": row.source or "http",
@@ -353,6 +360,7 @@ class SessionSettingRequest(BaseModel):
 
     session_id: str
     enable_markdown: bool | None = None
+    show_tool_calls: bool | None = None
     profile_override_id: int | None = Field(default=None, gt=0)
 
 
@@ -423,6 +431,8 @@ async def update_session_setting(
 
     if request.enable_markdown is not None:
         session.enable_markdown = request.enable_markdown
+    if request.show_tool_calls is not None:
+        session.show_tool_calls = request.show_tool_calls
     if "profile_override_id" in request.model_fields_set:
         if request.profile_override_id is None:
             session.profile_override_id = None
@@ -551,7 +561,15 @@ async def get_session_history(
 ):
     uid = getattr(current_user, "uid", None)
     offset = (page - 1) * size
-    messages = await message_crud.get_history_paged(db, session_id=session_id, uid=uid, limit=size, offset=offset)
+    session = await session_crud.get_by_session_id(db, session_id)
+    messages = await message_crud.get_history_paged(
+        db,
+        session_id=session_id,
+        uid=uid,
+        limit=size,
+        offset=offset,
+        include_tool_messages=session.show_tool_calls if session else True,
+    )
 
     # 倒序取出，正序返回
     messages.reverse()
@@ -594,6 +612,11 @@ async def chat_websocket(
             if notify_task in done:
                 event = notify_task.result()
                 if _event_matches_session(event, state.current_session_id, require_session_id=True):
+                    if event.get("type") == "audit_tool_results_update":
+                        async with AsyncSessionLocal() as db:
+                            session = await session_crud.get_by_session_id(db, state.current_session_id)
+                        if session and not session.show_tool_calls:
+                            continue
                     await websocket.send_json(event)
                 continue
 
@@ -629,7 +652,12 @@ async def chat_websocket(
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
                 if not state.active_task or state.active_task.done():
                     try:
-                        profile_setting = NewSessionProfileSetting.model_validate({"profile_override_id": profile_override_id})
+                        profile_setting = NewSessionProfileSetting.model_validate(
+                            {
+                                "profile_override_id": profile_override_id,
+                                "show_tool_calls": data.get("show_tool_calls"),
+                            }
+                        )
                     except ValidationError as exc:
                         await websocket.send_json(
                             {
@@ -650,6 +678,7 @@ async def chat_websocket(
                                 uid=uid,
                                 source="ws",
                                 profile_override_id=profile_setting.profile_override_id,
+                                show_tool_calls=profile_setting.show_tool_calls,
                             )
                     except BaseBusinessException as exc:
                         await websocket.send_json(

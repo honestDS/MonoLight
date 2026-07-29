@@ -101,6 +101,15 @@
             </el-select>
           </div>
 
+          <div class="tool-output-setting">
+            <span class="tool-output-setting-label">{{ $t('chat.tool_output') }}</span>
+            <el-switch
+              :model-value="currentSessionShowToolCalls"
+              :disabled="toolOutputSettingSubmitting || loading"
+              @update:model-value="updateSessionShowToolCalls"
+            />
+          </div>
+
           <el-checkbox v-if="isCurrentSessionReadOnly" v-model="externalSessionAutoPullEnabled">
             {{ $t('chat.external_session_auto_pull') }}
           </el-checkbox>
@@ -235,6 +244,7 @@ const profiles = ref([])
 const currentUid = ref(null)
 const profilesLoading = ref(false)
 const profileSettingSubmitting = ref(false)
+const toolOutputSettingSubmitting = ref(false)
 
 // 获取当前会话的 Markdown 开关状态
 const currentSessionEnableMarkdown = computed({
@@ -304,7 +314,8 @@ const {
   llmRequestMetadata,
   historyLoading,
   initialHistoryLoaded,
-  newSessionProfileOverrideId
+  newSessionProfileOverrideId,
+  currentSessionShowToolCalls
 } = chat
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
@@ -359,12 +370,33 @@ const updateSessionProfileOverride = async (profileId) => {
   }
 }
 
+const updateSessionShowToolCalls = async (showToolCalls) => {
+  if (toolOutputSettingSubmitting.value || loading.value) return
+
+  const sessionId = currentSessionId.value
+  const previousValue = currentSessionShowToolCalls.value
+  currentSessionShowToolCalls.value = showToolCalls
+  if (!sessionId) return
+
+  toolOutputSettingSubmitting.value = true
+  try {
+    await chatApi.updateSessionSetting(sessionId, { show_tool_calls: showToolCalls })
+    await reloadCurrentSessionHistory()
+  } catch (error) {
+    currentSessionShowToolCalls.value = previousValue
+    ElMessage.error(error.message || t('chat.setting_failed'))
+  } finally {
+    toolOutputSettingSubmitting.value = false
+  }
+}
+
 // 解构方法
 const {
   loadSessions,
   handleDeleteSession,
   selectSession,
   createNewSession,
+  reloadCurrentSessionHistory,
   send: originalSend,
   setTransportMode,
   disconnectWebSocket,

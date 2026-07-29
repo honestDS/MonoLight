@@ -124,11 +124,14 @@ async def process_single_tool_with_isolated_db(
 def dump_output_history(
     messages: list[InternalMessage],
     *,
-    expose_tool_call_content: bool = True,
+    show_tool_calls: bool = True,
 ) -> list[dict[str, Any]]:
-    output_messages = messages
-    if not expose_tool_call_content:
-        output_messages = [message.model_copy(update={"content": None}) if message.role == MessageRole.ASSISTANT and message.tool_calls else message for message in messages]
+    output_messages = messages if show_tool_calls else [
+        message
+        for message in messages
+        if message.role != MessageRole.TOOL
+        and not (message.role == MessageRole.ASSISTANT and message.tool_calls)
+    ]
     return [message.model_dump(exclude_none=True) for message in output_messages]
 
 

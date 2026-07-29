@@ -87,6 +87,13 @@ def is_submission_queued(submission_status: str) -> bool:
     return submission_status == "queued" or submission_status.endswith("_and_queued")
 
 
+def get_tool_call_visibility(session: Any | None, source: str) -> tuple[bool, bool]:
+    if source in {"http", "ws"}:
+        show_tool_calls = session.show_tool_calls if session is not None else True
+        return show_tool_calls, show_tool_calls
+    return False, source != "weixin-openclaw"
+
+
 def build_input_queued_event(
     session_id: str,
     request_id: str,
@@ -133,6 +140,19 @@ def build_session_reply_work_identity(work: SessionReplyWorkItem) -> str:
 
 def build_session_reply_work_event_id(work: SessionReplyWorkItem, *, error: bool = False) -> str:
     return f"session-reply-work:{build_session_reply_work_identity(work)}:{'error' if error else 'event'}"
+
+
+def build_identified_work_response(
+    work: SessionReplyWorkItem,
+    response: dict[str, Any],
+    *,
+    message_id: int | None = None,
+) -> dict[str, Any]:
+    identified_response = {**response, "work_id": work.id}
+    result_message_id = getattr(work, "result_message_id", None) if message_id is None else message_id
+    if isinstance(result_message_id, int) and not isinstance(result_message_id, bool) and result_message_id > 0:
+        identified_response["message_id"] = result_message_id
+    return identified_response
 
 
 async def _get_work_failure_content(db: AsyncSession, work: SessionReplyWorkItem) -> str:
@@ -357,6 +377,8 @@ class SessionReplyQueueManager:
             )
             message_row.guidance_prompt = guidance_prompt
             db.add(message_row)
+        session = await session_crud.get_by_session_id(db, session_id)
+        show_tool_calls, expose_tool_call_content = get_tool_call_visibility(session, source)
         work, _created = await session_reply_work_item_crud.enqueue(
             db,
             uid=uid,
@@ -374,7 +396,8 @@ class SessionReplyQueueManager:
             "decision_message_id": message_row.id,
             "stream_requested": source == "ws" if stream_requested is None else stream_requested,
             "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
-            "expose_tool_call_content": source != "weixin-openclaw",
+            "show_tool_calls": show_tool_calls,
+            "expose_tool_call_content": expose_tool_call_content,
             "language": get_current_locale(),
             "message_source": source,
             "request_ids": merge_work_request_ids(work, request_id=request_id),
@@ -480,14 +503,18 @@ class SessionReplyQueueManager:
         additional_system_prompt: str | None = None,
     ) -> tuple[InternalMessage, SessionReplyWorkItem]:
         profile_id = profile.id if profile and profile.id else -1
+        session = None
         if profile_id > 0:
-            await session_crud.upsert_profile(
+            session = await session_crud.upsert_profile(
                 db,
                 session_id=session_id,
                 uid=uid,
                 profile_id=profile_id,
                 source=source,
             )
+        else:
+            session = await session_crud.get_by_session_id(db, session_id)
+        show_tool_calls, expose_tool_call_content = get_tool_call_visibility(session, source)
 
         message_row = persisted_message_row
         if message_row is None:
@@ -534,7 +561,8 @@ class SessionReplyQueueManager:
                 "context_summary_events_requested": source == "ws" if context_summary_events_requested is None else context_summary_events_requested,
                 # 微信 OpenClaw 对发送频率有限制，工具调用阶段的正文只保留在
                 # 数据库和日志中，不作为额外的用户可见消息发送到微信。
-                "expose_tool_call_content": source != "weixin-openclaw",
+                "show_tool_calls": show_tool_calls,
+                "expose_tool_call_content": expose_tool_call_content,
                 "language": get_current_locale(),
                 "message_source": source,
                 "audit_decision_response": audit_decision_response,
@@ -693,6 +721,7 @@ class SessionReplyQueueManager:
             )
         stream_requested = any(bool((item.execution_state or {}).get("stream_requested")) for item in contiguous)
         context_summary_events_requested = any(bool((item.execution_state or {}).get("context_summary_events_requested")) for item in contiguous)
+        show_tool_calls = all(bool((item.execution_state or {}).get("show_tool_calls", True)) for item in contiguous)
         expose_tool_call_content = all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in contiguous)
         latest_guidance_prompt = next(
             (message.guidance_prompt for message in reversed(messages) if isinstance(message.guidance_prompt, str) and message.guidance_prompt.strip()),
@@ -702,6 +731,7 @@ class SessionReplyQueueManager:
             **(work.execution_state or {}),
             "stream_requested": stream_requested,
             "context_summary_events_requested": context_summary_events_requested,
+            "show_tool_calls": show_tool_calls,
             "expose_tool_call_content": expose_tool_call_content,
             "request_ids": merge_work_request_ids(*contiguous),
         }
@@ -785,9 +815,12 @@ class SessionReplyQueueManager:
             )
         )
         frozen_message_ids = list(work.input_message_ids or [])
+        merged_work = [work, *additional_work]
         execution_state = {
             **(work.execution_state or {}),
             "request_ids": merge_work_request_ids(work, *additional_work),
+            "show_tool_calls": all(bool((item.execution_state or {}).get("show_tool_calls", True)) for item in merged_work),
+            "expose_tool_call_content": all(bool((item.execution_state or {}).get("expose_tool_call_content", True)) for item in merged_work),
         }
         updated = await session_reply_work_item_crud.update_claimed(
             db,
@@ -866,11 +899,11 @@ class SessionReplyQueueManager:
                 if work.status == SessionReplyWorkStatus.SUCCEEDED:
                     response = (work.execution_state or {}).get("response")
                     if isinstance(response, dict):
-                        return {**response, "work_id": work.id}
+                        return build_identified_work_response(work, response)
                     if work.result_message_id:
                         message = await db.get(Message, work.result_message_id)
-                        return {"content": message.content if message else "", "work_id": work.id}
-                    return {"content": "", "work_id": work.id}
+                        return build_identified_work_response(work, {"content": message.content if message else ""})
+                    return build_identified_work_response(work, {"content": ""})
                 if work.status == SessionReplyWorkStatus.FAILED:
                     await _raise_work_failure(db, work)
                 if work.status == SessionReplyWorkStatus.CANCELLED:
@@ -904,16 +937,20 @@ class SessionReplyQueueManager:
                     response = (work.execution_state or {}).get("response")
                     if not isinstance(response, dict):
                         response = await self.wait_for_result(target_work_id)
-                    yield {
+                    identified_response = build_identified_work_response(work, response)
+                    done_event = {
                         "type": "done",
                         "session_id": work.session_id,
                         "work_id": target_work_id,
                         "response_id": f"session-reply-work:{target_work_id}",
-                        "history": response.get("history", []),
-                        "files": response.get("files"),
-                        "response": response,
+                        "history": identified_response.get("history", []),
+                        "files": identified_response.get("files"),
+                        "response": identified_response,
                         "request_ids": get_work_request_ids(work),
                     }
+                    if identified_response.get("message_id") is not None:
+                        done_event["message_id"] = identified_response["message_id"]
+                    yield done_event
                     return
                 if work.status == SessionReplyWorkStatus.FAILED:
                     error_content = await _get_work_failure_content(db, work)
