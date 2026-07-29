@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -261,9 +262,9 @@ async def test_chat_passes_explicit_stream_request_to_queue(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_platform_handler_passes_stream_dispatch_setting_to_adapter(monkeypatch):
+@pytest.mark.parametrize("use_stream_dispatch", [False, True])
+async def test_platform_handler_passes_explicit_stream_dispatch_setting_to_adapter(monkeypatch, use_stream_dispatch):
     handler = WeixinOpenClawPlatformHandler()
-    assert handler.use_stream_dispatch is True
     captured = {}
 
     class FakeAdapter:
@@ -297,9 +298,116 @@ async def test_platform_handler_passes_stream_dispatch_setting_to_adapter(monkey
         uid="owner",
         platform_id=7,
         adapter_signature=("adapter",),
+        use_stream_dispatch=use_stream_dispatch,
     )
 
-    assert captured["stream_requested"] is True
+    assert captured["stream_requested"] is use_stream_dispatch
+
+
+@pytest.mark.asyncio
+async def test_platform_handler_reads_platform_by_id_and_resolves_stream_dispatch(monkeypatch):
+    handler = WeixinOpenClawPlatformHandler()
+    db = SimpleNamespace()
+    platform = SimpleNamespace(use_stream_dispatch=True)
+    get_calls = []
+
+    async def get_platform(actual_db, platform_id):
+        get_calls.append((actual_db, platform_id))
+        return platform
+
+    monkeypatch.setattr("app.core.message_platforms.base.message_platform_crud.get", get_platform)
+
+    loaded_platform = await handler._get_platform_by_id(db, 7)
+
+    assert loaded_platform is platform
+    assert get_calls == [(db, 7)]
+    assert handler._resolve_use_stream_dispatch(None) is False
+    assert handler._resolve_use_stream_dispatch(SimpleNamespace(use_stream_dispatch=False)) is False
+    assert handler._resolve_use_stream_dispatch(SimpleNamespace(use_stream_dispatch=True)) is True
+
+
+@pytest.mark.asyncio
+async def test_platform_handler_run_passes_platform_stream_dispatch_to_collector(monkeypatch):
+    handler = WeixinOpenClawPlatformHandler()
+    captured_stream_requests = []
+    collector_instances = []
+    platform_stream_settings = iter([True, True, False, False, False])
+    session_enter_count = 0
+    message = WeixinOpenClawMessage(
+        user_id="weixin-user",
+        text="hello",
+        session_id="weixin-openclaw:weixin-user",
+    )
+
+    class FakeAdapter:
+        def __init__(self):
+            self.config = SimpleNamespace(poll_interval_ms=0)
+            self.sync_buf = ""
+            self.poll_count = 0
+
+        async def poll_messages_once(self):
+            self.poll_count += 1
+            if self.poll_count <= 2:
+                return [message]
+            raise asyncio.CancelledError
+
+        async def close(self):
+            return None
+
+    class FakeCollector:
+        def __init__(self, *, dispatch, **_kwargs):
+            self.dispatch = dispatch
+            self.pending_messages = []
+            collector_instances.append(self)
+
+        async def add(self, _key, collected_message):
+            self.pending_messages.append(collected_message)
+
+        async def dispatch_next(self):
+            await self.dispatch(self.pending_messages.pop(0))
+
+        async def flush_and_wait(self, _key):
+            return None
+
+        async def close(self):
+            return None
+
+    class SessionContext:
+        async def __aenter__(self):
+            nonlocal session_enter_count
+            session_enter_count += 1
+            if session_enter_count in {3, 5}:
+                await collector_instances[0].dispatch_next()
+            return SimpleNamespace()
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+    adapter = FakeAdapter()
+
+    async def get_platform(_db, _platform_id):
+        return SimpleNamespace(
+            id=7,
+            uid="owner",
+            state={},
+            use_stream_dispatch=next(platform_stream_settings),
+        )
+
+    async def handle_message(_adapter, _message, **kwargs):
+        captured_stream_requests.append(kwargs["use_stream_dispatch"])
+
+    monkeypatch.setattr(handler, "is_pollable", lambda current_platform: current_platform is not None)
+    monkeypatch.setattr(handler, "_adapter_signature", lambda _platform: ("adapter",))
+    monkeypatch.setattr(handler, "_build_adapter", lambda _platform: adapter)
+    monkeypatch.setattr(handler, "_handle_message", handle_message)
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.AsyncSessionLocal", lambda: SessionContext())
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.InboundMessageCollector", FakeCollector)
+    monkeypatch.setattr("app.core.message_platforms.weixin_openclaw.message_platform_crud.get", get_platform)
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler.run(7)
+
+    assert captured_stream_requests == [True, False]
 
 
 @pytest.mark.asyncio

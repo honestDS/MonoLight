@@ -24,6 +24,7 @@ from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.profile_validation import get_validated_profile_for_assignment
 from app.models.message_platform import (
     MessagePlatformCreate,
+    MessagePlatformLanguage,
     MessagePlatformResponse,
     MessagePlatformStatus,
     MessagePlatformType,
@@ -76,6 +77,7 @@ async def get_message_platform_types():
     return StandardResponse.success(
         data={
             "platform_types": [item.value for item in MessagePlatformType],
+            "languages": [item.value for item in MessagePlatformLanguage],
             "statuses": [item.value for item in MessagePlatformStatus],
         }
     )

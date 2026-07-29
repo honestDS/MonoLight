@@ -4,9 +4,10 @@ from functools import lru_cache
 from typing import Any
 
 from app.core.constants import MSG_MESSAGE_PLATFORM_TOOL_USED
+from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.message_platform_outbox import message_platform_outbox_crud
 from app.core.crud.session import session_crud
-from app.core.i18n import t
+from app.core.i18n import DEFAULT_LOCALE, message_platform_t, t
 from app.core.log import get_logger
 from app.core.message_platforms.outbound_text import (
     build_outbound_text_policy_registry,
@@ -31,6 +32,24 @@ def get_outbound_text_policy_registry():
 
 def normalize_outbox_event(event: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(event, ensure_ascii=False, default=str))
+
+
+def _has_proactive_reply_tool_history(event: dict[str, Any]) -> bool:
+    history = event.get("history")
+    if not isinstance(history, list):
+        return False
+    return any(item.get("role") == "assistant" and isinstance(item.get("tool_calls"), list) and any(isinstance(tool_call, dict) for tool_call in item["tool_calls"]) for item in history if isinstance(item, dict))
+
+
+async def _get_message_platform_language(uid: str, session_id: str, source: str) -> str:
+    async with AsyncSessionLocal() as db:
+        platform = await message_platform_crud.get_platform_for_session(
+            db,
+            uid=uid,
+            session_id=session_id,
+            source=source,
+        )
+    return str(getattr(platform, "language", None) or DEFAULT_LOCALE)
 
 
 def _resolve_event_identity(event: dict[str, Any]) -> dict[str, Any]:
@@ -74,8 +93,9 @@ async def _send_session_event_for_session(uid: str, session_id: str, event: dict
         if not is_web_session_source(source):
             if stream_requested:
                 normalized_event.pop("history", None)
-            elif session is not None and session.show_tool_calls:
-                normalized_event = combine_proactive_reply_tool_output(normalized_event)
+            elif session is not None and session.show_tool_calls and _has_proactive_reply_tool_history(normalized_event):
+                language = await _get_message_platform_language(uid, session_id, source)
+                normalized_event = combine_proactive_reply_tool_output(normalized_event, language=language)
     policy = get_outbound_text_policy_registry().get(source)
     if policy is not None:
         normalized_event = await process_outbound_text_event(uid, session_id, source, normalized_event, policy)
@@ -140,13 +160,16 @@ async def send_session_stream_event(uid: str, session_id: str, event: dict[str, 
     tool_names = event.get("tool_names")
     if not isinstance(tool_names, list):
         tool_names = [event.get("name")]
-    tool_lines = [t(MSG_MESSAGE_PLATFORM_TOOL_USED, name=name.strip()) for name in tool_names if isinstance(name, str) and name.strip()]
-    if not tool_lines:
+    tool_names = [name.strip() for name in tool_names if isinstance(name, str) and name.strip()]
+    if not tool_names:
         return
+    language = await _get_message_platform_language(uid, session_id, source)
+    tool_lines = [message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language=language, name=name) for name in tool_names]
 
     content = event.get("content")
     parts = [content.strip()] if isinstance(content, str) and content.strip() else []
     parts.extend(tool_lines)
+    # Weixin Markdown requires blank lines between paragraphs for visible line breaks.
     await _send_session_event_for_session(
         uid,
         session_id,
@@ -156,7 +179,7 @@ async def send_session_stream_event(uid: str, session_id: str, event: dict[str, 
             "source": "stream_tool_call",
             "session_id": session_id,
             "work_id": work_id,
-            "content": "\n".join(parts),
+            "content": "\n\n".join(parts),
         },
         session,
     )

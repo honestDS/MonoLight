@@ -9,6 +9,8 @@ export default {
   account_id: '账号ID',
   uid: '绑定用户',
   profile: '配置文件',
+  language: '语言',
+  use_stream_dispatch: '流式返回',
   inherited_profile: '使用用户默认配置',
   default_profile_suffix: '（默认）',
   enabled: '启用',
@@ -42,6 +44,10 @@ export default {
   },
   type_map: {
     WEIXIN_OPENCLAW: '微信 OpenClaw'
+  },
+  language_map: {
+    zh: '中文',
+    en: 'English'
   },
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: '二维码已过期',

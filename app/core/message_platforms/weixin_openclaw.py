@@ -20,24 +20,24 @@ logger = get_logger(__name__)
 class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
     platform_type = MessagePlatformType.WEIXIN_OPENCLAW
     sources = frozenset({"weixin-openclaw"})
-    # True 使用流式生成，False 使用非流式生成；最终回复仍由发件箱统一发送。
-    use_stream_dispatch = True
 
     async def run(self, platform_id: int) -> None:
         adapter: WeixinOpenClawAdapter | None = None
         adapter_signature: tuple | None = None
         collector: InboundMessageCollector[tuple[str, str], WeixinOpenClawMessage] | None = None
+        use_stream_dispatch = False
         try:
             while True:
                 platform_uid = ""
                 previous_sync_buf = ""
                 try:
                     async with AsyncSessionLocal() as db:
-                        platform = await message_platform_crud.get(db, platform_id)
+                        platform = await self._get_platform_by_id(db, platform_id)
                     if not self.is_pollable(platform):
                         return
                     assert platform is not None
                     platform_uid = platform.uid or ""
+                    use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
                     previous_sync_buf = str((platform.state or {}).get("sync_buf") or "")
                     next_signature = self._adapter_signature(platform)
                     if adapter is None or adapter_signature != next_signature:
@@ -56,6 +56,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                                 uid=platform_uid or message.user_id,
                                 platform_id=platform_id,
                                 adapter_signature=adapter_signature,
+                                use_stream_dispatch=use_stream_dispatch,
                             )
 
                         collector = InboundMessageCollector(
@@ -68,10 +69,11 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                         adapter.sync_buf = previous_sync_buf
                     messages = await adapter.poll_messages_once()
                     async with AsyncSessionLocal() as db:
-                        platform = await message_platform_crud.get(db, platform_id)
+                        platform = await self._get_platform_by_id(db, platform_id)
                         if not self.is_pollable(platform):
                             return
                         assert platform is not None
+                        use_stream_dispatch = self._resolve_use_stream_dispatch(platform)
                         if adapter.sync_buf != previous_sync_buf:
                             await message_platform_crud.update_runtime_state(db, platform=platform, state={"sync_buf": adapter.sync_buf}, status=MessagePlatformStatus.CONNECTED, last_error="")
                     assert collector is not None
@@ -89,6 +91,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                                 uid=platform_uid or message.user_id,
                                 platform_id=platform_id,
                                 adapter_signature=adapter_signature,
+                                use_stream_dispatch=use_stream_dispatch,
                             )
                         else:
                             await collector.add(collector_key, message)
@@ -108,7 +111,16 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             if adapter is not None:
                 await adapter.close()
 
-    async def _handle_message(self, adapter: WeixinOpenClawAdapter, message: WeixinOpenClawMessage, *, uid: str, platform_id: int, adapter_signature: tuple | None) -> None:
+    async def _handle_message(
+        self,
+        adapter: WeixinOpenClawAdapter,
+        message: WeixinOpenClawMessage,
+        *,
+        uid: str,
+        platform_id: int,
+        adapter_signature: tuple | None,
+        use_stream_dispatch: bool,
+    ) -> None:
         try:
             await self._save_context_token(platform_id, message)
 
@@ -126,7 +138,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
                     uid=uid,
                     runtime_validator=runtime_validator,
                     message_platform_id=platform_id,
-                    stream_requested=self.use_stream_dispatch,
+                    stream_requested=use_stream_dispatch,
                 )
         except Exception:
             logger.bind(uid=uid, session_id=message.session_id).exception("message platform message handling failed")
@@ -180,10 +192,9 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
             config["merge_single_poll_messages"],
         )
 
-    @staticmethod
-    async def _mark_error(platform_id: int, error: str) -> None:
+    async def _mark_error(self, platform_id: int, error: str) -> None:
         async with AsyncSessionLocal() as db:
-            platform = await message_platform_crud.get(db, platform_id)
+            platform = await self._get_platform_by_id(db, platform_id)
             if platform is not None:
                 await message_platform_crud.update_runtime_state(db, platform=platform, status=MessagePlatformStatus.ERROR, last_error=error[:1000])
 
@@ -191,7 +202,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         if adapter_signature is None:
             return False
         async with AsyncSessionLocal() as db:
-            platform = await message_platform_crud.get(db, platform_id)
+            platform = await self._get_platform_by_id(db, platform_id)
             if not self.is_pollable(platform):
                 return False
             try:
@@ -226,7 +237,7 @@ class WeixinOpenClawPlatformHandler(MessagePlatformHandler):
         if not message.context_token:
             return
         async with AsyncSessionLocal() as db:
-            platform = await message_platform_crud.get(db, platform_id)
+            platform = await self._get_platform_by_id(db, platform_id)
             if not self.is_pollable(platform):
                 return
             assert platform is not None

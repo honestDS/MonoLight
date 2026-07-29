@@ -4,7 +4,7 @@ from typing import Any
 
 from app.core.i18n import locales
 from app.core.i18n.context import get_current_locale, get_current_log_locale
-from app.core.i18n.locale import DEFAULT_LOCALE
+from app.core.i18n.locale import DEFAULT_LOCALE, normalize_locale
 
 # 内存中缓存所有翻译资源: { "zh": { "MSG_XYZ": "...", ... }, "en": { ... } }
 _translations: dict[str, dict[str, str]] = {}
@@ -73,3 +73,9 @@ def t(key: str, locale: str | None = None, default: str | None = None, **params:
             return text
 
     return text
+
+
+def message_platform_t(key: str, language: str | None, default: str | None = None, **params: Any) -> str:
+    """Translate message-platform content using only the platform's configured language."""
+    platform_locale = language if isinstance(language, str) else None
+    return t(key, locale=normalize_locale(platform_locale), default=default, **params)

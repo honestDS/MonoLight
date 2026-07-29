@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from app.core.constants import MSG_MESSAGE_PLATFORM_TOOL_USED
-from app.core.i18n import t
+from app.core.i18n import message_platform_t
 
 
 def _tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -30,7 +30,7 @@ def _extract_final_text(content: Any) -> str:
     return content
 
 
-def combine_proactive_reply_tool_output(event: dict[str, Any]) -> dict[str, Any]:
+def combine_proactive_reply_tool_output(event: dict[str, Any], *, language: str | None) -> dict[str, Any]:
     history = event.get("history")
     if not isinstance(history, list):
         return event
@@ -51,9 +51,10 @@ def combine_proactive_reply_tool_output(event: dict[str, Any]) -> dict[str, Any]
             if not isinstance(tool_call, dict):
                 continue
             has_tool_call = True
-            round_parts.append(t(MSG_MESSAGE_PLATFORM_TOOL_USED, name=_tool_call_name(tool_call)))
+            round_parts.append(message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language=language, name=_tool_call_name(tool_call)))
         if round_parts:
-            parts.append("\n".join(round_parts))
+            # Weixin Markdown requires blank lines between paragraphs for visible line breaks.
+            parts.append("\n\n".join(round_parts))
 
     if not has_tool_call:
         return event

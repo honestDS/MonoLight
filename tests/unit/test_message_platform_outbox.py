@@ -12,7 +12,8 @@ from app.core.constants import (
     MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
 )
 from app.core.crud.message_platform_outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
-from app.core.i18n import t
+from app.core.i18n import message_platform_t, t
+from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.message_platforms import notifier as notifier_module
 from app.core.message_platforms import outbound_text as outbound_text_module
 from app.core.message_platforms.base import MessagePlatformHandler
@@ -616,8 +617,13 @@ async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_sess
         enqueued_events.append(kwargs["event"])
         return SimpleNamespace(id=7), True
 
+    async def get_platform_for_session(db, *, uid, session_id, source):
+        assert (uid, session_id, source) == ("uid-1", "weixin-openclaw:user-1", "weixin-openclaw")
+        return SimpleNamespace(language="en")
+
     monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module.message_platform_crud, "get_platform_for_session", get_platform_for_session)
     monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
     monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
     event = {
@@ -645,12 +651,16 @@ async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_sess
         "tool_call_id": "call-1",
     }
 
-    await notifier_module.send_session_stream_event("uid-1", "weixin-openclaw:user-1", event)
+    locale_token = set_current_locale("zh")
+    try:
+        await notifier_module.send_session_stream_event("uid-1", "weixin-openclaw:user-1", event)
+    finally:
+        reset_current_locale(locale_token)
 
     assert len(enqueued_events) == 1
     enqueued_event = enqueued_events[0]
     assert enqueued_event["type"] == "proactive_reply"
-    assert enqueued_event["content"] == (f"我先检查\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='execute_shell')}\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='read_text_file')}")
+    assert enqueued_event["content"] == "我先检查\n\nUsing tool:execute_shell\n\nUsing tool:read_text_file"
     assert enqueued_event["event_id"] == "stream_tool_call:17:9"
     assert enqueued_event["work_id"] == 17
     assert enqueued_event["session_id"] == "weixin-openclaw:user-1"
@@ -787,8 +797,13 @@ async def test_notifier_combines_tool_output_before_external_text_policy(monkeyp
         enqueued_events.append(kwargs["event"])
         return SimpleNamespace(id=7), True
 
+    async def get_platform_for_session(db, *, uid, session_id, source):
+        assert (uid, session_id, source) == ("uid-1", "weixin-openclaw:user-1", "weixin-openclaw")
+        return SimpleNamespace(language="zh")
+
     monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module.message_platform_crud, "get_platform_for_session", get_platform_for_session)
     monkeypatch.setattr(notifier_module, "process_outbound_text_event", process_event)
     monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
     event = {
@@ -812,11 +827,15 @@ async def test_notifier_combines_tool_output_before_external_text_policy(monkeyp
         ],
     }
 
-    await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+    locale_token = set_current_locale("en")
+    try:
+        await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+    finally:
+        reset_current_locale(locale_token)
 
     assert len(policy_events) == 1
     content = policy_events[0]["content"]
-    assert content == f"checking\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='lookup')}\n\nfinal reply"
+    assert content == "checking\n\n使用工具:lookup\n\nfinal reply"
     assert "history" not in policy_events[0]
     assert policy_events[0]["event_id"] == "session-reply-work:1:event"
     assert policy_events[0]["files"] == [{"id": "file-1"}]
@@ -884,10 +903,11 @@ def test_combine_tool_output_uses_structured_final_reply_text(content, expected)
                     "tool_calls": [{"id": "call-1", "name": "lookup"}],
                 }
             ],
-        }
+        },
+        language="zh",
     )
 
-    assert combined["content"] == f"{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='lookup')}\n\n{expected}"
+    assert combined["content"] == f"{message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language='zh', name='lookup')}\n\n{expected}"
     assert "history" not in combined
     assert combined["event_id"] == "event-1"
     assert combined["files"] == [{"id": "file-1"}]
@@ -909,13 +929,30 @@ def test_combine_tool_output_lists_multiple_tools_without_round_content():
                     ],
                 }
             ],
-        }
+        },
+        language="zh",
     )
 
-    assert combined["content"] == (f"{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='first')}\n{t(MSG_MESSAGE_PLATFORM_TOOL_USED, name='second')}\n\nfinal reply")
+    assert combined["content"] == (f"{message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language='zh', name='first')}\n\n{message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language='zh', name='second')}\n\nfinal reply")
     assert "history" not in combined
     assert combined["event_id"] == "event-1"
     assert combined["files"] == [{"id": "file-1"}]
+
+
+def test_message_platform_t_uses_explicit_platform_language():
+    chinese_locale_token = set_current_locale("en")
+    try:
+        assert message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language="zh", name="lookup") == "使用工具:lookup"
+        assert message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language=None, name="lookup") == "使用工具:lookup"
+        assert message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language="invalid", name="lookup") == "使用工具:lookup"
+    finally:
+        reset_current_locale(chinese_locale_token)
+
+    english_locale_token = set_current_locale("zh")
+    try:
+        assert message_platform_t(MSG_MESSAGE_PLATFORM_TOOL_USED, language="en", name="lookup") == "Using tool:lookup"
+    finally:
+        reset_current_locale(english_locale_token)
 
 
 @pytest.mark.asyncio

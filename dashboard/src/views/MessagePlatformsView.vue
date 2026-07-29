@@ -51,6 +51,7 @@
       :is-edit="isEdit"
       :form="form"
       :platform-types="platformTypes"
+      :platform-languages="platformLanguages"
       :users="users"
       :users-loading="usersLoading"
       :profiles="profiles"
@@ -96,6 +97,7 @@ const pageSize = ref(10)
 const total = ref(0)
 const platforms = ref([])
 const platformTypes = ref([])
+const platformLanguages = ref([])
 const users = ref([])
 const profiles = ref([])
 const loginData = ref(null)
@@ -106,6 +108,8 @@ let loginTimer = null
 const defaultForm = () => ({
   name: '',
   platform_type: 'WEIXIN_OPENCLAW',
+  language: 'zh',
+  use_stream_dispatch: false,
   is_enabled: true,
   uid: '',
   profile_id: null,
@@ -151,8 +155,10 @@ const fetchTypes = async () => {
   try {
     const res = await messagePlatformApi.types()
     platformTypes.value = res.data.data?.platform_types || ['WEIXIN_OPENCLAW']
+    platformLanguages.value = res.data.data?.languages || ['zh', 'en']
   } catch (err) {
     console.error(err)
+    platformLanguages.value = ['zh', 'en']
   }
 }
 
@@ -204,6 +210,8 @@ const handleEdit = (row) => {
   resetForm()
   form.name = row.name
   form.platform_type = row.platform_type
+  form.language = row.language || 'zh'
+  form.use_stream_dispatch = Boolean(row.use_stream_dispatch)
   form.is_enabled = row.is_enabled
   form.uid = row.uid || ''
   form.profile_id = row.profile_id ?? null
@@ -214,6 +222,8 @@ const handleEdit = (row) => {
 const buildPayload = () => ({
   name: form.name.trim(),
   platform_type: form.platform_type,
+  language: form.language,
+  use_stream_dispatch: form.use_stream_dispatch,
   is_enabled: form.is_enabled,
   uid: form.uid || null,
   profile_id: form.profile_id ?? null,

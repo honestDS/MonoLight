@@ -9,6 +9,8 @@ export default {
   account_id: 'Account ID',
   uid: 'Bound User',
   profile: 'Profile',
+  language: 'Language',
+  use_stream_dispatch: 'Stream Responses',
   inherited_profile: 'Use user default profile',
   default_profile_suffix: ' (Default)',
   enabled: 'Enabled',
@@ -42,6 +44,10 @@ export default {
   },
   type_map: {
     WEIXIN_OPENCLAW: 'Weixin OpenClaw'
+  },
+  language_map: {
+    zh: '中文',
+    en: 'English'
   },
   error_map: {
     ERR_MESSAGE_PLATFORM_QRCODE_EXPIRED: 'QR code expired',

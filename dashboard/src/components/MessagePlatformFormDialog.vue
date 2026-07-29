@@ -27,6 +27,14 @@
           <el-option v-for="profile in profileOptions" :key="profile.id" :label="formatProfileOptionLabel(profile, $t('messagePlatforms.default_profile_suffix'))" :value="profile.id" />
         </el-select>
       </el-form-item>
+      <el-form-item :label="$t('messagePlatforms.language')">
+        <el-select v-model="localForm.language" class="full-width-input">
+          <el-option v-for="language in platformLanguages" :key="language" :label="$t(`messagePlatforms.language_map.${language}`)" :value="language" />
+        </el-select>
+      </el-form-item>
+      <el-form-item :label="$t('messagePlatforms.use_stream_dispatch')">
+        <el-switch v-model="localForm.use_stream_dispatch" />
+      </el-form-item>
       <el-form-item :label="$t('messagePlatforms.api_timeout_ms')">
         <el-input-number v-model="localForm.config.api_timeout_ms" :min="1000" :max="120000" />
       </el-form-item>
@@ -56,6 +64,7 @@ const props = defineProps({
   isEdit: { type: Boolean, default: false },
   form: { type: Object, required: true },
   platformTypes: { type: Array, default: () => [] },
+  platformLanguages: { type: Array, default: () => [] },
   users: { type: Array, default: () => [] },
   usersLoading: { type: Boolean, default: false },
   profiles: { type: Array, default: () => [] },

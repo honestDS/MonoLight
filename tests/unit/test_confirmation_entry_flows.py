@@ -1170,6 +1170,7 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
         id=1,
         uid="owner",
         is_enabled=True,
+        use_stream_dispatch=False,
         platform_type=handler.platform_type,
         status=MessagePlatformStatus.CONNECTED,
         account_id="account",
