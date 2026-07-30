@@ -89,7 +89,6 @@ export default {
   advanced_settings: '高级设置',
   custom_request_headers: '自定义请求头',
   fill_headers_template: '填入模板',
-  custom_headers_placeholder: '{"user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"}',
   custom_headers_json_object_error: '自定义请求头必须是有效的 JSON 对象。',
   custom_headers_max_items_error: '自定义请求头最多可包含 32 项。',
   custom_headers_name_error: '请求头名称必须是有效的 HTTP header token，且不能有忽略大小写的重复项。',

@@ -89,7 +89,6 @@ export default {
   advanced_settings: 'Advanced Settings',
   custom_request_headers: 'Custom Request Headers',
   fill_headers_template: 'Fill Template',
-  custom_headers_placeholder: '{"user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"}',
   custom_headers_json_object_error: 'Custom request headers must be a valid JSON object.',
   custom_headers_max_items_error: 'Custom request headers can contain at most 32 entries.',
   custom_headers_name_error: 'Each header name must be a valid HTTP header token with no case-insensitive duplicates.',

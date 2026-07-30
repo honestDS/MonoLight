@@ -231,7 +231,7 @@
                     v-model="advancedSettingsDrafts[idx]"
                     type="textarea"
                     :rows="4"
-                    :placeholder="$t('channels.custom_headers_placeholder')"
+                    :placeholder="customHeadersPlaceholder"
                     @input="handleAdvancedSettingsInput(idx)" />
                 </el-form-item>
               </el-collapse-item>
@@ -336,6 +336,7 @@ const customHeadersTemplate = {
   'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
   'cache-control': 'no-cache'
 }
+const customHeadersPlaceholder = JSON.stringify({ 'user-agent': customHeadersTemplate['user-agent'] })
 const httpHeaderNamePattern = /^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$/
 const reservedCustomHeaderNames = new Set([
   'authorization',
