@@ -59,6 +59,13 @@ class LogManager:
     _configured = False
 
     @staticmethod
+    def _format_db_log_message(message: str, exception) -> str:
+        if exception is None:
+            return message
+        exception_text = "".join(traceback.format_exception(exception.type, exception.value, exception.traceback))
+        return f"{message}\n{exception_text}"
+
+    @staticmethod
     def _truncate_tool_log_message(record: dict) -> str:
         """对工具类日志的超大 message 做字符级截断。
 
@@ -101,7 +108,7 @@ class LogManager:
 
                 # 仅对工具类日志（tool_call / tool_result）的超大 message 做截断，
                 # 避免工具结果撑大数据库存储体积
-                db_log_message = cls._truncate_tool_log_message(record)
+                db_log_message = cls._format_db_log_message(cls._truncate_tool_log_message(record), record["exception"])
 
                 log_entry = SystemLogCreate(
                     level=record["level"].name,

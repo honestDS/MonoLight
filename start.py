@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from app.core.event_loop import get_uvicorn_loop
+
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 DEFAULT_WEB_WORKERS = 1
@@ -67,6 +69,8 @@ def build_web_command(config: StartConfig) -> list[str]:
         str(config.port),
         "--workers",
         str(config.web_workers),
+        "--loop",
+        get_uvicorn_loop(),
     ]
 
 

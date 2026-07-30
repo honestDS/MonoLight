@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import sys
 
@@ -120,7 +121,19 @@ def test_build_web_command_uses_current_python_and_worker_count():
         "8001",
         "--workers",
         "4",
+        "--loop",
+        "app.core.event_loop:create_windows_selector_event_loop" if sys.platform == "win32" else "auto",
     ]
+
+
+def test_windows_selector_event_loop_factory_returns_closable_selector_loop():
+    from app.core.event_loop import create_windows_selector_event_loop
+
+    loop = create_windows_selector_event_loop()
+    try:
+        assert isinstance(loop, asyncio.SelectorEventLoop)
+    finally:
+        loop.close()
 
 
 @pytest.mark.parametrize(

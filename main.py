@@ -16,6 +16,7 @@ from app.api.v1.prompts import router as prompt_router
 from app.api.v1.scheduled_tasks import router as scheduled_task_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
+from app.core.event_loop import get_uvicorn_loop
 from app.core.log import LogManager, get_logger
 from app.core.log_broadcaster import log_broadcaster
 from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
@@ -90,4 +91,5 @@ if __name__ == "__main__":
         reload=False,
         reload_dirs=["app"],
         reload_excludes=[TEMP_DIR.name, DATA_DIR.name, "*.log"],
+        loop=get_uvicorn_loop(),
     )
