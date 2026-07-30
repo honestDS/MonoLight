@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
@@ -7,17 +8,24 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.utils.context_summary import service as service_module
 from app.core.utils.context_summary.boundary import (
     ContextSummaryTriggerMode,
     resolve_context_summary_boundary,
 )
-from app.core.utils.context_summary.common import ContextSummaryState
+from app.core.utils.context_summary.common import (
+    ContextSummaryState,
+    ContextSummaryWorkInvalidError,
+)
+from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
+from app.core.utils.context_summary.stage import GeneratedSummaryResult
 from app.core.utils.context_summary.user_message_block import (
     append_covered_user_message,
     split_covered_user_message,
 )
 from app.core.utils.dispatcher import context_summary_checkpoint as checkpoint_module
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.session import ChatSession
 
 
 @pytest_asyncio.fixture
@@ -27,7 +35,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         await connection.run_sync(
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
-                tables=[Message.__table__],
+                tables=[Message.__table__, ChatSession.__table__],
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -425,3 +433,220 @@ async def test_checkpoint_refreshes_same_work_content_version_when_provider_meta
     assert captured["estimate_kwargs"]["context_summary_revision"] == 5
     assert captured["estimate_kwargs"]["context_content_revision"] == 7
     assert captured["required_input_tokens_override"] == 5007
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_preserves_logical_batches_when_physical_ids_run_in_reverse(monkeypatch):
+    captured = {}
+
+    async def ensure_summary(_db, **kwargs):
+        captured.update(kwargs)
+        return ContextSummaryState(content="combined summary", message_id=2)
+
+    monkeypatch.setattr(checkpoint_module, "ensure_context_summary", ensure_summary)
+    logical_batches = [
+        InternalMessage(id=92, role=MessageRole.USER, content="batch-b-first"),
+        InternalMessage(id=90, role=MessageRole.USER, content="batch-b-second"),
+        InternalMessage(id=82, role=MessageRole.USER, content="batch-c-first"),
+        InternalMessage(id=80, role=MessageRole.USER, content="batch-c-second"),
+    ]
+    result = await asyncio.wait_for(
+        checkpoint_module.apply_context_summary_checkpoint(
+            object(),
+            session_id="session-1",
+            uid="user-1",
+            profile=object(),
+            cfg=object(),
+            messages=[
+                InternalMessage(role=MessageRole.SYSTEM, content="system"),
+                InternalMessage(id=1, role=MessageRole.USER, content="old request"),
+                InternalMessage(id=2, role=MessageRole.ASSISTANT, content="old answer"),
+                *logical_batches,
+            ],
+            trigger_mode=ContextSummaryTriggerMode.USER_MESSAGE,
+            fixed_upper_message_id=80,
+            context_window_k=8,
+            max_tokens=512,
+            tools=None,
+        ),
+        timeout=1,
+    )
+
+    assert captured["fixed_upper_message_id"] == 80
+    assert [message.id for message in captured["fixed_request_messages"]] == [None, 92, 90, 82, 80]
+    assert [message.id for message in result] == [None, None, 92, 90, 82, 80]
+    assert [message.content for message in result[-4:]] == [
+        "batch-b-first",
+        "batch-b-second",
+        "batch-c-first",
+        "batch-c-second",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persist_context_summary_rejects_stale_content_revision_then_accepts_retry(db_session: AsyncSession, monkeypatch):
+    session = ChatSession(
+        session_id="session-cas",
+        uid="user-1",
+        context_summary="prior summary",
+        context_summary_message_id=8,
+        context_summary_revision=4,
+        context_content_revision=7,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    expected_content_revisions = []
+    update_context_summary = service_module.session_crud.update_context_summary
+
+    async def trace_update_context_summary(*args, **kwargs):
+        expected_content_revisions.append(kwargs["expected_content_revision"])
+        return await update_context_summary(*args, **kwargs)
+
+    monkeypatch.setattr(service_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(service_module.session_crud, "update_context_summary", trace_update_context_summary)
+    await service_module.session_crud.bump_context_content_revision(
+        db_session,
+        session_id="session-cas",
+        uid="user-1",
+    )
+
+    stale_updated = await asyncio.wait_for(
+        service_module.persist_context_summary(
+            session_id="session-cas",
+            uid="user-1",
+            expected_message_id=8,
+            expected_revision=4,
+            expected_content_revision=7,
+            summary="stale summary",
+            message_id=12,
+        ),
+        timeout=1,
+    )
+    retried_updated = await asyncio.wait_for(
+        service_module.persist_context_summary(
+            session_id="session-cas",
+            uid="user-1",
+            expected_message_id=None,
+            expected_revision=5,
+            expected_content_revision=8,
+            summary="fresh summary",
+            message_id=12,
+        ),
+        timeout=1,
+    )
+    await db_session.refresh(session)
+
+    assert stale_updated is False
+    assert retried_updated is True
+    assert expected_content_revisions == [7, 8]
+    assert session.context_summary == "fresh summary"
+    assert session.context_summary.count("fresh summary") == 1
+    assert session.context_summary_message_id == 12
+    assert session.context_summary_revision == 6
+    assert session.context_content_revision == 8
+
+
+@pytest.mark.asyncio
+async def test_context_summary_lease_loss_after_candidate_generation_never_persists_old_result(db_session: AsyncSession, monkeypatch):
+    session = ChatSession(
+        session_id="session-lease",
+        uid="user-1",
+        context_summary="prior summary",
+        context_summary_message_id=8,
+        context_summary_revision=4,
+        context_content_revision=7,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    session_factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    lease_active = True
+    persist_calls = []
+    usage_call_count = 0
+
+    async def build_snapshot(*_args, **_kwargs):
+        return ContextSummarySnapshot(
+            expected_summary_message_id=8,
+            snapshot_before_id=13,
+            snapshot_max_message_id=12,
+            persistent_summary_target_id=12,
+            recent_round_start_ids=(13,),
+            frozen_user_message_ids=(),
+            recent_messages=(),
+            content_revision=7,
+        )
+
+    async def measure_history(*_args, **_kwargs):
+        return 100, 2
+
+    async def generate_summary(*_args, **_kwargs):
+        nonlocal lease_active
+        lease_active = False
+        return GeneratedSummaryResult(
+            content="candidate generated before lease loss",
+            message_count=4,
+            completed_stage=SimpleNamespace(content="candidate generated before lease loss"),
+        )
+
+    def calc_usage(*_args, **_kwargs):
+        nonlocal usage_call_count
+        usage_call_count += 1
+        return {
+            "context_window_tokens": 1024,
+            "output_tokens": 128,
+            "safety_tokens": 0,
+            "input_budget": 896,
+            "threshold_percent": 50,
+            "summary_tokens": 1,
+            "history_tokens": 100,
+            "tools_tokens": 0,
+            "current_message_tokens": 0,
+            "history_message_count": 2,
+            "reserved_tokens": 0,
+            "required_tokens": 100 if usage_call_count == 1 else 1,
+            "summary_trigger_tokens": 10,
+            "compression_goal_tokens": 10,
+        }
+
+    async def check_work_validity():
+        return lease_active
+
+    async def persist_old_candidate(**kwargs):
+        persist_calls.append(kwargs)
+        return True
+
+    async def cleanup_work(_work_dedupe_key):
+        return None
+
+    monkeypatch.setattr(service_module, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(service_module, "build_context_summary_snapshot", build_snapshot)
+    monkeypatch.setattr(service_module, "measure_snapshot_history", measure_history)
+    monkeypatch.setattr(service_module, "generate_snapshot_summary_result", generate_summary)
+    monkeypatch.setattr(service_module, "calc_token_usage", calc_usage)
+    monkeypatch.setattr(service_module, "persist_context_summary", persist_old_candidate)
+    monkeypatch.setattr(service_module, "cleanup_context_summary_work_safely", cleanup_work)
+
+    with pytest.raises(ContextSummaryWorkInvalidError):
+        await asyncio.wait_for(
+            service_module.ensure_context_summary(
+                db_session,
+                session_id="session-lease",
+                uid="user-1",
+                profile=SimpleNamespace(id=1),
+                cfg=SimpleNamespace(other=SimpleNamespace(context_summary_threshold_percent=50)),
+                before_id=13,
+                current_message="",
+                context_window_k=1,
+                max_tokens=128,
+                reserved_tokens=0,
+                work_validity_checker=check_work_validity,
+            ),
+            timeout=1,
+        )
+    await db_session.refresh(session)
+
+    assert persist_calls == []
+    assert session.context_summary == "prior summary"
+    assert session.context_summary_message_id == 8
+    assert session.context_summary_revision == 4
+    assert session.context_content_revision == 7

@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from app.adapters import chat_web as chat_web_module
 from app.core.constants import ERR_LLM_STREAM_TIMEOUT, ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
 from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.exceptions import BaseBusinessException, LLMException
+from app.core.session_reply_queue import executor as executor_module
 from app.core.session_reply_queue.executor import _execute_foreground
 from app.core.session_reply_queue.manager import (
     SessionReplyQueueManager,
@@ -1558,3 +1560,191 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
             "commit": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_publish_interactive_stream_dequeues_request_ids_once_across_agent_loop_boundaries(monkeypatch):
+    work = SimpleNamespace(
+        id=7,
+        sequence_no=1,
+        uid="user-1",
+        session_id="session-1",
+        execution_state={"request_ids": ["request-1"]},
+    )
+    persisted_events = []
+    commits = []
+    refresh_count = 0
+
+    class EventDb:
+        async def commit(self):
+            commits.append(True)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return EventDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeDb:
+        async def refresh(self, refreshed_work):
+            nonlocal refresh_count
+            refresh_count += 1
+            if refresh_count == 1:
+                refreshed_work.execution_state = {"request_ids": ["request-1", "request-2", "request-1"]}
+
+    async def publish(_db, *, work_id, sequence_no, event, commit):
+        assert commit is False
+        persisted_events.append((work_id, sequence_no, dict(event)))
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        executor_module.session_reply_stream_event_crud,
+        "publish",
+        publish,
+    )
+    stream_state = executor_module._InteractiveWorkStreamEventState(
+        work=work,
+        next_sequence=1,
+        dequeued_request_ids=set(),
+        turn_end_content_by_response_id={},
+        tool_names_by_response_id={},
+    )
+    db = FakeDb()
+
+    await asyncio.wait_for(
+        executor_module._publish_interactive_work_stream_event(
+            db,
+            stream_state,
+            {"type": "agent_loop_start", "response_id": "response-1"},
+        ),
+        timeout=1,
+    )
+    work.execution_state["request_ids"].extend(["request-3", "request-2"])
+    await asyncio.wait_for(
+        executor_module._publish_interactive_work_stream_event(
+            db,
+            stream_state,
+            {"type": "agent_loop_start", "response_id": "response-2"},
+        ),
+        timeout=1,
+    )
+
+    dequeued_events = [event for _work_id, _sequence_no, event in persisted_events if event["type"] == "input_dequeued"]
+    assert [event["request_ids"] for event in dequeued_events] == [["request-1", "request-2"], ["request-3"]]
+    assert [request_id for event in dequeued_events for request_id in event["request_ids"]] == ["request-1", "request-2", "request-3"]
+    assert [event["type"] for _work_id, _sequence_no, event in persisted_events] == [
+        "input_dequeued",
+        "agent_loop_start",
+        "input_dequeued",
+        "agent_loop_start",
+    ]
+    assert [sequence_no for _work_id, sequence_no, _event in persisted_events] == [1, 2, 3, 4]
+    assert len(commits) == 4
+
+
+@pytest.mark.asyncio
+async def test_wait_for_stream_switches_merged_target_without_replay_before_terminal_done(monkeypatch):
+    manager = SessionReplyQueueManager()
+    target_work = SimpleNamespace(
+        id=8,
+        session_id="session-1",
+        status=SessionReplyWorkStatus.RUNNING,
+        execution_state={"request_ids": ["request-1", "request-2", "request-1"]},
+        error=None,
+        result_message_id=91,
+    )
+    resolve_calls = []
+    stream_queries = []
+    late_unmerged_request_ids = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def resolve_merged_target(_db, work_id):
+        resolve_calls.append(work_id)
+        if len(resolve_calls) == 1:
+            return target_work
+        target_work.status = SessionReplyWorkStatus.SUCCEEDED
+        target_work.execution_state = {
+            "request_ids": ["request-1", "request-2", "request-1"],
+            "response": {
+                "response_id": "response-final",
+                "history": [{"role": "assistant", "content": "complete"}],
+                "files": None,
+            },
+        }
+        return target_work
+
+    async def list_after_sequence(_db, *, work_id, after_sequence_no):
+        stream_queries.append((work_id, after_sequence_no))
+        if after_sequence_no == 0:
+            return [
+                SimpleNamespace(
+                    sequence_no=1,
+                    event={
+                        "type": "input_dequeued",
+                        "session_id": "session-1",
+                        "work_id": 8,
+                        "request_ids": ["request-1", "request-2"],
+                    },
+                ),
+                SimpleNamespace(
+                    sequence_no=2,
+                    event={"type": "content", "content": "first", "response_id": "response-final"},
+                ),
+            ]
+        late_unmerged_request_ids.append("request-3")
+        return [
+            SimpleNamespace(
+                sequence_no=3,
+                event={"type": "content", "content": " last", "response_id": "response-final"},
+            ),
+            SimpleNamespace(
+                sequence_no=4,
+                event={"type": "turn_end", "response_id": "response-final", "message_id": 91},
+            ),
+        ]
+
+    async def no_sleep(_delay):
+        return None
+
+    async def collect_stream():
+        return [event async for event in manager.wait_for_stream(7)]
+
+    monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_work_item_crud.resolve_merged_target",
+        resolve_merged_target,
+    )
+    monkeypatch.setattr(
+        "app.core.session_reply_queue.manager.session_reply_stream_event_crud.list_after_sequence",
+        list_after_sequence,
+    )
+    monkeypatch.setattr("app.core.session_reply_queue.manager.asyncio.sleep", no_sleep)
+
+    yielded = await asyncio.wait_for(collect_stream(), timeout=1)
+
+    assert resolve_calls == [7, 8]
+    assert stream_queries == [(8, 0), (8, 2)]
+    assert [event["type"] for event in yielded] == [
+        "input_dequeued",
+        "content",
+        "content",
+        "turn_end",
+        "done",
+    ]
+    assert "".join(event["content"] for event in yielded if event["type"] == "content") == "first last"
+    assert yielded[-2]["response_id"] == yielded[-1]["response_id"] == "response-final"
+    assert yielded[-1]["message_id"] == 91
+    assert yielded[-1]["request_ids"] == ["request-1", "request-2"]
+    assert yielded[0]["request_ids"] == ["request-1", "request-2"]
+    assert late_unmerged_request_ids == ["request-3"]
+    assert all("request-3" not in event.get("request_ids", []) for event in yielded)

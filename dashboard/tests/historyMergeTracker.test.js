@@ -70,3 +70,49 @@ test('repeated begin and invalidate calls never revalidate old tokens', () => {
   assert.equal(tracker.isLatest(secondRequestId), false)
   assert.equal(tracker.isLatest(thirdRequestId), false)
 })
+
+test('only the C/B/A completion order applies the newest C snapshot', () => {
+  const tracker = createHistoryMergeTracker()
+  const appliedSnapshots = []
+  const requestA = tracker.begin()
+  const requestB = tracker.begin()
+  const requestC = tracker.begin()
+
+  for (const [request, snapshot] of [
+    [requestC, 'C'],
+    [requestB, 'B'],
+    [requestA, 'A']
+  ]) {
+    if (tracker.isLatest(request)) appliedSnapshots.push(snapshot)
+  }
+
+  assert.deepEqual(appliedSnapshots, ['C'])
+})
+
+test('an invalidated request remains invalid after returning to its former session', () => {
+  const tracker = createHistoryMergeTracker()
+  const oldSessionRequest = tracker.begin()
+
+  tracker.invalidate()
+  const otherSessionRequest = tracker.begin()
+  tracker.invalidate()
+  const returnedSessionRequest = tracker.begin()
+
+  assert.equal(tracker.isLatest(oldSessionRequest), false)
+  assert.equal(tracker.isLatest(otherSessionRequest), false)
+  assert.equal(tracker.isLatest(returnedSessionRequest), true)
+})
+
+test('interleaved history synchronizations apply only their latest token', () => {
+  const tracker = createHistoryMergeTracker()
+  const appliedSnapshots = []
+  const firstSync = tracker.begin()
+  const secondSync = tracker.begin()
+
+  if (tracker.isLatest(firstSync)) appliedSnapshots.push('first')
+  const thirdSync = tracker.begin()
+  if (tracker.isLatest(secondSync)) appliedSnapshots.push('second')
+  if (tracker.isLatest(thirdSync)) appliedSnapshots.push('third')
+
+  assert.deepEqual(appliedSnapshots, ['third'])
+})

@@ -50,12 +50,67 @@ export const clearAllContextSummaryWorks = (activeKeys, requestKeys) => {
 }
 
 export const shouldIgnoreExternalSessionEvent = (sequenceBySession, data, currentSessionId) => {
-  if (!data || data.work_id !== undefined && data.work_id !== null && data.work_id !== '') return false
+  if (!data) return false
+  if (
+    data.session_id !== undefined &&
+    data.session_id !== null &&
+    data.session_id !== '' &&
+    currentSessionId !== undefined &&
+    currentSessionId !== null &&
+    currentSessionId !== '' &&
+    String(data.session_id) !== String(currentSessionId)
+  ) return true
   if (!Number.isFinite(data.event_sequence_no)) return false
   const sessionId = data.session_id || currentSessionId
   if (!sessionId) return false
-  const previousSequenceNo = sequenceBySession.get(sessionId)
+  const scope = data.work_id !== undefined && data.work_id !== null && data.work_id !== ''
+    ? `work:${String(sessionId)}:${String(data.work_id)}`
+    : `session:${String(sessionId)}`
+  const previousSequenceNo = sequenceBySession.get(scope)
   if (previousSequenceNo !== undefined && data.event_sequence_no <= previousSequenceNo) return true
-  sequenceBySession.set(sessionId, data.event_sequence_no)
+  sequenceBySession.set(scope, data.event_sequence_no)
   return false
+}
+
+const getSummaryLifecycleKey = (data, requestId) => {
+  const workKey = getContextSummaryWorkKey(data, requestId)
+  if (!workKey) return null
+  const sessionId = data?.session_id !== undefined && data?.session_id !== null && data.session_id !== ''
+    ? String(data.session_id)
+    : ''
+  return `${sessionId}:${workKey}`
+}
+
+export function createContextSummaryTracker() {
+  const sequenceByScope = new Map()
+  const endedWorkKeys = new Set()
+
+  return {
+    shouldIgnoreExternalSessionEvent(data, currentSessionId) {
+      return shouldIgnoreExternalSessionEvent(sequenceByScope, data, currentSessionId)
+    },
+
+    startContextSummaryWork(activeKeys, requestKeys, data, requestId) {
+      const lifecycleKey = getSummaryLifecycleKey(data, requestId)
+      if (!lifecycleKey || endedWorkKeys.has(lifecycleKey)) return
+      startContextSummaryWork(activeKeys, requestKeys, data, requestId)
+    },
+
+    endContextSummaryWork(activeKeys, requestKeys, data, requestId) {
+      const lifecycleKey = getSummaryLifecycleKey(data, requestId)
+      if (!lifecycleKey) return
+      endedWorkKeys.add(lifecycleKey)
+      endContextSummaryWork(activeKeys, requestKeys, data, requestId)
+    },
+
+    clearContextSummaryRequest(activeKeys, requestKeys, requestId) {
+      clearContextSummaryRequest(activeKeys, requestKeys, requestId)
+    },
+
+    clearAllContextSummaryWorks(activeKeys, requestKeys) {
+      clearAllContextSummaryWorks(activeKeys, requestKeys)
+      sequenceByScope.clear()
+      endedWorkKeys.clear()
+    }
+  }
 }

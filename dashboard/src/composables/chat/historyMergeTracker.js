@@ -1,16 +1,20 @@
 export function createHistoryMergeTracker() {
+  let generation = 0
   let latestRequestId = 0
+  let latestToken = null
 
   return {
     begin() {
       latestRequestId += 1
-      return latestRequestId
+      latestToken = Object.freeze({ generation, requestId: latestRequestId })
+      return latestToken
     },
     invalidate() {
-      latestRequestId += 1
+      generation += 1
+      latestToken = null
     },
-    isLatest(requestId) {
-      return requestId === latestRequestId
+    isLatest(token) {
+      return token === latestToken && token?.generation === generation
     }
   }
 }

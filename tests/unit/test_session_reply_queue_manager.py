@@ -1,7 +1,8 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
 from app.core.crud.message import message_crud
@@ -18,6 +19,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkType,
 )
 from tests.unit.session_reply_queue_test_support import (
+    AsyncBarrier,
     add_message,
     enqueue,
 )
@@ -538,6 +540,166 @@ async def test_running_confirmed_tool_execution_absorbs_later_foreground_message
     await db_session.refresh(confirmed)
     assert confirmed.input_message_ids == [30, 10, 20]
     assert confirmed.execution_state["request_ids"] == ["request-confirmed", "request-shared", "request-first", "request-second", "request-third"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_absorb_merges_each_work_once_and_preserves_work_order(
+    concurrent_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+    async with concurrent_session_factory() as db:
+        root = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=1,
+            dedupe_key="foreground-message:1",
+        )
+        await add_message(db, 30, "B")
+        second = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=30,
+            dedupe_key="foreground-message:30",
+        )
+        await add_message(db, 10, "C")
+        third = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=10,
+            dedupe_key="foreground-message:10",
+        )
+        root.status = SessionReplyWorkStatus.RUNNING
+        root.locked_by = "worker-1"
+        root.input_message_ids = [1]
+        root.execution_state = {"request_ids": ["request-root", "request-shared"]}
+        second.execution_state = {"request_ids": ["request-second", "request-shared"]}
+        third.execution_state = {"request_ids": ["request-third", "request-second"]}
+        db.add_all([root, second, third])
+        await db.commit()
+
+    merge_barrier = AsyncBarrier(2)
+    original_merge_ready_foreground = session_reply_work_item_crud.merge_ready_foreground
+
+    async def synchronize_merge(*args, **kwargs):
+        await merge_barrier.wait()
+        return await original_merge_ready_foreground(*args, **kwargs)
+
+    async def skip_runtime_instructions(db, session_id, message):
+        return None
+
+    monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", synchronize_merge)
+    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+
+    async def absorb_in_session():
+        async with concurrent_session_factory() as db:
+            return await manager.absorb_contiguous_foreground_messages(
+                db,
+                work_id=root.id,
+                worker_id="worker-1",
+            )
+
+    batches = await asyncio.gather(absorb_in_session(), absorb_in_session())
+
+    async with concurrent_session_factory() as db:
+        persisted_root = await db.get(SessionReplyWorkItem, root.id)
+        persisted_second = await db.get(SessionReplyWorkItem, second.id)
+        persisted_third = await db.get(SessionReplyWorkItem, third.id)
+        messages = list((await db.execute(select(Message).where(Message.id.in_([30, 10])))).scalars().all())
+
+    successful_batches = [batch for batch in batches if batch is not None]
+    assert len(successful_batches) == 1
+    assert successful_batches[0].source_message_ids == (30, 10)
+    assert persisted_root.input_message_ids == [1, 30, 10]
+    assert persisted_root.execution_state["request_ids"] == ["request-root", "request-shared", "request-second", "request-third"]
+    assert persisted_second.status == SessionReplyWorkStatus.MERGED
+    assert persisted_third.status == SessionReplyWorkStatus.MERGED
+    assert persisted_second.merged_into_id == root.id
+    assert persisted_third.merged_into_id == root.id
+    assert all(message.is_processed for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_absorb_rolls_back_when_work_reaches_terminal_state_before_commit(
+    concurrent_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+):
+    crud = CRUDSessionReplyWorkItem()
+    manager = SessionReplyQueueManager()
+    async with concurrent_session_factory() as db:
+        root = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=1,
+            dedupe_key="foreground-message:1",
+        )
+        await add_message(db, 2, "pending input")
+        candidate = await enqueue(
+            crud,
+            db,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_id=2,
+            dedupe_key="foreground-message:2",
+        )
+        root.status = SessionReplyWorkStatus.RUNNING
+        root.locked_by = "worker-1"
+        root.input_message_ids = [1]
+        db.add(root)
+        await db.commit()
+
+    terminal_started = asyncio.Event()
+    terminal_finished = asyncio.Event()
+    original_merge_ready_foreground = session_reply_work_item_crud.merge_ready_foreground
+
+    async def wait_for_terminal(*args, **kwargs):
+        terminal_started.set()
+        await terminal_finished.wait()
+        return await original_merge_ready_foreground(*args, **kwargs)
+
+    async def skip_runtime_instructions(db, session_id, message):
+        return None
+
+    monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", wait_for_terminal)
+    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+
+    async def absorb():
+        async with concurrent_session_factory() as db:
+            return await manager.absorb_contiguous_foreground_messages(
+                db,
+                work_id=root.id,
+                worker_id="worker-1",
+            )
+
+    async def mark_terminal_after_absorb_reads() -> bool:
+        await terminal_started.wait()
+        async with concurrent_session_factory() as db:
+            updated = await crud.mark_terminal(
+                db,
+                work_id=root.id,
+                worker_id="worker-1",
+                status=SessionReplyWorkStatus.SUCCEEDED,
+            )
+        terminal_finished.set()
+        return updated
+
+    absorbed, terminal_updated = await asyncio.gather(absorb(), mark_terminal_after_absorb_reads())
+
+    async with concurrent_session_factory() as db:
+        persisted_root = await db.get(SessionReplyWorkItem, root.id)
+        persisted_candidate = await db.get(SessionReplyWorkItem, candidate.id)
+        candidate_message = await db.get(Message, 2)
+
+    assert terminal_updated is True
+    assert absorbed is None
+    assert persisted_root.status == SessionReplyWorkStatus.SUCCEEDED
+    assert persisted_candidate.status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert persisted_candidate.merged_into_id is None
+    assert candidate_message.is_processed is False
 
 
 @pytest.mark.asyncio

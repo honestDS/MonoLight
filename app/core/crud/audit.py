@@ -469,6 +469,7 @@ class CRUDAudit:
         decision_message_id: int,
         decision_raw_message: str,
         decided_by: str,
+        commit: bool = True,
     ) -> tuple[AuditRecord | None, str | None]:
         claim_token = uuid.uuid4().hex
         now = get_local_time()
@@ -496,7 +497,10 @@ class CRUDAudit:
             await db.rollback()
             return None, None
         await db.execute(delete(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == audit_record_id))
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return await self.get_record(db, audit_record_id), claim_token
 
     async def claim_passed_for_execution(self, db: AsyncSession, *, audit_record_id: int) -> tuple[AuditRecord | None, str | None]:

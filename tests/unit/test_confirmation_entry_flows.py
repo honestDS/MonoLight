@@ -31,6 +31,7 @@ from app.core.constants import (
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
 from app.core.crud.audit import audit_crud
+from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager
@@ -52,6 +53,7 @@ from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
     SessionReplySequence,
     SessionReplyWorkItem,
+    SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
 
@@ -76,6 +78,32 @@ async def db_session() -> AsyncSession:
     async with session_factory() as session:
         yield session
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def concurrent_confirmation_session_factory(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'confirmation-concurrency.db'}",
+        connect_args={"timeout": 30},
+    )
+    tables = [
+        Message.__table__,
+        AuditRecord.__table__,
+        AuditToolDetail.__table__,
+        AuditConfirmationClaim.__table__,
+        AuditExecutionRecord.__table__,
+        AuditToolResultVersion.__table__,
+        ChatSession.__table__,
+        SessionReplySequence.__table__,
+        SessionReplyWorkItem.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield session_factory
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -244,6 +272,81 @@ async def get_tool_result_payload(db: AsyncSession, session_id: str = "session-1
     assert message is not None
     stored_message = InternalMessage.model_validate_json(message.content)
     return json.loads(stored_message.content)
+
+
+async def _prepare_concurrent_confirmation(session_factory, *, expires_at=None) -> int:
+    async with session_factory() as db:
+        record = await add_pending_confirmation(db)
+        if expires_at is not None:
+            record.expires_at = expires_at
+        db.add(ChatSession(session_id="session-1", uid="owner", profile_id=1))
+        await db.commit()
+        assert record.id is not None
+        return record.id
+
+
+async def _collect_websocket_submission(session_factory, *, message: str, request_id: str, role: str, completed: asyncio.Event | None = None):
+    try:
+        async with session_factory() as db:
+            db.info["confirmation_race_role"] = role
+            return [
+                event
+                async for event in ws_chat_adapter.chat(
+                    db,
+                    message,
+                    uid="owner",
+                    session_id="session-1",
+                    request_id=request_id,
+                )
+            ]
+    finally:
+        if completed is not None:
+            completed.set()
+
+
+async def _collect_web_submission(session_factory, *, message: str, role: str, completed: asyncio.Event | None = None):
+    try:
+        async with session_factory() as db:
+            db.info["confirmation_race_role"] = role
+            return await web_chat_adapter.chat(
+                db,
+                message,
+                uid="owner",
+                session_id="session-1",
+            )
+    finally:
+        if completed is not None:
+            completed.set()
+
+
+def _install_confirmation_read_barrier(monkeypatch, *, delayed_role: str | None = None, delayed_until: asyncio.Event | None = None):
+    original_get_current = audit_crud.get_current_confirmation
+    both_read = asyncio.Event()
+    release = asyncio.Event()
+    readers: set[str] = set()
+
+    async def get_current_after_both_read(db, *, uid: str, session_id: str):
+        record = await original_get_current(db, uid=uid, session_id=session_id)
+        role = str(db.info.get("confirmation_race_role") or id(db))
+        readers.add(role)
+        if len(readers) == 2:
+            both_read.set()
+        await release.wait()
+        if role == delayed_role and delayed_until is not None:
+            await delayed_until.wait()
+        return record
+
+    monkeypatch.setattr(audit_crud, "get_current_confirmation", get_current_after_both_read)
+    return original_get_current, both_read, release
+
+
+async def _concurrent_confirmation_snapshot(session_factory, record_id: int):
+    async with session_factory() as db:
+        record = await db.get(AuditRecord, record_id)
+        works = list((await db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.session_id == "session-1").order_by(SessionReplyWorkItem.sequence_no))).scalars().all())
+        messages = list((await db.execute(select(Message).where(Message.session_id == "session-1", Message.role == MessageRole.USER).order_by(Message.id))).scalars().all())
+        claims = list((await db.execute(select(AuditConfirmationClaim).where(AuditConfirmationClaim.audit_record_id == record_id))).scalars().all())
+    return record, works, messages, claims
 
 
 @pytest.mark.asyncio
@@ -1253,3 +1356,258 @@ async def test_weixin_platform_flushes_old_batch_before_independent_decision(mon
     await handler.run(1)
 
     assert order == ["旧批次", decision_text]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_websocket_approvals_keep_losing_input_as_absorbable_foreground_work(
+    concurrent_confirmation_session_factory,
+    entry_dependencies,
+    monkeypatch,
+):
+    record_id = await _prepare_concurrent_confirmation(concurrent_confirmation_session_factory)
+
+    async def completed_stream(work_id):
+        yield {"type": "done", "session_id": "session-1", "work_id": work_id, "response": {"work_id": work_id}}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", completed_stream)
+    _original_current, both_read, release = _install_confirmation_read_barrier(monkeypatch)
+
+    first_task = asyncio.create_task(
+        _collect_websocket_submission(
+            concurrent_confirmation_session_factory,
+            message="同意",
+            request_id="approval-a",
+            role="first-websocket",
+        )
+    )
+    second_task = asyncio.create_task(
+        _collect_websocket_submission(
+            concurrent_confirmation_session_factory,
+            message="approve",
+            request_id="approval-b",
+            role="second-websocket",
+        )
+    )
+    await both_read.wait()
+    release.set()
+    first_events, second_events = await asyncio.gather(first_task, second_task)
+
+    assert all(event.get("type") != "error" for event in [*first_events, *second_events])
+    record, works, messages, claims = await _concurrent_confirmation_snapshot(concurrent_confirmation_session_factory, record_id)
+    assert record is not None
+    assert record.status == AuditRecordStatus.EXECUTING
+    assert claims == []
+    assert sum(work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION for work in works) == 1
+    assert len(works) == 2
+    assert sum(message.content == "同意" for message in messages) == 1
+    assert sum(message.content == "approve" for message in messages) == 1
+
+    confirmed_work = next(work for work in works if work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION)
+    appended_work = next(work for work in works if work.work_type == SessionReplyWorkType.FOREGROUND_REPLY)
+    assert appended_work.sequence_no > confirmed_work.sequence_no
+    assert appended_work.execution_state["message_source"] == "ws"
+    assert appended_work.execution_state["request_ids"] in [["approval-a"], ["approval-b"]]
+
+    async with concurrent_confirmation_session_factory() as db:
+        claimed = await session_reply_work_item_crud.claim_next(db, worker_id="confirmation-worker", lease_seconds=300)
+        assert claimed is not None
+        assert claimed.id == confirmed_work.id
+        additional = await session_reply_queue_manager.absorb_contiguous_foreground_messages(
+            db,
+            work_id=claimed.id,
+            worker_id="confirmation-worker",
+        )
+        assert additional is not None
+        assert additional.messages[0].content in {"同意", "approve"}
+        absorbed_work = await db.get(SessionReplyWorkItem, appended_work.id)
+        assert absorbed_work is not None
+        assert absorbed_work.status == SessionReplyWorkStatus.MERGED
+        absorbed_message = await db.get(Message, int(appended_work.source_id))
+        assert absorbed_message is not None
+        assert absorbed_message.is_processed is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_weixin_approval_and_websocket_rejection_preserve_both_inputs_once(
+    concurrent_confirmation_session_factory,
+    entry_dependencies,
+    monkeypatch,
+):
+    record_id = await _prepare_concurrent_confirmation(concurrent_confirmation_session_factory)
+    rejection_completed = asyncio.Event()
+
+    async def completed_stream(work_id):
+        yield {"type": "done", "session_id": "session-1", "work_id": work_id, "response": {"work_id": work_id}}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", completed_stream)
+    _original_current, both_read, release = _install_confirmation_read_barrier(
+        monkeypatch,
+        delayed_role="weixin-approval",
+        delayed_until=rejection_completed,
+    )
+    adapter = build_weixin_adapter()
+
+    async def submit_weixin_approval():
+        async with concurrent_confirmation_session_factory() as db:
+            db.info["confirmation_race_role"] = "weixin-approval"
+            return await adapter.handle_message(
+                db,
+                WeixinOpenClawMessage(user_id="weixin-user", text="继续", session_id="session-1"),
+                uid="owner",
+            )
+
+    approval_task = asyncio.create_task(submit_weixin_approval())
+    rejection_task = asyncio.create_task(
+        _collect_websocket_submission(
+            concurrent_confirmation_session_factory,
+            message="拒绝",
+            request_id="rejection-request",
+            role="websocket-rejection",
+            completed=rejection_completed,
+        )
+    )
+    await both_read.wait()
+    release.set()
+    approval_result, rejection_events = await asyncio.gather(approval_task, rejection_task)
+
+    assert approval_result is True
+    assert all(event.get("type") != "error" for event in rejection_events)
+    record, works, messages, claims = await _concurrent_confirmation_snapshot(concurrent_confirmation_session_factory, record_id)
+    assert record is not None
+    assert record.status == AuditRecordStatus.REJECTED
+    assert claims == []
+    assert sum(work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION for work in works) == 0
+    assert len(works) == 2
+    assert works[1].sequence_no > works[0].sequence_no
+    assert sum(message.content == "继续" for message in messages) == 1
+    assert sum(message.content == "拒绝" for message in messages) == 1
+    assert sum(message.type == MessageType.AUDIT_DECISION for message in messages) == 1
+    assert sum(message.type == MessageType.TEXT for message in messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approval_and_foreground_append_leave_the_second_work_ready(
+    concurrent_confirmation_session_factory,
+    entry_dependencies,
+    monkeypatch,
+):
+    record_id = await _prepare_concurrent_confirmation(concurrent_confirmation_session_factory)
+    append_completed = asyncio.Event()
+
+    async def completed_stream(work_id):
+        yield {"type": "done", "session_id": "session-1", "work_id": work_id, "response": {"work_id": work_id}}
+
+    async def completed_result(work_id):
+        return {"work_id": work_id, "choices": []}
+
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", completed_stream)
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_result", completed_result)
+    _original_current, both_read, release = _install_confirmation_read_barrier(
+        monkeypatch,
+        delayed_role="websocket-approval",
+        delayed_until=append_completed,
+    )
+
+    approval_task = asyncio.create_task(
+        _collect_websocket_submission(
+            concurrent_confirmation_session_factory,
+            message="同意",
+            request_id="approval-request",
+            role="websocket-approval",
+        )
+    )
+    append_task = asyncio.create_task(
+        _collect_web_submission(
+            concurrent_confirmation_session_factory,
+            message="继续做别的事",
+            role="web-append",
+            completed=append_completed,
+        )
+    )
+    await both_read.wait()
+    release.set()
+    approval_events, append_response = await asyncio.gather(approval_task, append_task)
+
+    assert all(event.get("type") != "error" for event in approval_events)
+    assert append_response["choices"] == []
+    record, works, messages, claims = await _concurrent_confirmation_snapshot(concurrent_confirmation_session_factory, record_id)
+    assert record is not None
+    assert record.status == AuditRecordStatus.CANCELLED
+    assert claims == []
+    assert sum(work.work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION for work in works) == 0
+    assert len(works) == 2
+    assert works[1].sequence_no > works[0].sequence_no
+    assert works[1].status == SessionReplyWorkStatus.READY_FOR_LLM
+    assert sum(message.content == "同意" for message in messages) == 1
+    assert sum(message.content == "继续做别的事" for message in messages) == 1
+    assert all(message.type == MessageType.TEXT for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approval_and_expiration_cleanup_fall_back_without_a_dangling_claim(
+    concurrent_confirmation_session_factory,
+    entry_dependencies,
+    monkeypatch,
+):
+    record_id = await _prepare_concurrent_confirmation(concurrent_confirmation_session_factory)
+    original_get_current = audit_crud.get_current_confirmation
+    approval_read = asyncio.Event()
+    cleanup_read = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_completed = asyncio.Event()
+
+    async def held_approval_current(db, *, uid: str, session_id: str):
+        record = await original_get_current(db, uid=uid, session_id=session_id)
+        if db.info.get("confirmation_race_role") == "approval":
+            approval_read.set()
+            await cleanup_read.wait()
+            await release.wait()
+            await cleanup_completed.wait()
+        return record
+
+    async def completed_stream(work_id):
+        yield {"type": "done", "session_id": "session-1", "work_id": work_id, "response": {"work_id": work_id}}
+
+    monkeypatch.setattr(audit_crud, "get_current_confirmation", held_approval_current)
+    monkeypatch.setattr(session_reply_queue_manager, "wait_for_stream", completed_stream)
+
+    async def expire_after_shared_read():
+        try:
+            await approval_read.wait()
+            async with concurrent_confirmation_session_factory() as db:
+                current = await original_get_current(db, uid="owner", session_id="session-1")
+                assert current is not None
+                cleanup_read.set()
+                await release.wait()
+                record = await db.get(AuditRecord, record_id)
+                assert record is not None
+                record.expires_at = get_local_time() - timedelta(seconds=1)
+                db.add(record)
+                await db.commit()
+                await confirmation.expire_confirmation_by_session(db, uid="owner", session_id="session-1")
+        finally:
+            cleanup_completed.set()
+
+    approval_task = asyncio.create_task(
+        _collect_websocket_submission(
+            concurrent_confirmation_session_factory,
+            message="同意",
+            request_id="expired-approval",
+            role="approval",
+        )
+    )
+    cleanup_task = asyncio.create_task(expire_after_shared_read())
+    await approval_read.wait()
+    await cleanup_read.wait()
+    release.set()
+    approval_events, _cleanup_result = await asyncio.gather(approval_task, cleanup_task)
+
+    assert all(event.get("type") != "error" for event in approval_events)
+    record, works, messages, claims = await _concurrent_confirmation_snapshot(concurrent_confirmation_session_factory, record_id)
+    assert record is not None
+    assert record.status == AuditRecordStatus.EXPIRED
+    assert claims == []
+    assert len(works) == 1
+    assert works[0].work_type == SessionReplyWorkType.FOREGROUND_REPLY
+    assert sum(message.content == "同意" for message in messages) == 1
+    assert all(message.type == MessageType.TEXT for message in messages)

@@ -256,6 +256,127 @@ test('empty done response preserves content already received from the stream', (
   assert.equal(merged[0].db_id, '9')
 })
 
+test('late content with an old response identity cannot replace a different persisted final message by work', () => {
+  const persistedFinal = liveResponse({
+    id: 'assistant-final',
+    db_id: 9,
+    response_id: 'response-turn-3',
+    content: 'persisted final body'
+  })
+  const lateOldContent = liveResponse({
+    id: 'assistant-old-content',
+    response_id: 'response-turn-1',
+    content: 'late old body'
+  })
+
+  const merged = mergeAssistantResponseIntoList([persistedFinal], lateOldContent)
+
+  assert.equal(merged.length, 2)
+  assert.equal(merged[0].content, 'persisted final body')
+  assert.equal(merged[0].response_id, 'response-turn-3')
+  assert.equal(merged[1].content, 'late old body')
+})
+
+test('content, turn_end, done, and history events converge without duplicate final responses', () => {
+  const content = liveResponse({
+    id: 'assistant-content',
+    response_id: 'response-turn-3',
+    content: 'stream body'
+  })
+  const turnEnd = liveResponse({
+    id: 'assistant-turn-end',
+    db_id: 9,
+    response_id: 'response-turn-3',
+    content: 'turn end body'
+  })
+  const done = liveResponse({
+    id: 'assistant-done',
+    db_id: 9,
+    response_id: 'session-reply-work:7',
+    content: 'done body'
+  })
+  const history = liveResponse({
+    id: 'assistant-history',
+    db_id: 9,
+    response_id: 'response-turn-3',
+    content: ''
+  })
+
+  const merged = [content, turnEnd, done, history].reduce(
+    (messages, incoming) => mergeAssistantResponseIntoList(messages, incoming),
+    []
+  )
+  const replayed = mergeAssistantResponseIntoList(merged, done)
+
+  assert.equal(replayed.length, 1)
+  assert.equal(replayed[0].db_id, '9')
+  assert.equal(replayed[0].response_id, 'response-turn-3')
+  assert.equal(replayed[0].content, 'done body')
+})
+
+test('late old turns and different requests in one work remain isolated by response identity', () => {
+  const firstTurn = liveResponse({
+    id: 'assistant-first',
+    request_id: 'request-a',
+    response_id: 'response-turn-1',
+    content: 'first body'
+  })
+  const finalTurn = liveResponse({
+    id: 'assistant-final',
+    request_id: 'request-b',
+    db_id: 9,
+    response_id: 'response-turn-3',
+    content: 'final body'
+  })
+  const lateFirstTurn = liveResponse({
+    id: 'assistant-first-replayed',
+    request_id: 'request-a',
+    response_id: 'response-turn-1',
+    content: 'first body replayed'
+  })
+
+  const merged = mergeAssistantResponseIntoList([firstTurn, finalTurn], lateFirstTurn)
+
+  assert.equal(merged.length, 2)
+  assert.equal(merged[0].content, 'first body replayed')
+  assert.equal(merged[1].content, 'final body')
+  assert.equal(merged[1].request_id, 'request-b')
+})
+
+test('three interleaved turns keep one message per response while legacy done updates only the final turn', () => {
+  const turns = [1, 2, 3].map(turn => liveResponse({
+    id: `assistant-turn-${turn}`,
+    response_id: `response-turn-${turn}`,
+    content: `turn ${turn} body`
+  }))
+  const legacyDone = liveResponse({
+    id: 'assistant-done',
+    db_id: 9,
+    response_id: 'session-reply-work:7',
+    content: 'final turn body'
+  })
+  const lateSecondTurn = liveResponse({
+    id: 'assistant-turn-2-late',
+    response_id: 'response-turn-2',
+    content: 'turn 2 replayed'
+  })
+
+  const merged = mergeAssistantResponseIntoList(
+    mergeAssistantResponseIntoList(turns, legacyDone),
+    lateSecondTurn
+  )
+
+  assert.equal(merged.length, 3)
+  assert.deepEqual(merged.map(message => message.response_id), [
+    'response-turn-1',
+    'response-turn-2',
+    'response-turn-3'
+  ])
+  assert.equal(merged[1].content, 'turn 2 replayed')
+  assert.equal(merged[2].content, 'final turn body')
+  assert.equal(merged[2].db_id, '9')
+})
+
 test('confirmation cards and tool calls are excluded from plain response merging', () => {
   const confirmation = liveResponse({ type: 'audit_confirmation' })
   const toolCall = liveResponse({

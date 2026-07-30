@@ -659,13 +659,16 @@ async def _run_audited_interactive_dispatch(
     execution_resume_state=None,
     response_messages=None,
     audit_calls_target=None,
+    audit_results=None,
+    generate_hook=None,
 ):
     profile = SimpleNamespace(id=1)
+    audit_configured = audit_results is not None or audit_result is not None
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=object()),
         security=SimpleNamespace(
-            audit_channel_id=None if audit_result is None else 1,
-            audit_model_id=None if audit_result is None else "audit-model",
+            audit_channel_id=1 if audit_configured else None,
+            audit_model_id="audit-model" if audit_configured else None,
         ),
         tool=SimpleNamespace(
             max_turns=5,
@@ -688,8 +691,10 @@ async def _run_audited_interactive_dispatch(
     )
     saved_message_id = 10
     response_usage_iterator = iter(response_usages or [])
+    audit_results_iterator = iter(audit_results) if audit_results is not None else None
     next_audit_record_id = 42
     audit_details_by_record_id = {}
+    executable_audit_record_ids = set()
 
     async def get_user(db, uid):
         return SimpleNamespace(username="operator")
@@ -717,7 +722,10 @@ async def _run_audited_interactive_dispatch(
                     "messages": [message.model_copy(deep=True) for message in kwargs["messages"]],
                 }
             )
-        return SimpleNamespace(message=responses.pop(0), usage=next(response_usage_iterator, None))
+        response_message = responses.pop(0)
+        if generate_hook is not None:
+            await generate_hook(response_message)
+        return SimpleNamespace(message=response_message, usage=next(response_usage_iterator, None))
 
     async def generate_with_stream_callback(**kwargs):
         return await generate(**kwargs)
@@ -737,22 +745,30 @@ async def _run_audited_interactive_dispatch(
         nonlocal next_audit_record_id
         audit_record_id = next_audit_record_id
         next_audit_record_id += 1
-        round_tool_calls = [tool_call.model_copy(deep=True) for tool_call in kwargs["tool_calls"]]
+        round_tool_calls = [item.model_copy(deep=True) for item in kwargs["tool_calls"]]
         if audit_calls_target is not None:
             audit_calls_target.append(round_tool_calls)
         audit_details_by_record_id[audit_record_id] = [SimpleNamespace(original_tool_call_id=tool_call.id, id=(audit_record_id * 100) + index) for index, tool_call in enumerate(round_tool_calls, start=1)]
         if audit_waiter is not None:
             await audit_waiter()
-        if audit_result is not _DEFAULT_AUDIT_RESULT:
-            if audit_result is not None:
-                audit_details_by_record_id[audit_result.audit_record_id] = audit_details_by_record_id[audit_record_id]
-            return audit_result
-        return SimpleNamespace(
-            may_execute=True,
-            audit_record_id=audit_record_id,
-            tool_results=[],
-            confirmation_payload=None,
-        )
+        selected_audit_result = audit_result
+        if audit_results_iterator is not None:
+            try:
+                selected_audit_result = next(audit_results_iterator)
+            except StopIteration:
+                pass
+        if selected_audit_result is _DEFAULT_AUDIT_RESULT:
+            selected_audit_result = SimpleNamespace(
+                may_execute=True,
+                audit_record_id=audit_record_id,
+                tool_results=[],
+                confirmation_payload=None,
+            )
+        if selected_audit_result is not None:
+            audit_details_by_record_id[selected_audit_result.audit_record_id] = audit_details_by_record_id[audit_record_id]
+            if selected_audit_result.may_execute:
+                executable_audit_record_ids.add(selected_audit_result.audit_record_id)
+        return selected_audit_result
 
     async def persist_confirmation_bundle(
         db,
@@ -774,8 +790,8 @@ async def _run_audited_interactive_dispatch(
         return stored_results, confirmation_message
 
     async def claim_execution(db, *, audit_record_id):
-        if audit_result is None:
-            raise AssertionError("skipped audit must not create a claim")
+        if audit_record_id not in executable_audit_record_ids:
+            raise AssertionError("non-executable audit must not create a claim")
         if not claim_execution_success:
             return None, None
         return SimpleNamespace(execution_claim_token="claim-token"), "claim-token"
@@ -784,8 +800,8 @@ async def _run_audited_interactive_dispatch(
         return audit_details_by_record_id[audit_record_id]
 
     async def create_execution(db, **kwargs):
-        if audit_result is None:
-            raise AssertionError("skipped audit must not create execution records")
+        if kwargs["audit_record_id"] not in executable_audit_record_ids:
+            raise AssertionError("non-executable audit must not create execution records")
         return SimpleNamespace(id=8)
 
     async def finish_attempt(db, **kwargs):
@@ -1757,4 +1773,200 @@ async def test_streamed_audit_claim_failure_closes_started_tool_event(monkeypatc
     assert events[11]["message_id"] == 12
     assert json.loads(events[6]["result"])["status"] == "failed"
     assert events[6]["tool_call_id"] == events[5]["tool_call_id"] == "call-1"
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_batches_advance_confirmation_and_summary_boundaries_without_replay(monkeypatch):
+    audit_started = asyncio.Event()
+    release_audit = asyncio.Event()
+    confirmation_persistence_started = asyncio.Event()
+    release_confirmation_persistence = asyncio.Event()
+    batch_b = UserInputBatch(
+        messages=(
+            InternalMessage(id=102, role=MessageRole.USER, content="batch-b-first"),
+            InternalMessage(id=100, role=MessageRole.USER, content="batch-b-second"),
+        ),
+        source_message_ids=(102, 100),
+    )
+    batch_c = UserInputBatch(
+        messages=(
+            InternalMessage(id=112, role=MessageRole.USER, content="batch-c-first"),
+            InternalMessage(id=110, role=MessageRole.USER, content="batch-c-second"),
+        ),
+        source_message_ids=(112, 110),
+    )
+    batch_d = UserInputBatch(
+        messages=(
+            InternalMessage(id=122, role=MessageRole.USER, content="batch-d-first"),
+            InternalMessage(id=120, role=MessageRole.USER, content="batch-d-second"),
+        ),
+        source_message_ids=(122, 120),
+    )
+    pending_results = [
+        SimpleNamespace(
+            may_execute=False,
+            audit_record_id=42,
+            tool_results=[
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id="call-pending-a",
+                    content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+                )
+            ],
+            confirmation_payload={"type": "audit_confirmation", "audit_record_id": 42, "status": "pending"},
+        ),
+        SimpleNamespace(
+            may_execute=False,
+            audit_record_id=43,
+            tool_results=[
+                InternalMessage(
+                    role=MessageRole.TOOL,
+                    tool_call_id="call-pending-b",
+                    content=json.dumps({"status": "pending", "tool_name": "execute_shell"}),
+                )
+            ],
+            confirmation_payload={"type": "audit_confirmation", "audit_record_id": 43, "status": "pending"},
+        ),
+        SimpleNamespace(
+            may_execute=True,
+            audit_record_id=44,
+            tool_results=[],
+            confirmation_payload=None,
+        ),
+    ]
+    queued_batches: list[UserInputBatch] = []
+    delivered_batches: list[UserInputBatch] = []
+    checkpoints = []
+    generated_calls = []
+    cancellation_records = []
+    executed_tool_calls = []
+    audit_round_count = 0
+
+    async def fetch_additional_messages():
+        if not queued_batches:
+            return None
+        batch = queued_batches.pop(0)
+        delivered_batches.append(batch)
+        return batch
+
+    async def wait_during_first_audit():
+        nonlocal audit_round_count
+        audit_round_count += 1
+        if audit_round_count != 1:
+            return
+        audit_started.set()
+        await asyncio.wait_for(release_audit.wait(), timeout=1)
+
+    async def persist_cancelled_pending_audit_results(*_args, audit_record_id, tool_results, **_kwargs):
+        cancellation_records.append(("before_persist", audit_record_id))
+        return [
+            InternalMessage(
+                id=201,
+                role=MessageRole.TOOL,
+                tool_call_id=tool_results[0].tool_call_id,
+                content=json.dumps({"status": "cancelled", "confirmation_status": "superseded"}),
+            )
+        ]
+
+    async def persist_pending_confirmation_bundle(*_args, audit_record_id, tool_results, confirmation_payload, **_kwargs):
+        assert audit_record_id == 43
+        confirmation_persistence_started.set()
+        await asyncio.wait_for(release_confirmation_persistence.wait(), timeout=1)
+        return [
+            InternalMessage(
+                id=202,
+                role=MessageRole.TOOL,
+                tool_call_id=tool_results[0].tool_call_id,
+                content=tool_results[0].content,
+            )
+        ], InternalMessage(
+            id=301,
+            role=MessageRole.ASSISTANT,
+            content=json.dumps(confirmation_payload),
+        )
+
+    async def supersede_confirmation_bundle(*_args, audit_record_id, **_kwargs):
+        cancellation_records.append(("after_persist", audit_record_id))
+        return [
+            InternalMessage(
+                id=203,
+                role=MessageRole.TOOL,
+                tool_call_id="call-pending-b",
+                content=json.dumps({"status": "cancelled", "confirmation_status": "superseded"}),
+            )
+        ]
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(dict(checkpoint))
+
+    async def process_tool(tool_call, *_args, **_kwargs):
+        executed_tool_calls.append(tool_call.id)
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    async def enqueue_batch_d_after_intermediate_response(response_message):
+        if response_message.content == "intermediate":
+            queued_batches.append(batch_d)
+
+    dispatch_task = asyncio.create_task(
+        _run_audited_interactive_dispatch(
+            monkeypatch,
+            save_checkpoint,
+            process_tool,
+            audit_waiter=wait_during_first_audit,
+            audit_results=pending_results,
+            generated_calls_target=generated_calls,
+            generate_hook=enqueue_batch_d_after_intermediate_response,
+            additional_user_messages_fetcher=fetch_additional_messages,
+            persist_pending_confirmation_bundle_handler=persist_pending_confirmation_bundle,
+            persist_cancelled_pending_audit_results_handler=persist_cancelled_pending_audit_results,
+            supersede_pending_confirmation_bundle_handler=supersede_confirmation_bundle,
+            response_messages=[
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="call-pending-a", name="execute_shell", arguments={"command": "echo a"})],
+                ),
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="call-pending-b", name="execute_shell", arguments={"command": "echo b"})],
+                ),
+                InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    tool_calls=[InternalToolCall(id="call-allowed", name="execute_shell", arguments={"command": "echo allowed"})],
+                ),
+                InternalMessage(role=MessageRole.ASSISTANT, content="intermediate"),
+                InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+            ],
+        )
+    )
+
+    await asyncio.wait_for(audit_started.wait(), timeout=1)
+    queued_batches.append(batch_b)
+    release_audit.set()
+    await asyncio.wait_for(confirmation_persistence_started.wait(), timeout=1)
+    queued_batches.append(batch_c)
+    release_confirmation_persistence.set()
+    response, unknown_calls = await asyncio.wait_for(dispatch_task, timeout=1)
+
+    assert delivered_batches == [batch_b, batch_c, batch_d]
+    assert cancellation_records == [("before_persist", 42), ("after_persist", 43)]
+    assert executed_tool_calls == ["call-allowed"]
+    batch_ids = [*batch_b.source_message_ids, *batch_c.source_message_ids, *batch_d.source_message_ids]
+    request_batch_ids = [[message.id for message in call["messages"] if message.role == MessageRole.USER and message.id in batch_ids] for call in generated_calls]
+    assert request_batch_ids == [
+        [],
+        list(batch_b.source_message_ids),
+        [*batch_b.source_message_ids, *batch_c.source_message_ids],
+        [*batch_b.source_message_ids, *batch_c.source_message_ids],
+        [*batch_b.source_message_ids, *batch_c.source_message_ids, *batch_d.source_message_ids],
+    ]
+    assert all(len(message_ids) == len(set(message_ids)) for message_ids in request_batch_ids)
+    checkpoint_upper_ids = [checkpoint["context_summary_fixed_upper_message_id"] for checkpoint in checkpoints]
+    assert checkpoint_upper_ids == sorted(checkpoint_upper_ids)
+    assert list(dict.fromkeys(checkpoint_upper_ids)) == [100, 110, 120]
+    assert response["choices"][0]["message"]["content"] == "finished"
     assert unknown_calls == []

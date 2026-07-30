@@ -10,6 +10,8 @@ from sqlmodel import select
 
 from app.core.audit.confirmation import (
     ConfirmationDecision,
+    _broadcast_confirmation_status_update,
+    _sync_confirmation_message_status_projection,
     broadcast_pending_confirmation_cancellation,
     cancel_persisted_pending_confirmation_bundle,
     expire_confirmation_by_session,
@@ -19,7 +21,6 @@ from app.core.audit.confirmation import (
 )
 from app.core.constants import (
     ERR_AUDIT_CONFIRMATION_INVALID_INPUT,
-    ERR_AUDIT_CONFIRMATION_UNAVAILABLE,
     ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_PERSISTED_USER_MESSAGE_MISMATCH,
@@ -356,9 +357,31 @@ class SessionReplyQueueManager:
             decision_message_id=message_row.id,
             decision_raw_message=decision_raw_message,
             decided_by=current_confirmation.operator_username,
+            commit=False,
         )
         if claimed_record is None or claim_token is None:
-            raise RuntimeError(t(ERR_AUDIT_CONFIRMATION_UNAVAILABLE))
+            # The competing transaction already consumed this confirmation. Its
+            # rollback removed the provisional decision message, so persist the
+            # original input once as ordinary foreground work without parsing it again.
+            initial_message, work = await self._enqueue_foreground_message(
+                db,
+                uid=uid,
+                session_id=session_id,
+                profile=profile,
+                message=message,
+                attachments=attachments,
+                source=source,
+                stream_requested=stream_requested,
+                context_summary_events_requested=context_summary_events_requested,
+                request_id=request_id,
+                additional_system_prompt=cleaned_additional_system_prompt or None,
+            )
+            submission_status = await self._resolve_submission_status(
+                db,
+                work,
+                immediate_status="accepted",
+            )
+            return initial_message, work, submission_status
         await update_confirmation_tool_results_for_decision(
             db,
             audit_record_id=claimed_record.id,
@@ -366,7 +389,11 @@ class SessionReplyQueueManager:
             decision=decision,
             raw_message=decision_raw_message,
         )
-        await update_confirmation_message_status(db, audit_record_id=claimed_record.id)
+        confirmation_projection = await _sync_confirmation_message_status_projection(
+            db,
+            audit_record_id=claimed_record.id,
+            commit=False,
+        )
         guidance_prompt = None
         if source not in {"http", "ws"}:
             guidance_prompt = await message_crud.activate_and_get_guidance_prompt(
@@ -406,6 +433,11 @@ class SessionReplyQueueManager:
             work.execution_state["additional_system_prompt"] = cleaned_additional_system_prompt
         db.add(work)
         await db.commit()
+        if confirmation_projection is not None and confirmation_projection.status_update is not None:
+            await _broadcast_confirmation_status_update(
+                db,
+                status_update=confirmation_projection.status_update,
+            )
         await db.refresh(message_row)
         await db.refresh(work)
         return (

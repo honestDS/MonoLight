@@ -5,9 +5,9 @@ import { useChatState } from './useChatState'
 import { useSessionManager } from './useSessionManager'
 import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
-import { clearAllContextSummaryWorks, clearContextSummaryRequest, endContextSummaryWork, shouldIgnoreExternalSessionEvent, startContextSummaryWork } from './contextSummaryTracker.js'
+import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
-import { finishWorkLifecycle, markInputQueued, markInputsDequeued, resetWorkLifecycle, startAgentLoop, stopAgentLoop } from './workLifecycleTracker.js'
+import { createWorkLifecycleTracker } from './workLifecycleTracker.js'
 import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, mergeRemoteMessageIntoList, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
@@ -121,8 +121,9 @@ export function useChatSession() {
   const attachments = ref([])
   const contextSummaryWorkKeys = ref(new Set())
   const contextSummaryRequestKeys = new Map()
+  const contextSummaryTracker = createContextSummaryTracker()
   const llmRequestMetadataBySession = ref(new Map())
-  const sessionEventSequenceBySession = new Map()
+  const workLifecycleTracker = createWorkLifecycleTracker()
   const historyMergeTracker = createHistoryMergeTracker()
   const initialHistoryLoaded = ref(true)
   
@@ -270,21 +271,29 @@ export function useChatSession() {
   }
 
   const createLifecycleCallbacks = isCurrentRequestSession => ({
-    onInputQueued: event => applyLifecycleEvent(markInputQueued, event, isCurrentRequestSession),
-    onInputDequeued: event => applyLifecycleEvent(markInputsDequeued, event, isCurrentRequestSession),
-    onAgentLoopStart: event => applyLifecycleEvent(startAgentLoop, event, isCurrentRequestSession),
-    onAgentLoopOutput: event => applyLifecycleEvent(stopAgentLoop, event, isCurrentRequestSession),
+    onInputQueued: event => applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession),
+    onInputDequeued: event => applyLifecycleEvent(workLifecycleTracker.markInputsDequeued, event, isCurrentRequestSession),
+    onAgentLoopStart: event => applyLifecycleEvent(workLifecycleTracker.startAgentLoop, event, isCurrentRequestSession),
+    onAgentLoopOutput: event => applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, event, isCurrentRequestSession),
     onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
-    onWorkFinished: event => applyLifecycleEvent(finishWorkLifecycle, event, isCurrentRequestSession)
+    onWorkFinished: event => applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
   })
 
   const finishRequestLifecycle = (requestId, isCurrentRequestSession) => {
     if (!requestId) return
     applyLifecycleEvent(
-      finishWorkLifecycle,
+      workLifecycleTracker.finishWorkLifecycle,
       { request_ids: [requestId] },
       isCurrentRequestSession
     )
+  }
+
+  const getCompletedWorkId = (data) => data?.work_id ?? data?.response?.work_id
+
+  const shouldProcessCompletedWork = (data) => {
+    const workId = getCompletedWorkId(data)
+    return !workLifecycleTracker.isWorkTerminal(workId)
+      || workLifecycleTracker.isAcceptedTerminalEvent(data)
   }
 
   const rejectReadOnlySession = () => {
@@ -520,10 +529,14 @@ export function useChatSession() {
     { immediate: true }
   )
 
-  onScopeDispose(stopHttpHistorySync)
+  onScopeDispose(() => {
+    stopHttpHistorySync()
+    contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
+  })
 
   const applyAuditConfirmationStatus = (data) => {
-    if (shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
+    if (contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
     const auditRecordId = String(data.audit_record_id || '')
     const messageIndex = chatState.messages.value.findIndex((message) => {
@@ -569,7 +582,7 @@ export function useChatSession() {
   }
 
   const applyAuditToolResultsUpdate = (data, { skipSequenceGuard = false } = {}) => {
-    if (!skipSequenceGuard && shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) return
+    if (!skipSequenceGuard && contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
     const messages = filterNewMessages(Array.isArray(data.messages) ? data.messages : [])
     for (const remoteMessage of messages) {
@@ -700,6 +713,10 @@ export function useChatSession() {
           completeBeforeWorkFinished: true,
           onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
             if (eventType === 'turn_end' || data?.type !== 'done' || !isCurrentRequestSession()) return
+            if (!shouldProcessCompletedWork(data)) {
+              finalResponseProcessed = true
+              return
+            }
             const responseData = data.response || data
             const completedResponse = {
               ...responseData,
@@ -713,14 +730,14 @@ export function useChatSession() {
           },
           onContextSummaryStart: (data) => {
             if (isCurrentRequestSession()) {
-              if (!shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
-                startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
+              if (!contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
+                contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
               }
             }
           },
           onContextSummaryEnd: (data) => {
-            if (isCurrentRequestSession() && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
-              endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
+            if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
+              contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
             }
           }
         }
@@ -767,7 +784,7 @@ export function useChatSession() {
       }
 
       const auditConfirmation = parseAuditConfirmationResponse(response)
-      if (!finalResponseProcessed) {
+      if (!finalResponseProcessed && shouldProcessCompletedWork(response)) {
         processAiResponse(response, null, requestId)
       }
       if (auditConfirmation) {
@@ -779,7 +796,7 @@ export function useChatSession() {
       finishRequestLifecycle(requestId, isCurrentRequestSession)
       ElMessage.error(err.message || t('chat.send_failed'))
     } finally {
-      clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
+      contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
       if (requestSessionId === sessionManager.currentSessionId.value) {
         try {
           await mergeLatestSessionHistory(requestSessionId)
@@ -846,31 +863,34 @@ export function useChatSession() {
     const callbacks = {
       ...createLifecycleCallbacks(isCurrentRequestSession),
       onContextSummaryStart: (data) => {
-        if (isCurrentRequestSession() && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
-          startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
+        if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
+          contextSummaryTracker.startContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
       },
       onContextSummaryEnd: (data) => {
-        if (isCurrentRequestSession() && !shouldIgnoreExternalSessionEvent(sessionEventSequenceBySession, data, sessionManager.currentSessionId.value)) {
-          endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
+        if (isCurrentRequestSession() && !contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) {
+          contextSummaryTracker.endContextSummaryWork(contextSummaryWorkKeys.value, contextSummaryRequestKeys, data, requestId)
         }
       },
       onContent: (text, turn, thinkingIdParam, finishReason, responseId, requestIdParam, workId, eventId) => {
         if (!isCurrentRequestSession()) return
+        if (workLifecycleTracker.isWorkTerminal(workId)) return
         messageProcessor.processStreamContent(chatState.messages, text, turn, null, finishReason, responseId, requestIdParam, workId, eventId)
       },
       onToolStart: (toolCall, thinkingIdParam, responseId, requestIdParam, workId) => {
         if (!isCurrentRequestSession()) return
+        if (workLifecycleTracker.isWorkTerminal(workId)) return
         if (!currentSessionShowToolCalls.value) return
         messageProcessor.processStreamToolStart(chatState.messages, toolCall, null, responseId, requestIdParam, workId)
-       },
-       onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
-         if (!isCurrentRequestSession()) return
-         if (!currentSessionShowToolCalls.value) return
-         messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
+      },
+      onToolEnd: (toolEnd, responseId, requestIdParam, workId) => {
+        if (!isCurrentRequestSession()) return
+        if (workLifecycleTracker.isWorkTerminal(workId)) return
+        if (!currentSessionShowToolCalls.value) return
+        messageProcessor.processStreamToolEnd(chatState.messages, toolEnd, responseId, requestIdParam, workId)
       },
       onError: (errorMessage, thinkingIdParam, requestIdParam, errorData = {}) => {
-        clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
+        contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
         if (!isCurrentRequestSession()) return
         const inserted = messageProcessor.processStreamError(
           chatState.messages,
@@ -955,13 +975,14 @@ export function useChatSession() {
       },
       onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
         if (eventType !== 'turn_end') {
-          clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
+          contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestIdParam || requestId)
         }
         if (!isCurrentRequestSession()) return
         if (data.session_id && data.session_id !== requestSessionId) return
 
         // 每个 response_id 只保留一条正文；工具轮次的正文归入工具消息
         if (eventType === 'turn_end') {
+          if (workLifecycleTracker.isWorkTerminal(getCompletedWorkId(data))) return
           const displayContent = resolveAssistantDisplayContent(data.content, data.refusal, data.finish_reason)
           const hasDisplayContent = typeof displayContent === 'string'
             ? Boolean(displayContent.trim())
@@ -1087,6 +1108,8 @@ export function useChatSession() {
           return // turn_end 时不需要执行 done 的历史比对和占位符清理
         }
 
+        if (!shouldProcessCompletedWork(data)) return
+
         const completedResponse = data.response || data
         const auditConfirmation = parseAuditConfirmationResponse(completedResponse)
         if (auditConfirmation) {
@@ -1126,7 +1149,7 @@ export function useChatSession() {
     }
     
     const handleWsSendFailure = () => {
-      clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
+      contextSummaryTracker.clearContextSummaryRequest(contextSummaryWorkKeys.value, contextSummaryRequestKeys, requestId)
       if (!isCurrentRequestSession()) return
       finishRequestLifecycle(requestId, isCurrentRequestSession)
       ElMessage.error(t('chat.ws_send_failed'))
@@ -1158,8 +1181,8 @@ export function useChatSession() {
   // 选择会话；session 为会话对象
   const selectSession = (session) => {
     historyMergeTracker.invalidate()
-    clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
-    chatState.messages.value = resetWorkLifecycle(chatState.messages.value)
+    contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = false
     sessionManager.selectSession(session, transport.disconnectWebSocket)
     chatState.clearMessages()
@@ -1173,8 +1196,8 @@ export function useChatSession() {
    */
   const createNewSession = () => {    
     historyMergeTracker.invalidate()
-    clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
-    chatState.messages.value = resetWorkLifecycle(chatState.messages.value)
+    contextSummaryTracker.clearAllContextSummaryWorks(contextSummaryWorkKeys.value, contextSummaryRequestKeys)
+    chatState.messages.value = workLifecycleTracker.resetWorkLifecycle(chatState.messages.value)
     initialHistoryLoaded.value = true
     transport.setTransportMode('ws', transport.disconnectWebSocket)
     sessionManager.createNewSession(transport.disconnectWebSocket)

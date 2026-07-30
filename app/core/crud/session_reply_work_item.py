@@ -77,37 +77,36 @@ class CRUDSessionReplyWorkItem:
         dedupe_key: str,
         commit: bool = True,
     ) -> tuple[SessionReplyWorkItem, bool]:
-        existing = await self.get_by_dedupe_key(db, dedupe_key)
-        if existing is not None:
-            return existing, False
-
-        sequence_no = await self.allocate_sequence_no(db, session_id)
-        now = get_local_time()
-        statement = (
-            sqlite_insert(SessionReplyWorkItem)
-            .values(
-                uid=uid,
-                session_id=session_id,
-                profile_id=profile_id,
-                sequence_no=sequence_no,
-                work_type=work_type,
-                source_type=source_type,
-                source_id=str(source_id),
-                dedupe_key=dedupe_key,
-                status=SessionReplyWorkStatus.READY_FOR_LLM,
-                execution_state={},
-                event_sent=False,
-                attempt_count=0,
-                max_attempts=2,
-                available_at=int(time.time()),
-                created_at=now,
-                updated_at=now,
+        async with db.begin_nested() as savepoint:
+            sequence_no = await self.allocate_sequence_no(db, session_id)
+            now = get_local_time()
+            statement = (
+                sqlite_insert(SessionReplyWorkItem)
+                .values(
+                    uid=uid,
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    sequence_no=sequence_no,
+                    work_type=work_type,
+                    source_type=source_type,
+                    source_id=str(source_id),
+                    dedupe_key=dedupe_key,
+                    status=SessionReplyWorkStatus.READY_FOR_LLM,
+                    execution_state={},
+                    event_sent=False,
+                    attempt_count=0,
+                    max_attempts=2,
+                    available_at=int(time.time()),
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[SessionReplyWorkItem.dedupe_key])
+                .returning(SessionReplyWorkItem)
             )
-            .on_conflict_do_nothing(index_elements=[SessionReplyWorkItem.dedupe_key])
-            .returning(SessionReplyWorkItem)
-        )
-        result = await db.execute(statement)
-        work = result.scalars().first()
+            result = await db.execute(statement)
+            work = result.scalars().first()
+            if work is None:
+                await savepoint.rollback()
         if work is None:
             work = await self.get_by_dedupe_key(db, dedupe_key)
             if work is None:

@@ -54,10 +54,11 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
   const incomingResponseId = incomingMessage?.response_id
   const incomingWorkId = incomingMessage?.work_id
   const hasStrongerIdentity = hasIdentity(incomingResponseId) || hasIdentity(incomingWorkId)
+  const canUseWorkFallback = incomingDbId !== null || !hasIdentity(incomingResponseId)
   const identities = [
     ['db_id', incomingDbId],
     ['response_id', incomingResponseId],
-    ['work_id', incomingWorkId],
+    ...(canUseWorkFallback ? [['work_id', incomingWorkId]] : []),
     ...(incomingDbId === null && !hasStrongerIdentity ? [['request_id', incomingMessage?.request_id]] : [])
   ]
 
