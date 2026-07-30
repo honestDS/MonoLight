@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -182,6 +183,77 @@ def _audit_max_input_tokens(chat_params: dict[str, Any]) -> int:
     )
 
 
+def _fit_audit_write_file_payload_to_context(
+    system_prompt: str,
+    payload: dict[str, Any],
+    chat_params: dict[str, Any],
+) -> dict[str, Any]:
+    adapted_payload = copy.deepcopy(payload)
+    max_input_tokens = _audit_max_input_tokens(chat_params)
+
+    def request_context_tokens(candidate_payload: dict[str, Any]) -> int:
+        messages = [
+            InternalMessage(role=MessageRole.SYSTEM, content=system_prompt),
+            InternalMessage(role=MessageRole.USER, content=json.dumps(candidate_payload, ensure_ascii=False)),
+        ]
+        return estimate_request_context_tokens(messages, [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA])
+
+    if request_context_tokens(adapted_payload) <= max_input_tokens:
+        return adapted_payload
+
+    tool_calls = adapted_payload.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return adapted_payload
+    write_contents: list[tuple[int, str, int, str]] = []
+    for index, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict) or tool_call.get("tool_name", tool_call.get("name")) != "write_file":
+            continue
+        arguments = tool_call.get("arguments")
+        if isinstance(arguments, dict) and isinstance(arguments.get("content"), str):
+            content = arguments["content"]
+            content_bytes = content.encode("utf-8")
+            write_contents.append((index, content, len(content_bytes), hashlib.sha256(content_bytes).hexdigest()))
+    if not write_contents:
+        return adapted_payload
+
+    def payload_with_content_limit(content_limit: int) -> dict[str, Any]:
+        candidate_payload = copy.deepcopy(adapted_payload)
+        candidate_calls = candidate_payload["tool_calls"]
+        for index, original_content, original_size, original_sha256 in write_contents:
+            content_prefix, truncated = truncate_text_to_tokens(original_content, content_limit)
+            tool_call = candidate_calls[index]
+            arguments = tool_call["arguments"]
+            arguments["content"] = content_prefix
+            existing_evidence = tool_call.get("argument_evidence")
+            argument_evidence = dict(existing_evidence) if isinstance(existing_evidence, dict) else {}
+            argument_evidence["content"] = {
+                "status": "ok",
+                "size": original_size,
+                "sha256": original_sha256,
+                "truncated": truncated,
+                "bytes_read": len(content_prefix.encode("utf-8")),
+            }
+            tool_call["argument_evidence"] = argument_evidence
+        return candidate_payload
+
+    empty_payload = payload_with_content_limit(0)
+    if request_context_tokens(empty_payload) > max_input_tokens:
+        return empty_payload
+
+    low = 0
+    high = max(max(estimate_tokens(content), 1) for _, content, _, _ in write_contents)
+    fitted_payload = empty_payload
+    while low < high:
+        candidate_limit = (low + high + 1) // 2
+        candidate_payload = payload_with_content_limit(candidate_limit)
+        if request_context_tokens(candidate_payload) <= max_input_tokens:
+            low = candidate_limit
+            fitted_payload = candidate_payload
+        else:
+            high = candidate_limit - 1
+    return fitted_payload
+
+
 def _audit_read_token_budget(messages: list[InternalMessage], chat_params: dict[str, Any]) -> tuple[int, int]:
     request_context_tokens = estimate_request_context_tokens(messages, [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA])
     return max(0, _audit_max_input_tokens(chat_params) - request_context_tokens), request_context_tokens
@@ -342,12 +414,7 @@ def _file_checks_are_sufficient(
         if check.get("status") != "ok":
             return False
         matching_reads = [
-            read
-            for read in file_reads
-            if _path_aliases(snapshot) & _path_aliases(read)
-            and read.get("status") == "ok"
-            and isinstance(read.get("content"), str)
-            and all(read.get(field) == snapshot.get(field) for field in ("original_path", "absolute_path", "resolved_path", "size", "sha256", "truncated", "bytes_read"))
+            read for read in file_reads if _path_aliases(snapshot) & _path_aliases(read) and read.get("status") == "ok" and isinstance(read.get("content"), str) and all(read.get(field) == snapshot.get(field) for field in ("original_path", "absolute_path", "resolved_path", "size", "sha256", "truncated", "bytes_read"))
         ]
         if not matching_reads:
             return False
@@ -487,9 +554,10 @@ async def _call_auditor(
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(t(ERR_AUDIT_CHANNEL_UNAVAILABLE)) from exc
     chat_params = resolve_chat_params(model_entry, cfg.channel.chat_channel)
+    audit_payload = _fit_audit_write_file_payload_to_context(AUDIT_BATCH_PROMPT, request_payload, chat_params)
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content=AUDIT_BATCH_PROMPT),
-        InternalMessage(role=MessageRole.USER, content=json.dumps(request_payload, ensure_ascii=False)),
+        InternalMessage(role=MessageRole.USER, content=json.dumps(audit_payload, ensure_ascii=False)),
     ]
     expected_tool_call_ids = {item.get("tool_call_id") for item in request_payload.get("tool_calls", []) if isinstance(item, dict) and isinstance(item.get("tool_call_id"), str)}
     read_state = {"calls": 0}
@@ -562,14 +630,16 @@ async def _summarize_pending(
         "tool_calls": tool_calls,
         "server_confirmation_reasons": server_confirmation_reasons or {},
     }
+    summary_prompt = AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language)
+    audit_payload = _fit_audit_write_file_payload_to_context(summary_prompt, summary_payload, chat_params)
     messages = [
         InternalMessage(
             role=MessageRole.SYSTEM,
-            content=AUDIT_SUMMARY_PROMPT.format(audit_report_language=cfg.security.audit_report_language),
+            content=summary_prompt,
         ),
         InternalMessage(
             role=MessageRole.USER,
-            content=json.dumps(summary_payload, ensure_ascii=False),
+            content=json.dumps(audit_payload, ensure_ascii=False),
         ),
     ]
     expected_tool_call_ids = {item.get("id") for item in tool_calls if isinstance(item, dict) and isinstance(item.get("id"), str)}

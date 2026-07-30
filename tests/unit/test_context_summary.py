@@ -238,16 +238,16 @@ def test_user_role_tool_summary_does_not_count_as_a_user_round():
 def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_tight():
     messages = [
         InternalMessage(role=MessageRole.SYSTEM, content="stable prompt"),
-        InternalMessage(id=1, role=MessageRole.USER, content="run the lookup"),
+        InternalMessage(id=1, role=MessageRole.USER, content="write the generated file"),
         InternalMessage(
             id=2,
             role=MessageRole.ASSISTANT,
-            content="I will check.",
+            content="I will write the file.",
             tool_calls=[
                 InternalToolCall(
                     id="call-1",
-                    name="lookup",
-                    arguments={"query": "tool argument " * 3000},
+                    name="write_file",
+                    arguments={"file_path": "generated.txt", "content": "file content " * 3000},
                 )
             ],
         ),
@@ -255,9 +255,9 @@ def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_t
             id=3,
             role=MessageRole.TOOL,
             tool_call_id="call-1",
-            content="important result " * 1000,
+            content="file write result " * 1000,
         ),
-        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="The lookup completed."),
+        InternalMessage(id=4, role=MessageRole.ASSISTANT, content="The file write completed."),
         InternalMessage(id=5, role=MessageRole.USER, content="continue"),
     ]
 
@@ -273,7 +273,7 @@ def test_recent_tool_chain_is_replaced_in_place_without_orphans_when_budget_is_t
 
     non_system = [message for message in request if message.role != MessageRole.SYSTEM]
     assert [message.id for message in non_system if message.id is not None] == [1, 2, 4, 5]
-    assert non_system[1].content == "I will check."
+    assert non_system[1].content == "I will write the file."
     assert non_system[1].tool_calls is None
     temporary_summary = non_system[2]
     assert temporary_summary.role == MessageRole.USER

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ from app.core.audit.service import (
     _file_checks_are_sufficient,
     _file_snapshots_from_reads,
     _fit_audit_read_result_to_context,
+    _fit_audit_write_file_payload_to_context,
     _parse_results,
     _read_for_audit_sync,
     _requires_confirmation_from_evidence,
@@ -97,6 +99,9 @@ def test_audit_prompt_requires_script_content_evidence():
     assert "must be scored 8-10" in AUDIT_BATCH_PROMPT
     assert "prepares the file on disk and does not execute its contents" in AUDIT_BATCH_PROMPT
     assert "Score the preparation of high-risk content" in AUDIT_BATCH_PROMPT
+    assert "argument_evidence.content" in AUDIT_BATCH_PROMPT
+    assert "remaining content was not reviewed" in AUDIT_BATCH_PROMPT
+    assert "You receive every complete tool call" not in AUDIT_BATCH_PROMPT
     assert "explicit_script_paths" not in AUDIT_BATCH_PROMPT
     assert "marked script_execution" not in AUDIT_BATCH_PROMPT
 
@@ -771,6 +776,203 @@ def test_audit_read_token_budget_shrinks_as_messages_grow():
 def test_audit_max_input_tokens_uses_proportional_safety_margin_with_minimum():
     assert _audit_max_input_tokens({"context_window_k": 8, "max_tokens": 512}) == 8000 - 512 - 800
     assert _audit_max_input_tokens({"context_window_k": 1, "max_tokens": 512}) == 1000 - 512 - 256
+
+
+def test_small_write_file_audit_payload_is_unchanged_without_argument_evidence():
+    payload = {
+        "confirmation_threshold": 5,
+        "working_directory": "C:/audit",
+        "tool_calls": [
+            {
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "arguments": {"file_path": "note.txt", "content": "short content"},
+            }
+        ],
+    }
+
+    adapted_payload = _fit_audit_write_file_payload_to_context(
+        "audit",
+        payload,
+        {"context_window_k": 2, "max_tokens": 256},
+    )
+
+    assert adapted_payload == payload
+    assert adapted_payload is not payload
+    assert "argument_evidence" not in adapted_payload["tool_calls"][0]
+
+
+def test_large_write_file_audit_payload_uses_prefix_evidence_within_input_budget():
+    content = 'write this escaped value: \\"\\n' * 2000
+    payload = {
+        "confirmation_threshold": 5,
+        "working_directory": "C:/audit",
+        "tool_calls": [
+            {
+                "tool_call_id": "call-1",
+                "tool_name": "write_file",
+                "arguments": {"file_path": "note.txt", "content": content},
+            }
+        ],
+    }
+    chat_params = {"context_window_k": 2, "max_tokens": 256}
+
+    adapted_payload = _fit_audit_write_file_payload_to_context("audit", payload, chat_params)
+    adapted_call = adapted_payload["tool_calls"][0]
+    adapted_content = adapted_call["arguments"]["content"]
+    evidence = adapted_call["argument_evidence"]["content"]
+    request_tokens = estimate_request_context_tokens(
+        [
+            InternalMessage(role=MessageRole.SYSTEM, content="audit"),
+            InternalMessage(role=MessageRole.USER, content=json.dumps(adapted_payload, ensure_ascii=False)),
+        ],
+        [AUDIT_READ_TEXT_FILE_TOOL_SCHEMA],
+    )
+
+    assert payload["tool_calls"][0]["arguments"]["content"] == content
+    assert content.startswith(adapted_content)
+    assert evidence == {
+        "status": "ok",
+        "size": len(content.encode("utf-8")),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "truncated": True,
+        "bytes_read": len(adapted_content.encode("utf-8")),
+    }
+    assert request_tokens <= _audit_max_input_tokens(chat_params)
+
+
+def test_multiple_write_file_payloads_preserve_short_content_and_fairly_truncate_long_content():
+    short_content = "short content " * 10
+    long_content = "long content " * 4000
+    payload = {
+        "tool_calls": [
+            {
+                "tool_call_id": "short",
+                "tool_name": "write_file",
+                "arguments": {"file_path": "short.txt", "content": short_content},
+            },
+            {
+                "tool_call_id": "long",
+                "tool_name": "write_file",
+                "arguments": {"file_path": "long.txt", "content": long_content},
+            },
+        ]
+    }
+
+    adapted_payload = _fit_audit_write_file_payload_to_context(
+        "audit",
+        payload,
+        {"context_window_k": 2, "max_tokens": 256},
+    )
+    short_call, long_call = adapted_payload["tool_calls"]
+
+    assert short_call["arguments"]["content"] == short_content
+    assert short_call["argument_evidence"]["content"]["truncated"] is False
+    assert long_content.startswith(long_call["arguments"]["content"])
+    assert long_call["argument_evidence"]["content"]["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    calls = []
+    content = "audit this write payload " * 5000
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    class FakeChannel:
+        is_active = True
+        base_url = "https://audit.example"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
+
+        def get_decrypted_api_key(self):
+            return "secret"
+
+    async def get_channel(*_args, **_kwargs):
+        return FakeChannel()
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return InternalResponse(
+            message=InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content='{"results":[{"tool_call_id":"call-1","score":0,"reason":"safe","file_checks":[]}]}',
+            ),
+            model="audit-model",
+        )
+
+    monkeypatch.setattr(service.channel_crud, "get", get_channel)
+    monkeypatch.setattr(service, "resolve_chat_params", lambda *_args: {"context_window_k": 4, "max_tokens": 512, "chat_timeout": 30})
+    monkeypatch.setattr(service.LLMClient, "generate", generate)
+
+    request_payload = {
+        "confirmation_threshold": 5,
+        "working_directory": str(tmp_path),
+        "tool_calls": [
+            {
+                "tool_call_id": "call-1",
+                "turn_index": 0,
+                "tool_name": "write_file",
+                "arguments": {"file_path": "note.txt", "content": content},
+            }
+        ],
+    }
+    await _call_auditor(FakeDb(), cfg, request_payload, tmp_path)
+
+    sent_payload = json.loads(calls[0]["messages"][1].content)
+    sent_call = sent_payload["tool_calls"][0]
+    assert request_payload["tool_calls"][0]["arguments"]["content"] == content
+    assert content.startswith(sent_call["arguments"]["content"])
+    assert sent_call["argument_evidence"]["content"]["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_pending_summary_sends_adapted_write_file_payload(monkeypatch, tmp_path):
+    import app.core.audit.service as service
+
+    cfg = _profile_config()
+    cfg.security.audit_report_language = "en"
+    calls = []
+    content = "summarize this write payload " * 5000
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    class FakeChannel:
+        is_active = True
+        base_url = "https://audit.example"
+        model_ids = [{"model_id": "audit-model", "usage": "CHAT", "protocol": "OPENAI"}]
+
+        def get_decrypted_api_key(self):
+            return "secret"
+
+    async def get_channel(*_args, **_kwargs):
+        return FakeChannel()
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="Write note.txt after confirmation."),
+            model="audit-model",
+        )
+
+    monkeypatch.setattr(service.channel_crud, "get", get_channel)
+    monkeypatch.setattr(service, "resolve_chat_params", lambda *_args: {"context_window_k": 4, "max_tokens": 512, "chat_timeout": 30})
+    monkeypatch.setattr(service.LLMClient, "generate", generate)
+
+    tool_calls = [{"id": "call-1", "name": "write_file", "arguments": {"file_path": "note.txt", "content": content}}]
+    await _summarize_pending(FakeDb(), cfg, tool_calls, working_directory=tmp_path)
+
+    sent_payload = json.loads(calls[0]["messages"][1].content)
+    sent_call = sent_payload["tool_calls"][0]
+    assert tool_calls[0]["arguments"]["content"] == content
+    assert content.startswith(sent_call["arguments"]["content"])
+    assert sent_call["argument_evidence"]["content"]["truncated"] is True
 
 
 def test_audit_read_result_fits_escaped_json_within_input_budget():
