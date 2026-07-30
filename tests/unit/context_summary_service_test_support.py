@@ -86,6 +86,8 @@ def _patch_summary_dependencies(monkeypatch, *, update_result=True, generation_e
             priority=1,
             context_window_tokens=4096,
             max_output_tokens=256,
+            temperature=0.7,
+            top_p=None,
             safety_margin_tokens=0,
             input_budget_tokens=3840,
         )

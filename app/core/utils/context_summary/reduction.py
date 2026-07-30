@@ -83,6 +83,8 @@ def build_reduction_stage_identity(
             "priority": model.priority,
             "context_window_tokens": model.context_window_tokens,
             "max_output_tokens": model.max_output_tokens,
+            "temperature": model.temperature,
+            "top_p": model.top_p,
             "safety_margin_tokens": model.safety_margin_tokens,
         },
         sort_keys=True,

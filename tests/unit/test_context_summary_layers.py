@@ -22,7 +22,15 @@ class _SummaryChannel:
 
 
 @pytest.mark.asyncio
-async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypatch):
+@pytest.mark.parametrize(
+    ("configured_max_tokens", "expected_max_output_tokens"),
+    [(400, 400), (0, 500)],
+)
+async def test_summary_model_selection_builds_fixed_capability_snapshot(
+    monkeypatch,
+    configured_max_tokens: int,
+    expected_max_output_tokens: int,
+):
     channel_config = ChannelConfig()
     selection_calls = []
 
@@ -33,7 +41,9 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
             {
                 "model_id": "summary-model",
                 "context_window_k": 8,
-                "max_tokens": 4096,
+                "max_tokens": configured_max_tokens,
+                "temperature": 0.35,
+                "top_p": 0.8,
                 "usage": "CHAT",
                 "protocol": "OPENAI",
                 "advanced_settings": {
@@ -63,9 +73,11 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
         api_key="secret",
         priority=3,
         context_window_tokens=8000,
-        max_output_tokens=500,
+        max_output_tokens=expected_max_output_tokens,
+        temperature=0.35,
+        top_p=0.8,
         safety_margin_tokens=256,
-        input_budget_tokens=7244,
+        input_budget_tokens=8000 - expected_max_output_tokens - 256,
         http_proxy="http://proxy.example.com:8080",
         custom_headers={"user-agent": "SummaryClient/1.0"},
     )
@@ -76,8 +88,8 @@ async def test_summary_model_selection_builds_fixed_capability_snapshot(monkeypa
             "cursor_key": "9:CHAT:CONTEXT_SUMMARY",
         }
     ]
-    assert snapshot.accepts_prompt_tokens(7244)
-    assert not snapshot.accepts_prompt_tokens(7245)
+    assert snapshot.accepts_prompt_tokens(snapshot.input_budget_tokens)
+    assert not snapshot.accepts_prompt_tokens(snapshot.input_budget_tokens + 1)
     with pytest.raises(FrozenInstanceError):
         snapshot.model_id = "other-model"
 
@@ -104,6 +116,8 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
         priority=3,
         context_window_tokens=8192,
         max_output_tokens=512,
+        temperature=0.35,
+        top_p=0.8,
         safety_margin_tokens=256,
         input_budget_tokens=7424,
         http_proxy="http://proxy.example.com:8080",
@@ -124,7 +138,8 @@ async def test_single_summary_call_only_uses_selected_snapshot(monkeypatch):
     assert len(request["messages"]) == 1
     assert request["messages"][0].role == MessageRole.USER
     assert request["messages"][0].content == "summarize this history"
-    assert request["temperature"] == 0.2
+    assert request["temperature"] == 0.35
+    assert request["top_p"] == 0.8
     assert request["max_tokens"] == 512
     assert request["protocol"] == "openai"
     assert request["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
@@ -151,6 +166,8 @@ async def test_single_summary_call_returns_none_for_empty_content(monkeypatch):
         priority=1,
         context_window_tokens=4096,
         max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
         safety_margin_tokens=256,
         input_budget_tokens=3584,
     )

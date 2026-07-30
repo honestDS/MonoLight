@@ -19,6 +19,8 @@ def _model(*, priority: int, input_budget_tokens: int) -> ContextSummaryModelSna
         priority=priority,
         context_window_tokens=input_budget_tokens + 256,
         max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
         safety_margin_tokens=0,
         input_budget_tokens=input_budget_tokens,
     )

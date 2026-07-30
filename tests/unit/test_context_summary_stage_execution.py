@@ -62,6 +62,8 @@ def _patch_multifragment_completion_barrier(
             priority=1,
             context_window_tokens=2048,
             max_output_tokens=256,
+            temperature=0.7,
+            top_p=None,
             safety_margin_tokens=0,
             input_budget_tokens=1792,
         )
@@ -363,6 +365,8 @@ async def test_refinement_stage_keeps_direct_lower_stage_range_and_completion_ba
         priority=1,
         context_window_tokens=4096,
         max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
         safety_margin_tokens=0,
         input_budget_tokens=3840,
     )
@@ -483,6 +487,8 @@ async def test_refinement_stage_invalidates_recovered_non_reducing_fragment(
         priority=1,
         context_window_tokens=4096,
         max_output_tokens=256,
+        temperature=0.7,
+        top_p=None,
         safety_margin_tokens=0,
         input_budget_tokens=3840,
     )

@@ -906,7 +906,11 @@ async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_pa
         )
 
     monkeypatch.setattr(service.channel_crud, "get", get_channel)
-    monkeypatch.setattr(service, "resolve_chat_params", lambda *_args: {"context_window_k": 4, "max_tokens": 512, "chat_timeout": 30})
+    monkeypatch.setattr(
+        service,
+        "resolve_chat_params",
+        lambda *_args: {"context_window_k": 4, "temperature": 0.25, "top_p": 0.8, "max_tokens": 512, "chat_timeout": 30},
+    )
     monkeypatch.setattr(service.LLMClient, "generate", generate)
 
     request_payload = {
@@ -928,6 +932,8 @@ async def test_call_auditor_sends_adapted_write_file_payload(monkeypatch, tmp_pa
     assert request_payload["tool_calls"][0]["arguments"]["content"] == content
     assert content.startswith(sent_call["arguments"]["content"])
     assert sent_call["argument_evidence"]["content"]["truncated"] is True
+    assert calls[0]["temperature"] == 0.25
+    assert calls[0]["top_p"] == 0.8
 
 
 @pytest.mark.asyncio
@@ -962,7 +968,11 @@ async def test_pending_summary_sends_adapted_write_file_payload(monkeypatch, tmp
         )
 
     monkeypatch.setattr(service.channel_crud, "get", get_channel)
-    monkeypatch.setattr(service, "resolve_chat_params", lambda *_args: {"context_window_k": 4, "max_tokens": 512, "chat_timeout": 30})
+    monkeypatch.setattr(
+        service,
+        "resolve_chat_params",
+        lambda *_args: {"context_window_k": 4, "temperature": 0.4, "top_p": 0.9, "max_tokens": 512, "chat_timeout": 30},
+    )
     monkeypatch.setattr(service.LLMClient, "generate", generate)
 
     tool_calls = [{"id": "call-1", "name": "write_file", "arguments": {"file_path": "note.txt", "content": content}}]
@@ -973,6 +983,8 @@ async def test_pending_summary_sends_adapted_write_file_payload(monkeypatch, tmp
     assert tool_calls[0]["arguments"]["content"] == content
     assert content.startswith(sent_call["arguments"]["content"])
     assert sent_call["argument_evidence"]["content"]["truncated"] is True
+    assert calls[0]["temperature"] == 0.4
+    assert calls[0]["top_p"] == 0.9
 
 
 def test_audit_read_result_fits_escaped_json_within_input_budget():

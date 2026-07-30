@@ -21,6 +21,8 @@ class ContextSummaryModelSnapshot:
     priority: int
     context_window_tokens: int
     max_output_tokens: int
+    temperature: float
+    top_p: float | None
     safety_margin_tokens: int
     input_budget_tokens: int
     http_proxy: str | None = None
@@ -53,7 +55,9 @@ async def select_context_summary_model(
     channel, model_entry, rule = selection
     chat_params = resolve_chat_params(model_entry, channel_config)
     context_window_tokens = chat_params["context_window_k"] * CONTEXT_WINDOW_TOKENS_PER_K
-    max_output_tokens = min(1024, max(256, context_window_tokens // 16))
+    task_max_output_tokens = min(1024, max(256, context_window_tokens // 16))
+    configured_max_tokens = chat_params["max_tokens"]
+    max_output_tokens = min(task_max_output_tokens, configured_max_tokens) if configured_max_tokens > 0 else task_max_output_tokens
     normalized_safety_margin = max(safety_margin_tokens, 0)
 
     return ContextSummaryModelSnapshot(
@@ -66,6 +70,8 @@ async def select_context_summary_model(
         priority=rule.priority,
         context_window_tokens=context_window_tokens,
         max_output_tokens=max_output_tokens,
+        temperature=chat_params["temperature"],
+        top_p=chat_params["top_p"],
         safety_margin_tokens=normalized_safety_margin,
         input_budget_tokens=max(
             1,
