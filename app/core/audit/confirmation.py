@@ -389,7 +389,12 @@ async def get_pending_tool_results(
         tool_call_id = message.audit_tool_call_id if structured else tool_result.tool_call_id
         if structured and tool_result.tool_call_id != tool_call_id:
             return None
-        if tool_result.role != MessageRole.TOOL or not isinstance(tool_call_id, str) or tool_call_id not in expected_tool_call_ids or tool_call_id in pending_results or not isinstance(result_payload, dict) or result_payload.get("status") != AuditRecordStatus.PENDING.value:
+        result_status = result_payload.get("status") if isinstance(result_payload, dict) else None
+        is_pending_result = result_status == AuditRecordStatus.PENDING.value
+        is_executing_confirmation_result = (
+            result_status == AuditRecordStatus.EXECUTING.value and result_payload.get("confirmation_status") in {ConfirmationDecision.APPROVE.value, ConfirmationDecision.IGNORE.value} and isinstance(result_payload.get(CONFIRMATION_DECISION_FIELD), str) and bool(result_payload[CONFIRMATION_DECISION_FIELD].strip())
+        )
+        if tool_result.role != MessageRole.TOOL or not isinstance(tool_call_id, str) or tool_call_id not in expected_tool_call_ids or tool_call_id in pending_results or not isinstance(result_payload, dict) or not (is_pending_result or is_executing_confirmation_result):
             return None
         pending_results[tool_call_id] = message
 
@@ -710,7 +715,7 @@ async def update_confirmation_tool_results_for_decision(
     decision: ConfirmationDecision,
     raw_message: str,
 ) -> int:
-    status = AuditRecordStatus.PENDING if decision in {ConfirmationDecision.APPROVE, ConfirmationDecision.IGNORE} else AuditRecordStatus.REJECTED
+    status = AuditRecordStatus.EXECUTING if decision in {ConfirmationDecision.APPROVE, ConfirmationDecision.IGNORE} else AuditRecordStatus.REJECTED
     return await _update_confirmation_tool_results(
         db,
         audit_record_id=audit_record_id,
@@ -802,24 +807,82 @@ def _confirmation_status_value(record) -> str:
     return record.status.value if isinstance(record.status, AuditRecordStatus) else str(record.status)
 
 
-async def _send_confirmation_status_event(
+def _build_confirmation_status_event(
     record,
     *,
     message_id: int | None,
     status: str,
     content: str | None,
-    event_id: str,
-) -> None:
-    event = {
+) -> dict[str, Any]:
+    return {
         "type": "audit_confirmation_status",
         "source": "audit_confirmation",
-        "event_id": event_id,
+        "event_id": f"audit-confirmation:{record.id}:{status}",
         "session_id": record.session_id,
         "audit_record_id": record.id,
         "message_id": message_id,
         "status": status,
         "content": content,
     }
+
+
+def _build_confirmation_tool_results_event(record, tool_results: list[dict]) -> dict[str, Any] | None:
+    if not tool_results:
+        return None
+
+    result_hash = hashlib.sha256(json.dumps(tool_results, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    return {
+        "type": "audit_tool_results_update",
+        "source": "audit_confirmation",
+        "event_id": f"audit-tool-results:{record.id}:{result_hash}",
+        "session_id": record.session_id,
+        "audit_record_id": record.id,
+        "messages": tool_results,
+    }
+
+
+async def build_confirmation_update_events(
+    db: AsyncSession,
+    *,
+    audit_record_id: int,
+    include_tool_results: bool = True,
+) -> list[dict[str, Any]]:
+    record = await audit_crud.get_record(db, audit_record_id)
+    if record is None or record.id is None:
+        return []
+    confirmation_message, _confirmation_payload = await _get_confirmation_message(db, record)
+    if confirmation_message is None or confirmation_message.id is None:
+        return []
+
+    events = [
+        _build_confirmation_status_event(
+            record,
+            message_id=confirmation_message.id,
+            status=_confirmation_status_value(record),
+            content=confirmation_message.content,
+        )
+    ]
+    if include_tool_results:
+        tool_results = await _get_confirmation_tool_result_events(db, record)
+        tool_results_event = _build_confirmation_tool_results_event(record, tool_results)
+        if tool_results_event is not None:
+            events.append(tool_results_event)
+    return events
+
+
+async def _send_confirmation_status_event(
+    record,
+    *,
+    message_id: int | None,
+    status: str,
+    content: str | None,
+) -> None:
+    event = _build_confirmation_status_event(
+        record,
+        message_id=message_id,
+        status=status,
+        content=content,
+    )
     try:
         await send_session_event(record.uid, record.session_id, event)
     except Exception:
@@ -830,18 +893,10 @@ async def _send_confirmation_status_event(
 
 
 async def _send_confirmation_tool_results_event(record, tool_results: list[dict]) -> None:
-    if not tool_results:
+    event = _build_confirmation_tool_results_event(record, tool_results)
+    if event is None:
         return
 
-    result_hash = hashlib.sha256(json.dumps(tool_results, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
-    event = {
-        "type": "audit_tool_results_update",
-        "source": "audit_confirmation",
-        "event_id": f"audit-tool-results:{record.id}:{result_hash}",
-        "session_id": record.session_id,
-        "audit_record_id": record.id,
-        "messages": tool_results,
-    }
     try:
         await send_session_event(record.uid, record.session_id, event)
     except Exception:
@@ -873,7 +928,6 @@ async def _broadcast_confirmation_status_update(
         message_id=status_update.message_id,
         status=status_update.status,
         content=status_update.content,
-        event_id=f"audit-confirmation:{status_update.record.id}:{status_update.status}",
     )
     tool_results = await _get_confirmation_tool_result_events(db, status_update.record)
     await _send_confirmation_tool_results_event(status_update.record, tool_results)

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { createHistoryMergeTracker } from '../src/composables/chat/historyMergeTracker.js'
-import { createWorkLifecycleTracker } from '../src/composables/chat/workLifecycleTracker.js'
+import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from '../src/composables/chat/workLifecycleTracker.js'
 import { mergeAssistantResponseIntoList } from '../src/utils/assistantResponseIdentity.js'
 
 const userMessage = requestId => ({
@@ -37,6 +37,13 @@ const createEventDriver = () => {
         && !lifecycle.isAcceptedTerminalEvent(terminalEvent)
       ) return
       messages = mergeAssistantResponseIntoList(messages, message)
+    },
+    shouldApplyOwnProactiveReply(event, requestId) {
+      return shouldApplyOwnProactiveReply(lifecycle, event, requestId)
+    },
+    shouldProcessCompletedWork(event) {
+      return !lifecycle.isWorkTerminal(event.work_id)
+        || lifecycle.isAcceptedTerminalEvent(event)
     },
     beginHistory() {
       return history.begin()
@@ -174,4 +181,52 @@ test('concurrent work events converge without reviving terminal UI state or dupl
   assert.equal(assistants.find(message => message.response_id === 'response-b1').content, 'B body')
   assert.equal(assistants.find(message => message.response_id === 'response-c1').content, 'C final body')
   assert.equal(assistants.some(message => message.response_id === 'response-b-late'), false)
+})
+
+test('proactive and done terminal order preserves the first confirmation card body', () => {
+  const runTerminalOrder = (firstEventType) => {
+    const driver = createEventDriver()
+    const terminalEvents = {
+      proactive: {
+        work_id: 'work-a',
+        request_ids: ['request-a'],
+        event_sequence_no: 1,
+        confirmationCardBody: firstEventType === 'proactive' ? 'Confirm execution' : ''
+      },
+      done: {
+        work_id: 'work-a',
+        request_ids: ['request-a'],
+        event_sequence_no: 2,
+        confirmationCardBody: firstEventType === 'done' ? 'Confirm execution' : ''
+      }
+    }
+    const eventTypes = firstEventType === 'proactive'
+      ? ['proactive', 'done']
+      : ['done', 'proactive']
+    let confirmationCardBody = null
+    let applications = 0
+
+    for (const eventType of eventTypes) {
+      const event = terminalEvents[eventType]
+      driver.lifecycle('finishWorkLifecycle', event)
+      const shouldApply = eventType === 'proactive'
+        ? driver.shouldApplyOwnProactiveReply(event, 'request-a')
+        : driver.shouldProcessCompletedWork(event)
+      if (!shouldApply) continue
+
+      confirmationCardBody = event.confirmationCardBody
+      applications += 1
+    }
+
+    return { confirmationCardBody, applications }
+  }
+
+  assert.deepEqual(runTerminalOrder('proactive'), {
+    confirmationCardBody: 'Confirm execution',
+    applications: 1
+  })
+  assert.deepEqual(runTerminalOrder('done'), {
+    confirmationCardBody: 'Confirm execution',
+    applications: 1
+  })
 })

@@ -928,7 +928,27 @@ async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
 
     async def enqueue_message(*_args, **kwargs):
         captured_kwargs.update(kwargs)
-        return SimpleNamespace(id=1), SimpleNamespace(id=9), "queued"
+        return (
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=9),
+            "queued",
+            [
+                {
+                    "type": "audit_confirmation_status",
+                    "event_id": "audit-confirmation:1:rejected",
+                    "session_id": "session-1",
+                    "audit_record_id": 1,
+                    "status": "rejected",
+                },
+                {
+                    "type": "audit_tool_results_update",
+                    "event_id": "audit-tool-results:1:rejected",
+                    "session_id": "session-1",
+                    "audit_record_id": 1,
+                    "messages": [{"tool_call_id": "call-1", "content": '{"status":"rejected"}'}],
+                },
+            ],
+        )
 
     async def wait_for_stream(_work_id):
         yield {"type": "done", "response": {"history": [], "files": None}}
@@ -953,7 +973,17 @@ async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
     assert captured_kwargs["stream_requested"] is True
     assert captured_kwargs["context_summary_events_requested"] is True
     assert captured_kwargs["request_id"] == "request-1"
-    assert events[0] == {
+    assert [event["type"] for event in events] == [
+        "audit_confirmation_status",
+        "audit_tool_results_update",
+        "input_queued",
+        "done",
+    ]
+    assert events[0]["event_id"] == "audit-confirmation:1:rejected"
+    assert events[0]["status"] == "rejected"
+    assert events[1]["event_id"] == "audit-tool-results:1:rejected"
+    assert events[1]["messages"][0]["content"] == '{"status":"rejected"}'
+    assert events[2] == {
         "type": "input_queued",
         "session_id": "session-1",
         "request_id": "request-1",
@@ -961,6 +991,111 @@ async def test_http_stream_adapter_enqueues_stream_dispatch(monkeypatch):
         "submission_status": "queued",
     }
     assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_http_adapter_merges_confirmation_updates_into_non_stream_response(monkeypatch):
+    adapter = chat_web_module.WebChatAdapter()
+    work = SimpleNamespace(id=9, execution_state={})
+    confirmation_update_events = [
+        {
+            "type": "audit_confirmation_status",
+            "event_id": "audit-confirmation:1:executing",
+            "session_id": "session-1",
+            "audit_record_id": 1,
+            "status": "executing",
+        },
+        {
+            "type": "audit_tool_results_update",
+            "event_id": "audit-tool-results:1:executing",
+            "session_id": "session-1",
+            "audit_record_id": 1,
+            "messages": [{"tool_call_id": "call-1", "content": '{"status":"executing"}'}],
+        },
+    ]
+    final_db = object()
+    final_event_calls = []
+    session_factory_calls = []
+    request_bind = object()
+    request_db = SimpleNamespace(bind=request_bind)
+    final_confirmation_update_events = [
+        {
+            "type": "audit_confirmation_status",
+            "event_id": "audit-confirmation:1:succeeded",
+            "session_id": "session-1",
+            "audit_record_id": 1,
+            "status": "succeeded",
+        },
+        {
+            "type": "audit_tool_results_update",
+            "event_id": "audit-tool-results:1:succeeded",
+            "session_id": "session-1",
+            "audit_record_id": 1,
+            "messages": [{"tool_call_id": "call-1", "content": '{"status":"succeeded"}'}],
+        },
+    ]
+
+    async def ensure_writable(*_args, **_kwargs):
+        return None
+
+    async def get_profile(*_args, **_kwargs):
+        return SimpleNamespace(id=1)
+
+    async def validate_message(*_args, **_kwargs):
+        return None
+
+    async def enqueue_message(*_args, **_kwargs):
+        return SimpleNamespace(id=1), work, "approved", confirmation_update_events
+
+    class SessionContext:
+        async def __aenter__(self):
+            return final_db
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    def create_final_session_factory(*, bind, class_, expire_on_commit):
+        session_factory_calls.append((bind, class_, expire_on_commit))
+        return SessionContext
+
+    async def build_final_confirmation_update_events(db, *, audit_record_id, include_tool_results):
+        final_event_calls.append((db, audit_record_id, include_tool_results))
+        return final_confirmation_update_events
+
+    async def wait_for_result(_work_id):
+        return {
+            "choices": [],
+            "session_events": [
+                {"type": "existing", "event_id": "existing-event"},
+                {"type": "stale", "event_id": "audit-confirmation:1:succeeded"},
+            ],
+        }
+
+    monkeypatch.setattr(chat_web_module, "ensure_web_session_writable", ensure_writable)
+    monkeypatch.setattr(chat_web_module, "resolve_profile_for_session", get_profile)
+    monkeypatch.setattr(chat_web_module.ChatDispatcher, "validate_initial_message_before_save", validate_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "submit_user_message", enqueue_message)
+    monkeypatch.setattr(chat_web_module.session_reply_queue_manager, "wait_for_result", wait_for_result)
+    monkeypatch.setattr(chat_web_module, "async_sessionmaker", create_final_session_factory)
+    monkeypatch.setattr(chat_web_module, "build_confirmation_update_events", build_final_confirmation_update_events)
+
+    response = await adapter.chat(
+        db=request_db,
+        message="reject",
+        uid="user-1",
+        session_id="session-1",
+    )
+
+    assert session_factory_calls == [(request_bind, type(request_db), False)]
+    assert final_event_calls == [(final_db, 1, True)]
+    assert [event["event_id"] for event in response["session_events"]] == [
+        "existing-event",
+        "audit-confirmation:1:succeeded",
+        "audit-tool-results:1:succeeded",
+    ]
+    assert response["session_events"][1]["status"] == "succeeded"
+    assert response["session_events"][2]["messages"][0]["content"] == '{"status":"succeeded"}'
+    assert all("executing" not in event["event_id"] for event in response["session_events"])
 
 
 @pytest.mark.asyncio
@@ -979,7 +1114,7 @@ async def test_http_adapter_uses_resolved_work_identity_from_failure(monkeypatch
         return None
 
     async def enqueue_message(*_args, **_kwargs):
-        return SimpleNamespace(id=1), original_work, "queued"
+        return SimpleNamespace(id=1), original_work, "queued", []
 
     async def wait_for_result(work_id):
         assert work_id == 9

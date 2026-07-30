@@ -476,6 +476,62 @@ async def test_pending_tool_result_validation_rejects_missing_and_duplicate_resu
         is None
     )
 
+    result = await db_session.execute(select(Message).where(Message.session_id == "session-1", Message.type == MessageType.TOOL_RESULT))
+    pending_tool_result = result.scalars().one()
+
+    async def set_tool_result_payload(payload: dict):
+        pending_tool_result.content = InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id="call-1",
+            content=json.dumps(payload),
+        ).model_dump_json(exclude_none=True)
+        db_session.add(pending_tool_result)
+        await db_session.commit()
+
+    async def get_single_tool_result():
+        return await get_pending_tool_results(
+            db_session,
+            uid="owner",
+            session_id="session-1",
+            source_assistant_message_id=record.source_assistant_message_id,
+            before_message_id=decision_message.id,
+            tool_call_ids=["call-1"],
+        )
+
+    await set_tool_result_payload(
+        {
+            "status": AuditRecordStatus.EXECUTING.value,
+            "confirmation_status": "approve",
+            "confirmation_decision": "同意",
+        }
+    )
+    assert await get_single_tool_result() is not None
+
+    await set_tool_result_payload(
+        {
+            "status": AuditRecordStatus.EXECUTING.value,
+            "confirmation_status": "ignore",
+            "confirmation_decision": "忽略",
+        }
+    )
+    assert await get_single_tool_result() is not None
+
+    await set_tool_result_payload(
+        {
+            "status": AuditRecordStatus.EXECUTING.value,
+            "confirmation_status": "approve",
+        }
+    )
+    assert await get_single_tool_result() is None
+
+    await set_tool_result_payload(
+        {
+            "status": AuditRecordStatus.EXECUTING.value,
+            "confirmation_decision": "同意",
+        }
+    )
+    assert await get_single_tool_result() is None
+
     db_session.add(
         Message(
             session_id="session-1",
@@ -887,6 +943,15 @@ async def test_web_entry_reaches_unified_submission_for_confirmation_outcomes(
     )
 
     assert response["choices"] == []
+    direct_events = response["session_events"]
+    assert [event["type"] for event in direct_events] == ["audit_confirmation_status", "audit_tool_results_update"]
+    assert direct_events[0]["session_id"] == "session-1"
+    assert direct_events[0]["audit_record_id"] == record.id
+    assert direct_events[0]["status"] == expected_status.value
+    assert direct_events[1]["session_id"] == "session-1"
+    assert direct_events[1]["audit_record_id"] == record.id
+    direct_tool_result = InternalMessage.model_validate_json(direct_events[1]["messages"][0]["content"])
+    assert json.loads(direct_tool_result.content)["status"] == expected_status.value
     await refresh_record(db_session, record)
     works = await list_work(db_session)
     assert record.status == expected_status
@@ -1043,7 +1108,7 @@ async def test_invalid_confirmation_input_commits_bundle_before_broadcast(db_ses
     monkeypatch.setattr(session_reply_queue_manager_module, "broadcast_pending_confirmation_cancellation", broadcast_after_commit)
     monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
 
-    initial_message, work, status = await session_reply_queue_manager.submit_user_message(
+    initial_message, work, status, direct_events = await session_reply_queue_manager.submit_user_message(
         db_session,
         uid="owner",
         session_id="session-1",
@@ -1063,6 +1128,10 @@ async def test_invalid_confirmation_input_commits_bundle_before_broadcast(db_ses
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.CANCELLED.value
     assert (await get_tool_result_payload(db_session))["status"] == AuditRecordStatus.CANCELLED.value
     assert [item.id for item in works] == [work.id]
+    assert [event["type"] for event in direct_events] == ["audit_confirmation_status", "audit_tool_results_update"]
+    assert direct_events[0]["status"] == AuditRecordStatus.CANCELLED.value
+    direct_tool_result = InternalMessage.model_validate_json(direct_events[1]["messages"][0]["content"])
+    assert json.loads(direct_tool_result.content)["status"] == AuditRecordStatus.CANCELLED.value
     assert [event["type"] for event in events] == ["audit_confirmation_status", "audit_tool_results_update"]
 
 
@@ -1127,14 +1196,22 @@ async def test_websocket_adapter_approval_reaches_confirmed_execution_work(db_se
 
     await refresh_record(db_session, record)
     works = await list_work(db_session)
-    assert events == [
-        {
-            "type": "done",
-            "session_id": "session-1",
-            "response": {"work_id": works[0].id},
-            "request_id": "request-1",
-        },
-    ]
+    assert [event["type"] for event in events] == ["audit_confirmation_status", "audit_tool_results_update", "done"]
+    assert events[0]["session_id"] == "session-1"
+    assert events[0]["audit_record_id"] == record.id
+    assert events[0]["status"] == AuditRecordStatus.EXECUTING.value
+    assert events[0]["request_id"] == "request-1"
+    assert events[1]["session_id"] == "session-1"
+    assert events[1]["audit_record_id"] == record.id
+    assert events[1]["request_id"] == "request-1"
+    direct_tool_result = InternalMessage.model_validate_json(events[1]["messages"][0]["content"])
+    assert json.loads(direct_tool_result.content)["status"] == AuditRecordStatus.EXECUTING.value
+    assert events[2] == {
+        "type": "done",
+        "session_id": "session-1",
+        "response": {"work_id": works[0].id},
+        "request_id": "request-1",
+    }
     assert record.status == AuditRecordStatus.EXECUTING
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
@@ -1204,7 +1281,16 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
-    assert websocket.sent == []
+    assert [event["type"] for event in websocket.sent] == ["audit_confirmation_status", "audit_tool_results_update"]
+    assert websocket.sent[0]["session_id"] == session_id
+    assert websocket.sent[0]["audit_record_id"] == record.id
+    assert websocket.sent[0]["status"] == AuditRecordStatus.EXECUTING.value
+    assert websocket.sent[0]["request_id"] == "approval-request"
+    assert websocket.sent[1]["session_id"] == session_id
+    assert websocket.sent[1]["audit_record_id"] == record.id
+    assert websocket.sent[1]["request_id"] == "approval-request"
+    direct_tool_result = InternalMessage.model_validate_json(websocket.sent[1]["messages"][0]["content"])
+    assert json.loads(direct_tool_result.content)["status"] == AuditRecordStatus.EXECUTING.value
 
 
 async def _noop_async(*_args, **_kwargs):

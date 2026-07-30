@@ -13,6 +13,16 @@ const getRequestIds = event => {
   return new Set(event.request_ids.map(normalizeIdentity).filter(Boolean))
 }
 
+export const shouldApplyOwnProactiveReply = (tracker, event, requestId) => {
+  const normalizedRequestId = normalizeIdentity(requestId)
+  if (!normalizedRequestId || !getRequestIds(event).has(normalizedRequestId)) return false
+
+  const workId = normalizeIdentity(event?.work_id)
+  if (!workId) return true
+
+  return !tracker.isWorkTerminal(workId) || tracker.isAcceptedTerminalEvent(event)
+}
+
 const isThinkingForWork = (message, workId) =>
   message?.role === 'thinking' && sameIdentity(message.work_id, workId)
 

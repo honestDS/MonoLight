@@ -7,8 +7,9 @@ import { useChatTransport } from './useChatTransport'
 import { resolveAssistantDisplayContent, useMessageProcessor } from './useMessageProcessor'
 import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
-import { createWorkLifecycleTracker } from './workLifecycleTracker.js'
-import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, mergeRemoteMessageIntoList, normalizeMessageContent } from '../../utils'
+import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
+import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
+import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { chatApi } from '../../api'
@@ -538,36 +539,10 @@ export function useChatSession() {
   const applyAuditConfirmationStatus = (data) => {
     if (contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-    const auditRecordId = String(data.audit_record_id || '')
-    const messageIndex = chatState.messages.value.findIndex((message) => {
-      if (data.message_id && String(message.db_id || message.id) === String(data.message_id)) return true
-      if (message.type !== 'audit_confirmation') return false
-      try {
-        const payload = typeof message.content === 'string' ? JSON.parse(message.content) : message.content
-        return auditRecordId && String(payload?.audit_record_id || '') === auditRecordId
-      } catch {
-        return false
-      }
-    })
-    if (messageIndex !== -1) {
-      const message = chatState.messages.value[messageIndex]
-      const currentPayload = normalizeMessageContent(message.content)
-      const incomingPayload = normalizeMessageContent(data.content)
-      const mergedPayload = {
-        ...(currentPayload && typeof currentPayload === 'object' ? currentPayload : {}),
-        ...(incomingPayload && typeof incomingPayload === 'object' ? incomingPayload : {}),
-        ...(data.status ? { status: data.status } : {})
-      }
-      chatState.messages.value[messageIndex] = mergeRemoteMessage(message, {
-        ...message,
-        id: data.message_id || message.id,
-        db_id: data.message_id || message.db_id,
-        type: 'audit_confirmation',
-        content: JSON.stringify(mergedPayload)
-      })
-    }
-
-    if (messageIndex === -1) {
+    const result = applyAuditConfirmationStatusToMessages(chatState.messages.value, data)
+    if (result.updated) {
+      chatState.messages.value = result.messages
+    } else {
       void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
         console.error('Audit confirmation history merge failed:', err)
       })
@@ -584,14 +559,13 @@ export function useChatSession() {
   const applyAuditToolResultsUpdate = (data, { skipSequenceGuard = false } = {}) => {
     if (!skipSequenceGuard && contextSummaryTracker.shouldIgnoreExternalSessionEvent(data, sessionManager.currentSessionId.value)) return
     if (!data || data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-    const messages = filterNewMessages(Array.isArray(data.messages) ? data.messages : [])
-    for (const remoteMessage of messages) {
-      if (!remoteMessage || typeof remoteMessage !== 'object') continue
-      const normalizedMessage = normalizeHistoryMessage({
-        ...remoteMessage,
-        db_id: remoteMessage.db_id ?? remoteMessage.id
-      })
-      chatState.messages.value = mergeRemoteMessageIntoList(chatState.messages.value, normalizedMessage)
+    const result = applyAuditToolResultsUpdateToMessages(
+      chatState.messages.value,
+      data,
+      currentSessionShowToolCalls.value
+    )
+    if (result.updated) {
+      chatState.messages.value = result.messages
     }
 
     void mergeLatestSessionHistory(data.session_id || sessionManager.currentSessionId.value).catch(err => {
@@ -711,6 +685,8 @@ export function useChatSession() {
           ...createLifecycleCallbacks(isCurrentRequestSession),
           deferAgentLoopOutput: true,
           completeBeforeWorkFinished: true,
+          onAuditConfirmationStatus: applyAuditConfirmationStatus,
+          onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
           onComplete: (data, thinkingIdParam, requestIdParam, eventType) => {
             if (eventType === 'turn_end' || data?.type !== 'done' || !isCurrentRequestSession()) return
             if (!shouldProcessCompletedWork(data)) {
@@ -915,7 +891,12 @@ export function useChatSession() {
         if (
           Array.isArray(data?.request_ids) &&
           data.request_ids.some(id => String(id) === String(requestId))
-        ) return
+        ) {
+          if (shouldApplyOwnProactiveReply(workLifecycleTracker, data, requestId)) {
+            processAiResponse(data, null, requestId)
+          }
+          return
+        }
         const workId = data.work_id
         if (
           workId !== undefined &&

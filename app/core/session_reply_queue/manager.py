@@ -13,6 +13,7 @@ from app.core.audit.confirmation import (
     _broadcast_confirmation_status_update,
     _sync_confirmation_message_status_projection,
     broadcast_pending_confirmation_cancellation,
+    build_confirmation_update_events,
     cancel_persisted_pending_confirmation_bundle,
     expire_confirmation_by_session,
     parse_confirmation_decision,
@@ -188,7 +189,7 @@ class SessionReplyQueueManager:
         has_quote: bool = False,
         request_id: str | None = None,
         additional_system_prompt: str | None = None,
-    ) -> tuple[InternalMessage, SessionReplyWorkItem, str]:
+    ) -> tuple[InternalMessage, SessionReplyWorkItem, str, list[dict[str, Any]]]:
         await expire_confirmation_by_session(db, uid=uid, session_id=session_id)
         cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
         current_confirmation = await audit_crud.get_current_confirmation(db, uid=uid, session_id=session_id)
@@ -211,11 +212,12 @@ class SessionReplyQueueManager:
                 work,
                 immediate_status="accepted",
             )
-            return initial_message, work, submission_status
+            return initial_message, work, submission_status, []
 
+        current_confirmation_id = current_confirmation.id
         requires_high_risk_override = await audit_crud.requires_high_risk_override(
             db,
-            current_confirmation.id,
+            current_confirmation_id,
         )
         decision = parse_confirmation_decision(
             message,
@@ -240,7 +242,7 @@ class SessionReplyQueueManager:
             await db.flush()
             await audit_crud.close_pending(
                 db,
-                audit_record_id=current_confirmation.id,
+                audit_record_id=current_confirmation_id,
                 uid=uid,
                 session_id=session_id,
                 status=AuditRecordStatus.REJECTED,
@@ -250,12 +252,12 @@ class SessionReplyQueueManager:
             )
             await update_confirmation_tool_results_for_decision(
                 db,
-                audit_record_id=current_confirmation.id,
+                audit_record_id=current_confirmation_id,
                 before_message_id=message_row.id,
                 decision=decision,
                 raw_message=decision_raw_message,
             )
-            await update_confirmation_message_status(db, audit_record_id=current_confirmation.id)
+            await update_confirmation_message_status(db, audit_record_id=current_confirmation_id)
             initial_message, work = await self._enqueue_foreground_message(
                 db,
                 uid=uid,
@@ -276,7 +278,13 @@ class SessionReplyQueueManager:
                 work,
                 immediate_status="rejected",
             )
-            return initial_message, work, submission_status
+            confirmation_update_events = await self._build_direct_confirmation_update_events(
+                db,
+                source=source,
+                audit_record_id=current_confirmation_id,
+                work=work,
+            )
+            return initial_message, work, submission_status, confirmation_update_events
 
         if decision is None:
             profile_id = profile.id if profile and profile.id else -1
@@ -299,7 +307,7 @@ class SessionReplyQueueManager:
                 )
                 cancellation = await cancel_persisted_pending_confirmation_bundle(
                     db,
-                    audit_record_id=current_confirmation.id,
+                    audit_record_id=current_confirmation_id,
                     uid=uid,
                     session_id=session_id,
                     feedback=invalid_input_feedback,
@@ -333,7 +341,13 @@ class SessionReplyQueueManager:
                 work,
                 immediate_status="cancelled",
             )
-            return initial_message, work, submission_status
+            confirmation_update_events = await self._build_direct_confirmation_update_events(
+                db,
+                source=source,
+                audit_record_id=current_confirmation_id,
+                work=work,
+            )
+            return initial_message, work, submission_status, confirmation_update_events
 
         profile_id = profile.id if profile and profile.id else -1
         decision_raw_message = message if isinstance(message, str) else _serialize_message_content(message)
@@ -351,7 +365,7 @@ class SessionReplyQueueManager:
         await db.flush()
         claimed_record, claim_token = await audit_crud.claim_pending_for_execution(
             db,
-            audit_record_id=current_confirmation.id,
+            audit_record_id=current_confirmation_id,
             uid=uid,
             session_id=session_id,
             decision_message_id=message_row.id,
@@ -381,7 +395,13 @@ class SessionReplyQueueManager:
                 work,
                 immediate_status="accepted",
             )
-            return initial_message, work, submission_status
+            confirmation_update_events = await self._build_direct_confirmation_update_events(
+                db,
+                source=source,
+                audit_record_id=current_confirmation_id,
+                work=work,
+            )
+            return initial_message, work, submission_status, confirmation_update_events
         await update_confirmation_tool_results_for_decision(
             db,
             audit_record_id=claimed_record.id,
@@ -440,6 +460,12 @@ class SessionReplyQueueManager:
             )
         await db.refresh(message_row)
         await db.refresh(work)
+        confirmation_update_events = await self._build_direct_confirmation_update_events(
+            db,
+            source=source,
+            audit_record_id=claimed_record.id,
+            work=work,
+        )
         return (
             InternalMessage(
                 id=message_row.id,
@@ -454,6 +480,24 @@ class SessionReplyQueueManager:
                 work,
                 immediate_status="approved",
             ),
+            confirmation_update_events,
+        )
+
+    async def _build_direct_confirmation_update_events(
+        self,
+        db: AsyncSession,
+        *,
+        source: str,
+        audit_record_id: int | None,
+        work: SessionReplyWorkItem,
+    ) -> list[dict[str, Any]]:
+        if source not in {"http", "ws"} or audit_record_id is None:
+            return []
+        execution_state = work.execution_state if isinstance(work.execution_state, dict) else {}
+        return await build_confirmation_update_events(
+            db,
+            audit_record_id=audit_record_id,
+            include_tool_results=bool(execution_state.get("show_tool_calls", True)),
         )
 
     async def _resolve_submission_status(
@@ -499,7 +543,7 @@ class SessionReplyQueueManager:
                 request_id=request_id,
                 additional_system_prompt=additional_system_prompt,
             )
-        initial_message, work, _status = await self.submit_user_message(
+        initial_message, work, _status, _confirmation_update_events = await self.submit_user_message(
             db,
             uid=uid,
             session_id=session_id,

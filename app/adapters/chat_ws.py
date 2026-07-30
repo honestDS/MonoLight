@@ -44,7 +44,7 @@ class WebSocketChatAdapter(BaseChatAdapter):
         try:
             profile = await resolve_profile_for_session(db, uid=uid, session_id=session_id)
             await ChatDispatcher.validate_initial_message_before_save(db, message, uid, session_id, profile, attachments)
-            _initial_message, work, submission_status = await session_reply_queue_manager.submit_user_message(
+            _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
                 db,
                 uid=uid,
                 session_id=session_id,
@@ -54,6 +54,10 @@ class WebSocketChatAdapter(BaseChatAdapter):
                 source="ws",
                 request_id=request_id,
             )
+            for event in confirmation_update_events:
+                if request_id and isinstance(event, dict) and "request_id" not in event:
+                    event = {**event, "request_id": request_id}
+                yield event
             if request_id and is_submission_queued(submission_status):
                 yield build_input_queued_event(session_id, request_id, work.id, submission_status)
             async for chunk in session_reply_queue_manager.wait_for_stream(work.id):

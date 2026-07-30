@@ -741,7 +741,7 @@ async def chat_websocket(
                                 }
                             )
                             continue
-                        _initial_message, work, submission_status = await session_reply_queue_manager.submit_user_message(
+                        _initial_message, work, submission_status, confirmation_update_events = await session_reply_queue_manager.submit_user_message(
                             db,
                             uid=uid,
                             session_id=session_id,
@@ -751,6 +751,10 @@ async def chat_websocket(
                             source="ws",
                             request_id=request_id,
                         )
+                        for event in confirmation_update_events:
+                            if request_id and isinstance(event, dict) and "request_id" not in event:
+                                event = {**event, "request_id": request_id}
+                            await websocket.send_json(event)
                         if request_id and is_submission_queued(submission_status):
                             await websocket.send_json(
                                 build_input_queued_event(

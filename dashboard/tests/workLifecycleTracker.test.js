@@ -5,6 +5,7 @@ import {
   finishWorkLifecycle,
   markInputQueued,
   markInputsDequeued,
+  shouldApplyOwnProactiveReply,
   startAgentLoop,
   stopAgentLoop
 } from '../src/composables/chat/workLifecycleTracker.js'
@@ -233,4 +234,62 @@ test('records only the first accepted terminal event for each work', () => {
   tracker.resetWorkLifecycle(messages)
   assert.equal(tracker.isWorkTerminal('work-a'), false)
   assert.equal(tracker.isAcceptedTerminalEvent(firstTerminalEvent), false)
+})
+
+test('applies an own proactive reply only when it is the accepted terminal event', () => {
+  const tracker = createWorkLifecycleTracker()
+  const proactiveReply = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 1
+  }
+  const done = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 2
+  }
+  const lateProactiveReply = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 3
+  }
+
+  let messages = [userMessage('request-a')]
+  messages = tracker.finishWorkLifecycle(messages, proactiveReply)
+
+  assert.equal(shouldApplyOwnProactiveReply(tracker, proactiveReply, 'request-a'), true)
+
+  messages = tracker.finishWorkLifecycle(messages, done)
+  assert.equal(shouldApplyOwnProactiveReply(tracker, done, 'request-a'), false)
+  assert.equal(shouldApplyOwnProactiveReply(tracker, lateProactiveReply, 'request-a'), false)
+})
+
+test('does not apply an own proactive reply after done wins the terminal event', () => {
+  const tracker = createWorkLifecycleTracker()
+  const done = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 1
+  }
+  const lateProactiveReply = {
+    work_id: 'work-a',
+    request_ids: ['request-a'],
+    event_sequence_no: 2
+  }
+
+  tracker.finishWorkLifecycle([userMessage('request-a')], done)
+
+  assert.equal(shouldApplyOwnProactiveReply(tracker, lateProactiveReply, 'request-a'), false)
+})
+
+test('requires the current request id but accepts own proactive replies without work ids', () => {
+  const tracker = createWorkLifecycleTracker()
+
+  assert.equal(shouldApplyOwnProactiveReply(tracker, {
+    work_id: 'work-a',
+    request_ids: ['other-request']
+  }, 'request-a'), false)
+  assert.equal(shouldApplyOwnProactiveReply(tracker, {
+    request_ids: ['request-a']
+  }, 'request-a'), true)
 })
