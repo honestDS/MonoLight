@@ -28,6 +28,7 @@ from app.core.constants import (
     ERR_TERMINAL_READ_TRUNCATED_INVALID,
     ERR_TERMINAL_STATUS_TARGET_INVALID,
     ERR_TERMINAL_STATUS_TRANSITION_INVALID,
+    ERR_TOOL_SHELL_EXECUTION_MODE_INVALID,
 )
 from app.core.i18n import t
 
@@ -46,6 +47,19 @@ class TerminalSessionStatus(StrEnum):
     EXITED = "exited"
     FAILED = "failed"
     LOST = "lost"
+
+
+class ShellExecutionMode(StrEnum):
+    INTERACTIVE = "interactive"
+    NON_INTERACTIVE = "non_interactive"
+
+
+def validate_shell_execution_mode(value: ShellExecutionMode | str) -> ShellExecutionMode:
+    """Validate and return a shell execution mode without normalization."""
+    try:
+        return ShellExecutionMode(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(t(ERR_TOOL_SHELL_EXECUTION_MODE_INVALID, value=value)) from exc
 
 
 TERMINAL_SESSION_FINAL_STATUSES = frozenset(
@@ -343,15 +357,52 @@ class TerminalSessionSnapshot(TerminalProtocolModel):
 
     @model_validator(mode="after")
     def validate_terminal_outcome(self) -> "TerminalSessionSnapshot":
-        if self.status is TerminalSessionStatus.EXITED:
-            if self.exit_code is None or self.failure_reason is not None:
-                raise ValueError(t(ERR_TERMINAL_EXITED_OUTCOME_INVALID))
-        elif self.status in {TerminalSessionStatus.FAILED, TerminalSessionStatus.LOST}:
-            if self.exit_code is not None or not self.failure_reason or not self.failure_reason.strip():
-                raise ValueError(t(ERR_TERMINAL_FAILURE_OUTCOME_INVALID))
-        elif self.exit_code is not None or self.failure_reason is not None:
-            raise ValueError(t(ERR_TERMINAL_ACTIVE_OUTCOME_INVALID))
+        _validate_terminal_outcome(self.status, self.exit_code, self.failure_reason)
         return self
+
+
+def _validate_terminal_outcome(
+    status: TerminalSessionStatus,
+    exit_code: int | None,
+    failure_reason: str | None,
+) -> None:
+    if status is TerminalSessionStatus.EXITED:
+        if exit_code is None or failure_reason is not None:
+            raise ValueError(t(ERR_TERMINAL_EXITED_OUTCOME_INVALID))
+    elif status in {TerminalSessionStatus.FAILED, TerminalSessionStatus.LOST}:
+        if exit_code is not None or not failure_reason or not failure_reason.strip():
+            raise ValueError(t(ERR_TERMINAL_FAILURE_OUTCOME_INVALID))
+    elif exit_code is not None or failure_reason is not None:
+        raise ValueError(t(ERR_TERMINAL_ACTIVE_OUTCOME_INVALID))
+
+
+class ShellNonInteractiveCompletedResult(TerminalProtocolModel):
+    stdout: str
+    stderr: str
+    exit_code: int
+    system_info: str
+
+
+class ShellNonInteractiveTimeoutResult(TerminalProtocolModel):
+    error: str = Field(min_length=1)
+    system_info: str
+
+
+class ShellInteractiveHandoffResult(TerminalProtocolModel):
+    terminal_session_id: TerminalSessionId
+    status: TerminalSessionStatus
+    output_buffer: TerminalOutputBufferState
+    output_stream: Literal["merged_stdout_stderr"] = "merged_stdout_stderr"
+    exit_code: int | None = None
+    failure_reason: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_terminal_outcome(self) -> "ShellInteractiveHandoffResult":
+        _validate_terminal_outcome(self.status, self.exit_code, self.failure_reason)
+        return self
+
+
+type ShellExecutionResult = ShellNonInteractiveCompletedResult | ShellNonInteractiveTimeoutResult | ShellInteractiveHandoffResult
 
 
 __all__ = [
@@ -380,5 +431,11 @@ __all__ = [
     "can_transition_terminal_status",
     "generate_terminal_request_id",
     "generate_terminal_session_id",
+    "ShellExecutionMode",
+    "ShellExecutionResult",
+    "ShellInteractiveHandoffResult",
+    "ShellNonInteractiveCompletedResult",
+    "ShellNonInteractiveTimeoutResult",
+    "validate_shell_execution_mode",
     "validate_terminal_status_transition",
 ]

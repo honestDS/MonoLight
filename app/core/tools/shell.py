@@ -9,10 +9,11 @@ import subprocess
 import sys
 import sysconfig
 
-from app.core.constants import ERR_TOOL_COMMAND_TIMEOUT, ERR_TOOL_SHELL_BLACKLISTED
+from app.core.constants import ERR_TOOL_COMMAND_TIMEOUT, ERR_TOOL_SHELL_BLACKLISTED, ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
+from app.core.terminal import ShellExecutionMode, validate_shell_execution_mode
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -170,7 +171,11 @@ class ShellExecutor(BaseExecutor):
             self.logger.error(t("LOG_SHELL_PROFILE_TIMEOUT_FAILED", error=str(e)))
         return 30.0
 
-    async def execute(self, command: str) -> str:
+    async def execute(self, command: str, execution_mode: ShellExecutionMode | str) -> str:
+        execution_mode = validate_shell_execution_mode(execution_mode)
+        if execution_mode is ShellExecutionMode.INTERACTIVE:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE))
+
         system_info = get_full_system_context()
 
         blacklisted = self.check_blacklist(command)
@@ -266,10 +271,8 @@ SHELL_TOOL_SCHEMA = {
     "function": {
         "name": "execute_shell",
         "description": (
-            "Execute a single non-interactive shell command and return its output. "
-            "Do not use interactive programs (for example: vim, less, more, top, htop, nano, ipython, bpython, python -i, notepad, textedit, open, start, explorer, sqlite3, mysql, psql, gdb, lldb, man, woman, most, pg, watch, tail -f, less +F, journalctl -f), "
-            "and do not use commands that spawn long-running or GUI child processes (for example: editors, file managers, browsers, image viewers, terminal emulators, IDEs, or any command that waits for user input before exiting). "
-            "This tool runs with stdin closed, and interactive or child processes can block the shell until timeout. "
+            "Execute a shell command using the required execution_mode and return its output. "
+            "Choose non_interactive for commands that exit on their own without terminal input, or interactive for commands that require a live terminal session. "
             "For local file operations, use the dedicated file or knowledge-base tools instead."
         ),
         "parameters": {
@@ -277,10 +280,16 @@ SHELL_TOOL_SCHEMA = {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Single non-interactive shell command. Do not pass interactive commands, GUI launchers, or commands that wait for user input; only use commands that exit on their own. A simple Python -c command automatically bypasses shell escaping.",
+                    "description": "Shell command to execute. Select the execution_mode that matches whether the command exits on its own or requires a live terminal session.",
+                },
+                "execution_mode": {
+                    "type": "string",
+                    "enum": [mode.value for mode in ShellExecutionMode],
+                    "description": "Execution mode: choose non_interactive for commands that exit on their own without terminal input; choose interactive for commands that require a live terminal session.",
                 },
             },
-            "required": ["command"],
+            "required": ["command", "execution_mode"],
+            "additionalProperties": False,
         },
     },
 }

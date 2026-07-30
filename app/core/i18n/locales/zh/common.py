@@ -149,6 +149,8 @@ MESSAGES = {
     "ERR_TOOL_RUNTIME_CONTEXT_MISSING": "运行时上下文缺失",
     "ERR_TOOL_KNOWLEDGE_BASE_QUERY_FAILED": "知识库查询失败: {error}",
     "ERR_TOOL_SHELL_BLACKLISTED": "不允许通过 shell 工具执行该命令: {command}",
+    "ERR_TOOL_SHELL_EXECUTION_MODE_INVALID": "非法的 Shell 执行模式: {value}，仅允许 interactive、non_interactive",
+    "ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE": "interactive 终端执行当前尚不可用",
     "ERR_TOOL_COMMAND_TIMEOUT": "命令执行超时: {timeout} 秒",
     "ERR_TOOL_FIRECRAWL_API_KEY_MISSING": "Firecrawl API Key 未配置，请前往系统配置中的工具设置完成配置",
     "ERR_TOOL_FIRECRAWL_AUTH_FAILED": "Firecrawl API Key 认证失败或已失效，请检查并更新配置",

@@ -3,18 +3,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.tools import IMAGE_GENERATION_TOOL_SCHEMA, LIST_BACKGROUND_TASKS_TOOL_SCHEMA, SEND_FILE_TO_USER_TOOL_SCHEMA, get_tool_required_parameters
+from app.core.tools import IMAGE_GENERATION_TOOL_SCHEMA, LIST_BACKGROUND_TASKS_TOOL_SCHEMA, SEND_FILE_TO_USER_TOOL_SCHEMA, SHELL_TOOL_SCHEMA, get_tool_required_parameters
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
 
 
 def test_get_tool_required_parameters_reads_registered_schema():
-    assert get_tool_required_parameters("execute_shell") == ["command"]
+    assert get_tool_required_parameters("execute_shell") == ["command", "execution_mode"]
     assert get_tool_required_parameters("unknown_tool") == []
 
 
 @pytest.mark.asyncio
-async def test_process_single_tool_returns_failure_for_missing_required_arguments():
+@pytest.mark.parametrize(
+    ("arguments", "expected_missing"),
+    [
+        ({"execution_mode": "non_interactive"}, ["command"]),
+        ({"command": "echo ok"}, ["execution_mode"]),
+    ],
+)
+async def test_process_single_tool_returns_failure_for_missing_required_arguments(arguments, expected_missing):
     cfg = ProfileConfig.model_validate(
         {
             "tool": {
@@ -31,7 +38,7 @@ async def test_process_single_tool_returns_failure_for_missing_required_argument
     tool_call = SimpleNamespace(
         id="call-1",
         name="execute_shell",
-        arguments={},
+        arguments=arguments,
     )
 
     result = await process_single_tool_module.process_single_tool(
@@ -50,8 +57,8 @@ async def test_process_single_tool_returns_failure_for_missing_required_argument
     assert payload == {
         "status": "failed",
         "tool_name": "execute_shell",
-        "error": "缺少必填参数: command",
-        "missing_arguments": ["command"],
+        "error": f"缺少必填参数: {', '.join(expected_missing)}",
+        "missing_arguments": expected_missing,
     }
     assert result.tool_call_id == "call-1"
 
@@ -98,3 +105,36 @@ def test_prevalidate_tool_round_uses_runtime_dynamic_enum():
     errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg, tool_schemas=[dynamic_schema])
 
     assert "must be one of ['7']" in json.loads(errors[tool_call.id])["error"]
+
+
+@pytest.mark.parametrize(
+    "execution_mode",
+    ["auto", "AUTO", "Interactive", "NON_INTERACTIVE", None, 1, True, {}],
+)
+def test_prevalidate_tool_round_rejects_invalid_shell_execution_mode(execution_mode):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="call-1",
+        name="execute_shell",
+        arguments={"command": "echo ok", "execution_mode": execution_mode},
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg, tool_schemas=[SHELL_TOOL_SCHEMA])
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["status"] == "failed"
+    assert "execution_mode" in payload["error"]
+
+
+@pytest.mark.parametrize("execution_mode", ["interactive", "non_interactive"])
+def test_prevalidate_tool_round_accepts_valid_shell_execution_modes(execution_mode):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="call-1",
+        name="execute_shell",
+        arguments={"command": "echo ok", "execution_mode": execution_mode},
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg, tool_schemas=[SHELL_TOOL_SCHEMA])
+
+    assert errors == {}

@@ -2,6 +2,11 @@ from app.core.terminal.schemas import (
     ALL_TERMINAL_ACTIONS,
     TERMINAL_SESSION_FINAL_STATUSES,
     TERMINAL_STATUS_TRANSITIONS,
+    ShellExecutionMode,
+    ShellExecutionResult,
+    ShellInteractiveHandoffResult,
+    ShellNonInteractiveCompletedResult,
+    ShellNonInteractiveTimeoutResult,
     TerminalAction,
     TerminalActionReceipt,
     TerminalCloseRequest,
@@ -24,6 +29,7 @@ from app.core.terminal.schemas import (
     can_transition_terminal_status,
     generate_terminal_request_id,
     generate_terminal_session_id,
+    validate_shell_execution_mode,
     validate_terminal_status_transition,
 )
 
@@ -31,6 +37,11 @@ __all__ = [
     "ALL_TERMINAL_ACTIONS",
     "TERMINAL_SESSION_FINAL_STATUSES",
     "TERMINAL_STATUS_TRANSITIONS",
+    "ShellExecutionMode",
+    "ShellExecutionResult",
+    "ShellInteractiveHandoffResult",
+    "ShellNonInteractiveCompletedResult",
+    "ShellNonInteractiveTimeoutResult",
     "TerminalAction",
     "TerminalActionReceipt",
     "TerminalCloseRequest",
@@ -53,5 +64,6 @@ __all__ = [
     "can_transition_terminal_status",
     "generate_terminal_request_id",
     "generate_terminal_session_id",
+    "validate_shell_execution_mode",
     "validate_terminal_status_transition",
 ]
