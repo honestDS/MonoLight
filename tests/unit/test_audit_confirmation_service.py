@@ -1265,6 +1265,8 @@ async def test_audit_round_handles_unassociated_read_protocol_failure_by_thresho
     assert all(detail["conclusion"] == expected_status for detail in captured["tool_details"])
     assert all(detail["score"] == 0 for detail in captured["tool_details"])
     assert all(detail["server_confirmation_reasons"][-1]["code"] == "file_read_protocol_invalid" for detail in captured["tool_details"])
+    if expected_status == "pending":
+        assert result.confirmation_payload["risk"] == audit_threshold
     expected_log_count = 3 if protocol_case == "invalid_id" else 2
     assert len(logs) == expected_log_count
     assert "安全审计 LLM" in logs[0] or "Security audit LLM" in logs[0]
@@ -1455,6 +1457,7 @@ async def test_read_snapshot_is_bound_to_tool_detail_and_missing_check_requires_
     assert second_detail["file_snapshots"] == []
     assert first_detail["server_confirmation_reasons"][0]["code"] == "file_evidence_insufficient"
     assert first_detail["score"] == 0
+    assert result.confirmation_payload["risk"] == cfg.security.audit_threshold
     assert "review me" in first_detail["reason"]
 
 

@@ -965,7 +965,7 @@ async def audit_tool_round(
     tool_results = tuple(_result_message(call, status, next(item["reason"] for item in parsed_results if item["tool_call_id"] == call.id)) for call in tool_calls)
     confirmation_payload = None
     if status == AuditRecordStatus.PENDING:
-        risk_score = max(item["score"] or 0 for item in parsed_results)
+        risk_score = max(max(item["score"] or 0 for item in parsed_results), cfg.security.audit_threshold)
         expires_at_text = expires_at.isoformat() if expires_at else "-"
         timeout_seconds = cfg.security.audit_confirmation_timeout_seconds
         confirmation_payload = {
