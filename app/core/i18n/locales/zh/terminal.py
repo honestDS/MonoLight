@@ -1,0 +1,18 @@
+MESSAGES = {
+    "ERR_TERMINAL_STATUS_TARGET_INVALID": "终端会话目标状态无效：{target}",
+    "ERR_TERMINAL_STATUS_TRANSITION_INVALID": "终端会话状态迁移无效：{current} -> {target}",
+    "ERR_TERMINAL_OUTPUT_OFFSET_ORDER_INVALID": "next_offset 不得早于 oldest_offset",
+    "ERR_TERMINAL_OUTPUT_SEQUENCE_ORDER_INVALID": "next_sequence 不得早于 oldest_sequence",
+    "ERR_TERMINAL_OUTPUT_CAPACITY_EXCEEDED": "保留的终端输出不得超过 capacity_bytes",
+    "ERR_TERMINAL_EMPTY_BUFFER_SEQUENCE_INVALID": "空输出缓冲区的 next_sequence 必须等于 oldest_sequence",
+    "ERR_TERMINAL_NONEMPTY_BUFFER_SEQUENCE_INVALID": "非空输出缓冲区的 next_sequence 必须大于 oldest_sequence",
+    "ERR_TERMINAL_READ_OFFSET_AHEAD": "请求的输出偏移量不得超过最新偏移量",
+    "ERR_TERMINAL_READ_OFFSET_ORDER_INVALID": "读取结果的偏移量必须在可用输出范围内单调递增",
+    "ERR_TERMINAL_READ_TRUNCATED_INVALID": "截断读取必须从最早可用偏移量开始",
+    "ERR_TERMINAL_READ_OK_INVALID": "正常读取必须从请求的可用偏移量开始",
+    "ERR_TERMINAL_READ_EMPTY_INVALID": "空读取不得包含未读输出",
+    "ERR_TERMINAL_READ_EXPIRED_INVALID": "已过期读取不得包含保留输出",
+    "ERR_TERMINAL_EXITED_OUTCOME_INVALID": "已退出会话必须包含 exit_code 且不得包含 failure_reason",
+    "ERR_TERMINAL_FAILURE_OUTCOME_INVALID": "失败或丢失会话必须包含 failure_reason 且不得包含 exit_code",
+    "ERR_TERMINAL_ACTIVE_OUTCOME_INVALID": "非终态会话不得包含 exit_code 或 failure_reason",
+}

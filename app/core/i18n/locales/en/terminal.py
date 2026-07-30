@@ -1,0 +1,18 @@
+MESSAGES = {
+    "ERR_TERMINAL_STATUS_TARGET_INVALID": "Invalid terminal session target status: {target}",
+    "ERR_TERMINAL_STATUS_TRANSITION_INVALID": "Invalid terminal session status transition: {current} -> {target}",
+    "ERR_TERMINAL_OUTPUT_OFFSET_ORDER_INVALID": "next_offset must not precede oldest_offset",
+    "ERR_TERMINAL_OUTPUT_SEQUENCE_ORDER_INVALID": "next_sequence must not precede oldest_sequence",
+    "ERR_TERMINAL_OUTPUT_CAPACITY_EXCEEDED": "retained output must not exceed capacity_bytes",
+    "ERR_TERMINAL_EMPTY_BUFFER_SEQUENCE_INVALID": "empty buffers must keep next_sequence equal to oldest_sequence",
+    "ERR_TERMINAL_NONEMPTY_BUFFER_SEQUENCE_INVALID": "nonempty buffers must advance next_sequence",
+    "ERR_TERMINAL_READ_OFFSET_AHEAD": "requested_offset must not exceed latest_offset",
+    "ERR_TERMINAL_READ_OFFSET_ORDER_INVALID": "read result offsets must be monotonic within available output",
+    "ERR_TERMINAL_READ_TRUNCATED_INVALID": "truncated reads must start at the oldest available offset",
+    "ERR_TERMINAL_READ_OK_INVALID": "ok reads must start at the requested available offset",
+    "ERR_TERMINAL_READ_EMPTY_INVALID": "empty reads must have no unread output",
+    "ERR_TERMINAL_READ_EXPIRED_INVALID": "expired reads must have no retained output",
+    "ERR_TERMINAL_EXITED_OUTCOME_INVALID": "exited sessions require exit_code and no failure_reason",
+    "ERR_TERMINAL_FAILURE_OUTCOME_INVALID": "failed and lost sessions require failure_reason and no exit_code",
+    "ERR_TERMINAL_ACTIVE_OUTCOME_INVALID": "nonterminal sessions must not have exit_code or failure_reason",
+}
