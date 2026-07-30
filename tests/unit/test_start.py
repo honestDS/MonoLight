@@ -141,6 +141,7 @@ def test_windows_selector_event_loop_factory_returns_closable_selector_loop():
     [
         (start.build_message_platform_command, "app.workers.message_platform"),
         (start.build_background_task_command, "app.workers.background_task"),
+        (start.build_terminal_command, "app.workers.terminal"),
         (start.build_session_reply_command, "app.workers.session_reply"),
     ],
 )
@@ -181,7 +182,7 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["initialize", "process", "process", "process", "process"]
+    assert events == ["initialize", "process", "process", "process", "process", "process"]
 
 
 @pytest.mark.parametrize(

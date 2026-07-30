@@ -24,5 +24,7 @@ from app.models.session_reply_work_item import SessionReplySequence as SessionRe
 from app.models.session_reply_work_item import SessionReplyWorkItem as SessionReplyWorkItem
 from app.models.system_log import SystemLog as SystemLog
 from app.models.system_setting import SystemSetting as SystemSetting
+from app.models.terminal_session import TerminalControlCommand as TerminalControlCommand
+from app.models.terminal_session import TerminalSession as TerminalSession
 from app.models.user import User as User
 from app.models.worker_lease import WorkerLease as WorkerLease

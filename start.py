@@ -82,6 +82,10 @@ def build_background_task_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.background_task"]
 
 
+def build_terminal_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.terminal"]
+
+
 def build_session_reply_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.session_reply"]
 
@@ -226,6 +230,9 @@ def run() -> int:
         background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
         processes.append(background_task_process)
         report_process_started("Background task worker", background_task_process)
+        terminal_process = subprocess.Popen(build_terminal_command(), env=child_environment, **process_options)
+        processes.append(terminal_process)
+        report_process_started("Terminal worker", terminal_process)
         session_reply_process = subprocess.Popen(build_session_reply_command(), env=child_environment, **process_options)
         processes.append(session_reply_process)
         report_process_started("Session reply worker", session_reply_process)

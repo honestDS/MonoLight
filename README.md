@@ -55,7 +55,7 @@ MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（Gene
 
 ## 运行服务
 
-项目包含 Web 服务、消息平台 Worker 和后台任务 Worker 三类进程。Web 服务支持多个 Worker，两个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
+项目包含 Web 服务、消息平台 Worker、后台任务 Worker 和终端 Worker 四类进程。Web 服务支持多个 Worker，三个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
 
 在 `.env` 中配置监听地址、端口和 Web Worker 数量：
 
@@ -71,7 +71,7 @@ APP_WORKERS=1
 python start.py
 ```
 
-启动器会先完成数据库建表、迁移和系统数据初始化，再启动 Web 服务、消息平台 Worker 和后台任务 Worker；任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
+启动器会先完成数据库建表、迁移和系统数据初始化，再启动 Web 服务、消息平台 Worker、后台任务 Worker 和终端 Worker；任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
 
 需要分别调试各进程时，先执行一次全局初始化：
 
@@ -85,6 +85,7 @@ python -c "import asyncio; from start import initialize_system; asyncio.run(init
 python main.py
 python -m app.workers.message_platform
 python -m app.workers.background_task
+python -m app.workers.terminal
 ```
 
 多实例部署时，所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。

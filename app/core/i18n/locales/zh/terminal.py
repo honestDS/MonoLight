@@ -15,4 +15,9 @@ MESSAGES = {
     "ERR_TERMINAL_EXITED_OUTCOME_INVALID": "已退出会话必须包含 exit_code 且不得包含 failure_reason",
     "ERR_TERMINAL_FAILURE_OUTCOME_INVALID": "失败或丢失会话必须包含 failure_reason 且不得包含 exit_code",
     "ERR_TERMINAL_ACTIVE_OUTCOME_INVALID": "非终态会话不得包含 exit_code 或 failure_reason",
+    "ERR_TERMINAL_SESSION_NOT_FOUND": "终端会话不存在：{terminal_session_id}",
+    "ERR_TERMINAL_SESSION_ACCESS_DENIED": "无权访问终端会话：{terminal_session_id}",
+    "ERR_TERMINAL_ACTION_NOT_ALLOWED": "终端会话 {terminal_session_id} 不允许执行操作：{action}",
+    "ERR_TERMINAL_COMMAND_REQUEST_CONFLICT": "终端会话 {terminal_session_id} 的请求 {request_id} 与已存在命令冲突：{action}",
+    "ERR_TERMINAL_MUTATING_REQUEST_REQUIRED": "必须提供终端写入、调整大小、发送信号或关闭请求",
 }

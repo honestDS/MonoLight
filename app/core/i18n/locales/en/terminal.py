@@ -15,4 +15,9 @@ MESSAGES = {
     "ERR_TERMINAL_EXITED_OUTCOME_INVALID": "exited sessions require exit_code and no failure_reason",
     "ERR_TERMINAL_FAILURE_OUTCOME_INVALID": "failed and lost sessions require failure_reason and no exit_code",
     "ERR_TERMINAL_ACTIVE_OUTCOME_INVALID": "nonterminal sessions must not have exit_code or failure_reason",
+    "ERR_TERMINAL_SESSION_NOT_FOUND": "Terminal session not found: {terminal_session_id}",
+    "ERR_TERMINAL_SESSION_ACCESS_DENIED": "Access denied for terminal session: {terminal_session_id}",
+    "ERR_TERMINAL_ACTION_NOT_ALLOWED": "Action {action} is not allowed for terminal session {terminal_session_id}",
+    "ERR_TERMINAL_COMMAND_REQUEST_CONFLICT": "Request {request_id} conflicts with the existing command for terminal session {terminal_session_id}: {action}",
+    "ERR_TERMINAL_MUTATING_REQUEST_REQUIRED": "A terminal write, resize, signal, or close request is required",
 }

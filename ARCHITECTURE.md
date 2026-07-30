@@ -57,6 +57,7 @@ app/workers/
 ├── lease.py                # Worker 数据库租约管理
 ├── message_platform.py     # 消息平台、定时任务与发件箱进程
 ├── session_reply.py        # 会话最终回复进程
+├── terminal.py              # 持有终端会话租约与后续 PTY 生命周期
 └── signals.py              # Worker 退出信号处理
 ```
 
@@ -201,6 +202,7 @@ app/core/crud/
 ├── session_reply_stream_event.py # 回复流事件访问
 ├── session_reply_work_item.py # 回复工作与顺序访问
 ├── system_setting.py       # 系统设置访问
+├── terminal_session.py      # 终端会话与控制命令访问
 ├── user.py                 # 用户访问
 └── worker_lease.py         # Worker 租约访问
 ```
@@ -358,6 +360,7 @@ app/models/
 ├── session_reply_work_item.py # 回复工作与顺序模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型
+├── terminal_session.py      # 终端会话与控制命令模型
 ├── user.py                 # 用户模型
 └── worker_lease.py         # Worker 租约模型
 ```
@@ -540,7 +543,8 @@ scripts/
 ├── migration_20260724_add_audit_tool_result_versions.py # 审计工具结果版本表
 ├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
 ├── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
-└── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
+├── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
+└── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
 ```
 
 ## 运行期目录
