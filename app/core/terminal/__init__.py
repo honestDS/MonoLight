@@ -1,3 +1,13 @@
+from app.core.terminal.pty_base import (
+    BoundedPtyOutputBuffer,
+    PtyDriver,
+    PtyOutputRead,
+    PtyProcessConfig,
+    PtyResourceSnapshot,
+)
+from app.core.terminal.pty_factory import create_pty_driver
+from app.core.terminal.pty_unix import LinuxPtyDriver
+from app.core.terminal.pty_windows import WindowsPtyDriver
 from app.core.terminal.schemas import (
     ALL_TERMINAL_ACTIONS,
     TERMINAL_SESSION_FINAL_STATUSES,
@@ -35,6 +45,7 @@ from app.core.terminal.schemas import (
 
 __all__ = [
     "ALL_TERMINAL_ACTIONS",
+    "BoundedPtyOutputBuffer",
     "TERMINAL_SESSION_FINAL_STATUSES",
     "TERMINAL_STATUS_TRANSITIONS",
     "ShellExecutionMode",
@@ -42,6 +53,13 @@ __all__ = [
     "ShellInteractiveHandoffResult",
     "ShellNonInteractiveCompletedResult",
     "ShellNonInteractiveTimeoutResult",
+    "PtyDriver",
+    "LinuxPtyDriver",
+    "PtyOutputRead",
+    "PtyProcessConfig",
+    "PtyResourceSnapshot",
+    "WindowsPtyDriver",
+    "create_pty_driver",
     "TerminalAction",
     "TerminalActionReceipt",
     "TerminalCloseRequest",
