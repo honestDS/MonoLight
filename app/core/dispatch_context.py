@@ -16,6 +16,7 @@ class DispatchContext:
     session_id: str
     profile: Profile
     db: AsyncSession | None = None
+    tool_call_id: str | None = None
     task_id: int | None = None
     allowed_knowledge_base_ids: list[int] = field(default_factory=list)
 
@@ -30,6 +31,7 @@ def build_background_dispatch_context(
     session_id: str,
     profile: Profile,
     db: AsyncSession | None = None,
+    tool_call_id: str | None = None,
     task_id: int | None = None,
     source: str = "background_task",
     allowed_knowledge_base_ids: list[int] | None = None,
@@ -41,6 +43,7 @@ def build_background_dispatch_context(
         session_id=session_id,
         profile=profile,
         db=db,
+        tool_call_id=tool_call_id,
         task_id=task_id,
         allowed_knowledge_base_ids=allowed_knowledge_base_ids or [],
     )
@@ -54,6 +57,7 @@ def build_dispatch_context(
     session_id: str,
     profile: Profile,
     db: AsyncSession | None = None,
+    tool_call_id: str | None = None,
     task_id: int | None = None,
     allowed_knowledge_base_ids: list[int] | None = None,
 ) -> DispatchContext:
@@ -64,6 +68,7 @@ def build_dispatch_context(
         session_id=session_id,
         profile=profile,
         db=db,
+        tool_call_id=tool_call_id,
         task_id=task_id,
         allowed_knowledge_base_ids=allowed_knowledge_base_ids or [],
     )

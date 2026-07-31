@@ -150,7 +150,6 @@ MESSAGES = {
     "ERR_TOOL_KNOWLEDGE_BASE_QUERY_FAILED": "Failed to query knowledge base: {error}",
     "ERR_TOOL_SHELL_BLACKLISTED": "This command is not allowed via the shell tool: {command}",
     "ERR_TOOL_SHELL_EXECUTION_MODE_INVALID": "Invalid shell execution mode: {value}; only interactive and non_interactive are allowed",
-    "ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE": "Interactive terminal execution is not currently available",
     "ERR_TOOL_COMMAND_TIMEOUT": "Command timed out after {timeout} seconds",
     "ERR_TOOL_FIRECRAWL_API_KEY_MISSING": "Firecrawl API key is not configured. Please configure it in tool settings",
     "ERR_TOOL_FIRECRAWL_AUTH_FAILED": "Firecrawl API key authentication failed or expired. Please update the configuration",

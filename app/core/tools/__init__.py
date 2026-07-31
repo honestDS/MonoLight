@@ -21,6 +21,22 @@ from .read_text_file import TextFileReadResult as TextFileReadResult
 from .read_text_file import read_text_file as read_text_file
 from .send_file_to_user import SEND_FILE_TO_USER_TOOL_SCHEMA, SendFileToUserExecutor
 from .shell import SHELL_TOOL_SCHEMA, ShellExecutor
+from .terminal import SHELL_COMPANION_TOOL_NAMES as SHELL_COMPANION_TOOL_NAMES
+from .terminal import (
+    SHELL_COMPANION_TOOL_SCHEMAS,
+    TERMINAL_CLOSE_TOOL_SCHEMA,
+    TERMINAL_READ_TOOL_SCHEMA,
+    TERMINAL_RESIZE_TOOL_SCHEMA,
+    TERMINAL_SIGNAL_TOOL_SCHEMA,
+    TERMINAL_STATUS_TOOL_SCHEMA,
+    TERMINAL_WRITE_TOOL_SCHEMA,
+    TerminalCloseExecutor,
+    TerminalReadExecutor,
+    TerminalResizeExecutor,
+    TerminalSignalExecutor,
+    TerminalStatusExecutor,
+    TerminalWriteExecutor,
+)
 
 logger = get_logger(__name__)
 
@@ -67,6 +83,12 @@ TOOL_EXECUTOR_MAP = {
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA["function"]["name"]: CancelBackgroundTaskExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
+    TERMINAL_STATUS_TOOL_SCHEMA["function"]["name"]: TerminalStatusExecutor,
+    TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
+    TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
+    TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
+    TERMINAL_SIGNAL_TOOL_SCHEMA["function"]["name"]: TerminalSignalExecutor,
+    TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
 }
 
 
@@ -78,6 +100,8 @@ def tool_requires_audit(tool_name: str) -> bool:
 def get_registered_tool_names():
     registered_tool_names = []
     for schema in CONFIGURABLE_TOOL_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
+    for schema in SHELL_COMPANION_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     for schema in CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
@@ -105,7 +129,12 @@ def _inject_background_control(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def _iter_tool_schemas() -> list[dict[str, Any]]:
-    return [*CONFIGURABLE_TOOL_SCHEMAS, *CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS, *CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS]
+    return [
+        *CONFIGURABLE_TOOL_SCHEMAS,
+        *SHELL_COMPANION_TOOL_SCHEMAS,
+        *CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS,
+        *CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS,
+    ]
 
 
 def tool_schema_has_parameter(tool_name: str, parameter_name: str) -> bool:
@@ -199,6 +228,8 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
         if schema["function"]["name"] in enabled_tool_names:
             tool_schema = copy.deepcopy(schema)
             base_tools.append(_inject_background_control(tool_schema) if allow_background else tool_schema)
+            if schema["function"]["name"] == SHELL_TOOL_SCHEMA["function"]["name"]:
+                base_tools.extend(copy.deepcopy(companion_schema) for companion_schema in SHELL_COMPANION_TOOL_SCHEMAS)
     if allow_background and IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
         base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
     whitelist_ids = []

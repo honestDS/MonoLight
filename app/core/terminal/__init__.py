@@ -1,3 +1,4 @@
+from app.core.terminal.process_config import build_interactive_shell_argv, build_subprocess_env
 from app.core.terminal.pty_base import (
     BoundedPtyOutputBuffer,
     PtyDriver,
@@ -59,6 +60,8 @@ __all__ = [
     "PtyProcessConfig",
     "PtyResourceSnapshot",
     "WindowsPtyDriver",
+    "build_interactive_shell_argv",
+    "build_subprocess_env",
     "create_pty_driver",
     "TerminalAction",
     "TerminalActionReceipt",

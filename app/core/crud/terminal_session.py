@@ -9,8 +9,10 @@ from sqlmodel import select
 from app.core.terminal.schemas import (
     TERMINAL_SESSION_FINAL_STATUSES,
     TerminalAction,
+    TerminalOutputBufferState,
     TerminalSessionStatus,
     generate_terminal_session_id,
+    validate_terminal_status_transition,
 )
 from app.models.terminal_session import (
     TerminalControlCommand,
@@ -161,7 +163,6 @@ class CRUDTerminalSession:
             update(TerminalSession)
             .where(
                 TerminalSession.terminal_session_id == terminal_session_id,
-                TerminalSession.status.not_in(TERMINAL_SESSION_FINAL_STATUSES),
                 TerminalSession.locked_by == worker_id,
                 TerminalSession.lock_until >= now,
             )
@@ -169,6 +170,52 @@ class CRUDTerminalSession:
                 lock_until=now + lease_seconds,
                 updated_at=updated_at,
             )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        return result.rowcount == 1
+
+    async def update_runtime_snapshot(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        worker_id: str,
+        status: TerminalSessionStatus,
+        output_buffer: TerminalOutputBufferState,
+        exit_code: int | None = None,
+        failure_reason: str | None = None,
+    ) -> bool:
+        terminal_session = await self.get(db, terminal_session_id)
+        if terminal_session is None:
+            return False
+
+        target_status = validate_terminal_status_transition(terminal_session.status, status)
+        now = await get_database_timestamp(db)
+        database_time = await get_database_time(db)
+        values = {
+            "status": target_status,
+            "oldest_output_offset": output_buffer.oldest_offset,
+            "next_output_offset": output_buffer.next_offset,
+            "oldest_output_sequence": output_buffer.oldest_sequence,
+            "next_output_sequence": output_buffer.next_sequence,
+            "exit_code": exit_code,
+            "failure_reason": failure_reason,
+            "updated_at": database_time,
+        }
+        if target_status is TerminalSessionStatus.RUNNING and terminal_session.started_at is None:
+            values["started_at"] = database_time
+        if target_status in TERMINAL_SESSION_FINAL_STATUSES:
+            values["finished_at"] = database_time
+
+        result = await db.execute(
+            update(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id == terminal_session_id,
+                TerminalSession.status == terminal_session.status,
+                TerminalSession.locked_by == worker_id,
+                TerminalSession.lock_until >= now,
+            )
+            .values(**values)
             .execution_options(synchronize_session=False)
         )
         await db.commit()
@@ -285,7 +332,6 @@ class CRUDTerminalControlCommand:
                 TerminalSession.terminal_session_id == TerminalControlCommand.terminal_session_id,
                 TerminalSession.locked_by == worker_id,
                 TerminalSession.lock_until >= now,
-                TerminalSession.status.not_in(TERMINAL_SESSION_FINAL_STATUSES),
             )
         )
         candidate = (

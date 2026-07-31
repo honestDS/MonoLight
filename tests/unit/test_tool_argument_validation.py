@@ -3,7 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.tools import IMAGE_GENERATION_TOOL_SCHEMA, LIST_BACKGROUND_TASKS_TOOL_SCHEMA, SEND_FILE_TO_USER_TOOL_SCHEMA, SHELL_TOOL_SCHEMA, get_tool_required_parameters
+from app.core.constants import ERR_TOOL_NOT_ENABLED
+from app.core.i18n import t
+from app.core.tools import (
+    IMAGE_GENERATION_TOOL_SCHEMA,
+    LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
+    SEND_FILE_TO_USER_TOOL_SCHEMA,
+    SHELL_COMPANION_TOOL_SCHEMAS,
+    SHELL_TOOL_SCHEMA,
+    get_tool_required_parameters,
+)
 from app.core.utils.dispatcher import process_single_tool as process_single_tool_module
 from app.models.profile import Profile, ProfileConfig
 
@@ -138,3 +147,83 @@ def test_prevalidate_tool_round_accepts_valid_shell_execution_modes(execution_mo
     errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg, tool_schemas=[SHELL_TOOL_SCHEMA])
 
     assert errors == {}
+
+
+def test_prevalidate_tool_round_accepts_companion_tools_when_shell_is_enabled():
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    session_id = "t" * 32
+    tool_calls = [
+        SimpleNamespace(id="status", name="terminal_status", arguments={"terminal_session_id": session_id}),
+        SimpleNamespace(
+            id="read",
+            name="terminal_read",
+            arguments={"terminal_session_id": session_id, "offset": 0, "max_bytes": 65_536},
+        ),
+        SimpleNamespace(
+            id="write",
+            name="terminal_write",
+            arguments={"terminal_session_id": session_id, "data": "input"},
+        ),
+        SimpleNamespace(
+            id="resize",
+            name="terminal_resize",
+            arguments={"terminal_session_id": session_id, "columns": 80, "rows": 24},
+        ),
+        SimpleNamespace(
+            id="signal",
+            name="terminal_signal",
+            arguments={"terminal_session_id": session_id, "signal": "interrupt"},
+        ),
+        SimpleNamespace(id="close", name="terminal_close", arguments={"terminal_session_id": session_id}),
+    ]
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        tool_calls,
+        cfg,
+        tool_schemas=[SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS],
+    )
+
+    assert errors == {}
+
+
+def test_prevalidate_tool_round_rejects_companion_tools_when_shell_is_disabled():
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": []}})
+    tool_call = SimpleNamespace(
+        id="terminal-read",
+        name="terminal_read",
+        arguments={"terminal_session_id": "t" * 32},
+    )
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["error"] == t(ERR_TOOL_NOT_ENABLED, tool_name="terminal_read")
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_detail"),
+    [
+        ("terminal_status", {"terminal_session_id": "t" * 31}, "shorter than 32"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "offset": -1}, "at least 0"),
+        ("terminal_read", {"terminal_session_id": "t" * 32, "max_bytes": 1_048_577}, "at most 1048576"),
+        ("terminal_signal", {"terminal_session_id": "t" * 32, "signal": "hangup"}, "must be one of"),
+        ("terminal_status", {"terminal_session_id": "t" * 32, "extra": True}, "extra"),
+    ],
+)
+def test_prevalidate_tool_round_rejects_companion_schema_boundaries(tool_name, arguments, expected_detail):
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(id="call-1", name=tool_name, arguments=arguments)
+
+    errors = process_single_tool_module.prevalidate_tool_round(
+        [tool_call],
+        cfg,
+        tool_schemas=SHELL_COMPANION_TOOL_SCHEMAS,
+    )
+
+    payload = json.loads(errors[tool_call.id])
+    assert payload["status"] == "failed"
+    assert expected_detail in payload["error"]

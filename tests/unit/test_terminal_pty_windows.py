@@ -86,7 +86,8 @@ async def test_windows_pty_interactive_resize_write_and_snapshot() -> None:
 
         await _wait_for_output(driver, b"READY")
         await asyncio.wait_for(driver.resize(100, 40), timeout=5.0)
-        await asyncio.wait_for(driver.write("hello\r\n"), timeout=5.0)
+        written = await asyncio.wait_for(driver.write("hello\r\n"), timeout=5.0)
+        assert written == len(b"hello\r\n")
         exit_code = await asyncio.wait_for(driver.wait(), timeout=15.0)
         output = await _wait_for_output(driver, b"SIZE:100x40")
 
@@ -156,6 +157,31 @@ async def test_windows_pty_force_close_terminates_process_tree() -> None:
         await _wait_for_process_state(child_pid, False, timeout=10.0)
     finally:
         await asyncio.wait_for(driver.close(force=True), timeout=15.0)
+
+    await asyncio.wait_for(driver.close(force=True), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_windows_pty_force_close_resolves_wait_with_exit_status() -> None:
+    script = "import time; time.sleep(60)"
+    driver = WindowsPtyDriver(_config(script))
+    wait_task: asyncio.Task[int] | None = None
+    try:
+        await asyncio.wait_for(driver.start(), timeout=10.0)
+        wait_task = asyncio.create_task(driver.wait())
+
+        await asyncio.wait_for(driver.close(force=True), timeout=15.0)
+        exit_code = await asyncio.wait_for(wait_task, timeout=15.0)
+        snapshot = driver.resource_snapshot()
+
+        assert isinstance(exit_code, int)
+        assert snapshot.eof is True
+        assert snapshot.running is False
+        assert snapshot.exit_code == exit_code
+    finally:
+        await asyncio.wait_for(driver.close(force=True), timeout=15.0)
+        if wait_task is not None and not wait_task.done():
+            await asyncio.wait_for(wait_task, timeout=15.0)
 
     await asyncio.wait_for(driver.close(force=True), timeout=5.0)
 

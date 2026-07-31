@@ -1,14 +1,24 @@
 import json
 import sys
 import sysconfig
+from types import SimpleNamespace
 
 import pytest
 
 import app.core.tools.shell as shell_module
-from app.core.constants import ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE
+from app.core.constants import ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED
+from app.core.dispatch_context import DispatchContext
 from app.core.i18n import t
-from app.core.terminal import ShellExecutionMode
+from app.core.terminal import (
+    ALL_TERMINAL_ACTIONS,
+    ShellExecutionMode,
+    TerminalOutputBufferState,
+    TerminalPermissionScope,
+    TerminalSessionSnapshot,
+    TerminalSessionStatus,
+)
 from app.core.tools.shell import SHELL_TOOL_SCHEMA, ShellExecutor
+from app.models.profile import Profile
 
 
 @pytest.mark.asyncio
@@ -130,7 +140,6 @@ def _block_shell_early_dependencies(monkeypatch, executor):
         raise AssertionError("shell execution reached an early dependency")
 
     monkeypatch.setattr(shell_module, "get_full_system_context", fail)
-    monkeypatch.setattr(executor, "check_blacklist", fail)
     monkeypatch.setattr(executor, "_get_profile_timeout", fail)
     monkeypatch.setattr(shell_module.asyncio, "create_subprocess_exec", fail)
     monkeypatch.setattr(shell_module.asyncio, "create_subprocess_shell", fail)
@@ -151,11 +160,111 @@ async def test_execute_rejects_invalid_execution_mode_before_side_effects(monkey
 
 
 @pytest.mark.asyncio
-async def test_execute_rejects_interactive_mode_before_side_effects(monkeypatch, tmp_path):
+async def test_execute_rejects_interactive_mode_without_active_audit_binding(monkeypatch, tmp_path):
     executor = ShellExecutor(project_root=str(tmp_path), uid="u1")
     _block_shell_early_dependencies(monkeypatch, executor)
+    executor.set_runtime_context(
+        dispatch_context=DispatchContext(
+            mode="interactive",
+            source="test",
+            uid="u1",
+            session_id="session-1",
+            profile=Profile(id=7, uid="u1", name="profile", configs={}),
+            db=object(),
+            tool_call_id="tool-call-1",
+        )
+    )
+
+    async def no_active_binding(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(shell_module.audit_crud, "get_running_execution_binding", no_active_binding)
 
     with pytest.raises(RuntimeError) as exc_info:
         await executor.execute(command="read-from-terminal", execution_mode=ShellExecutionMode.INTERACTIVE)
 
-    assert str(exc_info.value) == t(ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE)
+    assert str(exc_info.value) == t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED)
+
+
+@pytest.mark.asyncio
+async def test_execute_interactive_hands_off_to_terminal_session(monkeypatch, tmp_path):
+    executor = ShellExecutor(project_root=str(tmp_path), uid="u1")
+    _block_shell_early_dependencies(monkeypatch, executor)
+    executor.set_runtime_context(
+        dispatch_context=DispatchContext(
+            mode="interactive",
+            source="test",
+            uid="u1",
+            session_id="session-1",
+            profile=Profile(id=7, uid="u1", name="profile", configs={}),
+            db=object(),
+            tool_call_id="tool-call-1",
+        )
+    )
+
+    audit_record = SimpleNamespace(id=11, uid="u1", session_id="session-1")
+    audit_execution = SimpleNamespace(id=22, audit_tool_detail_id=33)
+    audit_detail = SimpleNamespace(id=33, original_tool_call_id="original-tool-call")
+    terminal_session = SimpleNamespace(terminal_session_id="terminal-session-1" * 3)
+    snapshot = TerminalSessionSnapshot(
+        terminal_session_id=terminal_session.terminal_session_id,
+        status=TerminalSessionStatus.STARTING,
+        permission_scope=TerminalPermissionScope(
+            owner_uid="u1",
+            owner_session_id="session-1",
+            original_tool_call_id="original-tool-call",
+            audit_record_id=11,
+            audit_execution_record_id=22,
+            allowed_actions=ALL_TERMINAL_ACTIONS,
+        ),
+        output_buffer=TerminalOutputBufferState(
+            capacity_bytes=1_048_576,
+            oldest_offset=0,
+            next_offset=0,
+            oldest_sequence=1,
+            next_sequence=1,
+        ),
+    )
+
+    async def get_running_execution_binding(*args, **kwargs):
+        assert kwargs == {"new_tool_call_id": "tool-call-1"}
+        return audit_record, audit_execution
+
+    async def list_tool_details(*args, **kwargs):
+        assert args[1:] == (11,)
+        return [audit_detail]
+
+    async def get_or_create_session(*args, **kwargs):
+        assert kwargs["profile_id"] == 7
+        assert kwargs["original_tool_call_id"] == "original-tool-call"
+        assert kwargs["audit_record_id"] == 11
+        assert kwargs["audit_execution_record_id"] == 22
+        assert kwargs["allowed_actions"] == ALL_TERMINAL_ACTIONS
+        return terminal_session
+
+    async def get_snapshot(*args, **kwargs):
+        assert args[1:] == (terminal_session.terminal_session_id, "u1", "session-1")
+        return snapshot
+
+    monkeypatch.setattr(shell_module.audit_crud, "get_running_execution_binding", get_running_execution_binding)
+    monkeypatch.setattr(shell_module.audit_crud, "list_tool_details", list_tool_details)
+    monkeypatch.setattr(shell_module.terminal_session_manager, "get_or_create_session_for_execution", get_or_create_session)
+    monkeypatch.setattr(shell_module.terminal_session_manager, "get_snapshot", get_snapshot)
+
+    result = json.loads(
+        await executor.execute(
+            command="python -i",
+            execution_mode=ShellExecutionMode.INTERACTIVE,
+        )
+    )
+
+    assert result["terminal_session_id"] == terminal_session.terminal_session_id
+    assert result["status"] == "starting"
+    assert result["output_stream"] == "merged_stdout_stderr"
+    assert result["output_buffer"] == {
+        "capacity_bytes": 1_048_576,
+        "oldest_offset": 0,
+        "next_offset": 0,
+        "oldest_sequence": 1,
+        "next_sequence": 1,
+    }

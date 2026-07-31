@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from typing import (
     Any,
@@ -28,6 +29,7 @@ from app.core.log import (
 )
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.tools import (
+    SHELL_COMPANION_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
     get_tool_required_parameters,
@@ -50,7 +52,10 @@ def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
     enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
     if not isinstance(enabled_tools, list):
         return False
-    return tool_name in {name for name in enabled_tools if isinstance(name, str)}
+    enabled_tool_names = {name for name in enabled_tools if isinstance(name, str)}
+    if tool_name in SHELL_COMPANION_TOOL_NAMES:
+        return "execute_shell" in enabled_tool_names
+    return tool_name in enabled_tool_names
 
 
 def _build_tool_disabled_result(tool_name: str) -> str:
@@ -173,6 +178,9 @@ def _validate_schema_value(value: Any, schema: dict[str, Any], path: str) -> lis
             errors.append(f"{path} is shorter than {schema['minLength']}")
         if isinstance(schema.get("maxLength"), int) and len(value) > schema["maxLength"]:
             errors.append(f"{path} is longer than {schema['maxLength']}")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+            errors.append(f"{path} does not match pattern {pattern}")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if isinstance(schema.get("minimum"), (int, float)) and value < schema["minimum"]:
             errors.append(f"{path} must be at least {schema['minimum']}")
@@ -321,6 +329,7 @@ async def process_single_tool(
                     session_id=session_id,
                     profile=profile,
                     db=db,
+                    tool_call_id=tool_call.id,
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                 )
                 instance.set_runtime_context(

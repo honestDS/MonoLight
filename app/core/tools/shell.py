@@ -1,19 +1,29 @@
 import asyncio
 import json
 import ntpath
-import os
 import posixpath
 import re
 import shlex
 import subprocess
 import sys
-import sysconfig
 
-from app.core.constants import ERR_TOOL_COMMAND_TIMEOUT, ERR_TOOL_SHELL_BLACKLISTED, ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE
+from app.core.constants import (
+    ERR_TOOL_COMMAND_TIMEOUT,
+    ERR_TOOL_SHELL_BLACKLISTED,
+    ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
+)
+from app.core.crud.audit import audit_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir
-from app.core.terminal import ShellExecutionMode, validate_shell_execution_mode
+from app.core.terminal import (
+    ALL_TERMINAL_ACTIONS,
+    ShellExecutionMode,
+    ShellInteractiveHandoffResult,
+    validate_shell_execution_mode,
+)
+from app.core.terminal.manager import terminal_session_manager
+from app.core.terminal.process_config import build_subprocess_env
 from app.core.utils.system import get_full_system_context
 
 from .base import BaseExecutor
@@ -72,13 +82,7 @@ class ShellExecutor(BaseExecutor):
         )
 
     def _build_subprocess_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        scripts_dir = sysconfig.get_path("scripts")
-        if scripts_dir:
-            env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
-        if sys.prefix != sys.base_prefix:
-            env["VIRTUAL_ENV"] = sys.prefix
-        return env
+        return build_subprocess_env()
 
     async def _execute_argv(self, argv: list[str], profile_timeout: float, system_info: str) -> str:
         process = await asyncio.create_subprocess_exec(
@@ -171,15 +175,66 @@ class ShellExecutor(BaseExecutor):
             self.logger.error(t("LOG_SHELL_PROFILE_TIMEOUT_FAILED", error=str(e)))
         return 30.0
 
+    async def _execute_interactive(self, command: str) -> str:
+        dispatch_context = self.dispatch_context
+        if self.db is None or self.profile is None or self.profile.id is None or not self.session_id or dispatch_context is None or not dispatch_context.tool_call_id:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+
+        tool_call_id = dispatch_context.tool_call_id
+        binding = await audit_crud.get_running_execution_binding(
+            self.db,
+            new_tool_call_id=tool_call_id,
+        )
+        if binding is None:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+
+        audit_record, audit_execution = binding
+        if audit_record.uid != self.uid or audit_record.session_id != self.session_id:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+        if audit_record.id is None or audit_execution.id is None:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+
+        details = await audit_crud.list_tool_details(self.db, audit_record.id)
+        detail = next(
+            (item for item in details if item.id == audit_execution.audit_tool_detail_id),
+            None,
+        )
+        if detail is None:
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+
+        terminal_session = await terminal_session_manager.get_or_create_session_for_execution(
+            self.db,
+            uid=self.uid,
+            session_id=self.session_id,
+            profile_id=self.profile.id,
+            original_tool_call_id=detail.original_tool_call_id,
+            audit_record_id=audit_record.id,
+            audit_execution_record_id=audit_execution.id,
+            command=command,
+            working_directory=str(self.user_temp_dir),
+            allowed_actions=ALL_TERMINAL_ACTIONS,
+        )
+        snapshot = await terminal_session_manager.get_snapshot(
+            self.db,
+            terminal_session.terminal_session_id,
+            self.uid,
+            self.session_id,
+        )
+        handoff = ShellInteractiveHandoffResult(
+            terminal_session_id=snapshot.terminal_session_id,
+            status=snapshot.status,
+            output_buffer=snapshot.output_buffer,
+            exit_code=snapshot.exit_code,
+            failure_reason=snapshot.failure_reason,
+        )
+        return json.dumps(handoff.model_dump(mode="json"), ensure_ascii=False)
+
     async def execute(self, command: str, execution_mode: ShellExecutionMode | str) -> str:
         execution_mode = validate_shell_execution_mode(execution_mode)
-        if execution_mode is ShellExecutionMode.INTERACTIVE:
-            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_UNAVAILABLE))
-
-        system_info = get_full_system_context()
 
         blacklisted = self.check_blacklist(command)
         if blacklisted:
+            system_info = get_full_system_context()
             return json.dumps(
                 {
                     "stdout": t(ERR_TOOL_SHELL_BLACKLISTED, command=blacklisted),
@@ -190,6 +245,10 @@ class ShellExecutor(BaseExecutor):
                 ensure_ascii=False,
             )
 
+        if execution_mode is ShellExecutionMode.INTERACTIVE:
+            return await self._execute_interactive(command)
+
+        system_info = get_full_system_context()
         t_logger = self.logger.bind(tool_call=True)
         loop = asyncio.get_running_loop()
         loop_type = type(loop).__name__

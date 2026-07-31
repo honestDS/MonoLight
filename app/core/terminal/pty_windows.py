@@ -33,6 +33,7 @@ from app.core.terminal.schemas import TerminalSignal
 
 _MAX_TERMINAL_DIMENSION = 1_000
 _TERMINATE_WAIT_SECONDS = 0.2
+_CLOSE_STATUS_POLL_INTERVAL_SECONDS = 0.02
 
 
 class WindowsPtyDriver(PtyDriver):
@@ -53,6 +54,7 @@ class WindowsPtyDriver(PtyDriver):
         self._completion_event = asyncio.Event()
         self._start_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
+        self._closing = False
         self._cleanup_complete = False
 
     async def start(self) -> None:
@@ -130,8 +132,9 @@ class WindowsPtyDriver(PtyDriver):
         if self._eof or self._completion_event.is_set():
             raise RuntimeError(t(ERR_TERMINAL_PTY_CLOSED))
 
-        written = await asyncio.to_thread(self._pty.write, data)
-        return len(data) if written is None else int(written)
+        input_byte_length = len(data.encode("utf-8"))
+        await asyncio.to_thread(self._pty.write, data)
+        return input_byte_length
 
     async def resize(self, columns: int, rows: int) -> None:
         """Set the ConPTY dimensions."""
@@ -275,26 +278,78 @@ class WindowsPtyDriver(PtyDriver):
     def _record_drain_exception(self, error: BaseException) -> None:
         self._drain_exception = error
         self._alive = False
-        self._completion_event.set()
+        if not self._closing:
+            self._completion_event.set()
 
     async def _close_impl(self, force: bool) -> None:
-        if force:
-            await self._signal_process_tree("kill")
-        elif not self._completion_event.is_set():
-            try:
-                await self.write("\x03")
-            except Exception:
-                pass
-            await self._wait_for_completion(self.config.close_grace_seconds)
-            if not self._completion_event.is_set():
-                await self._signal_process_tree("terminate")
-            await asyncio.sleep(_TERMINATE_WAIT_SECONDS)
-            await self._signal_process_tree("kill")
+        self._closing = True
+        try:
+            if force:
+                await self._signal_process_tree("kill")
+            elif not self._completion_event.is_set():
+                try:
+                    await self.write("\x03")
+                except Exception:
+                    pass
+                await self._wait_for_completion(self.config.close_grace_seconds)
+                if not self._completion_event.is_set():
+                    await self._signal_process_tree("terminate")
+                await asyncio.sleep(_TERMINATE_WAIT_SECONDS)
+                await self._signal_process_tree("kill")
 
-        await self._cancel_io()
-        await self._wait_for_drain()
-        await self._signal_process_tree("kill")
-        await self._release_pty()
+            await self._cancel_io()
+            await self._wait_for_drain()
+            await self._signal_process_tree("kill")
+            await self._converge_close_state()
+            if not self._completion_event.is_set():
+                self._completion_event.set()
+            await self._release_pty()
+        finally:
+            self._closing = False
+
+    async def _converge_close_state(self) -> None:
+        if self._exit_code is not None or self._pty is None:
+            return
+
+        pty = self._pty
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(
+            _TERMINATE_WAIT_SECONDS,
+            self.config.close_grace_seconds,
+        )
+        while True:
+            try:
+                is_alive = bool(await asyncio.to_thread(pty.isalive))
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                is_alive = None
+
+            if is_alive is False:
+                self._alive = False
+                try:
+                    status = await asyncio.to_thread(pty.get_exitstatus)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    status = None
+                else:
+                    self._eof = True
+                    self._completion_event.set()
+                    self._exit_code = self._normalize_exit_code(status)
+                    if self._exit_code is not None:
+                        self._drain_exception = None
+                        return
+                    return
+            elif is_alive is True:
+                self._alive = True
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(
+                min(_CLOSE_STATUS_POLL_INTERVAL_SECONDS, remaining),
+            )
 
     async def _complete_cancelled_close(self) -> None:
         cleanup_task = asyncio.create_task(self._force_cleanup())
