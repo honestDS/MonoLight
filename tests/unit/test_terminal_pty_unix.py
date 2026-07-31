@@ -9,7 +9,6 @@ import pytest
 
 from app.core.terminal.pty_base import PtyProcessConfig
 from app.core.terminal.pty_unix import LinuxPtyDriver
-from app.core.terminal.schemas import TerminalSignal
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
@@ -223,8 +222,6 @@ async def test_linux_pty_rejects_operations_before_start():
             await driver.write("input")
         with pytest.raises(RuntimeError):
             await driver.resize(80, 24)
-        with pytest.raises(RuntimeError):
-            await driver.send_signal(TerminalSignal.INTERRUPT)
         with pytest.raises(RuntimeError):
             await driver.wait()
         await asyncio.wait_for(driver.close(force=True), timeout=5.0)

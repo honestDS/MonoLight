@@ -104,6 +104,29 @@ async def test_terminal_session_snapshot_persists_across_database_sessions():
 
 
 @pytest.mark.asyncio
+async def test_terminal_session_snapshot_accepts_legacy_signal_action():
+    terminal_session = await create_terminal_session(
+        terminal_session_id="s" * 32,
+        audit_record_id=110,
+        audit_execution_record_id=1010,
+    )
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(TerminalSession).where(TerminalSession.terminal_session_id == terminal_session.terminal_session_id).values(allowed_actions=["status", "read", "write", "resize", "signal", "close"]))
+        await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        snapshot = await terminal_session_manager.get_snapshot(
+            db,
+            terminal_session.terminal_session_id,
+            "user-1",
+            "chat-session-1",
+        )
+
+    assert snapshot.permission_scope.allowed_actions == ALL_TERMINAL_ACTIONS
+
+
+@pytest.mark.asyncio
 async def test_terminal_session_snapshot_reports_not_found_and_access_denied():
     terminal_session = await create_terminal_session(
         terminal_session_id="q" * 32,
@@ -252,6 +275,33 @@ async def test_terminal_starting_claims_are_ordered_exclusive_and_recoverable():
     assert released_session is not None
     assert released_session.locked_by is None
     assert released_session.lock_until is None
+
+
+@pytest.mark.asyncio
+async def test_list_active_audit_execution_record_ids_excludes_final_sessions_and_other_audits():
+    cases = [
+        (TerminalSessionStatus.STARTING, 200, 2001),
+        (TerminalSessionStatus.RUNNING, 200, 2002),
+        (TerminalSessionStatus.CLOSING, 200, 2003),
+        (TerminalSessionStatus.EXITED, 200, 2004),
+        (TerminalSessionStatus.FAILED, 200, 2005),
+        (TerminalSessionStatus.LOST, 200, 2006),
+        (TerminalSessionStatus.STARTING, 201, 2007),
+    ]
+    for index, (status, audit_record_id, audit_execution_record_id) in enumerate(cases):
+        await create_terminal_session(
+            terminal_session_id=f"l{index}" + "s" * 31,
+            audit_record_id=audit_record_id,
+            audit_execution_record_id=audit_execution_record_id,
+        )
+        async with AsyncSessionLocal() as db:
+            await db.execute(update(TerminalSession).where(TerminalSession.terminal_session_id == f"l{index}" + "s" * 31).values(status=status))
+            await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        active_ids = await terminal_session_crud.list_active_audit_execution_record_ids(db, audit_record_id=200)
+
+    assert active_ids == {2001, 2002, 2003}
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,7 @@ from app.core.utils.dispatcher.helpers import (
 from app.core.utils.dispatcher.mark_initial_message_processed import mark_initial_message_processed
 from app.core.utils.dispatcher.markdown_instruction import materialize_latest_user_environment_prompt
 from app.core.utils.dispatcher.prepare_messages import prepare_messages
-from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round
+from app.core.utils.dispatcher.process_single_tool import get_handed_off_terminal_session_id, get_queued_background_task_id, prevalidate_tool_round
 from app.core.utils.dispatcher.save_assistant_message import save_assistant_message
 from app.core.utils.dispatcher.save_initial_message import save_initial_message
 from app.core.utils.dispatcher.save_tool_response import save_tool_response
@@ -821,10 +821,12 @@ class InteractiveDispatcherMixin:
                         try:
                             for completed_task in asyncio.as_completed(tasks):
                                 tool_res = await completed_task
+                                tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_res.tool_call_id)
                                 if audit_claim_token is not None:
                                     execution_id = audit_execution_ids[tool_res.tool_call_id]
                                     queued_task_id = get_queued_background_task_id(tool_res.content)
-                                    if queued_task_id is None:
+                                    terminal_session_id = get_handed_off_terminal_session_id(tool_res.content) if tool_call is not None and tool_call.name == "execute_shell" else None
+                                    if queued_task_id is None and terminal_session_id is None:
                                         execution_succeeded = _tool_result_succeeded(tool_res.content)
                                         audit_all_succeeded = audit_all_succeeded and execution_succeeded
                                         result_summary = serialize_execution_summary(
@@ -840,12 +842,17 @@ class InteractiveDispatcherMixin:
                                         )
                                     elif audit_execution_checkpoint_state is not None:
                                         audit_execution_checkpoint_state["handoff_state"] = "persisted"
-                                        task_ids = audit_execution_checkpoint_state.setdefault("background_task_ids", [])
-                                        if queued_task_id not in task_ids:
-                                            task_ids.append(queued_task_id)
+                                        if queued_task_id is not None:
+                                            task_ids = audit_execution_checkpoint_state.setdefault("background_task_ids", [])
+                                            if queued_task_id not in task_ids:
+                                                task_ids.append(queued_task_id)
+                                        if terminal_session_id is not None:
+                                            terminal_session_ids = audit_execution_checkpoint_state.setdefault("terminal_session_ids", [])
+                                            if terminal_session_id not in terminal_session_ids:
+                                                terminal_session_ids.append(terminal_session_id)
                                 files_to_user.extend(extract_files_to_user([tool_res]))
                                 await save_tool_response(db, session_id, uid, profile.id, tool_res, messages, turn_messages)
-                                if audit_execution_checkpoint_state is not None and get_queued_background_task_id(tool_res.content) is not None:
+                                if audit_execution_checkpoint_state is not None and (queued_task_id is not None or terminal_session_id is not None):
                                     await _save_execution_checkpoint(
                                         checkpoint_state,
                                         messages,
@@ -856,7 +863,6 @@ class InteractiveDispatcherMixin:
                                 else:
                                     await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                 if stream_event_callback is not None and show_tool_calls:
-                                    tool_call = _find_tool_call_by_id(ai_msg.tool_calls, tool_res.tool_call_id)
                                     await stream_event_callback(
                                         {
                                             "type": "tool_end",

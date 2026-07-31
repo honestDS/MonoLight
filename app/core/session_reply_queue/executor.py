@@ -37,6 +37,7 @@ from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.terminal_session import terminal_session_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import get_current_locale, t
 from app.core.message_platforms.notifier import send_session_event, send_session_stream_event
@@ -53,7 +54,7 @@ from app.core.utils.assistant_files import parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.helpers import dump_background_proactive_history, dump_output_history
-from app.core.utils.dispatcher.process_single_tool import get_queued_background_task_id, prevalidate_tool_round, process_single_tool
+from app.core.utils.dispatcher.process_single_tool import get_handed_off_terminal_session_id, get_queued_background_task_id, prevalidate_tool_round, process_single_tool
 from app.core.utils.dispatcher.save_message import save_message
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.core.utils.dispatcher.validate_profile_and_cfg import validate_profile_and_cfg
@@ -508,12 +509,14 @@ async def mark_work_audit_execution_unknown(work_id: int, worker_id: str, error:
         audit_record_id, claim_token = binding
         background_tasks = await background_task_crud.list_by_audit_record(db, audit_record_id)
         active_background_execution_ids = {task.audit_execution_record_id for task in background_tasks if task.status in {BackgroundTaskStatus.PENDING, BackgroundTaskStatus.RUNNING} and task.audit_execution_record_id is not None}
-        if active_background_execution_ids:
+        active_terminal_execution_ids = await terminal_session_crud.list_active_audit_execution_record_ids(db, audit_record_id)
+        excluded_execution_record_ids = active_background_execution_ids | active_terminal_execution_ids
+        if excluded_execution_record_ids:
             await audit_crud.mark_running_executions_unknown_except(
                 db,
                 audit_record_id=audit_record_id,
                 claim_token=claim_token,
-                excluded_execution_record_ids=active_background_execution_ids,
+                excluded_execution_record_ids=excluded_execution_record_ids,
                 error_reason=error,
             )
             return
@@ -926,6 +929,10 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
             profile=profile,
         )
 
+    async def _commit_and_notify_confirmation_tool_results(notify_audit_record_id: int) -> None:
+        await db.commit()
+        await notify_confirmation_tool_results(db, audit_record_id=notify_audit_record_id)
+
     reaudit_round = None
     if files_changed and is_audit_configured(cfg):
         reaudit_round = await audit_tool_round(
@@ -987,7 +994,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 )
                 status_updated = await update_confirmation_message_status(db, audit_record_id=reaudit_round.audit_record_id)
                 if status_updated is False:
-                    await notify_confirmation_tool_results(db, audit_record_id=reaudit_round.audit_record_id)
+                    await _commit_and_notify_confirmation_tool_results(reaudit_round.audit_record_id)
                 turn_messages.append(InternalMessage(role=MessageRole.ASSISTANT, content=confirmation_content))
                 return {
                     "content": confirmation_content,
@@ -1124,7 +1131,8 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 result_payload = json.loads(tool_result.content or "{}")
             except (TypeError, ValueError):
                 result_payload = {}
-            if get_queued_background_task_id(tool_result.content) is None:
+            terminal_session_id = get_handed_off_terminal_session_id(tool_result.content) if confirmed_call.name == "execute_shell" else None
+            if get_queued_background_task_id(tool_result.content) is None and terminal_session_id is None:
                 succeeded = not (isinstance(result_payload, dict) and (result_payload.get("error") or result_payload.get("status") == "failed" or (isinstance(result_payload.get("exit_code"), int) and result_payload["exit_code"] != 0)))
                 all_succeeded = all_succeeded and succeeded
                 result_summary = serialize_execution_summary(
@@ -1148,7 +1156,9 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
     if execution_round_status is not None:
         status_updated = await update_confirmation_message_status(db, audit_record_id=audit_record_id)
         if replacement_state.replaced_tool_results and status_updated is False:
-            await notify_confirmation_tool_results(db, audit_record_id=audit_record_id)
+            await _commit_and_notify_confirmation_tool_results(audit_record_id)
+    elif replacement_state.replaced_tool_results:
+        await _commit_and_notify_confirmation_tool_results(audit_record_id)
 
     guidance_prompt = (work.execution_state or {}).get("guidance_prompt")
     initial_message = InternalMessage(

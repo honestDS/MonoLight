@@ -27,13 +27,11 @@ from .terminal import (
     TERMINAL_CLOSE_TOOL_SCHEMA,
     TERMINAL_READ_TOOL_SCHEMA,
     TERMINAL_RESIZE_TOOL_SCHEMA,
-    TERMINAL_SIGNAL_TOOL_SCHEMA,
     TERMINAL_STATUS_TOOL_SCHEMA,
     TERMINAL_WRITE_TOOL_SCHEMA,
     TerminalCloseExecutor,
     TerminalReadExecutor,
     TerminalResizeExecutor,
-    TerminalSignalExecutor,
     TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
@@ -87,7 +85,6 @@ TOOL_EXECUTOR_MAP = {
     TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
     TERMINAL_RESIZE_TOOL_SCHEMA["function"]["name"]: TerminalResizeExecutor,
-    TERMINAL_SIGNAL_TOOL_SCHEMA["function"]["name"]: TerminalSignalExecutor,
     TERMINAL_CLOSE_TOOL_SCHEMA["function"]["name"]: TerminalCloseExecutor,
 }
 

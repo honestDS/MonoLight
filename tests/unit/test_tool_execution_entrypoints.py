@@ -16,7 +16,7 @@ def _assert_source_order(source: str, *markers: str) -> None:
 
 def test_registered_tools_explicitly_declare_audit_requirement():
     assert all(isinstance(executor_class.requires_audit, bool) for executor_class in TOOL_EXECUTOR_MAP.values())
-    audited_tools = {"execute_shell", "write_file", "terminal_write", "terminal_signal", "terminal_close"}
+    audited_tools = {"execute_shell", "write_file", "terminal_write", "terminal_close"}
     assert {tool_name for tool_name in TOOL_EXECUTOR_MAP if tool_requires_audit(tool_name)} == audited_tools
     assert all(not tool_requires_audit(tool_name) for tool_name in TOOL_EXECUTOR_MAP if tool_name not in audited_tools)
     assert tool_requires_audit("unknown_tool") is False

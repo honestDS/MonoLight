@@ -25,11 +25,9 @@ from app.core.constants import (
     ERR_TERMINAL_PTY_INPUT_INVALID,
     ERR_TERMINAL_PTY_NOT_STARTED,
     ERR_TERMINAL_PTY_PLATFORM_MISMATCH,
-    ERR_TERMINAL_PTY_SIGNAL_INVALID,
 )
 from app.core.i18n import t
 from app.core.terminal.pty_base import PtyDriver, PtyProcessConfig
-from app.core.terminal.schemas import TerminalSignal
 
 _MAX_TERMINAL_DIMENSION = 1_000
 _TERMINATE_WAIT_SECONDS = 0.2
@@ -133,7 +131,8 @@ class WindowsPtyDriver(PtyDriver):
             raise RuntimeError(t(ERR_TERMINAL_PTY_CLOSED))
 
         input_byte_length = len(data.encode("utf-8"))
-        await asyncio.to_thread(self._pty.write, data)
+        pty_data = data.replace("\r\n", "\n").replace("\n", "\r\n")
+        await asyncio.to_thread(self._pty.write, pty_data)
         return input_byte_length
 
     async def resize(self, columns: int, rows: int) -> None:
@@ -146,24 +145,6 @@ class WindowsPtyDriver(PtyDriver):
             raise RuntimeError(t(ERR_TERMINAL_PTY_CLOSED))
 
         await asyncio.to_thread(self._pty.set_size, columns, rows)
-
-    async def send_signal(self, signal: TerminalSignal) -> None:
-        """Send a terminal interrupt or a signal to the process tree."""
-        if not self._started:
-            raise RuntimeError(t(ERR_TERMINAL_PTY_NOT_STARTED))
-        if self._completion_event.is_set() or self._eof or self._cleanup_complete:
-            return
-
-        if signal is TerminalSignal.INTERRUPT:
-            await self.write("\x03")
-            return
-        if signal is TerminalSignal.TERMINATE:
-            await self._signal_process_tree("terminate")
-            return
-        if signal is TerminalSignal.KILL:
-            await self._signal_process_tree("kill")
-            return
-        raise ValueError(t(ERR_TERMINAL_PTY_SIGNAL_INVALID, signal=signal))
 
     async def wait(self) -> int:
         """Wait for output draining to finish and return the exit code."""
@@ -287,15 +268,10 @@ class WindowsPtyDriver(PtyDriver):
             if force:
                 await self._signal_process_tree("kill")
             elif not self._completion_event.is_set():
-                try:
-                    await self.write("\x03")
-                except Exception:
-                    pass
+                await self._signal_process_tree("terminate")
                 await self._wait_for_completion(self.config.close_grace_seconds)
                 if not self._completion_event.is_set():
-                    await self._signal_process_tree("terminate")
-                await asyncio.sleep(_TERMINATE_WAIT_SECONDS)
-                await self._signal_process_tree("kill")
+                    await self._signal_process_tree("kill")
 
             await self._cancel_io()
             await self._wait_for_drain()

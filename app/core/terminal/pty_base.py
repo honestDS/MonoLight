@@ -13,7 +13,7 @@ from app.core.constants import (
     ERR_TERMINAL_READ_OFFSET_AHEAD,
 )
 from app.core.i18n import t
-from app.core.terminal.schemas import TerminalOutputBufferState, TerminalSignal
+from app.core.terminal.schemas import TerminalOutputBufferState
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,11 +237,6 @@ class PtyDriver(ABC):
     @abstractmethod
     async def resize(self, columns: int, rows: int) -> None:
         """Resize the platform-specific PTY."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def send_signal(self, signal: TerminalSignal) -> None:
-        """Send a platform-specific process signal."""
         raise NotImplementedError
 
     @abstractmethod

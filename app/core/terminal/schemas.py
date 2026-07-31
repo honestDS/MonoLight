@@ -144,14 +144,7 @@ class TerminalAction(StrEnum):
     READ = "read"
     WRITE = "write"
     RESIZE = "resize"
-    SIGNAL = "signal"
     CLOSE = "close"
-
-
-class TerminalSignal(StrEnum):
-    INTERRUPT = "interrupt"
-    TERMINATE = "terminate"
-    KILL = "kill"
 
 
 ALL_TERMINAL_ACTIONS = frozenset(TerminalAction)
@@ -209,13 +202,6 @@ class TerminalResizeRequest(TerminalProtocolModel):
     rows: int = Field(ge=1, le=1_000)
 
 
-class TerminalSignalRequest(TerminalProtocolModel):
-    action: Literal[TerminalAction.SIGNAL] = TerminalAction.SIGNAL
-    terminal_session_id: TerminalSessionId
-    request_id: TerminalMutatingRequestId
-    signal: TerminalSignal
-
-
 class TerminalCloseRequest(TerminalProtocolModel):
     action: Literal[TerminalAction.CLOSE] = TerminalAction.CLOSE
     terminal_session_id: TerminalSessionId
@@ -224,7 +210,7 @@ class TerminalCloseRequest(TerminalProtocolModel):
 
 
 type TerminalRequest = Annotated[
-    TerminalStatusRequest | TerminalReadRequest | TerminalWriteRequest | TerminalResizeRequest | TerminalSignalRequest | TerminalCloseRequest,
+    TerminalStatusRequest | TerminalReadRequest | TerminalWriteRequest | TerminalResizeRequest | TerminalCloseRequest,
     Field(discriminator="action"),
 ]
 
@@ -242,7 +228,6 @@ class TerminalActionReceipt(TerminalProtocolModel):
     action: Literal[
         TerminalAction.WRITE,
         TerminalAction.RESIZE,
-        TerminalAction.SIGNAL,
         TerminalAction.CLOSE,
     ]
     duplicate: bool
@@ -424,8 +409,6 @@ __all__ = [
     "TerminalSessionId",
     "TerminalSessionSnapshot",
     "TerminalSessionStatus",
-    "TerminalSignal",
-    "TerminalSignalRequest",
     "TerminalStatusRequest",
     "TerminalWriteRequest",
     "can_transition_terminal_status",

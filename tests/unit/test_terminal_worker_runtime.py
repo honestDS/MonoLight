@@ -18,6 +18,7 @@ from app.core.terminal import (
     TerminalWriteRequest,
 )
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
+from app.models.audit import AuditExecutionRecord
 from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 
@@ -32,8 +33,10 @@ STEP_TIMEOUT = 10.0
 @pytest.fixture(autouse=True)
 async def isolated_terminal_database():
     async with engine.begin() as connection:
+        await connection.run_sync(lambda sync_connection: AuditExecutionRecord.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.drop(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: AuditExecutionRecord.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
 
@@ -41,6 +44,7 @@ async def isolated_terminal_database():
         yield
     finally:
         async with AsyncSessionLocal() as db:
+            await db.execute(delete(AuditExecutionRecord))
             await db.execute(delete(TerminalControlCommand))
             await db.execute(delete(TerminalSession))
             await db.commit()
@@ -134,11 +138,10 @@ async def test_terminal_worker_runs_real_interactive_python_session():
         )
         assert running_snapshot.status is TerminalSessionStatus.RUNNING
 
-        newline = "\r\n" if sys.platform == "win32" else "\n"
         write_request = TerminalWriteRequest(
             terminal_session_id=terminal_session.terminal_session_id,
             request_id="w" * 16,
-            data='import os; print("stage5-ready"); print("CWD:" + os.getcwd())' + newline,
+            data='import os; print("stage5-ready"); print("CWD:" + os.getcwd())' + "\n",
         )
         async with AsyncSessionLocal() as db:
             write_command, write_created = await terminal_session_manager.enqueue_control(

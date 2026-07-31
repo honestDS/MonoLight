@@ -7,6 +7,11 @@ import pytest
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.session_reply_queue import executor as executor_module
+from app.core.terminal.schemas import (
+    ShellInteractiveHandoffResult,
+    TerminalOutputBufferState,
+    TerminalSessionStatus,
+)
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
 from app.models.session_reply_work_item import (
@@ -1060,6 +1065,9 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
         assert audit_record_id == 99
         return []
 
+    async def list_active_audit_execution_record_ids(*args, **kwargs):
+        return set()
+
     async def mark_execution_unknown(db, **kwargs):
         assert kwargs["audit_record_id"] == 99
         assert kwargs["claim_token"] == "new-token"
@@ -1075,6 +1083,11 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
     monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
     monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(
+        executor_module.terminal_session_crud,
+        "list_active_audit_execution_record_ids",
+        list_active_audit_execution_record_ids,
+    )
     monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
     monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
@@ -1090,6 +1103,105 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
         }
     ]
     assert confirmation_calls == [99]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("background_execution_ids", "terminal_execution_ids", "expected_excluded_ids"),
+    [
+        ([101], {202}, {101, 202}),
+        ([], {202}, {202}),
+    ],
+)
+async def test_mark_work_audit_execution_unknown_preserves_active_handoffs(
+    monkeypatch,
+    background_execution_ids,
+    terminal_execution_ids,
+    expected_excluded_ids,
+):
+    work = SimpleNamespace(
+        work_type=SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION,
+        source_id="99",
+        execution_state={"audit_claim_token": "new-token"},
+    )
+    unknown_except_calls = []
+    mark_execution_unknown_calls = []
+    reliable_unknown_calls = []
+    finish_round_calls = []
+
+    class FakeSession:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_work(db, work_id):
+        assert work_id == 7
+        return work
+
+    async def list_background_tasks(db, audit_record_id):
+        assert audit_record_id == 99
+        return [
+            SimpleNamespace(
+                status=executor_module.BackgroundTaskStatus.RUNNING,
+                audit_execution_record_id=execution_id,
+            )
+            for execution_id in background_execution_ids
+        ]
+
+    async def list_active_audit_execution_record_ids(*args, **kwargs):
+        return terminal_execution_ids
+
+    async def mark_running_executions_unknown_except(db, **kwargs):
+        unknown_except_calls.append(kwargs)
+        return True
+
+    async def mark_execution_unknown(db, **kwargs):
+        mark_execution_unknown_calls.append(kwargs)
+        return True
+
+    async def mark_unknown_reliably(db, **kwargs):
+        reliable_unknown_calls.append(kwargs)
+        return True
+
+    async def finish_execution_round(db, **kwargs):
+        finish_round_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(
+        executor_module.terminal_session_crud,
+        "list_active_audit_execution_record_ids",
+        list_active_audit_execution_record_ids,
+    )
+    monkeypatch.setattr(
+        executor_module.audit_crud,
+        "mark_running_executions_unknown_except",
+        mark_running_executions_unknown_except,
+    )
+    monkeypatch.setattr(executor_module, "_mark_audit_execution_unknown_reliably", mark_unknown_reliably)
+    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
+
+    await executor_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
+
+    assert unknown_except_calls == [
+        {
+            "audit_record_id": 99,
+            "claim_token": "new-token",
+            "excluded_execution_record_ids": expected_excluded_ids,
+            "error_reason": "interrupted",
+        }
+    ]
+    assert mark_execution_unknown_calls == []
+    assert reliable_unknown_calls == []
+    assert finish_round_calls == []
 
 
 @pytest.mark.asyncio
@@ -1266,10 +1378,14 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     saved_messages = []
     notified_audit_record_ids = []
     memory_chains = []
+    event_order = []
 
     class FakeDb:
         async def get(self, model, item_id):
             return source_message
+
+        async def commit(self):
+            event_order.append("commit")
 
     async def get_record(db, audit_record_id):
         return record
@@ -1304,6 +1420,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         )
 
     async def replace_result(db, **kwargs):
+        event_order.append("replace")
         replaced_results.append(kwargs)
         return kwargs["content"]
 
@@ -1315,6 +1432,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         return False
 
     async def notify_confirmation_results(db, *, audit_record_id):
+        event_order.append("notify")
         notified_audit_record_ids.append(audit_record_id)
 
     def dump_history(messages):
@@ -1346,6 +1464,7 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
     assert replaced_results[0]["original_tool_call_id"] == "original-1"
     assert replaced_results[0]["audit_record_id"] == 99
     assert notified_audit_record_ids == [99]
+    assert event_order == ["replace", "commit", "notify"]
     assert len(saved_messages) == 1
     assert saved_messages[0][0][4] == MessageType.AUDIT_CONFIRMATION
     assert any(message.role == MessageRole.TOOL and message.tool_call_id == "original-1" for message in memory_chains[0])
@@ -1501,6 +1620,180 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
     assert interactive_dispatch_kwargs["attachments"] is None
     assert interactive_dispatch_kwargs["allow_additional_user_messages"] is True
     assert interactive_dispatch_kwargs["execution_resume_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continues_reply(monkeypatch):
+    source_internal = InternalMessage(
+        role=MessageRole.ASSISTANT,
+        tool_calls=[
+            InternalToolCall(
+                id="original-1",
+                name="execute_shell",
+                arguments={"command": "echo 1", "execution_mode": "interactive"},
+            )
+        ],
+    )
+    source_message = SimpleNamespace(
+        id=1,
+        uid="user-1",
+        session_id="session-1",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TOOL_CALL,
+        content=json.dumps(source_internal.model_dump(mode="json"), ensure_ascii=False),
+    )
+    record = SimpleNamespace(
+        status=AuditRecordStatus.EXECUTING,
+        execution_claim_token="claim-token",
+        source_assistant_message_id=1,
+        working_directory=".",
+        operator_username="tester",
+        round_arguments_hash="a" * 64,
+        decision_raw_message="同意",
+        decision_message_id=4,
+    )
+    details = [
+        SimpleNamespace(
+            id=11,
+            original_tool_call_id="original-1",
+            turn_index=0,
+            tool_name="execute_shell",
+            arguments_hash="b" * 64,
+        )
+    ]
+    pending_message = SimpleNamespace(id=2, content="pending")
+    work = SimpleNamespace(
+        source_id="42",
+        execution_state={"audit_claim_token": "claim-token", "decision_message_id": 4},
+        uid="user-1",
+        session_id="session-1",
+        profile_id=3,
+        dedupe_key="confirmed-audit:42",
+        created_at=datetime(2026, 7, 20, 0, 0, 0),
+    )
+    created_attempts = []
+    finish_attempt_calls = []
+    finish_round_calls = []
+    process_calls = []
+    replaced_results = []
+    confirmation_status_calls = []
+    notification_calls = []
+    event_order = []
+
+    class FakeDb:
+        async def get(self, model, item_id):
+            assert item_id == 1
+            return source_message
+
+        async def commit(self):
+            event_order.append("commit")
+
+    async def get_record(db, audit_record_id):
+        return record
+
+    async def list_details(db, audit_record_id):
+        return details
+
+    async def get_profile(db, profile_id):
+        return SimpleNamespace(id=3, uid="user-1")
+
+    async def validate_profile(db, profile):
+        return SimpleNamespace()
+
+    async def get_tools(db, profile):
+        return [], None
+
+    async def create_execution(db, **kwargs):
+        created_attempts.append(kwargs)
+        return SimpleNamespace(id=101)
+
+    async def process_tool(tool_call, db, profile, cfg, messages, username, session_id, turn, uid, **kwargs):
+        process_calls.append((tool_call, messages))
+        handoff = ShellInteractiveHandoffResult(
+            terminal_session_id="t" * 32,
+            status=TerminalSessionStatus.STARTING,
+            output_buffer=TerminalOutputBufferState(
+                capacity_bytes=65_536,
+                oldest_offset=0,
+                next_offset=0,
+                oldest_sequence=1,
+                next_sequence=1,
+            ),
+            output_stream="merged_stdout_stderr",
+        )
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=handoff.model_dump_json(),
+        )
+
+    async def replace_result(db, **kwargs):
+        event_order.append("replace")
+        replaced_results.append(kwargs)
+        return kwargs["content"]
+
+    async def get_pending(db, **kwargs):
+        return {"original-1": pending_message}
+
+    async def finish_attempt(db, **kwargs):
+        finish_attempt_calls.append(kwargs)
+        return True
+
+    async def finish_round_if_complete(db, **kwargs):
+        finish_round_calls.append(kwargs)
+        return None
+
+    async def update_confirmation(*args, **kwargs):
+        confirmation_status_calls.append((args, kwargs))
+
+    async def notify_confirmation_results(*args, **kwargs):
+        event_order.append("notify")
+        notification_calls.append(kwargs["audit_record_id"])
+
+    async def dispatch_interactive_work(*args, **kwargs):
+        event_order.append("dispatch")
+        return {
+            "choices": [{"message": {"content": "完成"}}],
+            "history": [{"role": "assistant", "content": "完成"}],
+            "files": [],
+            "response_id": "response-final",
+        }
+
+    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_module, "create_file_integrity_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_module, "notify_confirmation_tool_results", notify_confirmation_results)
+    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
+
+    response = await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+
+    assert response["content"] == "完成"
+    assert response["history"] == [{"role": "assistant", "content": "完成"}]
+    assert response["files"] == []
+    assert response["response_id"] == "response-final"
+    assert len(created_attempts) == 1
+    assert len(process_calls) == 1
+    assert process_calls[0][0].name == "execute_shell"
+    assert finish_attempt_calls == []
+    assert finish_round_calls == [{"audit_record_id": 42, "claim_token": "claim-token"}]
+    assert replaced_results[0]["pending_message"].id == 2
+    assert replaced_results[0]["original_tool_call_id"] == "original-1"
+    assert confirmation_status_calls == []
+    assert notification_calls == [42]
+    assert event_order == ["replace", "commit", "notify", "dispatch"]
 
 
 @pytest.mark.asyncio

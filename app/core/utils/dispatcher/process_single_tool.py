@@ -28,6 +28,7 @@ from app.core.log import (
     get_logger,
 )
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
+from app.core.terminal.schemas import ShellInteractiveHandoffResult
 from app.core.tools import (
     SHELL_COMPANION_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
@@ -90,6 +91,20 @@ def get_queued_background_task_id(content: str | None) -> int | None:
         return None
     task_id = payload.get("task_id")
     return task_id if isinstance(task_id, int) and task_id > 0 else None
+
+
+def get_handed_off_terminal_session_id(content: str | None) -> str | None:
+    try:
+        payload = json.loads(content or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        handoff = ShellInteractiveHandoffResult.model_validate(payload)
+    except (TypeError, ValueError):
+        return None
+    return handoff.terminal_session_id
 
 
 def _build_background_task_unsupported_result(tool_name: str) -> str:

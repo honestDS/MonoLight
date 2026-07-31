@@ -12,8 +12,6 @@ from app.core.terminal.schemas import (
     TerminalReadRequest,
     TerminalReadResult,
     TerminalResizeRequest,
-    TerminalSignal,
-    TerminalSignalRequest,
     TerminalStatusRequest,
     TerminalWriteRequest,
 )
@@ -66,7 +64,7 @@ TERMINAL_WRITE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "terminal_write",
-        "description": "Write input data to an interactive terminal session.",
+        "description": "Write input data to an interactive terminal session. Use '\\n' to submit a line; the service handles platform-specific newline conversion.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -97,23 +95,6 @@ TERMINAL_RESIZE_TOOL_SCHEMA = {
     },
 }
 
-TERMINAL_SIGNAL_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "terminal_signal",
-        "description": "Send an interrupt, terminate, or kill signal to an interactive terminal session.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "terminal_session_id": _TERMINAL_SESSION_ID_SCHEMA,
-                "signal": {"type": "string", "enum": [signal.value for signal in TerminalSignal]},
-            },
-            "required": ["terminal_session_id", "signal"],
-            "additionalProperties": False,
-        },
-    },
-}
-
 TERMINAL_CLOSE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -137,7 +118,6 @@ SHELL_COMPANION_TOOL_SCHEMAS = [
     TERMINAL_READ_TOOL_SCHEMA,
     TERMINAL_WRITE_TOOL_SCHEMA,
     TERMINAL_RESIZE_TOOL_SCHEMA,
-    TERMINAL_SIGNAL_TOOL_SCHEMA,
     TERMINAL_CLOSE_TOOL_SCHEMA,
 ]
 SHELL_COMPANION_TOOL_NAMES = frozenset(schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS)
@@ -188,7 +168,7 @@ class _TerminalExecutor(BaseExecutor):
 
     async def _build_action_receipt(
         self,
-        request: TerminalWriteRequest | TerminalResizeRequest | TerminalSignalRequest | TerminalCloseRequest,
+        request: TerminalWriteRequest | TerminalResizeRequest | TerminalCloseRequest,
     ) -> str:
         db, session_id, _ = self._require_runtime_context()
         command, created = await terminal_session_manager.enqueue_control(
@@ -265,18 +245,6 @@ class TerminalResizeExecutor(_TerminalExecutor):
         return await self._build_action_receipt(request)
 
 
-class TerminalSignalExecutor(_TerminalExecutor):
-    requires_audit = True
-
-    async def execute(self, terminal_session_id: str, signal: TerminalSignal | str) -> str:
-        request = TerminalSignalRequest(
-            terminal_session_id=terminal_session_id,
-            request_id=self._derive_request_id(TerminalAction.SIGNAL),
-            signal=signal,
-        )
-        return await self._build_action_receipt(request)
-
-
 class TerminalCloseExecutor(_TerminalExecutor):
     requires_audit = True
 
@@ -295,13 +263,11 @@ __all__ = [
     "TERMINAL_CLOSE_TOOL_SCHEMA",
     "TERMINAL_READ_TOOL_SCHEMA",
     "TERMINAL_RESIZE_TOOL_SCHEMA",
-    "TERMINAL_SIGNAL_TOOL_SCHEMA",
     "TERMINAL_STATUS_TOOL_SCHEMA",
     "TERMINAL_WRITE_TOOL_SCHEMA",
     "TerminalCloseExecutor",
     "TerminalReadExecutor",
     "TerminalResizeExecutor",
-    "TerminalSignalExecutor",
     "TerminalStatusExecutor",
     "TerminalWriteExecutor",
 ]

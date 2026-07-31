@@ -169,11 +169,6 @@ def test_prevalidate_tool_round_accepts_companion_tools_when_shell_is_enabled():
             name="terminal_resize",
             arguments={"terminal_session_id": session_id, "columns": 80, "rows": 24},
         ),
-        SimpleNamespace(
-            id="signal",
-            name="terminal_signal",
-            arguments={"terminal_session_id": session_id, "signal": "interrupt"},
-        ),
         SimpleNamespace(id="close", name="terminal_close", arguments={"terminal_session_id": session_id}),
     ]
 
@@ -204,13 +199,28 @@ def test_prevalidate_tool_round_rejects_companion_tools_when_shell_is_disabled()
     assert payload["error"] == t(ERR_TOOL_NOT_ENABLED, tool_name="terminal_read")
 
 
+def test_prevalidate_tool_round_rejects_removed_terminal_signal_companion():
+    cfg = ProfileConfig.model_validate({"tool": {"enabled_tools": ["execute_shell"]}})
+    tool_call = SimpleNamespace(
+        id="terminal-signal",
+        name="terminal_signal",
+        arguments={"terminal_session_id": "t" * 32, "signal": "interrupt"},
+    )
+    tool_schemas = [SHELL_TOOL_SCHEMA, *SHELL_COMPANION_TOOL_SCHEMAS]
+
+    assert "terminal_signal" not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
+    errors = process_single_tool_module.prevalidate_tool_round([tool_call], cfg, tool_schemas=tool_schemas)
+
+    assert tool_call.id in errors
+    assert json.loads(errors[tool_call.id])["status"] == "failed"
+
+
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "expected_detail"),
     [
         ("terminal_status", {"terminal_session_id": "t" * 31}, "shorter than 32"),
         ("terminal_read", {"terminal_session_id": "t" * 32, "offset": -1}, "at least 0"),
         ("terminal_read", {"terminal_session_id": "t" * 32, "max_bytes": 1_048_577}, "at most 1048576"),
-        ("terminal_signal", {"terminal_session_id": "t" * 32, "signal": "hangup"}, "must be one of"),
         ("terminal_status", {"terminal_session_id": "t" * 32, "extra": True}, "extra"),
     ],
 )

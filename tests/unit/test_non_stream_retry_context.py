@@ -11,6 +11,11 @@ from app.core.dispatchers import interactive_helpers as interactive_helpers_modu
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.exceptions import LLMException
+from app.core.terminal.schemas import (
+    ShellInteractiveHandoffResult,
+    TerminalOutputBufferState,
+    TerminalSessionStatus,
+)
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import build_max_output_tokens_instruction
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
@@ -24,6 +29,11 @@ class _Session:
 
     async def commit(self):
         self.commit_count += 1
+
+
+class _DatabaseLikeSession(_Session):
+    async def execute(self, *args, **kwargs):
+        return None
 
 
 class _Dispatcher(non_stream_module.NonStreamDispatcherMixin):
@@ -661,6 +671,10 @@ async def _run_audited_interactive_dispatch(
     audit_calls_target=None,
     audit_results=None,
     generate_hook=None,
+    finish_attempt_calls_target=None,
+    finish_round_if_complete_calls_target=None,
+    finish_round_if_complete_result=None,
+    use_execution_round_if_complete=False,
 ):
     profile = SimpleNamespace(id=1)
     audit_configured = audit_results is not None or audit_result is not None
@@ -805,10 +819,17 @@ async def _run_audited_interactive_dispatch(
         return SimpleNamespace(id=8)
 
     async def finish_attempt(db, **kwargs):
+        if finish_attempt_calls_target is not None:
+            finish_attempt_calls_target.append(dict(kwargs))
         return True
 
     async def finish_round(db, **kwargs):
         return finish_round_result
+
+    async def finish_round_if_complete(db, **kwargs):
+        if finish_round_if_complete_calls_target is not None:
+            finish_round_if_complete_calls_target.append(dict(kwargs))
+        return finish_round_if_complete_result
 
     async def update_confirmation(db, *, audit_record_id):
         return None
@@ -875,17 +896,26 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_module.audit_crud, "create_execution_attempt", create_execution)
     monkeypatch.setattr(interactive_module.audit_crud, "finish_execution_attempt", finish_attempt)
     monkeypatch.setattr(interactive_module.audit_crud, "finish_execution_round", finish_round)
+    if use_execution_round_if_complete:
+        monkeypatch.setattr(interactive_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
     monkeypatch.setattr(interactive_module.audit_crud, "mark_execution_unknown", mark_unknown)
     monkeypatch.setattr(interactive_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(interactive_helpers_module, "update_confirmation_message_status", update_confirmation)
     monkeypatch.setattr(interactive_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", process_tool)
 
+    async def get_session_by_id(*args, **kwargs):
+        return None
+
+    db = _DatabaseLikeSession() if use_execution_round_if_complete else _Session()
+    if use_execution_round_if_complete:
+        monkeypatch.setattr(interactive_module.session_crud, "get_by_session_id", get_session_by_id)
+
     if stream_dispatch:
         response = [
             event
             async for event in _StreamDispatcher.dispatch_stream(
-                db=_Session(),
+                db=db,
                 message="request",
                 uid="user-1",
                 session_id="session-1",
@@ -899,7 +929,7 @@ async def _run_audited_interactive_dispatch(
         ]
     else:
         response = await _Dispatcher.dispatch(
-            db=_Session(),
+            db=db,
             message="request",
             uid="user-1",
             session_id="session-1",
@@ -912,6 +942,58 @@ async def _run_audited_interactive_dispatch(
             execution_resume_state=execution_resume_state,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_persists_handoff_binding_when_round_is_not_complete(monkeypatch):
+    checkpoints = []
+    finish_attempt_calls = []
+    finish_round_if_complete_calls = []
+    terminal_session_id = "h" * 32
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(dict(checkpoint))
+
+    async def process_tool(tool_call, *args, **kwargs):
+        handoff = ShellInteractiveHandoffResult(
+            terminal_session_id=terminal_session_id,
+            status=TerminalSessionStatus.STARTING,
+            output_buffer=TerminalOutputBufferState(
+                capacity_bytes=1_048_576,
+                oldest_offset=0,
+                next_offset=0,
+                oldest_sequence=1,
+                next_sequence=1,
+            ),
+            output_stream="merged_stdout_stderr",
+        )
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content=handoff.model_dump_json(),
+        )
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        finish_attempt_calls_target=finish_attempt_calls,
+        finish_round_if_complete_calls_target=finish_round_if_complete_calls,
+        finish_round_if_complete_result=None,
+        use_execution_round_if_complete=True,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    assert finish_attempt_calls == []
+    assert finish_round_if_complete_calls == [{"audit_record_id": 42, "claim_token": "claim-token"}]
+    handoff_checkpoints = [checkpoint for checkpoint in checkpoints if SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY in checkpoint]
+    assert handoff_checkpoints[-1][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
+        "audit_record_id": 42,
+        "claim_token": "claim-token",
+        "handoff_state": "persisted",
+        "terminal_session_ids": [terminal_session_id],
+    }
+    assert unknown_calls == []
 
 
 @pytest.mark.asyncio

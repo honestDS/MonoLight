@@ -35,6 +35,19 @@ class CRUDTerminalSession:
         result = await db.execute(select(TerminalSession).where(TerminalSession.audit_execution_record_id == audit_execution_record_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def list_active_audit_execution_record_ids(
+        self,
+        db: AsyncSession,
+        audit_record_id: int,
+    ) -> set[int]:
+        result = await db.execute(
+            select(TerminalSession.audit_execution_record_id).where(
+                TerminalSession.audit_record_id == audit_record_id,
+                TerminalSession.status.not_in(TERMINAL_SESSION_FINAL_STATUSES),
+            )
+        )
+        return {execution_record_id for execution_record_id in result.scalars().all() if isinstance(execution_record_id, int) and not isinstance(execution_record_id, bool) and execution_record_id > 0}
+
     async def create_session(
         self,
         db: AsyncSession,
@@ -184,6 +197,8 @@ class CRUDTerminalSession:
         output_buffer: TerminalOutputBufferState,
         exit_code: int | None = None,
         failure_reason: str | None = None,
+        *,
+        commit: bool = True,
     ) -> bool:
         terminal_session = await self.get(db, terminal_session_id)
         if terminal_session is None:
@@ -218,7 +233,10 @@ class CRUDTerminalSession:
             .values(**values)
             .execution_options(synchronize_session=False)
         )
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         return result.rowcount == 1
 
     async def release_starting_claim(

@@ -10,7 +10,6 @@ from app.core.terminal.pty_base import (
     PtyDriver,
     PtyProcessConfig,
 )
-from app.core.terminal.schemas import TerminalSignal
 
 
 def make_config(**overrides: object) -> PtyProcessConfig:
@@ -321,9 +320,6 @@ class FakePtyDriver(PtyDriver):
         return len(data)
 
     async def resize(self, columns: int, rows: int) -> None:
-        return None
-
-    async def send_signal(self, signal: TerminalSignal) -> None:
         return None
 
     async def wait(self) -> int:

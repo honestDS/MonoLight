@@ -18,7 +18,6 @@ from app.core.terminal import (
     TerminalResizeRequest,
     TerminalSessionSnapshot,
     TerminalSessionStatus,
-    TerminalSignalRequest,
     TerminalStatusRequest,
     TerminalWriteRequest,
     can_transition_terminal_status,
@@ -195,7 +194,6 @@ def test_permission_scope_requires_exact_owner_session_and_authorized_action():
     assert scope.permits("user-1", "session-1", TerminalAction.WRITE)
     assert not scope.permits("user-2", "session-1", TerminalAction.READ)
     assert not scope.permits("user-1", "session-2", TerminalAction.READ)
-    assert not scope.permits("user-1", "session-1", TerminalAction.SIGNAL)
     assert _permission_scope().allowed_actions == ALL_TERMINAL_ACTIONS
 
 
@@ -254,15 +252,6 @@ def test_generated_terminal_identifiers_are_unique_and_valid():
         ),
         (
             {
-                "action": "signal",
-                "terminal_session_id": TERMINAL_SESSION_ID,
-                "request_id": REQUEST_ID,
-                "signal": "interrupt",
-            },
-            TerminalSignalRequest,
-        ),
-        (
-            {
                 "action": "close",
                 "terminal_session_id": TERMINAL_SESSION_ID,
                 "request_id": REQUEST_ID,
@@ -291,6 +280,15 @@ def test_terminal_requests_forbid_extra_fields_and_unknown_actions():
         )
     with pytest.raises(ValidationError):
         REQUEST_ADAPTER.validate_python({"action": "unknown", "terminal_session_id": TERMINAL_SESSION_ID})
+    with pytest.raises(ValidationError):
+        REQUEST_ADAPTER.validate_python(
+            {
+                "action": "signal",
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "request_id": REQUEST_ID,
+                "signal": "interrupt",
+            }
+        )
 
 
 @pytest.mark.parametrize(

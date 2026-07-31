@@ -22,6 +22,7 @@ from app.core.constants import (
     ERR_TERMINAL_SESSION_ACCESS_DENIED,
     ERR_TERMINAL_SESSION_NOT_FOUND,
 )
+from app.core.crud.audit import audit_crud
 from app.core.crud.terminal_session import (
     terminal_control_command_crud,
     terminal_session_crud,
@@ -33,6 +34,7 @@ from app.core.terminal.process_config import build_interactive_shell_argv, build
 from app.core.terminal.pty_base import PtyDriver, PtyProcessConfig
 from app.core.terminal.pty_factory import create_pty_driver
 from app.core.terminal.schemas import (
+    ALL_TERMINAL_ACTIONS,
     TERMINAL_SESSION_FINAL_STATUSES,
     TerminalAction,
     TerminalCloseRequest,
@@ -44,11 +46,11 @@ from app.core.terminal.schemas import (
     TerminalResizeRequest,
     TerminalSessionSnapshot,
     TerminalSessionStatus,
-    TerminalSignal,
-    TerminalSignalRequest,
     TerminalStatusRequest,
     TerminalWriteRequest,
 )
+from app.core.utils.background_task_result import serialize_execution_summary
+from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import AsyncSessionLocal
 
@@ -58,14 +60,19 @@ TERMINAL_SESSION_LEASE_SECONDS = 60
 TERMINAL_SESSION_LEASE_RENEW_INTERVAL_SECONDS = 20
 TERMINAL_SESSION_POLL_INTERVAL_SECONDS = 0.2
 
-type TerminalMutatingRequest = TerminalWriteRequest | TerminalResizeRequest | TerminalSignalRequest | TerminalCloseRequest
+type TerminalMutatingRequest = TerminalWriteRequest | TerminalResizeRequest | TerminalCloseRequest
 
 _TERMINAL_MUTATING_REQUEST_TYPES = (
     TerminalWriteRequest,
     TerminalResizeRequest,
-    TerminalSignalRequest,
     TerminalCloseRequest,
 )
+
+
+async def _update_terminal_confirmation_status(db: AsyncSession, *, audit_record_id: int) -> None:
+    from app.core.audit.confirmation import update_confirmation_message_status
+
+    await update_confirmation_message_status(db, audit_record_id=audit_record_id)
 
 
 class _TerminalLeaseLost(Exception):
@@ -215,7 +222,7 @@ class TerminalSessionManager:
             or terminal_session.audit_execution_record_id != audit_execution_record_id
             or terminal_session.command != command
             or terminal_session.working_directory != working_directory
-            or frozenset(terminal_session.allowed_actions) != allowed_actions
+            or frozenset(action for action in terminal_session.allowed_actions if action in {available_action.value for available_action in ALL_TERMINAL_ACTIONS}) != allowed_actions
         ):
             raise ForbiddenException(
                 ERR_TERMINAL_SESSION_ACCESS_DENIED,
@@ -262,7 +269,7 @@ class TerminalSessionManager:
             original_tool_call_id=terminal_session.original_tool_call_id,
             audit_record_id=terminal_session.audit_record_id,
             audit_execution_record_id=terminal_session.audit_execution_record_id,
-            allowed_actions=terminal_session.allowed_actions,
+            allowed_actions=frozenset(action for action in ALL_TERMINAL_ACTIONS if action.value in terminal_session.allowed_actions),
         )
         output_buffer = TerminalOutputBufferState(
             capacity_bytes=terminal_session.output_capacity_bytes,
@@ -520,17 +527,18 @@ class _TerminalSessionRuntime:
         while not self._stop_event.is_set():
             driver = self._driver
             if driver is None:
-                await self._update_runtime_snapshot(
-                    self._status,
-                    output_buffer=self._get_output_buffer(),
-                    exit_code=self._exit_code,
-                    failure_reason=self._failure_reason,
-                )
+                if self._status not in TERMINAL_SESSION_FINAL_STATUSES:
+                    await self._update_runtime_snapshot(
+                        self._status,
+                        output_buffer=self._get_output_buffer(),
+                        exit_code=self._exit_code,
+                        failure_reason=self._failure_reason,
+                    )
             else:
                 snapshot = driver.resource_snapshot()
                 if self._wait_task is not None and self._wait_task.done() and self._status not in TERMINAL_SESSION_FINAL_STATUSES:
                     await self._complete_natural_exit()
-                else:
+                elif self._status not in TERMINAL_SESSION_FINAL_STATUSES:
                     await self._update_runtime_snapshot(
                         self._status,
                         output_buffer=snapshot.output_buffer,
@@ -664,7 +672,6 @@ class _TerminalSessionRuntime:
             if action in {
                 TerminalAction.WRITE,
                 TerminalAction.RESIZE,
-                TerminalAction.SIGNAL,
             }:
                 raise RuntimeError(t(ERR_TERMINAL_PTY_NOT_STARTED))
             raise RuntimeError(t(ERR_TERMINAL_PROCESS_ACTION_INVALID, action=command.action))
@@ -697,11 +704,6 @@ class _TerminalSessionRuntime:
             rows = payload["rows"]
             await driver.resize(columns, rows)
             return {"columns": columns, "rows": rows}
-
-        if action is TerminalAction.SIGNAL:
-            signal = TerminalSignal(payload["signal"])
-            await driver.send_signal(signal)
-            return {"signal": signal.value}
 
         if action is TerminalAction.CLOSE:
             return await self._execute_close(bool(payload["force"]))
@@ -778,13 +780,6 @@ class _TerminalSessionRuntime:
             raise
 
         if was_final:
-            snapshot = driver.resource_snapshot()
-            await self._update_runtime_snapshot(
-                self._status,
-                output_buffer=snapshot.output_buffer,
-                exit_code=self._exit_code,
-                failure_reason=self._failure_reason,
-            )
             return self._close_result()
 
         wait_task = self._wait_task
@@ -835,6 +830,11 @@ class _TerminalSessionRuntime:
         exit_code: int | None = None,
         failure_reason: str | None = None,
     ) -> None:
+        if self._status is status and status in TERMINAL_SESSION_FINAL_STATUSES:
+            return
+
+        audit_record_id = self.terminal_session.audit_record_id
+        audit_round_finished = False
         async with AsyncSessionLocal() as db:
             updated = await terminal_session_crud.update_runtime_snapshot(
                 db,
@@ -844,7 +844,118 @@ class _TerminalSessionRuntime:
                 output_buffer,
                 exit_code=exit_code,
                 failure_reason=failure_reason,
+                commit=False,
             )
+            if updated and status in TERMINAL_SESSION_FINAL_STATUSES:
+                execution_record_id = self.terminal_session.audit_execution_record_id
+                execution = await audit_crud.get_execution_record(db, execution_record_id)
+                if execution is None:
+                    logger.warning(
+                        "Terminal session audit execution record not found",
+                        extra={
+                            "terminal_session_id": self.terminal_session_id,
+                            "audit_record_id": audit_record_id,
+                            "audit_execution_record_id": execution_record_id,
+                            "terminal_status": status.value,
+                        },
+                    )
+                elif execution.audit_record_id != audit_record_id:
+                    logger.error(
+                        "Terminal session audit execution binding mismatch",
+                        extra={
+                            "terminal_session_id": self.terminal_session_id,
+                            "audit_record_id": audit_record_id,
+                            "audit_execution_record_id": execution_record_id,
+                            "execution_audit_record_id": execution.audit_record_id,
+                        },
+                    )
+                elif execution.status != AuditExecutionStatus.RUNNING:
+                    logger.warning(
+                        "Terminal session audit execution is already finalized",
+                        extra={
+                            "terminal_session_id": self.terminal_session_id,
+                            "audit_record_id": audit_record_id,
+                            "audit_execution_record_id": execution_record_id,
+                            "execution_status": execution.status.value,
+                        },
+                    )
+                else:
+                    audit_record = await audit_crud.get_record(db, audit_record_id)
+                    if audit_record is None:
+                        logger.warning(
+                            "Terminal session audit record not found",
+                            extra={
+                                "terminal_session_id": self.terminal_session_id,
+                                "audit_record_id": audit_record_id,
+                                "audit_execution_record_id": execution_record_id,
+                            },
+                        )
+                    elif audit_record.status != AuditRecordStatus.EXECUTING or audit_record.execution_claim_token != execution.claim_token:
+                        logger.warning(
+                            "Terminal session audit round is already finalized",
+                            extra={
+                                "terminal_session_id": self.terminal_session_id,
+                                "audit_record_id": audit_record_id,
+                                "audit_execution_record_id": execution_record_id,
+                                "audit_status": audit_record.status.value,
+                            },
+                        )
+                    else:
+                        if status is TerminalSessionStatus.EXITED:
+                            execution_status = AuditExecutionStatus.SUCCEEDED if exit_code == 0 else AuditExecutionStatus.FAILED
+                        elif status is TerminalSessionStatus.FAILED:
+                            execution_status = AuditExecutionStatus.FAILED
+                        else:
+                            execution_status = AuditExecutionStatus.EXECUTION_UNKNOWN
+                        result_summary = serialize_execution_summary(
+                            {
+                                "terminal_session_id": self.terminal_session_id,
+                                "status": status.value,
+                                "exit_code": exit_code,
+                                "failure_reason": failure_reason,
+                            },
+                            max_chars=1000,
+                        )
+                        execution_finished = await audit_crud.finish_execution_attempt(
+                            db,
+                            execution_record_id=execution_record_id,
+                            status=execution_status,
+                            result_summary=result_summary,
+                            error=None if execution_status is AuditExecutionStatus.SUCCEEDED else result_summary,
+                            commit=False,
+                        )
+                        if execution_finished:
+                            round_status = await audit_crud.finish_execution_round_if_complete(
+                                db,
+                                audit_record_id=audit_record_id,
+                                claim_token=execution.claim_token,
+                                commit=False,
+                            )
+                            audit_round_finished = round_status is not None
+                        else:
+                            logger.warning(
+                                "Terminal session audit execution was not finalized",
+                                extra={
+                                    "terminal_session_id": self.terminal_session_id,
+                                    "audit_record_id": audit_record_id,
+                                    "audit_execution_record_id": execution_record_id,
+                                    "terminal_status": status.value,
+                                },
+                            )
+            await db.commit()
+            if audit_round_finished:
+                try:
+                    await _update_terminal_confirmation_status(db, audit_record_id=audit_record_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Terminal session confirmation status projection failed",
+                        extra={
+                            "terminal_session_id": self.terminal_session_id,
+                            "audit_record_id": audit_record_id,
+                        },
+                    )
         if not updated:
             logger.error(
                 "Terminal session runtime lease lost",

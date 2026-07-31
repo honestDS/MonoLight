@@ -15,7 +15,6 @@ from app.core.terminal import (
     TerminalReadResult,
     TerminalSessionSnapshot,
     TerminalSessionStatus,
-    TerminalSignal,
 )
 from app.core.tools import (
     SHELL_COMPANION_TOOL_SCHEMAS,
@@ -26,13 +25,25 @@ from app.core.tools.terminal import (
     TerminalCloseExecutor,
     TerminalReadExecutor,
     TerminalResizeExecutor,
-    TerminalSignalExecutor,
     TerminalStatusExecutor,
     TerminalWriteExecutor,
 )
+from app.core.utils.dispatcher.process_single_tool import get_handed_off_terminal_session_id
 from app.models.profile import Profile
 
 TERMINAL_SESSION_ID = "t" * 32
+_VALID_HANDOFF_PAYLOAD = {
+    "terminal_session_id": TERMINAL_SESSION_ID,
+    "status": "starting",
+    "output_buffer": {
+        "capacity_bytes": 1_048_576,
+        "oldest_offset": 0,
+        "next_offset": 0,
+        "oldest_sequence": 1,
+        "next_sequence": 1,
+    },
+    "output_stream": "merged_stdout_stderr",
+}
 
 
 def _profile(enabled_tools: list[str]) -> Profile:
@@ -64,6 +75,34 @@ def _snapshot() -> TerminalSessionSnapshot:
             next_sequence=1,
         ),
     )
+
+
+def test_get_handed_off_terminal_session_id_accepts_complete_handoff_result():
+    assert get_handed_off_terminal_session_id(json.dumps(_VALID_HANDOFF_PAYLOAD)) == TERMINAL_SESSION_ID
+
+
+@pytest.mark.parametrize(
+    "tool_result",
+    [
+        "{",
+        "[]",
+        "null",
+        json.dumps({"terminal_session_id": TERMINAL_SESSION_ID}),
+        json.dumps({"status": "starting", "output_stream": "merged_stdout_stderr"}),
+        json.dumps(
+            {
+                "terminal_session_id": TERMINAL_SESSION_ID,
+                "status": "starting",
+                "output_stream": "merged_stdout_stderr",
+            }
+        ),
+        json.dumps({"terminal_session_id": TERMINAL_SESSION_ID, "status": "success", "output": "done"}),
+        json.dumps({**_VALID_HANDOFF_PAYLOAD, "status": "exited"}),
+        json.dumps({**_VALID_HANDOFF_PAYLOAD, "output_stream": "stdout"}),
+    ],
+)
+def test_get_handed_off_terminal_session_id_rejects_non_handoff_results(tool_result):
+    assert get_handed_off_terminal_session_id(tool_result) is None
 
 
 def _executor(executor_class):
@@ -127,19 +166,13 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
                 "rows": {"minimum": 1, "maximum": 1_000},
             },
         },
-        "terminal_signal": {
-            "required": ["terminal_session_id", "signal"],
-            "properties": {
-                "terminal_session_id": {},
-                "signal": {"enum": [signal.value for signal in TerminalSignal]},
-            },
-        },
         "terminal_close": {
             "required": ["terminal_session_id"],
             "properties": {"terminal_session_id": {}, "force": {"default": False}},
         },
     }
 
+    assert "terminal_signal" not in {schema["function"]["name"] for schema in SHELL_COMPANION_TOOL_SCHEMAS}
     for schema in SHELL_COMPANION_TOOL_SCHEMAS:
         name = schema["function"]["name"]
         parameters = schema["function"]["parameters"]
@@ -156,9 +189,6 @@ def test_terminal_tool_schemas_match_protocol_defaults_and_bounds():
             properties = parameters["properties"][property_name]
             for field, value in property_expectations.items():
                 assert properties[field] == value
-
-    signal_schema = next(schema for schema in SHELL_COMPANION_TOOL_SCHEMAS if schema["function"]["name"] == "terminal_signal")
-    assert signal_schema["function"]["parameters"]["properties"]["signal"]["enum"] == [signal.value for signal in TerminalSignal]
 
 
 @pytest.mark.asyncio
@@ -210,11 +240,6 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
             {"terminal_session_id": TERMINAL_SESSION_ID, "columns": 100, "rows": 40},
             TerminalAction.RESIZE,
         ),
-        (
-            TerminalSignalExecutor,
-            {"terminal_session_id": TERMINAL_SESSION_ID, "signal": "interrupt"},
-            TerminalAction.SIGNAL,
-        ),
         (TerminalCloseExecutor, {"terminal_session_id": TERMINAL_SESSION_ID, "force": True}, TerminalAction.CLOSE),
     ]
     request_ids = {}
@@ -241,8 +266,6 @@ async def test_terminal_executors_use_protocol_results_and_stable_request_ids(mo
         TerminalAction.WRITE,
         TerminalAction.RESIZE,
         TerminalAction.RESIZE,
-        TerminalAction.SIGNAL,
-        TerminalAction.SIGNAL,
         TerminalAction.CLOSE,
         TerminalAction.CLOSE,
     ]

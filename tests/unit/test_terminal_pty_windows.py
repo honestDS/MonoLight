@@ -86,8 +86,8 @@ async def test_windows_pty_interactive_resize_write_and_snapshot() -> None:
 
         await _wait_for_output(driver, b"READY")
         await asyncio.wait_for(driver.resize(100, 40), timeout=5.0)
-        written = await asyncio.wait_for(driver.write("hello\r\n"), timeout=5.0)
-        assert written == len(b"hello\r\n")
+        written = await asyncio.wait_for(driver.write("hello\n"), timeout=5.0)
+        assert written == len(b"hello\n")
         exit_code = await asyncio.wait_for(driver.wait(), timeout=15.0)
         output = await _wait_for_output(driver, b"SIZE:100x40")
 

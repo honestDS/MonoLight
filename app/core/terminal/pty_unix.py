@@ -16,13 +16,11 @@ from app.core.constants import (
     ERR_TERMINAL_PTY_INPUT_INVALID,
     ERR_TERMINAL_PTY_NOT_STARTED,
     ERR_TERMINAL_PTY_PLATFORM_MISMATCH,
-    ERR_TERMINAL_PTY_SIGNAL_INVALID,
     ERR_TERMINAL_PTY_STATE_INVALID,
     ERR_TERMINAL_PTY_WRITE_STALLED,
 )
 from app.core.i18n import t
 from app.core.terminal.pty_base import PtyDriver, PtyProcessConfig
-from app.core.terminal.schemas import TerminalSignal
 
 if sys.platform.startswith("linux"):
     import fcntl
@@ -148,24 +146,6 @@ class LinuxPtyDriver(PtyDriver):
         if master_fd is None:
             raise RuntimeError(t(ERR_TERMINAL_PTY_CLOSED))
         self._set_winsize(master_fd, columns, rows)
-
-    async def send_signal(self, signal: TerminalSignal) -> None:
-        """Send a signal to the complete PTY process group."""
-        try:
-            terminal_signal = TerminalSignal(signal)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(t(ERR_TERMINAL_PTY_SIGNAL_INVALID, signal=signal)) from exc
-
-        self._require_started()
-        if self._closed or self._eof:
-            return
-
-        signal_number = {
-            TerminalSignal.INTERRUPT: signal_module.SIGINT,
-            TerminalSignal.TERMINATE: signal_module.SIGTERM,
-            TerminalSignal.KILL: signal_module.SIGKILL,
-        }[terminal_signal]
-        self._signal_process_group(self._pgid, signal_number)
 
     async def wait(self) -> int:
         """Wait for output drain completion and return the root exit code."""
