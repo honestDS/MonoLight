@@ -21,6 +21,7 @@ from app.core.constants import (
     ERR_TERMINAL_READ_OFFSET_AHEAD,
     ERR_TERMINAL_SESSION_ACCESS_DENIED,
     ERR_TERMINAL_SESSION_NOT_FOUND,
+    ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
 )
 from app.core.crud.audit import audit_crud
 from app.core.crud.terminal_session import (
@@ -88,8 +89,8 @@ class TerminalSessionManager:
         session_id: str,
         profile_id: int,
         original_tool_call_id: str,
-        audit_record_id: int,
-        audit_execution_record_id: int,
+        audit_record_id: int | None,
+        audit_execution_record_id: int | None,
         command: str,
         working_directory: str,
         allowed_actions: Iterable[TerminalAction | str],
@@ -97,6 +98,7 @@ class TerminalSessionManager:
         terminal_session_id: str | None = None,
         commit: bool = True,
     ) -> TerminalSession:
+        self._validate_audit_binding(audit_record_id, audit_execution_record_id)
         if terminal_session_id is not None:
             terminal_session_id = TerminalStatusRequest(terminal_session_id=terminal_session_id).terminal_session_id
         output_buffer = TerminalOutputBufferState(
@@ -138,17 +140,24 @@ class TerminalSessionManager:
         session_id: str,
         profile_id: int,
         original_tool_call_id: str,
-        audit_record_id: int,
-        audit_execution_record_id: int,
+        audit_record_id: int | None,
+        audit_execution_record_id: int | None,
         command: str,
         working_directory: str,
         allowed_actions: Iterable[TerminalAction | str],
     ) -> TerminalSession:
+        self._validate_audit_binding(audit_record_id, audit_execution_record_id)
         expected_allowed_actions = frozenset(TerminalAction(action).value for action in allowed_actions)
-        existing = await terminal_session_crud.get_by_audit_execution_record_id(
-            db,
-            audit_execution_record_id,
-        )
+        has_audit_binding = audit_record_id is not None and audit_execution_record_id is not None
+        if has_audit_binding:
+            existing = await terminal_session_crud.get_by_audit_execution_record_id(db, audit_execution_record_id)
+        else:
+            existing = await terminal_session_crud.get_by_unaudited_identity(
+                db,
+                uid=uid,
+                session_id=session_id,
+                original_tool_call_id=original_tool_call_id,
+            )
         if existing is not None:
             self._validate_execution_session(
                 existing,
@@ -179,10 +188,15 @@ class TerminalSessionManager:
             )
         except IntegrityError:
             await db.rollback()
-            existing = await terminal_session_crud.get_by_audit_execution_record_id(
-                db,
-                audit_execution_record_id,
-            )
+            if has_audit_binding:
+                existing = await terminal_session_crud.get_by_audit_execution_record_id(db, audit_execution_record_id)
+            else:
+                existing = await terminal_session_crud.get_by_unaudited_identity(
+                    db,
+                    uid=uid,
+                    session_id=session_id,
+                    original_tool_call_id=original_tool_call_id,
+                )
             if existing is None:
                 raise
             self._validate_execution_session(
@@ -207,8 +221,8 @@ class TerminalSessionManager:
         session_id: str,
         profile_id: int,
         original_tool_call_id: str,
-        audit_record_id: int,
-        audit_execution_record_id: int,
+        audit_record_id: int | None,
+        audit_execution_record_id: int | None,
         command: str,
         working_directory: str,
         allowed_actions: frozenset[str],
@@ -228,6 +242,14 @@ class TerminalSessionManager:
                 ERR_TERMINAL_SESSION_ACCESS_DENIED,
                 terminal_session_id=terminal_session.terminal_session_id,
             )
+
+    @staticmethod
+    def _validate_audit_binding(
+        audit_record_id: int | None,
+        audit_execution_record_id: int | None,
+    ) -> None:
+        if (audit_record_id is None) != (audit_execution_record_id is None):
+            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
 
     async def get_owned_session(
         self,
@@ -834,6 +856,7 @@ class _TerminalSessionRuntime:
             return
 
         audit_record_id = self.terminal_session.audit_record_id
+        audit_execution_record_id = self.terminal_session.audit_execution_record_id
         audit_round_finished = False
         async with AsyncSessionLocal() as db:
             updated = await terminal_session_crud.update_runtime_snapshot(
@@ -846,8 +869,18 @@ class _TerminalSessionRuntime:
                 failure_reason=failure_reason,
                 commit=False,
             )
-            if updated and status in TERMINAL_SESSION_FINAL_STATUSES:
-                execution_record_id = self.terminal_session.audit_execution_record_id
+            if updated and status in TERMINAL_SESSION_FINAL_STATUSES and (audit_record_id is None) != (audit_execution_record_id is None):
+                logger.error(
+                    "Terminal session has a partial audit binding",
+                    extra={
+                        "terminal_session_id": self.terminal_session_id,
+                        "audit_record_id": audit_record_id,
+                        "audit_execution_record_id": audit_execution_record_id,
+                        "terminal_status": status.value,
+                    },
+                )
+            elif updated and status in TERMINAL_SESSION_FINAL_STATUSES and audit_record_id is not None and audit_execution_record_id is not None:
+                execution_record_id = audit_execution_record_id
                 execution = await audit_crud.get_execution_record(db, execution_record_id)
                 if execution is None:
                     logger.warning(

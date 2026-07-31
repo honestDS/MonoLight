@@ -30,9 +30,32 @@ class CRUDTerminalSession:
     async def get_by_audit_execution_record_id(
         self,
         db: AsyncSession,
-        audit_execution_record_id: int,
+        audit_execution_record_id: int | None,
     ) -> TerminalSession | None:
+        if audit_execution_record_id is None:
+            return None
         result = await db.execute(select(TerminalSession).where(TerminalSession.audit_execution_record_id == audit_execution_record_id).execution_options(populate_existing=True))
+        return result.scalars().first()
+
+    async def get_by_unaudited_identity(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_id: str,
+        original_tool_call_id: str,
+    ) -> TerminalSession | None:
+        result = await db.execute(
+            select(TerminalSession)
+            .where(
+                TerminalSession.uid == uid,
+                TerminalSession.session_id == session_id,
+                TerminalSession.original_tool_call_id == original_tool_call_id,
+                TerminalSession.audit_record_id.is_(None),
+                TerminalSession.audit_execution_record_id.is_(None),
+            )
+            .execution_options(populate_existing=True)
+        )
         return result.scalars().first()
 
     async def list_active_audit_execution_record_ids(
@@ -56,8 +79,8 @@ class CRUDTerminalSession:
         session_id: str,
         profile_id: int,
         original_tool_call_id: str,
-        audit_record_id: int,
-        audit_execution_record_id: int,
+        audit_record_id: int | None,
+        audit_execution_record_id: int | None,
         command: str,
         working_directory: str,
         allowed_actions: Iterable[TerminalAction | str],

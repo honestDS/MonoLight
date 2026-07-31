@@ -46,8 +46,8 @@ async def create_terminal_session(
     session_id: str = "chat-session-1",
     profile_id: int = 1,
     original_tool_call_id: str = "tool-call-1",
-    audit_record_id: int = 1,
-    audit_execution_record_id: int = 1,
+    audit_record_id: int | None = 1,
+    audit_execution_record_id: int | None = 1,
     command: str = "python -i",
     working_directory: str = "temp/user-1",
     allowed_actions: set[TerminalAction] | None = None,
@@ -101,6 +101,36 @@ async def test_terminal_session_snapshot_persists_across_database_sessions():
     assert snapshot.output_buffer.next_offset == 0
     assert snapshot.output_buffer.oldest_sequence == 1
     assert snapshot.output_buffer.next_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_unaudited_terminal_session_preserves_none_audit_ids_and_reuses_identity():
+    session_kwargs = {
+        "uid": "user-1",
+        "session_id": "chat-session-1",
+        "profile_id": 1,
+        "original_tool_call_id": "unaudited-tool-call",
+        "audit_record_id": None,
+        "audit_execution_record_id": None,
+        "command": "python -i",
+        "working_directory": "temp/user-1",
+        "allowed_actions": ALL_TERMINAL_ACTIONS,
+    }
+
+    async with AsyncSessionLocal() as db:
+        first_session = await terminal_session_manager.get_or_create_session_for_execution(db, **session_kwargs)
+        second_session = await terminal_session_manager.get_or_create_session_for_execution(db, **session_kwargs)
+        snapshot = await terminal_session_manager.get_snapshot(
+            db,
+            first_session.terminal_session_id,
+            "user-1",
+            "chat-session-1",
+        )
+
+    assert second_session.terminal_session_id == first_session.terminal_session_id
+    assert snapshot.permission_scope.original_tool_call_id == "unaudited-tool-call"
+    assert snapshot.permission_scope.audit_record_id is None
+    assert snapshot.permission_scope.audit_execution_record_id is None
 
 
 @pytest.mark.asyncio
@@ -427,7 +457,21 @@ async def test_terminal_command_completion_requires_current_session_lease_owner(
 
 
 def test_terminal_model_metadata_marks_persisted_fields_not_nullable():
-    for column_name in ("command", "working_directory", "allowed_actions", "created_at", "updated_at"):
+    for column_name in ("audit_record_id", "audit_execution_record_id"):
+        assert TerminalSession.__table__.c[column_name].nullable is True
+    for column_name in (
+        "terminal_session_id",
+        "uid",
+        "session_id",
+        "original_tool_call_id",
+        "profile_id",
+        "command",
+        "working_directory",
+        "status",
+        "allowed_actions",
+        "created_at",
+        "updated_at",
+    ):
         assert TerminalSession.__table__.c[column_name].nullable is False
     for column_name in ("payload", "created_at", "updated_at"):
         assert TerminalControlCommand.__table__.c[column_name].nullable is False

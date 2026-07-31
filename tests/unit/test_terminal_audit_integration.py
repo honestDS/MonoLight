@@ -208,6 +208,61 @@ async def test_runtime_snapshot_finishes_terminal_audit_and_projects_completed_r
 
 
 @pytest.mark.asyncio
+async def test_runtime_snapshot_finishes_unaudited_terminal_without_audit_side_effects(
+    terminal_audit_database,
+    tmp_path,
+    monkeypatch,
+):
+    async def fail_audit_call(*args, **kwargs):
+        raise AssertionError("unaudited terminal finalization must not call audit services")
+
+    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
+    for method_name in (
+        "get_execution_record",
+        "get_record",
+        "finish_execution_attempt",
+        "finish_execution_round_if_complete",
+    ):
+        monkeypatch.setattr(terminal_manager_module.audit_crud, method_name, fail_audit_call)
+    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", fail_audit_call)
+
+    terminal_session = TerminalSession(
+        terminal_session_id="unaudited-terminal" + "s" * 19,
+        uid="user-1",
+        session_id="chat-session-1",
+        original_tool_call_id="tool-call-1",
+        profile_id=1,
+        audit_record_id=None,
+        audit_execution_record_id=None,
+        command="python -i",
+        working_directory=str(tmp_path),
+        status=TerminalSessionStatus.RUNNING,
+        allowed_actions=["status"],
+        locked_by=WORKER_ID,
+        lock_until=int(time.time()) + 3600,
+    )
+    async with terminal_audit_database() as db:
+        db.add(terminal_session)
+        await db.commit()
+
+    runtime = _TerminalSessionRuntime(terminal_session, WORKER_ID)
+    await runtime._update_runtime_snapshot(
+        TerminalSessionStatus.EXITED,
+        output_buffer=_output_buffer(),
+        exit_code=7,
+    )
+
+    async with terminal_audit_database() as db:
+        stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+
+    assert stored_terminal is not None
+    assert stored_terminal.status is TerminalSessionStatus.EXITED
+    assert stored_terminal.exit_code == 7
+    assert stored_terminal.audit_record_id is None
+    assert stored_terminal.audit_execution_record_id is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_snapshot_projects_confirmation_only_after_the_whole_round_finishes(
     terminal_audit_database,
     tmp_path,

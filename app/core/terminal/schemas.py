@@ -238,8 +238,8 @@ class TerminalPermissionScope(TerminalProtocolModel):
     owner_uid: str = Field(min_length=1, max_length=100)
     owner_session_id: str = Field(min_length=1, max_length=100)
     original_tool_call_id: str = Field(min_length=1, max_length=100)
-    audit_record_id: int = Field(ge=1)
-    audit_execution_record_id: int = Field(ge=1)
+    audit_record_id: int | None = Field(default=None, ge=1)
+    audit_execution_record_id: int | None = Field(default=None, ge=1)
     allowed_actions: frozenset[TerminalAction] = Field(
         default_factory=lambda: ALL_TERMINAL_ACTIONS,
         min_length=1,

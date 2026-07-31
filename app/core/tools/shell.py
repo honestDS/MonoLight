@@ -177,39 +177,48 @@ class ShellExecutor(BaseExecutor):
 
     async def _execute_interactive(self, command: str) -> str:
         dispatch_context = self.dispatch_context
-        if self.db is None or self.profile is None or self.profile.id is None or not self.session_id or dispatch_context is None or not dispatch_context.tool_call_id:
+        if self.cfg is None or self.db is None or self.profile is None or self.profile.id is None or not self.session_id or dispatch_context is None or not dispatch_context.tool_call_id:
             raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+
+        from app.core.audit.service import is_audit_configured
 
         tool_call_id = dispatch_context.tool_call_id
-        binding = await audit_crud.get_running_execution_binding(
-            self.db,
-            new_tool_call_id=tool_call_id,
-        )
-        if binding is None:
-            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+        original_tool_call_id = tool_call_id
+        audit_record_id = None
+        audit_execution_record_id = None
+        if is_audit_configured(self.cfg):
+            binding = await audit_crud.get_running_execution_binding(
+                self.db,
+                new_tool_call_id=tool_call_id,
+            )
+            if binding is None:
+                raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
 
-        audit_record, audit_execution = binding
-        if audit_record.uid != self.uid or audit_record.session_id != self.session_id:
-            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
-        if audit_record.id is None or audit_execution.id is None:
-            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+            audit_record, audit_execution = binding
+            if audit_record.uid != self.uid or audit_record.session_id != self.session_id:
+                raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+            if audit_record.id is None or audit_execution.id is None:
+                raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
 
-        details = await audit_crud.list_tool_details(self.db, audit_record.id)
-        detail = next(
-            (item for item in details if item.id == audit_execution.audit_tool_detail_id),
-            None,
-        )
-        if detail is None:
-            raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+            details = await audit_crud.list_tool_details(self.db, audit_record.id)
+            detail = next(
+                (item for item in details if item.id == audit_execution.audit_tool_detail_id),
+                None,
+            )
+            if detail is None:
+                raise RuntimeError(t(ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED))
+            original_tool_call_id = detail.original_tool_call_id
+            audit_record_id = audit_record.id
+            audit_execution_record_id = audit_execution.id
 
         terminal_session = await terminal_session_manager.get_or_create_session_for_execution(
             self.db,
             uid=self.uid,
             session_id=self.session_id,
             profile_id=self.profile.id,
-            original_tool_call_id=detail.original_tool_call_id,
-            audit_record_id=audit_record.id,
-            audit_execution_record_id=audit_execution.id,
+            original_tool_call_id=original_tool_call_id,
+            audit_record_id=audit_record_id,
+            audit_execution_record_id=audit_execution_record_id,
             command=command,
             working_directory=str(self.user_temp_dir),
             allowed_actions=ALL_TERMINAL_ACTIONS,
@@ -246,7 +255,12 @@ class ShellExecutor(BaseExecutor):
             )
 
         if execution_mode is ShellExecutionMode.INTERACTIVE:
-            return await self._execute_interactive(command)
+            try:
+                return await self._execute_interactive(command)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
         system_info = get_full_system_context()
         t_logger = self.logger.bind(tool_call=True)

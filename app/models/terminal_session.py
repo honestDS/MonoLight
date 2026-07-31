@@ -29,8 +29,8 @@ class TerminalSession(SQLModel, table=True):
     session_id: str = Field(index=True, max_length=100)
     original_tool_call_id: str = Field(index=True, max_length=100)
     profile_id: int = Field(index=True)
-    audit_record_id: int = Field(index=True)
-    audit_execution_record_id: int = Field(unique=True, index=True)
+    audit_record_id: int | None = Field(default=None, index=True)
+    audit_execution_record_id: int | None = Field(default=None, unique=True, index=True)
     command: str = Field(sa_column=Column(Text, nullable=False))
     working_directory: str = Field(sa_column=Column(Text, nullable=False))
     status: TerminalSessionStatus = Field(

@@ -1,8 +1,9 @@
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from scripts import migration_20260731_add_terminal_sessions as migration
+from scripts import migration_20260801_make_terminal_audit_optional as optional_audit_migration
 
 
 @pytest.mark.parametrize(
@@ -97,6 +98,120 @@ async def test_terminal_migration_creates_complete_idempotent_schema():
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_optional_terminal_audit_migration_preserves_legacy_data_constraints_indexes_and_allows_null_audits():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await migration.migrate(session)
+            await session.commit()
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO terminal_session (
+                        terminal_session_id, uid, session_id, original_tool_call_id, profile_id,
+                        audit_record_id, audit_execution_record_id, command, working_directory,
+                        status, allowed_actions, output_capacity_bytes, oldest_output_offset,
+                        next_output_offset, oldest_output_sequence, next_output_sequence,
+                        exit_code, failure_reason, locked_by, lock_until, created_at, updated_at,
+                        started_at, finished_at
+                    ) VALUES (
+                        :terminal_session_id, :uid, :session_id, :original_tool_call_id, :profile_id,
+                        :audit_record_id, :audit_execution_record_id, :command, :working_directory,
+                        :status, :allowed_actions, :output_capacity_bytes, :oldest_output_offset,
+                        :next_output_offset, :oldest_output_sequence, :next_output_sequence,
+                        :exit_code, :failure_reason, :locked_by, :lock_until, :created_at, :updated_at,
+                        :started_at, :finished_at
+                    )
+                    """
+                ),
+                {
+                    "terminal_session_id": "legacy-terminal",
+                    "uid": "user-1",
+                    "session_id": "chat-session-1",
+                    "original_tool_call_id": "tool-call-1",
+                    "profile_id": 1,
+                    "audit_record_id": 101,
+                    "audit_execution_record_id": 1001,
+                    "command": "python -i",
+                    "working_directory": "temp/user-1",
+                    "status": "running",
+                    "allowed_actions": '["status"]',
+                    "output_capacity_bytes": 1048576,
+                    "oldest_output_offset": 0,
+                    "next_output_offset": 0,
+                    "oldest_output_sequence": 1,
+                    "next_output_sequence": 1,
+                    "exit_code": None,
+                    "failure_reason": None,
+                    "locked_by": None,
+                    "lock_until": None,
+                    "created_at": "2026-08-01 00:00:00",
+                    "updated_at": "2026-08-01 00:00:00",
+                    "started_at": None,
+                    "finished_at": None,
+                },
+            )
+            await session.commit()
+
+            await optional_audit_migration.migrate(session)
+            await session.commit()
+            await optional_audit_migration.migrate(session)
+            await session.commit()
+
+        async with engine.connect() as connection:
+            schema = await connection.run_sync(_inspect_terminal_schema)
+
+        assert schema["session_nullable"]["audit_record_id"] is True
+        assert schema["session_nullable"]["audit_execution_record_id"] is True
+        assert ("audit_execution_record_id",) in schema["session_unique_columns"]
+        assert {"uid", "status", "lock_until"} <= schema["session_index_columns"]
+
+        async with session_factory() as session:
+            result = await session.execute(
+                text("SELECT uid, audit_record_id, audit_execution_record_id FROM terminal_session WHERE terminal_session_id = :terminal_session_id"),
+                {"terminal_session_id": "legacy-terminal"},
+            )
+            assert tuple(result.one()) == ("user-1", 101, 1001)
+
+            for terminal_session_id in ("unaudited-terminal-1", "unaudited-terminal-2"):
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO terminal_session (
+                            terminal_session_id, uid, session_id, original_tool_call_id, profile_id,
+                            audit_record_id, audit_execution_record_id, command, working_directory,
+                            status, allowed_actions, created_at, updated_at
+                        ) VALUES (
+                            :terminal_session_id, :uid, :session_id, :original_tool_call_id, :profile_id,
+                            NULL, NULL, :command, :working_directory,
+                            :status, :allowed_actions, :created_at, :updated_at
+                        )
+                        """
+                    ),
+                    {
+                        "terminal_session_id": terminal_session_id,
+                        "uid": "user-1",
+                        "session_id": "chat-session-1",
+                        "original_tool_call_id": terminal_session_id,
+                        "profile_id": 1,
+                        "command": "python -i",
+                        "working_directory": "temp/user-1",
+                        "status": "starting",
+                        "allowed_actions": '["status"]',
+                        "created_at": "2026-08-01 00:00:00",
+                        "updated_at": "2026-08-01 00:00:00",
+                    },
+                )
+            await session.commit()
+
+            result = await session.execute(text("SELECT COUNT(*) FROM terminal_session WHERE audit_record_id IS NULL AND audit_execution_record_id IS NULL"))
+            assert result.scalar_one() == 2
+    finally:
+        await engine.dispose()
+
+
 def _inspect_terminal_schema(sync_connection):
     inspector = inspect(sync_connection)
 
@@ -111,6 +226,7 @@ def _inspect_terminal_schema(sync_connection):
     return {
         "table_names": set(inspector.get_table_names()),
         "session_columns": {column["name"] for column in inspector.get_columns("terminal_session")},
+        "session_nullable": {column["name"]: column["nullable"] for column in inspector.get_columns("terminal_session")},
         "control_columns": {column["name"] for column in inspector.get_columns("terminal_control_command")},
         "session_unique_columns": unique_columns("terminal_session"),
         "control_unique_columns": unique_columns("terminal_control_command"),
