@@ -112,6 +112,7 @@ app/core/
 ├── rerank/                 # 知识库重排
 ├── retrieval/              # 知识库检索
 ├── session_reply_queue/    # 会话最终回复队列
+├── terminal/               # 交互终端与 PTY 生命周期
 ├── tools/                  # 模型可调用工具
 ├── utils/                  # 通用与调度辅助函数
 ├── channel_router.py       # 模型渠道选择
@@ -165,6 +166,29 @@ app/core/session_reply_queue/
 ├── executor.py             # 前台、任务总结及已确认工具执行
 └── manager.py              # 统一用户消息提交、确认判定与工作入队
 ```
+
+### 交互终端：`app/core/terminal/`
+
+```text
+app/core/terminal/
+├── __init__.py             # 交互终端能力导出
+├── schemas.py              # 终端协议、状态、权限与输出结果结构
+├── manager.py              # 终端会话、控制命令、租约与 Worker 编排
+├── process_config.py        # 交互 Shell 命令参数与子进程环境
+├── pty_base.py             # PTY 抽象、资源快照与有界输出缓冲
+├── pty_factory.py           # 按平台创建 PTY 驱动
+├── pty_unix.py              # Linux PTY 驱动
+├── pty_windows.py           # Windows ConPTY 驱动
+└── recovery.py              # 进程身份校验与孤儿进程清理
+```
+
+交互终端由 `execute_shell` 统一创建。该工具必须提供 `execution_mode`，模式描述的是同一条原命令的输入输出和生命周期，不代表编程语言；两种模式都执行未修改的原命令，不因模式选择替换或包装命令。`non_interactive` 始终使用 PIPE 子进程路径，适合不需要后续输入且应在 `tool_timeout` 内结束的命令；`interactive` 从进程创建开始就使用 PTY，适合需要后续输入、TTY 行为或在本次工具调用结束后继续运行的命令。当前仅支持 Windows ConPTY 和 Linux PTY，其他平台不支持 `interactive`。
+
+Web 进程和会话最终回复 Worker 不直接持有 PTY，只通过数据库中的 `terminal_session` 会话记录和 `terminal_control_command` 控制命令寻址；只有 terminal Worker 认领会话租约并持有 PTY。PTY 输出正文只保存在 terminal Worker 的有界内存缓冲中，数据库只保存输出容量、offset 和 sequence 等边界元数据；stdout 与 stderr 在 PTY 层合并为一个按字节 offset 读取的输出流。terminal Worker 重启后不会恢复旧输出正文，遗留会话按租约恢复规则处理。
+
+`terminal_write` 在 Worker 实际写入 PTY 之前记录 `output_offset_before_write`，并将该位置作为本次读取起点。写入、等待命令完成和内部读取共用当前 Profile 的 `tool_timeout` 时间预算；超时只结束等待，不关闭终端，并返回 `read_timed_out=true`、`read_result=null` 和 `read_offset`，后续通过 `terminal_read` 从该 offset 继续读取。终端自然退出或显式关闭后分别记录 `EXITED` 或对应失败终态；审计配置完整并成功绑定时，终端终态会完成原始审计执行记录，未配置审计时允许使用空绑定。
+
+终端会话租约失效时，持有者关闭 PTY，后续恢复流程清理孤儿进程并将无法继续持有的会话标记为 `LOST`，未完成的控制命令失败；terminal Worker 正常停止时会关闭其持有的 PTY、结束未完成命令，并将未完成会话标记为 `LOST`。删除聊天会话时，系统先按保存的进程身份清理终端进程，再处理活动会话的 `LOST` 终态和审计收尾，最后删除终端会话及控制命令记录。进程清理同时核对 PID、`create_time` 和系统 `boot_time`，避免 PID 复用导致误杀其他进程。
 
 ### 消息平台：`app/core/message_platforms/`
 
@@ -302,6 +326,7 @@ app/core/tools/
 ├── list_background_tasks.py # 查询后台任务
 ├── read_text_file.py       # 通用只读文本文件读取
 ├── send_file_to_user.py    # 向用户发送文件
+├── terminal.py             # 交互终端状态、读写、调整与关闭工具
 └── shell.py                # Shell 命令执行
 ```
 
@@ -503,7 +528,9 @@ dashboard/tests/
 tests/
 ├── integration/
 │   ├── conftest.py                  # 接口测试数据库夹具
-│   └── test_chat_guidance_api.py    # 外部会话引导接口请求测试
+│   ├── test_chat_concurrent_input.py # 并发输入接口流程测试
+│   ├── test_chat_guidance_api.py    # 外部会话引导接口请求测试
+│   └── test_terminal_shell_workflow.py # execute_shell 交互模式与伴随工具流程测试
 └── unit/
     ├── context_summary_*_fixture.py # 上下文总结测试夹具
     ├── context_summary_*_support.py # 上下文总结测试辅助
@@ -514,6 +541,7 @@ tests/
     ├── test_context_*.py             # 上下文与总结测试
     ├── test_message_*.py             # 消息与消息平台测试
     ├── test_session_*.py             # 会话、通知与回复队列测试
+    ├── test_terminal_*.py            # 终端单元、PTY 与平台测试
     ├── test_worker_*.py              # 独立进程与租约测试
     └── test_*.py                     # 其他后端单元测试
 ```
@@ -544,7 +572,9 @@ scripts/
 ├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
 ├── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
 ├── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
-└── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
+├── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
+├── migration_20260801_make_terminal_audit_optional.py # 终端审计绑定可选
+└── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
 ```
 
 ## 运行期目录

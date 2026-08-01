@@ -55,7 +55,7 @@ MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（Gene
 
 ## 运行服务
 
-项目包含 Web 服务、消息平台 Worker、后台任务 Worker 和终端 Worker 四类进程。Web 服务支持多个 Worker，三个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
+项目包含 Web 服务和四个独立 Worker：消息平台 Worker、后台任务 Worker、终端 Worker 和会话最终回复 Worker。Web 服务支持多个 Worker，四个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
 
 在 `.env` 中配置监听地址、端口和 Web Worker 数量：
 
@@ -71,7 +71,7 @@ APP_WORKERS=1
 python start.py
 ```
 
-启动器会先完成数据库建表、迁移和系统数据初始化，再启动 Web 服务、消息平台 Worker、后台任务 Worker 和终端 Worker；任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
+启动器会先完成数据库建表、迁移和系统数据初始化，再启动 Web 服务及四个后台 Worker；任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
 
 需要分别调试各进程时，先执行一次全局初始化：
 
@@ -86,9 +86,20 @@ python main.py
 python -m app.workers.message_platform
 python -m app.workers.background_task
 python -m app.workers.terminal
+python -m app.workers.session_reply
 ```
 
 多实例部署时，所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
+
+### Shell 交互终端配置与运维
+
+在 Profile 的 `tool.enabled_tools` 中启用 `execute_shell` 即可使用 Shell 交互终端；`terminal_status`、`terminal_read`、`terminal_write`、`terminal_resize` 和 `terminal_close` 等终端伴随工具会自动暴露，不需要单独加入 `enabled_tools`。`execute_shell` 的 `execution_mode` 为必填参数，表示同一条原命令的输入输出和生命周期模式，与编程语言无关；两种模式都执行原命令本身。
+
+`tool_timeout` 是 Profile 级工具超时。非交互 Shell 在该时间内等待进程完成，超时后结束进程并返回超时结果。交互终端的 `terminal_write` 使用同一时间预算完成写入、等待和内部输出读取；超时只结束本次等待，返回 `read_timed_out=true`、`read_result=null` 和 `read_offset`，不会关闭终端，后续应通过 `terminal_read` 从该 offset 继续读取。
+
+Web、会话最终回复 Worker 与 terminal Worker 必须连接同一个数据库；终端 PTY 由取得数据库租约的 terminal Worker 独占。输出正文只保存在 terminal Worker 的有界内存中，数据库保存 offset、sequence 等边界信息，stdout 和 stderr 合并读取。terminal Worker 重启或租约恢复不会恢复旧输出正文，遗留会话会按恢复规则清理并标记为 `LOST`。
+
+正常结束交互终端应调用 `terminal_close`，不要直接删除 `terminal_session` 或 `terminal_control_command` 记录。删除聊天会话时，系统会先按 PID、`create_time` 和 `boot_time` 校验并清理关联进程，再删除终端记录。交互终端当前支持 Windows ConPTY 和 Linux PTY，其他平台不支持 `interactive`。
 
 ## 自动化测试
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
