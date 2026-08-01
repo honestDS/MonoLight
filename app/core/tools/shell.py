@@ -344,8 +344,10 @@ SHELL_TOOL_SCHEMA = {
     "function": {
         "name": "execute_shell",
         "description": (
-            "Execute a shell command using the required execution_mode and return its output. "
-            "Choose non_interactive for commands that exit on their own without terminal input, or interactive for commands that require a live terminal session. "
+            "Execute the original command and return its result. The required execution_mode describes the input/output and lifecycle of the same command process, not a programming language; this mode is independent of programming language. "
+            "Both modes run the same original command unchanged; never replace or wrap the command in Python, a Python REPL, or another executable to satisfy this choice. "
+            "Prefer non_interactive when the command needs no later stdin and should exit within tool_timeout. Continuous or streaming output, or a command that is merely slow, is not by itself a reason to choose interactive. "
+            "Choose interactive only when the same original command process needs later terminal input, depends on TTY behavior, or must keep running after this tool call returns. REPLs, debuggers, TUIs, interactive prompts, and persistent services are categories that may meet these conditions. "
             "For local file operations, use the dedicated file or knowledge-base tools instead."
         ),
         "parameters": {
@@ -353,12 +355,17 @@ SHELL_TOOL_SCHEMA = {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute. Select the execution_mode that matches whether the command exits on its own or requires a live terminal session.",
+                    "description": "Execute the exact original command itself; do not replace or wrap the command in Python, a Python REPL, or another executable to satisfy execution_mode.",
                 },
                 "execution_mode": {
                     "type": "string",
                     "enum": [mode.value for mode in ShellExecutionMode],
-                    "description": "Execution mode: choose non_interactive for commands that exit on their own without terminal input; choose interactive for commands that require a live terminal session.",
+                    "description": (
+                        "Select how the same command process handles input/output and lifecycle; execution_mode is not a programming language and is independent of programming language. "
+                        "Both modes run the same original command unchanged; never replace or wrap the command in Python, a Python REPL, or another executable to satisfy this choice. "
+                        "Prefer non_interactive when the command needs no later stdin and should exit within tool_timeout. Continuous or streaming output, or a command that is merely slow, is not by itself a reason to choose interactive. "
+                        "Choose interactive only when the same original command process needs later terminal input, depends on TTY behavior, or must keep running after this tool call returns. REPLs, debuggers, TUIs, interactive prompts, and persistent services are categories that may meet these conditions."
+                    ),
                 },
             },
             "required": ["command", "execution_mode"],

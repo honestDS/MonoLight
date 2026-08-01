@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shlex
 import subprocess
@@ -8,6 +9,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 from sqlalchemy import delete
 
+from app.core.dispatch_context import DispatchContext
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
     TerminalCloseRequest,
@@ -15,10 +17,12 @@ from app.core.terminal import (
     TerminalReadResult,
     TerminalResizeRequest,
     TerminalSessionStatus,
-    TerminalWriteRequest,
+    TerminalWriteResult,
 )
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
+from app.core.tools.terminal import TerminalWriteExecutor
 from app.models.audit import AuditExecutionRecord
+from app.models.profile import Profile, ProfileConfig
 from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 
@@ -92,24 +96,6 @@ async def _wait_for_command(command_id: int):
         )
 
 
-async def _enqueue_read_result(terminal_session_id: str, request_id: str) -> TerminalReadResult:
-    read_request = TerminalReadRequest(
-        terminal_session_id=terminal_session_id,
-        offset=0,
-        max_bytes=65_536,
-    )
-    async with AsyncSessionLocal() as db:
-        read_command, read_created = await terminal_session_manager.enqueue_read(
-            db,
-            "terminal-runtime-user",
-            "terminal-runtime-session",
-            read_request,
-            request_id,
-        )
-    assert read_created is True
-    return TerminalReadResult.model_validate(await _wait_for_command(read_command.id))
-
-
 @pytest.mark.asyncio
 async def test_terminal_worker_runs_real_interactive_python_session():
     command = _interactive_python_command()
@@ -138,50 +124,58 @@ async def test_terminal_worker_runs_real_interactive_python_session():
         )
         assert running_snapshot.status is TerminalSessionStatus.RUNNING
 
-        write_request = TerminalWriteRequest(
+        write_executor = TerminalWriteExecutor(project_root=os.getcwd(), uid="terminal-runtime-user")
+        write_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": STEP_TIMEOUT}}))
+        async with AsyncSessionLocal() as db:
+            write_executor.set_runtime_context(
+                dispatch_context=DispatchContext(
+                    mode="interactive",
+                    source="test",
+                    uid="terminal-runtime-user",
+                    session_id="terminal-runtime-session",
+                    profile=Profile(id=1, uid="terminal-runtime-user", name="terminal-runtime", configs={}),
+                    db=db,
+                    tool_call_id="terminal-runtime-write-tool-call",
+                )
+            )
+            write_result = TerminalWriteResult.model_validate(
+                json.loads(
+                    await write_executor.execute(
+                        terminal_session_id=terminal_session.terminal_session_id,
+                        data='import os; print("stage5-ready"); print("CWD:" + os.getcwd())' + "\n",
+                    )
+                )
+            )
+        assert write_result.bytes_written > 0
+        assert write_result.read_timed_out is False
+        assert write_result.read_result is not None
+        assert "stage5-ready" in write_result.read_result.output
+        assert "CWD:" in write_result.read_result.output
+        assert os.getcwd() in write_result.read_result.output
+        assert write_result.read_result.eof is False
+
+        explicit_read_request = TerminalReadRequest(
             terminal_session_id=terminal_session.terminal_session_id,
-            request_id="w" * 16,
-            data='import os; print("stage5-ready"); print("CWD:" + os.getcwd())' + "\n",
+            offset=0,
+            max_bytes=65_536,
         )
         async with AsyncSessionLocal() as db:
-            write_command, write_created = await terminal_session_manager.enqueue_control(
+            explicit_read_command, explicit_read_created = await terminal_session_manager.enqueue_read(
                 db,
                 "terminal-runtime-user",
                 "terminal-runtime-session",
-                write_request,
+                explicit_read_request,
+                "r" * 16,
             )
-        assert write_created is True
-        write_result = await _wait_for_command(write_command.id)
-        assert write_result["bytes_written"] > 0
-
-        await _wait_until(
-            lambda: _get_snapshot(terminal_session.terminal_session_id),
-            lambda snapshot: snapshot.output_buffer.next_offset > running_snapshot.output_buffer.next_offset,
-        )
-
-        read_result = None
-        read_deadline = asyncio.get_running_loop().time() + STEP_TIMEOUT
-        read_attempt = 0
-        while read_result is None or not ("stage5-ready" in read_result.output and "CWD:" in read_result.output and os.getcwd() in read_result.output):
-            read_result = await _enqueue_read_result(
-                terminal_session.terminal_session_id,
-                "r" * 16 + f"-{read_attempt}",
-            )
-            if "stage5-ready" in read_result.output and "CWD:" in read_result.output and os.getcwd() in read_result.output:
-                break
-            remaining = read_deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise AssertionError(f"timed out waiting for terminal output: {read_result!r}")
-            read_attempt += 1
-            await asyncio.sleep(min(0.05, remaining))
-
-        assert "stage5-ready" in read_result.output
-        assert "CWD:" in read_result.output
-        assert os.getcwd() in read_result.output
-        assert read_result.requested_offset == 0
-        assert 0 <= read_result.start_offset <= read_result.next_offset <= read_result.latest_offset
-        assert read_result.sequence >= 1
-        assert read_result.eof is False
+        assert explicit_read_created is True
+        explicit_read_result = TerminalReadResult.model_validate(await _wait_for_command(explicit_read_command.id))
+        assert "stage5-ready" in explicit_read_result.output
+        assert "CWD:" in explicit_read_result.output
+        assert os.getcwd() in explicit_read_result.output
+        assert explicit_read_result.requested_offset == 0
+        assert 0 <= explicit_read_result.start_offset <= explicit_read_result.next_offset <= explicit_read_result.latest_offset
+        assert explicit_read_result.sequence >= 1
+        assert explicit_read_result.eof is False
 
         resize_request = TerminalResizeRequest(
             terminal_session_id=terminal_session.terminal_session_id,

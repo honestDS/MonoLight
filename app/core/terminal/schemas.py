@@ -332,6 +332,16 @@ class TerminalReadResult(TerminalProtocolModel):
         return self
 
 
+class TerminalWriteResult(TerminalActionReceipt):
+    """Receipt for a write followed by an optional merged-output read."""
+
+    action: Literal[TerminalAction.WRITE] = TerminalAction.WRITE
+    bytes_written: int = Field(ge=0)
+    read_offset: int = Field(ge=0)
+    read_timed_out: bool
+    read_result: TerminalReadResult | None = None
+
+
 class TerminalSessionSnapshot(TerminalProtocolModel):
     terminal_session_id: TerminalSessionId
     status: TerminalSessionStatus
@@ -411,6 +421,7 @@ __all__ = [
     "TerminalSessionStatus",
     "TerminalStatusRequest",
     "TerminalWriteRequest",
+    "TerminalWriteResult",
     "can_transition_terminal_status",
     "generate_terminal_request_id",
     "generate_terminal_session_id",

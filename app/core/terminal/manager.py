@@ -718,8 +718,12 @@ class _TerminalSessionRuntime:
             ).model_dump(mode="json")
 
         if action is TerminalAction.WRITE:
+            output_offset_before_write = driver.resource_snapshot().output_buffer.next_offset
             written = await driver.write(payload["data"])
-            return {"bytes_written": written}
+            return {
+                "bytes_written": written,
+                "output_offset_before_write": output_offset_before_write,
+            }
 
         if action is TerminalAction.RESIZE:
             columns = payload["columns"]

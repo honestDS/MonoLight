@@ -125,14 +125,33 @@ def test_subprocess_env_prefers_current_python_scripts_dir(tmp_path):
 def test_shell_schema_requires_explicit_execution_mode():
     parameters = SHELL_TOOL_SCHEMA["function"]["parameters"]
     execution_mode = parameters["properties"]["execution_mode"]
+    function_description = SHELL_TOOL_SCHEMA["function"]["description"]
+    mode_description = execution_mode["description"]
+    command_description = parameters["properties"]["command"]["description"]
 
     assert parameters["required"] == ["command", "execution_mode"]
     assert set(parameters["properties"]) == {"command", "execution_mode"}
     assert parameters["additionalProperties"] is False
     assert execution_mode["enum"] == ["interactive", "non_interactive"]
-    assert "default" not in repr(SHELL_TOOL_SCHEMA).lower()
+    assert "default" not in execution_mode
     assert "auto" not in repr(SHELL_TOOL_SCHEMA).lower()
-    assert "non_interactive" not in parameters["properties"]["command"]["description"]
+    assert "interactive" not in command_description.lower()
+    assert "non_interactive" not in command_description.lower()
+
+    for description in (function_description, mode_description):
+        assert "input/output" in description
+        assert "lifecycle" in description
+        assert "same command process" in description
+        assert "independent of programming language" in description
+        assert "same original command unchanged" in description
+        assert "never replace or wrap the command in Python" in description
+        assert "Prefer non_interactive" in description
+        assert "Continuous or streaming output" in description
+        assert "merely slow" in description
+        assert "not by itself a reason to choose interactive" in description
+        assert "needs later terminal input" in description
+        assert "depends on TTY behavior" in description
+        assert "must keep running after this tool call returns" in description
 
 
 def _block_shell_early_dependencies(monkeypatch, executor):
