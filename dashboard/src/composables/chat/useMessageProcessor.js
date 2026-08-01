@@ -3,6 +3,7 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
 import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, normalizeMessageContent } from '../../utils'
+import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
@@ -394,7 +395,7 @@ export function useMessageProcessor() {
     const newMsg = {
       id: `err_${requestId || Date.now()}`,
       role: 'err',
-      content: errorMessage,
+      content: truncateErrorMessage(errorMessage),
       created_at: Date.now() / 1000,
       ...(requestId ? { request_id: requestId } : {}),
       ...(workId ? { work_id: workId } : {}),
@@ -420,7 +421,7 @@ export function useMessageProcessor() {
     const finishDetails = choice?.finish_details ?? response.finish_details
     const providerMetadata = choice?.provider_metadata ?? response.provider_metadata
     const messageProviderMetadata = choiceMessage?.provider_metadata ?? response.message_provider_metadata
-    const aiContent = resolveAssistantDisplayContent(
+    let aiContent = resolveAssistantDisplayContent(
       choiceMessage ? choiceMessage.content : response.content,
       refusal,
       finishReason
@@ -429,6 +430,7 @@ export function useMessageProcessor() {
     const responseFiles = response.files || []
     const aiCreatedAt = choice?.created_at || response.created_at || null
     const role = choiceMessage?.role || response.role || 'assistant'
+    if (role === 'err') aiContent = truncateErrorMessage(aiContent)
 
     if (finishReason === 'queued') return
 

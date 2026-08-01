@@ -1,5 +1,6 @@
 import axios from 'axios'
 import i18n from '../i18n'
+import { truncateErrorMessage } from '../utils/errorMessage.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -36,8 +37,9 @@ request.interceptors.response.use(
     const { code, data, message } = res.data;
     if (code !== undefined && code !== 200) {
       // 业务报错，直接抛出，让 catch 块处理
-      const error = new Error(message || t('common.unknown_error'));
-      error.response = { data: { message: message || t('common.unknown_error'), data } };
+      const errorMessage = truncateErrorMessage(message || t('common.unknown_error'))
+      const error = new Error(errorMessage);
+      error.response = { data: { message: errorMessage, data } };
       return Promise.reject(error);
     }
     return res;
@@ -49,7 +51,7 @@ request.interceptors.response.use(
     }
     // 统一错误提示格式：优先读取后端返回的 message 或 detail
     const errorMsg = err.response?.data?.message || err.response?.data?.detail || err.message || t('common.network_request_failed');
-    err.message = errorMsg; 
+    err.message = truncateErrorMessage(errorMsg);
     return Promise.reject(err);
   }
 );
@@ -105,7 +107,7 @@ export const chatApi = {
         localStorage.removeItem('token')
         if (window.location.hash !== '#/login') window.location.hash = '/login'
       }
-      throw new Error(errorData?.message || errorData?.detail || t('common.network_request_failed'))
+      throw new Error(truncateErrorMessage(errorData?.message || errorData?.detail || t('common.network_request_failed')))
     }
     if (!response.body) {
       throw new Error(t('common.network_request_failed'))
@@ -121,7 +123,7 @@ export const chatApi = {
       const event = JSON.parse(line)
       if (onEvent) onEvent(event)
       if (event.type === 'error') {
-        throw new Error(event.message || t('chat.send_failed'))
+        throw new Error(truncateErrorMessage(event.message || t('chat.send_failed')))
       }
       if (event.type === 'done') {
         finalResponse = event.response || null

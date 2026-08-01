@@ -261,6 +261,7 @@ import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import { defaultChannelForm, defaultModelEntry } from '../constants'
+import { truncateErrorMessage } from '../utils/errorMessage.js'
 
 const { t } = useI18n()
 
@@ -661,10 +662,13 @@ const handleToggleActive = async (row) => {
 
 const formatErrorDetail = (err) => {
   const detail = err.response?.data
+  let message
   if (detail && typeof detail === 'object') {
-    return detail.message || detail.error || JSON.stringify(detail)
+    message = detail.message || detail.error || JSON.stringify(detail)
+  } else {
+    message = err.message || t('channels.chat_test_failed')
   }
-  return err.message || t('channels.chat_test_failed')
+  return truncateErrorMessage(message)
 }
 
 const isTestableModel = (entry) => {

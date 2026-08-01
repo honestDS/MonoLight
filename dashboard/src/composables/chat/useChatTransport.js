@@ -4,10 +4,11 @@ import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
+import { truncateErrorMessage } from '../../utils/errorMessage.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
-const resolveErrorMessage = (data, fallback) => data?.message || data?.content || data?.detail || data?.error || fallback
+const resolveErrorMessage = (data, fallback) => truncateErrorMessage(data?.message || data?.content || data?.detail || data?.error || fallback)
 
 const isWsErrorPayload = (data) => {
   if (data?.type === 'error' || data?.error || data?.detail) return true

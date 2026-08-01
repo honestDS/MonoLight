@@ -307,6 +307,7 @@ import {
   isToolResult
 } from '../utils'
 import { isAuditConfirmationActionable } from '../utils/auditConfirmation'
+import { truncateErrorMessage } from '../utils/errorMessage.js'
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -904,7 +905,8 @@ const parseAssistantFilesContent = (content) => {
 }
 const getMessageText = (message) => {
   const parsed = parseAssistantFilesContent(message.content)
-  return parsed ? parsed.text || '' : message.content
+  const text = parsed ? parsed.text || '' : message.content
+  return message.role === 'err' ? truncateErrorMessage(text) : text
 }
 const getMessageFiles = (message) => message.files || parseAssistantFilesContent(message.content)?.files || []
 const GUIDANCE_START_MARKER = '[系统提示信息]'

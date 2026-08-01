@@ -14,6 +14,7 @@ import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
+import { truncateErrorMessage } from '../../utils/errorMessage.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 const HTTP_HISTORY_FAST_SYNC_INTERVAL_MS = 2000
@@ -915,7 +916,7 @@ export function useChatSession() {
       },
       onProactiveReplyError: (data) => {
         if (data.session_id && data.session_id !== sessionManager.currentSessionId.value) return
-        const errorMessage = data.content || data.message || 'Background proactive reply failed'
+        const errorMessage = truncateErrorMessage(data.content || data.message || 'Background proactive reply failed')
         const inserted = messageProcessor.processStreamError(
           chatState.messages,
           errorMessage,
