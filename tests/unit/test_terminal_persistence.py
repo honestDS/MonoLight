@@ -4,15 +4,23 @@ from sqlalchemy import delete, update
 
 from app.core.constants import (
     ERR_TERMINAL_ACTION_NOT_ALLOWED,
+    ERR_TERMINAL_COMMAND_FAILED,
     ERR_TERMINAL_COMMAND_REQUEST_CONFLICT,
+    ERR_TERMINAL_PTY_CLOSED,
     ERR_TERMINAL_SESSION_ACCESS_DENIED,
+    ERR_TERMINAL_SESSION_LEASE_LOST,
     ERR_TERMINAL_SESSION_NOT_FOUND,
 )
 from app.core.crud.terminal_session import terminal_control_command_crud, terminal_session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
+from app.core.i18n import t
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
     TerminalAction,
+    TerminalCloseRequest,
+    TerminalOutputReadStatus,
+    TerminalReadRequest,
+    TerminalReadResult,
     TerminalResizeRequest,
     TerminalSessionStatus,
     TerminalWriteRequest,
@@ -257,7 +265,7 @@ async def test_terminal_control_enqueue_is_idempotent_and_permission_scoped():
 
 
 @pytest.mark.asyncio
-async def test_terminal_starting_claims_are_ordered_exclusive_and_recoverable():
+async def test_terminal_starting_claims_require_recovery_after_lease_expiry():
     first_session = await create_terminal_session(
         terminal_session_id="a" * 32,
         audit_record_id=104,
@@ -282,9 +290,10 @@ async def test_terminal_starting_claims_are_ordered_exclusive_and_recoverable():
         await db.commit()
 
         takeover = await terminal_session_crud.try_claim_starting(db, first_claim.terminal_session_id, "worker-b", 60)
+        recoverable_claim = await terminal_session_crud.claim_next_recoverable(db, "worker-b", 60)
         old_worker_renewed = await terminal_session_crud.renew_lease(db, first_claim.terminal_session_id, "worker-a", 60)
         new_worker_renewed = await terminal_session_crud.renew_lease(db, first_claim.terminal_session_id, "worker-b", 60)
-        released = await terminal_session_crud.release_starting_claim(db, first_claim.terminal_session_id, "worker-b")
+        released = await terminal_session_crud.release_claim(db, first_claim.terminal_session_id, "worker-b")
 
     async with AsyncSessionLocal() as db:
         released_session = await terminal_session_crud.get(db, first_claim.terminal_session_id)
@@ -296,15 +305,128 @@ async def test_terminal_starting_claims_are_ordered_exclusive_and_recoverable():
     }
     assert third_claim is None
     assert blocked_claim is None
-    assert takeover is not None
-    assert takeover.terminal_session_id == first_claim.terminal_session_id
-    assert takeover.locked_by == "worker-b"
+    assert takeover is None
+    assert recoverable_claim is not None
+    assert recoverable_claim.terminal_session_id == first_claim.terminal_session_id
+    assert recoverable_claim.locked_by == "worker-b"
     assert old_worker_renewed is False
     assert new_worker_renewed is True
     assert released is True
     assert released_session is not None
     assert released_session.locked_by is None
     assert released_session.lock_until is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_lost_session_completes_unowned_commands_idempotently():
+    terminal_session = await create_terminal_session(
+        terminal_session_id="e" * 32,
+        audit_record_id=None,
+        audit_execution_record_id=None,
+    )
+    failure_reason = t(ERR_TERMINAL_SESSION_LEASE_LOST)
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(TerminalSession)
+            .where(TerminalSession.terminal_session_id == terminal_session.terminal_session_id)
+            .values(
+                status=TerminalSessionStatus.LOST,
+                failure_reason=failure_reason,
+                next_output_offset=4,
+                next_output_sequence=2,
+                locked_by=None,
+                lock_until=None,
+            )
+        )
+        await db.commit()
+
+        read_request = TerminalReadRequest(
+            terminal_session_id=terminal_session.terminal_session_id,
+            offset=0,
+        )
+        read_command, read_created = await terminal_session_manager.enqueue_read(
+            db,
+            "user-1",
+            "chat-session-1",
+            read_request,
+            "lost-read-request",
+        )
+        repeated_read_command, repeated_read_created = await terminal_session_manager.enqueue_read(
+            db,
+            "user-1",
+            "chat-session-1",
+            read_request,
+            "lost-read-request",
+        )
+        read_result = TerminalReadResult.model_validate(await terminal_session_manager.wait_for_command_result(db, read_command.id, 1))
+
+        close_request = TerminalCloseRequest(
+            terminal_session_id=terminal_session.terminal_session_id,
+            request_id="lost-close-request",
+        )
+        close_command, close_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            close_request,
+        )
+        repeated_close_command, repeated_close_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            close_request,
+        )
+        close_result = await terminal_session_manager.wait_for_command_result(db, close_command.id, 1)
+
+        write_request = TerminalWriteRequest(
+            terminal_session_id=terminal_session.terminal_session_id,
+            request_id="lost-write-request",
+            data="ignored",
+        )
+        write_command, write_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            write_request,
+        )
+        repeated_write_command, repeated_write_created = await terminal_session_manager.enqueue_control(
+            db,
+            "user-1",
+            "chat-session-1",
+            write_request,
+        )
+        with pytest.raises(RuntimeError) as command_error:
+            await terminal_session_manager.wait_for_command_result(db, write_command.id, 1)
+
+        persisted_session = await terminal_session_crud.get(db, terminal_session.terminal_session_id)
+        commands = await terminal_control_command_crud.list_by_session(db, terminal_session.terminal_session_id)
+
+    assert read_created is True
+    assert repeated_read_created is False
+    assert repeated_read_command.id == read_command.id
+    assert read_result.read_status is TerminalOutputReadStatus.EXPIRED
+    assert read_result.requested_offset == 0
+    assert read_result.next_offset == 4
+    assert read_result.latest_offset == 4
+    assert read_result.output == ""
+    assert read_result.eof is True
+    assert close_created is True
+    assert repeated_close_created is False
+    assert repeated_close_command.id == close_command.id
+    assert close_result == {"status": TerminalSessionStatus.LOST.value}
+    assert write_created is True
+    assert repeated_write_created is False
+    assert repeated_write_command.id == write_command.id
+    assert str(command_error.value) == t(ERR_TERMINAL_COMMAND_FAILED, error=t(ERR_TERMINAL_PTY_CLOSED))
+    assert persisted_session is not None
+    assert persisted_session.status is TerminalSessionStatus.LOST
+    assert persisted_session.failure_reason == failure_reason
+    assert {command.action: command.status for command in commands} == {
+        TerminalAction.READ: TerminalControlCommandStatus.SUCCEEDED,
+        TerminalAction.CLOSE: TerminalControlCommandStatus.SUCCEEDED,
+        TerminalAction.WRITE: TerminalControlCommandStatus.FAILED,
+    }
 
 
 @pytest.mark.asyncio
@@ -447,8 +569,7 @@ async def test_terminal_command_completion_requires_current_session_lease_owner(
     assert created is True
     assert session_claim is not None
     assert claimed_command is not None
-    assert takeover is not None
-    assert takeover.locked_by == "worker-b"
+    assert takeover is None
     assert old_worker_marked is False
     assert command_after is not None
     assert command_after.status is TerminalControlCommandStatus.PROCESSING
@@ -457,7 +578,7 @@ async def test_terminal_command_completion_requires_current_session_lease_owner(
 
 
 def test_terminal_model_metadata_marks_persisted_fields_not_nullable():
-    for column_name in ("audit_record_id", "audit_execution_record_id"):
+    for column_name in ("audit_record_id", "audit_execution_record_id", "process_identity"):
         assert TerminalSession.__table__.c[column_name].nullable is True
     for column_name in (
         "terminal_session_id",

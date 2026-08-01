@@ -8,6 +8,7 @@ from sqlmodel import SQLModel, select
 from app.core.crud.background_task import background_task_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
 from app.core.session_cleanup import delete_session_data
+from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.models.message import Message, MessageRole, MessageType
@@ -23,6 +24,7 @@ from app.models.session_reply_work_item import (
     SessionReplyWorkStatus,
     SessionReplyWorkType,
 )
+from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 
 
 @pytest_asyncio.fixture
@@ -44,6 +46,8 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                     MessagePlatformOutbox.__table__,
                     BackgroundTask.__table__,
                     ScheduledTask.__table__,
+                    TerminalSession.__table__,
+                    TerminalControlCommand.__table__,
                 ],
             )
         )
@@ -200,6 +204,20 @@ async def test_delete_session_data_removes_empty_session_for_owner(db_session: A
 @pytest.mark.asyncio
 async def test_delete_session_data_rejects_non_owner_without_changes(db_session: AsyncSession):
     await _seed_session_data(db_session)
+    terminal_session = TerminalSession(
+        terminal_session_id="terminal-session-1",
+        uid="user-1",
+        session_id="session-1",
+        original_tool_call_id="terminal-call-1",
+        profile_id=1,
+        command="python -i",
+        working_directory="/workspace",
+        status=TerminalSessionStatus.RUNNING,
+        allowed_actions=[TerminalAction.CLOSE.value],
+        process_identity=None,
+    )
+    db_session.add(terminal_session)
+    await db_session.commit()
 
     deleted = await delete_session_data(
         db_session,
@@ -210,12 +228,57 @@ async def test_delete_session_data_rejects_non_owner_without_changes(db_session:
 
     assert deleted is False
     assert await db_session.get(ChatSession, "session-1") is not None
+    assert await db_session.get(TerminalSession, terminal_session.terminal_session_id) is not None
     assert list((await db_session.execute(select(Message))).scalars().all())
 
 
 @pytest.mark.asyncio
 async def test_delete_session_data_removes_all_associations_and_cancels_running_task(db_session: AsyncSession):
     completed_task_id, pending_task_id, running_task_id = await _seed_session_data(db_session)
+    target_terminal = TerminalSession(
+        terminal_session_id="terminal-session-1",
+        uid="user-1",
+        session_id="session-1",
+        original_tool_call_id="terminal-call-1",
+        profile_id=1,
+        command="python -i",
+        working_directory="/workspace",
+        status=TerminalSessionStatus.RUNNING,
+        allowed_actions=[TerminalAction.CLOSE.value],
+        process_identity=None,
+    )
+    target_command = TerminalControlCommand(
+        terminal_session_id=target_terminal.terminal_session_id,
+        request_id="request-1",
+        action=TerminalAction.CLOSE,
+        payload={"force": True},
+        payload_hash="a" * 64,
+        status=TerminalControlCommandStatus.PENDING,
+    )
+    other_terminal = TerminalSession(
+        terminal_session_id="terminal-session-2",
+        uid="user-2",
+        session_id="session-2",
+        original_tool_call_id="terminal-call-2",
+        profile_id=1,
+        command="python -i",
+        working_directory="/workspace",
+        status=TerminalSessionStatus.RUNNING,
+        allowed_actions=[TerminalAction.CLOSE.value],
+        process_identity=None,
+    )
+    other_command = TerminalControlCommand(
+        terminal_session_id=other_terminal.terminal_session_id,
+        request_id="request-2",
+        action=TerminalAction.CLOSE,
+        payload={"force": True},
+        payload_hash="b" * 64,
+        status=TerminalControlCommandStatus.PENDING,
+    )
+    db_session.add_all([target_terminal, target_command, other_terminal, other_command])
+    await db_session.commit()
+    assert target_command.id is not None
+    assert other_command.id is not None
 
     deleted = await delete_session_data(
         db_session,
@@ -224,9 +287,14 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
         is_admin=False,
     )
     await db_session.commit()
+    db_session.expunge_all()
 
     assert deleted is True
     assert await db_session.get(ChatSession, "session-1") is None
+    assert await db_session.get(TerminalSession, target_terminal.terminal_session_id) is None
+    assert await db_session.get(TerminalControlCommand, target_command.id) is None
+    assert await db_session.get(TerminalSession, other_terminal.terminal_session_id) is not None
+    assert await db_session.get(TerminalControlCommand, other_command.id) is not None
     for model in (
         Message,
         SessionReplySequence,

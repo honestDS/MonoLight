@@ -1,5 +1,6 @@
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -7,7 +8,7 @@ from sqlmodel import SQLModel
 
 import app.core.terminal.manager as terminal_manager_module
 from app.core.crud.audit import audit_crud
-from app.core.terminal.manager import _TerminalSessionRuntime
+from app.core.terminal.manager import _TerminalSessionRuntime, cleanup_terminal_sessions_by_chat_session
 from app.core.terminal.schemas import TerminalOutputBufferState, TerminalSessionStatus
 from app.models.audit import (
     AuditExecutionRecord,
@@ -17,7 +18,7 @@ from app.models.audit import (
     AuditToolConclusion,
     AuditToolDetail,
 )
-from app.models.terminal_session import TerminalSession
+from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 
 WORKER_ID = "terminal-test-worker"
 CLAIM_TOKEN = "terminal-test-claim"
@@ -360,8 +361,71 @@ async def test_runtime_snapshot_rolls_back_terminal_and_execution_when_audit_fin
     assert stored_terminal is not None and stored_terminal.status is TerminalSessionStatus.EXITED
     assert stored_execution is not None and stored_execution.status is AuditExecutionStatus.SUCCEEDED
     assert stored_record is not None and stored_record.status is AuditRecordStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminal_sessions_by_chat_session_finalizes_audit_and_deletes_commands(
+    terminal_audit_database,
+    tmp_path,
+    monkeypatch,
+):
+    async def cleanup_process_identity(_identity):
+        return SimpleNamespace(errors=())
+
+    async def fail_confirmation_projection(*args, **kwargs):
+        raise AssertionError("terminal cleanup must not project confirmation messages")
+
+    monkeypatch.setattr(terminal_manager_module, "cleanup_terminal_process_identity", cleanup_process_identity)
+    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", fail_confirmation_projection)
+    audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
+    execution_id, terminal_session = runtimes[0]
+    control_command = TerminalControlCommand(
+        terminal_session_id=terminal_session.terminal_session_id,
+        request_id="cleanup-request",
+        action="close",
+        payload={"force": True},
+        payload_hash="c" * 64,
+        status=TerminalControlCommandStatus.PENDING,
+    )
+    async with terminal_audit_database() as db:
+        db.add(control_command)
+        await db.commit()
+    assert control_command.id is not None
+
+    async with terminal_audit_database() as db:
+        deleted_count = await cleanup_terminal_sessions_by_chat_session(
+            db,
+            session_id="chat-session-1",
+            uid="user-1",
+        )
+        await db.commit()
+        stored_execution = await db.get(AuditExecutionRecord, execution_id)
+        stored_record = await db.get(AuditRecord, audit_record_id)
+        assert await db.get(TerminalSession, terminal_session.terminal_session_id) is None
+        assert await db.get(TerminalControlCommand, control_command.id) is None
+
+        repeated_count = await cleanup_terminal_sessions_by_chat_session(
+            db,
+            session_id="chat-session-1",
+            uid="user-1",
+        )
+        await db.commit()
+        repeated_execution = await db.get(AuditExecutionRecord, execution_id)
+        repeated_record = await db.get(AuditRecord, audit_record_id)
+
+    assert deleted_count == 1
+    assert repeated_count == 0
+    assert stored_execution is not None
+    assert stored_execution.status is AuditExecutionStatus.EXECUTION_UNKNOWN
+    assert stored_record is not None
+    assert stored_record.status is AuditRecordStatus.EXECUTION_UNKNOWN
     assert stored_record.execution_claim_token is None
-    assert confirmation_calls == [audit_record_id]
+    assert repeated_execution is not None
+    assert repeated_execution.status is AuditExecutionStatus.EXECUTION_UNKNOWN
+    assert repeated_record is not None
+    assert repeated_record.status is AuditRecordStatus.EXECUTION_UNKNOWN
+    assert repeated_record.execution_claim_token is None
+    assert stored_record.execution_claim_token is None
 
 
 @pytest.mark.asyncio

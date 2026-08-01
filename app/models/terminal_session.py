@@ -39,6 +39,7 @@ class TerminalSession(SQLModel, table=True):
         max_length=20,
     )
     allowed_actions: list[str] = Field(sa_column=Column(JSON, nullable=False))
+    process_identity: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     output_capacity_bytes: int = Field(default=1_048_576, ge=1)
     oldest_output_offset: int = Field(default=0, ge=0)
     next_output_offset: int = Field(default=0, ge=0)

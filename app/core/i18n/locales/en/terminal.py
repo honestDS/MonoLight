@@ -21,6 +21,7 @@ MESSAGES = {
     "ERR_TERMINAL_COMMAND_REQUEST_CONFLICT": "Request {request_id} conflicts with the existing command for terminal session {terminal_session_id}: {action}",
     "ERR_TERMINAL_COMMAND_FAILED": "Terminal command failed: {error}",
     "ERR_TERMINAL_COMMAND_TIMEOUT": "Timed out waiting for terminal command {command_id}: {timeout} seconds",
+    "ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE": "Exactly one of result or error must be provided for a terminal control command",
     "ERR_TERMINAL_MUTATING_REQUEST_REQUIRED": "A terminal write, resize, or close request is required",
     "ERR_TERMINAL_PTY_CONFIG_INVALID": "Invalid PTY configuration: {field}",
     "ERR_TERMINAL_PTY_PLATFORM_UNSUPPORTED": "Unsupported PTY platform: {platform}",
@@ -38,5 +39,8 @@ MESSAGES = {
     "ERR_TERMINAL_CONPTY_PID_INVALID": "Invalid ConPTY process ID",
     "ERR_TERMINAL_PTY_EXIT_CODE_MISSING": "PTY exit code is missing",
     "ERR_TERMINAL_PROCESS_ACTION_INVALID": "Invalid process action: {action}",
+    "ERR_TERMINAL_WORKER_STOPPED": "The terminal worker process stopped",
+    "ERR_TERMINAL_SESSION_LEASE_LOST": "The terminal session lease was lost",
+    "ERR_TERMINAL_SESSION_DELETED": "The terminal session was deleted",
     "ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED": "Interactive shell requires an active audit execution binding",
 }

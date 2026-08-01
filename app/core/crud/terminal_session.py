@@ -1,11 +1,13 @@
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import exists, or_, update
+from sqlalchemy import and_, delete, exists, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE, ERR_TERMINAL_PTY_CLOSED
+from app.core.i18n import t
 from app.core.terminal.schemas import (
     TERMINAL_SESSION_FINAL_STATUSES,
     TerminalAction,
@@ -26,6 +28,57 @@ class CRUDTerminalSession:
     async def get(self, db: AsyncSession, terminal_session_id: str) -> TerminalSession | None:
         result = await db.execute(select(TerminalSession).where(TerminalSession.terminal_session_id == terminal_session_id).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def list_by_chat_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+    ) -> list[TerminalSession]:
+        result = await db.execute(
+            select(TerminalSession)
+            .where(
+                TerminalSession.session_id == session_id,
+                TerminalSession.uid == uid,
+            )
+            .order_by(TerminalSession.created_at.asc(), TerminalSession.terminal_session_id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def delete_by_chat_session(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        uid: str,
+        commit: bool = True,
+    ) -> int:
+        session_ids_result = await db.execute(
+            select(TerminalSession.terminal_session_id).where(
+                TerminalSession.session_id == session_id,
+                TerminalSession.uid == uid,
+            )
+        )
+        terminal_session_ids = list(session_ids_result.scalars().all())
+        if not terminal_session_ids:
+            return 0
+
+        await db.execute(delete(TerminalControlCommand).where(TerminalControlCommand.terminal_session_id.in_(terminal_session_ids)).execution_options(synchronize_session=False))
+        result = await db.execute(
+            delete(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id.in_(terminal_session_ids),
+                TerminalSession.session_id == session_id,
+                TerminalSession.uid == uid,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount or 0
 
     async def get_by_audit_execution_record_id(
         self,
@@ -120,9 +173,14 @@ class CRUDTerminalSession:
         now = await get_database_timestamp(db)
         updated_at = await get_database_time(db)
         claimable = or_(
-            TerminalSession.locked_by.is_(None),
-            TerminalSession.locked_by == worker_id,
-            TerminalSession.lock_until < now,
+            and_(
+                TerminalSession.locked_by.is_(None),
+                TerminalSession.lock_until.is_(None),
+            ),
+            and_(
+                TerminalSession.locked_by == worker_id,
+                TerminalSession.lock_until >= now,
+            ),
         )
         result = await db.execute(
             update(TerminalSession)
@@ -155,9 +213,9 @@ class CRUDTerminalSession:
             select(TerminalSession.terminal_session_id)
             .where(
                 TerminalSession.status == TerminalSessionStatus.STARTING,
-                or_(
+                and_(
                     TerminalSession.locked_by.is_(None),
-                    TerminalSession.lock_until < now,
+                    TerminalSession.lock_until.is_(None),
                 ),
             )
             .order_by(TerminalSession.created_at.asc(), TerminalSession.terminal_session_id.asc())
@@ -169,10 +227,55 @@ class CRUDTerminalSession:
             .where(
                 TerminalSession.terminal_session_id == candidate,
                 TerminalSession.status == TerminalSessionStatus.STARTING,
+                and_(
+                    TerminalSession.locked_by.is_(None),
+                    TerminalSession.lock_until.is_(None),
+                ),
+            )
+            .values(
+                locked_by=worker_id,
+                lock_until=now + lease_seconds,
+                updated_at=updated_at,
+            )
+            .returning(TerminalSession)
+            .execution_options(synchronize_session=False, populate_existing=True)
+        )
+        claimed = result.scalars().first()
+        await db.commit()
+        return claimed
+
+    async def claim_next_recoverable(
+        self,
+        db: AsyncSession,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> TerminalSession | None:
+        now = await get_database_timestamp(db)
+        updated_at = await get_database_time(db)
+        recoverable = or_(
+            and_(
+                TerminalSession.status.in_((TerminalSessionStatus.RUNNING, TerminalSessionStatus.CLOSING)),
                 or_(
                     TerminalSession.locked_by.is_(None),
+                    TerminalSession.lock_until.is_(None),
                     TerminalSession.lock_until < now,
                 ),
+            ),
+            and_(
+                TerminalSession.status == TerminalSessionStatus.STARTING,
+                TerminalSession.locked_by.is_not(None),
+                or_(
+                    TerminalSession.lock_until.is_(None),
+                    TerminalSession.lock_until < now,
+                ),
+            ),
+        )
+        candidate = select(TerminalSession.terminal_session_id).where(recoverable).order_by(TerminalSession.created_at.asc(), TerminalSession.terminal_session_id.asc()).limit(1).scalar_subquery()
+        result = await db.execute(
+            update(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id == candidate,
+                recoverable,
             )
             .values(
                 locked_by=worker_id,
@@ -220,6 +323,7 @@ class CRUDTerminalSession:
         output_buffer: TerminalOutputBufferState,
         exit_code: int | None = None,
         failure_reason: str | None = None,
+        process_identity: dict[str, Any] | None = None,
         *,
         commit: bool = True,
     ) -> bool:
@@ -244,6 +348,8 @@ class CRUDTerminalSession:
             values["started_at"] = database_time
         if target_status in TERMINAL_SESSION_FINAL_STATUSES:
             values["finished_at"] = database_time
+        if process_identity is not None:
+            values["process_identity"] = process_identity
 
         result = await db.execute(
             update(TerminalSession)
@@ -254,6 +360,34 @@ class CRUDTerminalSession:
                 TerminalSession.lock_until >= now,
             )
             .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount == 1
+
+    async def release_claim(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        worker_id: str,
+        *,
+        commit: bool = True,
+    ) -> bool:
+        updated_at = await get_database_time(db)
+        result = await db.execute(
+            update(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id == terminal_session_id,
+                TerminalSession.locked_by == worker_id,
+            )
+            .values(
+                locked_by=None,
+                lock_until=None,
+                updated_at=updated_at,
+            )
             .execution_options(synchronize_session=False)
         )
         if commit:
@@ -285,6 +419,108 @@ class CRUDTerminalSession:
         )
         await db.commit()
         return result.rowcount == 1
+
+    async def fail_unfinished_commands(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_timestamp(db)
+        finished_at = await get_database_time(db)
+        conditions = [
+            TerminalControlCommand.terminal_session_id == terminal_session_id,
+            TerminalControlCommand.status.in_((TerminalControlCommandStatus.PENDING, TerminalControlCommandStatus.PROCESSING)),
+        ]
+        if worker_id is not None:
+            conditions.append(
+                exists(
+                    select(TerminalSession.terminal_session_id).where(
+                        TerminalSession.terminal_session_id == terminal_session_id,
+                        TerminalSession.locked_by == worker_id,
+                        TerminalSession.lock_until >= now,
+                    )
+                )
+            )
+        result = await db.execute(
+            update(TerminalControlCommand)
+            .where(*conditions)
+            .values(
+                status=TerminalControlCommandStatus.FAILED,
+                result=None,
+                error=error,
+                finished_at=finished_at,
+                locked_by=None,
+                lock_until=None,
+                updated_at=finished_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount > 0
+
+    async def cleanup_expired_final_claims(
+        self,
+        db: AsyncSession,
+        *,
+        commit: bool = True,
+    ) -> int:
+        now = await get_database_timestamp(db)
+        stale_final_claim = and_(
+            TerminalSession.status.in_(TERMINAL_SESSION_FINAL_STATUSES),
+            TerminalSession.locked_by.is_not(None),
+            or_(
+                TerminalSession.lock_until.is_(None),
+                TerminalSession.lock_until < now,
+            ),
+        )
+        session_ids_result = await db.execute(select(TerminalSession.terminal_session_id).where(stale_final_claim))
+        terminal_session_ids = list(session_ids_result.scalars().all())
+        if not terminal_session_ids:
+            return 0
+
+        database_time = await get_database_time(db)
+        session_result = await db.execute(
+            update(TerminalSession)
+            .where(
+                TerminalSession.terminal_session_id.in_(terminal_session_ids),
+                stale_final_claim,
+            )
+            .values(
+                locked_by=None,
+                lock_until=None,
+                updated_at=database_time,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        command_result = await db.execute(
+            update(TerminalControlCommand)
+            .where(
+                TerminalControlCommand.terminal_session_id.in_(terminal_session_ids),
+                TerminalControlCommand.status.in_((TerminalControlCommandStatus.PENDING, TerminalControlCommandStatus.PROCESSING)),
+            )
+            .values(
+                status=TerminalControlCommandStatus.FAILED,
+                result=None,
+                error=t(ERR_TERMINAL_PTY_CLOSED),
+                finished_at=database_time,
+                locked_by=None,
+                lock_until=None,
+                updated_at=database_time,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (session_result.rowcount or 0) + (command_result.rowcount or 0)
 
 
 class CRUDTerminalControlCommand:
@@ -405,6 +641,65 @@ class CRUDTerminalControlCommand:
         claimed = result.scalars().first()
         await db.commit()
         return claimed
+
+    async def complete_unowned_pending(
+        self,
+        db: AsyncSession,
+        terminal_session_id: str,
+        command_id: int,
+        *,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        if (result is None) == (error is None):
+            raise ValueError(t(ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE))
+        finished_at = await get_database_time(db)
+        terminal_session_exists = exists(
+            select(TerminalSession.terminal_session_id).where(
+                TerminalSession.terminal_session_id == terminal_session_id,
+                TerminalSession.status.in_(TERMINAL_SESSION_FINAL_STATUSES),
+                TerminalSession.locked_by.is_(None),
+            )
+        )
+        values: dict[str, Any]
+        if error is None:
+            values = {
+                "status": TerminalControlCommandStatus.SUCCEEDED,
+                "result": result,
+                "error": None,
+            }
+        else:
+            values = {
+                "status": TerminalControlCommandStatus.FAILED,
+                "result": None,
+                "error": error,
+            }
+        values.update(
+            {
+                "finished_at": finished_at,
+                "locked_by": None,
+                "lock_until": None,
+                "updated_at": finished_at,
+            }
+        )
+        update_result = await db.execute(
+            update(TerminalControlCommand)
+            .where(
+                TerminalControlCommand.id == command_id,
+                TerminalControlCommand.terminal_session_id == terminal_session_id,
+                TerminalControlCommand.status == TerminalControlCommandStatus.PENDING,
+                TerminalControlCommand.locked_by.is_(None),
+                terminal_session_exists,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return update_result.rowcount == 1
 
     async def mark_succeeded(
         self,

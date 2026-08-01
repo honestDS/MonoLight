@@ -21,6 +21,7 @@ MESSAGES = {
     "ERR_TERMINAL_COMMAND_REQUEST_CONFLICT": "终端会话 {terminal_session_id} 的请求 {request_id} 与已存在命令冲突：{action}",
     "ERR_TERMINAL_COMMAND_FAILED": "终端命令执行失败：{error}",
     "ERR_TERMINAL_COMMAND_TIMEOUT": "等待终端命令 {command_id} 结果超时：{timeout} 秒",
+    "ERR_TERMINAL_COMMAND_RESULT_ERROR_EXCLUSIVE": "终端控制命令必须且只能提供 result 或 error 之一",
     "ERR_TERMINAL_MUTATING_REQUEST_REQUIRED": "必须提供终端写入、调整大小或关闭请求",
     "ERR_TERMINAL_PTY_CONFIG_INVALID": "PTY 配置无效：{field}",
     "ERR_TERMINAL_PTY_PLATFORM_UNSUPPORTED": "不支持的 PTY 平台：{platform}",
@@ -38,5 +39,8 @@ MESSAGES = {
     "ERR_TERMINAL_CONPTY_PID_INVALID": "ConPTY 进程 ID 无效",
     "ERR_TERMINAL_PTY_EXIT_CODE_MISSING": "PTY 缺少退出码",
     "ERR_TERMINAL_PROCESS_ACTION_INVALID": "进程操作无效：{action}",
+    "ERR_TERMINAL_WORKER_STOPPED": "终端工作进程已停止",
+    "ERR_TERMINAL_SESSION_LEASE_LOST": "终端会话租约已失效",
+    "ERR_TERMINAL_SESSION_DELETED": "终端会话已删除",
     "ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED": "交互式 Shell 缺少活动审计执行绑定",
 }

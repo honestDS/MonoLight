@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from scripts import migration_20260731_add_terminal_sessions as migration
 from scripts import migration_20260801_make_terminal_audit_optional as optional_audit_migration
+from scripts import migration_20260801_terminal_process_identity as process_identity_migration
 
 
 @pytest.mark.parametrize(
@@ -208,6 +209,68 @@ async def test_optional_terminal_audit_migration_preserves_legacy_data_constrain
 
             result = await session.execute(text("SELECT COUNT(*) FROM terminal_session WHERE audit_record_id IS NULL AND audit_execution_record_id IS NULL"))
             assert result.scalar_one() == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_process_identity_migration_preserves_legacy_rows_and_is_idempotent():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await migration.migrate(session)
+            await session.commit()
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO terminal_session (
+                        terminal_session_id, uid, session_id, original_tool_call_id, profile_id,
+                        audit_record_id, audit_execution_record_id, command, working_directory,
+                        status, allowed_actions, created_at, updated_at
+                    ) VALUES (
+                        :terminal_session_id, :uid, :session_id, :original_tool_call_id, :profile_id,
+                        :audit_record_id, :audit_execution_record_id, :command, :working_directory,
+                        :status, :allowed_actions, :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "terminal_session_id": "legacy-process-identity",
+                    "uid": "user-1",
+                    "session_id": "chat-session-1",
+                    "original_tool_call_id": "tool-call-1",
+                    "profile_id": 1,
+                    "audit_record_id": 201,
+                    "audit_execution_record_id": 2001,
+                    "command": "python -i",
+                    "working_directory": "temp/user-1",
+                    "status": "running",
+                    "allowed_actions": '["status"]',
+                    "created_at": "2026-08-01 00:00:00",
+                    "updated_at": "2026-08-01 00:00:00",
+                },
+            )
+            await session.commit()
+            await optional_audit_migration.migrate(session)
+            await session.commit()
+            await process_identity_migration.migrate(session)
+            await session.commit()
+            await process_identity_migration.migrate(session)
+            await session.commit()
+
+        async with engine.connect() as connection:
+            schema = await connection.run_sync(_inspect_terminal_schema)
+
+        assert "process_identity" in schema["session_columns"]
+        assert schema["session_nullable"]["process_identity"] is True
+
+        async with session_factory() as session:
+            result = await session.execute(
+                text("SELECT uid, audit_record_id, audit_execution_record_id FROM terminal_session WHERE terminal_session_id = :terminal_session_id"),
+                {"terminal_session_id": "legacy-process-identity"},
+            )
+            assert tuple(result.one()) == ("user-1", 201, 2001)
     finally:
         await engine.dispose()
 

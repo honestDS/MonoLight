@@ -1,15 +1,19 @@
 import asyncio
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 
+import psutil
 import pytest
 from sqlalchemy import delete
 
+from app.core.constants import ERR_TERMINAL_WORKER_STOPPED
 from app.core.dispatch_context import DispatchContext
+from app.core.i18n import t
 from app.core.terminal import (
     ALL_TERMINAL_ACTIONS,
     TerminalCloseRequest,
@@ -123,6 +127,19 @@ async def test_terminal_worker_runs_real_interactive_python_session():
             lambda snapshot: snapshot.status is TerminalSessionStatus.RUNNING,
         )
         assert running_snapshot.status is TerminalSessionStatus.RUNNING
+        async with AsyncSessionLocal() as db:
+            stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+        assert stored_terminal is not None
+        process_identity = stored_terminal.process_identity
+        assert process_identity is not None
+        assert process_identity["platform"] == platform.system()
+        assert isinstance(process_identity["boot_time"], (int, float))
+        assert isinstance(process_identity["root_pid"], int)
+        assert isinstance(process_identity["root_create_time"], (int, float))
+        assert isinstance(process_identity["known_processes"], dict)
+        root_process = psutil.Process(process_identity["root_pid"])
+        assert root_process.is_running()
+        assert root_process.status() != psutil.STATUS_ZOMBIE
 
         write_executor = TerminalWriteExecutor(project_root=os.getcwd(), uid="terminal-runtime-user")
         write_executor.set_config(ProfileConfig.model_validate({"tool": {"tool_timeout": STEP_TIMEOUT}}))
@@ -243,5 +260,61 @@ async def test_terminal_worker_runs_real_interactive_python_session():
             )
         assert repeated_close_created is False
         assert await _wait_for_command(repeated_close_command.id) == close_result
+    finally:
+        await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_stop_marks_unaudited_interactive_session_lost_and_kills_process():
+    command = _interactive_python_command()
+    coordinator = TerminalWorkerCoordinator()
+    terminal_session = None
+    process_identity = None
+
+    try:
+        async with AsyncSessionLocal() as db:
+            terminal_session = await terminal_session_manager.create_session(
+                db,
+                uid="terminal-runtime-user",
+                session_id="terminal-runtime-session",
+                profile_id=1,
+                original_tool_call_id="unaudited-virtual-tool-call",
+                audit_record_id=None,
+                audit_execution_record_id=None,
+                command=command,
+                working_directory=os.getcwd(),
+                allowed_actions=ALL_TERMINAL_ACTIONS,
+            )
+
+        coordinator.start()
+        running_snapshot = await _wait_until(
+            lambda: _get_snapshot(terminal_session.terminal_session_id),
+            lambda snapshot: snapshot.status is TerminalSessionStatus.RUNNING,
+        )
+        assert running_snapshot.status is TerminalSessionStatus.RUNNING
+        async with AsyncSessionLocal() as db:
+            stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+        assert stored_terminal is not None
+        process_identity = stored_terminal.process_identity
+        assert process_identity is not None
+
+        await coordinator.stop()
+
+        async with AsyncSessionLocal() as db:
+            stored_terminal = await db.get(TerminalSession, terminal_session.terminal_session_id)
+        assert stored_terminal is not None
+        assert stored_terminal.status is TerminalSessionStatus.LOST
+        assert stored_terminal.failure_reason == t(ERR_TERMINAL_WORKER_STOPPED)
+        assert stored_terminal.locked_by is None
+        assert stored_terminal.lock_until is None
+
+        root_pid = process_identity["root_pid"]
+        root_create_time = process_identity["root_create_time"]
+        try:
+            root_process = psutil.Process(root_pid)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            pass
+        else:
+            assert not root_process.is_running() or root_process.status() == psutil.STATUS_ZOMBIE or root_process.create_time() != root_create_time
     finally:
         await asyncio.wait_for(coordinator.stop(), timeout=STEP_TIMEOUT)

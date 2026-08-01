@@ -8,6 +8,7 @@ from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.session import session_crud
 from app.core.crud.session_event import session_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
 
 
 async def delete_session_data(
@@ -27,6 +28,11 @@ async def delete_session_data(
         session_id=session_id,
         error_reason="会话已删除，待确认审计已取消",
         commit=False,
+    )
+    await cleanup_terminal_sessions_by_chat_session(
+        db,
+        session_id=session_id,
+        uid=session.uid,
     )
     await session_reply_work_item_crud.delete_by_session(
         db,
