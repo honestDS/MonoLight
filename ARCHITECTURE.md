@@ -25,7 +25,7 @@ Monoligh/
 └── ruff.toml               # Ruff 配置
 ```
 
-`.git/`、`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/` 和 `node_modules/` 等版本控制、虚拟环境及缓存目录不在本文展开。
+`.git/`、`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/` 和 `node_modules/` 等版本控制、虚拟环境及缓存目录不在本文展开。`.clinerules/`、`.kilo/` 和 `参考项目/` 是本地忽略的工具配置或参考资料目录，不属于受版本控制的产品架构。
 
 ## 后端目录：`app/`
 
@@ -94,6 +94,7 @@ app/adapters/
     ├── crypto.py           # 敏感配置加解密
     ├── media.py            # 媒体与文件处理
     ├── message.py          # 入站消息解析
+    ├── outbound.py         # 微信出站文本约束策略
     ├── response.py         # 出站响应处理
     └── schemas.py          # 平台内部数据结构
 ```
@@ -121,14 +122,18 @@ app/core/
 ├── crypto.py               # API Key 加解密
 ├── dispatch_context.py     # 工具执行上下文
 ├── dispatcher.py           # 对话分发入口
+├── event_loop.py           # Uvicorn 跨平台事件循环选择
 ├── exceptions.py           # 业务异常
 ├── log.py                  # 日志记录
 ├── log_broadcaster.py      # 实时日志广播
 ├── paths.py                # 数据与临时目录路径
+├── profile_selection.py    # 会话、平台与默认 Profile 选择
+├── profile_validation.py   # Profile 渠道配置与归属校验
 ├── prompts.py              # 内置提示内容
 ├── security.py             # 认证与安全辅助
 ├── session_cleanup.py      # 会话关联数据清理
-└── session_notifier.py     # 会话事件通知
+├── session_notifier.py     # 会话事件通知
+└── session_source.py       # 会话来源与工具调用展示默认值
 ```
 
 ### 审计记录：`app/core/audit/`
@@ -199,6 +204,8 @@ app/core/message_platforms/
 ├── inbound_collector.py    # 入站消息收集与合并
 ├── manager.py              # 平台轮询与发件箱投递管理
 ├── notifier.py             # 会话事件和平台消息入队
+├── outbound_text.py        # 出站文本长度约束、精简与回退
+├── tool_output.py          # 主动回复中的工具调用正文合并
 └── weixin_openclaw.py      # 微信 OpenClaw 平台处理器
 ```
 
@@ -301,8 +308,10 @@ app/core/utils/
 ├── config.py               # 配置读取
 ├── context_budget.py       # 上下文令牌预算
 ├── context_messages.py     # 上下文消息处理
+├── http_proxy.py           # 渠道 HTTP 代理校验与请求参数
 ├── message_assembler.py    # 消息组装
 ├── message_parser.py       # 消息解析
+├── model_request_headers.py # 模型自定义请求头校验与构建
 ├── request_token_baseline.py # LLM 请求令牌基线与增量估算
 ├── session.py              # 会话辅助函数
 ├── system.py               # 系统信息
@@ -431,6 +440,7 @@ app/transformers/
 ├── cohere_rerank.py        # Cohere 重排协议转换
 └── openai/
     ├── __init__.py         # OpenAI 转换器导出
+    ├── base.py             # OpenAI HTTP、SSE 与异常处理基类
     ├── chat_completions.py # OpenAI Chat Completions 协议转换
     ├── embedding.py        # OpenAI 嵌入协议转换
     ├── image_generation.py # OpenAI 生图协议转换
@@ -441,13 +451,15 @@ app/transformers/
 
 ```text
 dashboard/
-├── dist/                   # 前端构建产物
+├── dist/                   # 执行构建后生成的前端产物
 ├── public/                 # 静态页面模板
 ├── src/                    # Vue 源码
 ├── tests/                  # 前端聊天状态与事件跟踪测试
 ├── package-lock.json       # 依赖锁定文件
 └── package.json            # 前端依赖与命令
 ```
+
+`dashboard/dist/` 和 `dashboard/node_modules/` 均为按需生成且被忽略的目录，未执行构建或安装依赖时可以不存在。
 
 ### 前端源码：`dashboard/src/`
 
@@ -483,7 +495,7 @@ dashboard/src/views/
 └── UsersView.vue           # 用户管理
 ```
 
-### 通用组件与组合逻辑
+### 通用组件、组合逻辑与工具函数
 
 ```text
 dashboard/src/components/
@@ -499,7 +511,9 @@ dashboard/src/components/
 
 dashboard/src/composables/
 ├── chat/
+│   ├── auditConfirmationState.js # 审计确认状态与工具结果事件合并
 │   ├── contextSummaryTracker.js # 上下文总结工作与事件顺序跟踪
+│   ├── historyMergeTracker.js   # 异步历史加载失效与顺序控制
 │   ├── thinkingTracker.js       # Thinking 占位生命周期与请求归属跟踪
 │   ├── useChatSession.js         # 聊天会话模块编排
 │   ├── useChatState.js           # 消息列表与滚动状态
@@ -511,13 +525,26 @@ dashboard/src/composables/
 ├── useResizeObserver.js    # 尺寸监听
 ├── useToolParser.js        # 工具调用内容解析
 └── useWebSocket.js         # WebSocket 连接管理
+
+dashboard/src/utils/
+├── assistantResponseIdentity.js # 助手回复身份匹配与幂等合并
+├── auditConfirmation.js    # 审计确认是否仍可操作的判断
+├── index.js                # 消息处理、格式化与通用函数
+├── profileOptions.js       # Profile 筛选、展示与会话选择辅助
+└── toolOutputVisibility.js # 工具消息识别与显示过滤
 ```
 
 ### 前端测试：`dashboard/tests/`
 
 ```text
 dashboard/tests/
+├── assistantResponseIdentity.test.js # 助手回复身份与幂等合并测试
+├── auditConfirmation.test.js     # 审计确认可操作状态测试
+├── auditConfirmationState.test.js # 审计确认事件合并测试
+├── chatConcurrentEventFlow.test.js # 并发聊天事件收敛流程测试
 ├── contextSummaryTracker.test.js # 上下文总结工作与事件顺序测试
+├── historyMergeTracker.test.js   # 异步历史加载顺序测试
+├── profileOptions.test.js        # Profile 选项与归属测试
 ├── thinkingTracker.test.js       # Thinking 占位生命周期测试
 └── workLifecycleTracker.test.js  # 聊天工作生命周期测试
 ```
@@ -571,7 +598,13 @@ scripts/
 ├── migration_20260724_add_audit_tool_result_versions.py # 审计工具结果版本表
 ├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
 ├── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
+├── migration_20260727_add_channel_http_proxy.py # 渠道 HTTP 代理字段及旧配置迁移
 ├── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
+├── migration_20260727_drop_channel_type.py       # 删除旧渠道类型字段
+├── migration_20260728_add_profile_selection_priority.py # Profile 默认值、会话覆盖与平台绑定字段
+├── migration_20260729_add_chat_session_show_tool_calls.py # 会话工具调用展示字段
+├── migration_20260729_add_message_platform_language.py # 消息平台语言字段
+├── migration_20260729_add_message_platform_use_stream_dispatch.py # 消息平台流式分发字段
 ├── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
 ├── migration_20260801_make_terminal_audit_optional.py # 终端审计绑定可选
 └── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
