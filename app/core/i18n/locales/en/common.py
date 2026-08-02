@@ -116,7 +116,7 @@ MESSAGES = {
     "ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED": "Background task lease expired and the maximum retry count was reached",
     "MSG_BACKGROUND_TASK_CANCELLED": "Background task cancelled",
     "MSG_BACKGROUND_TASK_ALREADY_FINISHED": "Background task is already finished",
-    "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task and will reply proactively after completion.",
+    "MSG_BACKGROUND_TASK_QUEUED": "Tool {tool_name} has been queued as a background task. The system will automatically trigger a follow-up reply when it finishes; do not wait or query the background task list now, and do not proactively send the task result. Only query its status if the user explicitly asks later.",
     "ERR_TOOL_NOT_ENABLED": "Tool {tool_name} is not enabled in the selected profile",
     "ERR_TOOL_NOT_REGISTERED": "Tool {tool_name} is not registered",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "Tool {tool_name} does not support background execution",

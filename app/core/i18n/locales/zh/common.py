@@ -116,7 +116,7 @@ MESSAGES = {
     "ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED": "后台任务租约已过期且已达到最大重试次数",
     "MSG_BACKGROUND_TASK_CANCELLED": "后台任务已取消",
     "MSG_BACKGROUND_TASK_ALREADY_FINISHED": "后台任务已结束",
-    "MSG_BACKGROUND_TASK_QUEUED": "工具 {tool_name} 已加入后台任务队列，完成后会主动回复",
+    "MSG_BACKGROUND_TASK_QUEUED": "工具 {tool_name} 已加入后台任务队列。系统会在任务完成后自动触发后续回复；当前不要等待或查询后台任务列表，也不要主动发送任务结果。仅当用户之后明确要求查看任务状态时再查询。",
     "ERR_TOOL_NOT_ENABLED": "工具 {tool_name} 未在当前配置中启用",
     "ERR_TOOL_NOT_REGISTERED": "工具 {tool_name} 未注册",
     "ERR_BACKGROUND_TASK_UNSUPPORTED": "工具 {tool_name} 不支持后台执行",
