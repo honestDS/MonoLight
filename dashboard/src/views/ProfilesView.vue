@@ -53,7 +53,7 @@
 
     <ProfileFormDialog
       v-model:active-tab="activeTab"
-      v-model:allowed-file-send-dir-input="allowedFileSendDirInput"
+      v-model:allowed-operation-dir-input="allowedOperationDirInput"
       v-model:audit-model-key="auditModelKey"
       v-model:dialog-visible="dialogVisible"
       v-model:file-send-blocked-extension-input="fileSendBlockedExtensionInput"
@@ -69,9 +69,9 @@
       :submitting="submitting"
       :tool-options="toolOptions"
       :users="users"
-      @add-allowed-file-send-dir="addAllowedFileSendDir"
+      @add-allowed-operation-dir="addAllowedOperationDir"
       @add-file-send-blocked-extension="addFileSendBlockedExtension"
-      @remove-allowed-file-send-dir="removeAllowedFileSendDir"
+      @remove-allowed-operation-dir="removeAllowedOperationDir"
       @remove-file-send-blocked-extension="removeFileSendBlockedExtension"
       @submit="submitForm"
     />
@@ -141,7 +141,7 @@ const dialogType = ref('create')
 const submitting = ref(false)
 const settingsSubmitting = ref(false)
 const activeTab = ref('base')
-const allowedFileSendDirInput = ref('')
+const allowedOperationDirInput = ref('')
 const fileSendBlockedExtensionInput = ref('')
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
@@ -325,14 +325,14 @@ const addUniqueListValue = (targetList, rawValue, normalizeValue = value => valu
   return true
 }
 
-const addAllowedFileSendDir = () => {
-  if (addUniqueListValue(form.configs.tool.allowed_file_send_dirs, allowedFileSendDirInput.value)) {
-    allowedFileSendDirInput.value = ''
+const addAllowedOperationDir = () => {
+  if (addUniqueListValue(form.configs.tool.allowed_operation_dirs, allowedOperationDirInput.value)) {
+    allowedOperationDirInput.value = ''
   }
 }
 
-const removeAllowedFileSendDir = (value) => {
-  form.configs.tool.allowed_file_send_dirs = form.configs.tool.allowed_file_send_dirs.filter(item => item !== value)
+const removeAllowedOperationDir = (value) => {
+  form.configs.tool.allowed_operation_dirs = form.configs.tool.allowed_operation_dirs.filter(item => item !== value)
 }
 
 const normalizeExtension = (value) => {
@@ -385,7 +385,7 @@ const handleSetDefault = async (id) => {
 const showDialog = (type, row = null) => {
   dialogType.value = type
   activeTab.value = 'base'
-  allowedFileSendDirInput.value = ''
+  allowedOperationDirInput.value = ''
   fileSendBlockedExtensionInput.value = ''
   if (type === 'edit' && row) {
     form.id = row.id
@@ -450,7 +450,7 @@ const submitForm = async () => {
   cleanChannel(form.configs.channel.context_summary_channel)
   cleanChannel(form.configs.channel.rerank_channel)
   cleanChannel(form.configs.channel.image_generation_channel)
-  addAllowedFileSendDir()
+  addAllowedOperationDir()
   addFileSendBlockedExtension()
   form.configs.security = migrateSecurityConfig(form.configs.security)
 

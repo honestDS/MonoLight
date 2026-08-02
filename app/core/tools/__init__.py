@@ -16,6 +16,7 @@ from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecu
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
 from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
+from .read_multimodal_file import READ_MULTIMODAL_FILE_TOOL_SCHEMA, ReadMultimodalFileExecutor
 from .read_text_file import READ_TEXT_FILE_TOOL_SCHEMA as READ_TEXT_FILE_TOOL_SCHEMA
 from .read_text_file import TextFileReadResult as TextFileReadResult
 from .read_text_file import read_text_file as read_text_file
@@ -47,6 +48,7 @@ CONFIGURABLE_TOOL_SCHEMAS = [
     SEND_FILE_TO_USER_TOOL_SCHEMA,
     LIST_BACKGROUND_TASKS_TOOL_SCHEMA,
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA,
+    READ_MULTIMODAL_FILE_TOOL_SCHEMA,
 ]
 
 # 满足运行条件后才会向模型暴露的工具 Schema
@@ -79,6 +81,7 @@ TOOL_EXECUTOR_MAP = {
     SEND_FILE_TO_USER_TOOL_SCHEMA["function"]["name"]: SendFileToUserExecutor,
     LIST_BACKGROUND_TASKS_TOOL_SCHEMA["function"]["name"]: ListBackgroundTasksExecutor,
     CANCEL_BACKGROUND_TASK_TOOL_SCHEMA["function"]["name"]: CancelBackgroundTaskExecutor,
+    READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
     TERMINAL_STATUS_TOOL_SCHEMA["function"]["name"]: TerminalStatusExecutor,

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.dispatchers import interactive as interactive_module
@@ -675,6 +676,8 @@ async def _run_audited_interactive_dispatch(
     finish_round_if_complete_calls_target=None,
     finish_round_if_complete_result=None,
     use_execution_round_if_complete=False,
+    tool_call=None,
+    multimodal_capabilities=None,
 ):
     profile = SimpleNamespace(id=1)
     audit_configured = audit_results is not None or audit_result is not None
@@ -690,7 +693,7 @@ async def _run_audited_interactive_dispatch(
             executor_max_workers=1,
         ),
     )
-    tool_call = InternalToolCall(
+    tool_call = tool_call or InternalToolCall(
         id="call-1",
         name="execute_shell",
         arguments={"command": "echo 1"},
@@ -723,7 +726,7 @@ async def _run_audited_interactive_dispatch(
         return _Channel(), {"model_id": "model-1", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
-        return [SimpleNamespace(name="execute_shell")], []
+        return [SimpleNamespace(name=tool_call.name)], []
 
     async def mark_initial_message_processed(db, initial_message_id):
         return None
@@ -846,7 +849,11 @@ async def _run_audited_interactive_dispatch(
     monkeypatch.setattr(interactive_module, "mark_initial_message_processed", mark_initial_message_processed)
     monkeypatch.setattr(interactive_module, "select_channel", select_channel)
     monkeypatch.setattr(interactive_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(interactive_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(
+        interactive_module,
+        "get_multimodal_from_entry",
+        lambda model_entry: multimodal_capabilities or (False, False, False),
+    )
     monkeypatch.setattr(
         interactive_module,
         "resolve_chat_params",
@@ -863,6 +870,8 @@ async def _run_audited_interactive_dispatch(
         return [InternalMessage(role=MessageRole.USER, content="request")]
 
     async def materialize_environment_prompt(db, session_id, messages, max_tokens):
+        if multimodal_capabilities is not None:
+            return [message.model_copy(deep=True) for message in messages]
         return messages
 
     monkeypatch.setattr(interactive_module, "prepare_messages", prepare_messages)
@@ -1169,6 +1178,127 @@ async def test_interactive_without_audit_configuration_executes_tool_without_aud
     assert response["choices"][0]["message"]["content"] == "finished"
     assert tool_calls == ["call-1"]
     assert all(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in checkpoint for checkpoint in checkpoints)
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_injects_read_multimodal_result_only_into_next_model_request(monkeypatch, tmp_path):
+    image_path = tmp_path / "read-result.png"
+    Image.new("RGB", (2, 2), color=(30, 60, 90)).save(image_path)
+    tool_call = InternalToolCall(
+        id="call-image",
+        name="read_multimodal_file",
+        arguments={"path": str(image_path)},
+    )
+    tool_message = "下一条 role=user 消息由系统根据本工具结果自动生成，不是用户的新输入"
+    generated_calls = []
+    checkpoints = []
+
+    async def save_checkpoint(checkpoint):
+        checkpoints.append(checkpoint)
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content=json.dumps(
+                {
+                    "type": "multimodal_file_read",
+                    "status": "success",
+                    "modality": "image",
+                    "path": str(image_path.resolve()),
+                    "message": tool_message,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        generated_calls_target=generated_calls,
+        response_messages=[
+            InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ],
+        tool_call=tool_call,
+        multimodal_capabilities=(True, False, False),
+    )
+
+    assert len(generated_calls) == 2
+    assert not any(message.role == MessageRole.USER and isinstance(message.content, list) for message in generated_calls[0]["messages"])
+    temporary_message = generated_calls[1]["messages"][-1]
+    assert temporary_message.role == MessageRole.USER
+    assert any(part.type == "text" and "不是用户的新输入" in part.text for part in temporary_message.content)
+    assert any(part.type == "image_url" and part.image_url["url"].startswith("data:image/") for part in temporary_message.content)
+
+    history = response["history"]
+    assert not any(item.get("role") == "user" and isinstance(item.get("content"), list) for item in history)
+    assert all("pending_multimodal_inputs" not in checkpoint for checkpoint in checkpoints)
+    assert all("data:image" not in json.dumps(checkpoint, ensure_ascii=False) for checkpoint in checkpoints)
+    assert all(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in checkpoint for checkpoint in checkpoints)
+    assert unknown_calls == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_resume_reinjects_multimodal_image_from_messages_with_trailing_confirmation(monkeypatch, tmp_path):
+    image_path = tmp_path / "resume-image.png"
+    Image.new("RGB", (2, 2), color=(90, 60, 30)).save(image_path)
+    tool_call = InternalToolCall(
+        id="call-image",
+        name="read_multimodal_file",
+        arguments={"path": str(image_path)},
+    )
+    tool_result = InternalMessage(
+        role=MessageRole.TOOL,
+        tool_call_id=tool_call.id,
+        content=json.dumps(
+            {
+                "type": "multimodal_file_read",
+                "status": "success",
+                "modality": "image",
+                "path": str(image_path.resolve()),
+                "message": "下一条 role=user 消息不是用户新输入",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    generated_calls = []
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(*args, **kwargs):
+        raise AssertionError("resume with a completed multimodal result must not execute a tool")
+
+    response, unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        generated_calls_target=generated_calls,
+        response_messages=[InternalMessage(role=MessageRole.ASSISTANT, content="finished")],
+        tool_call=tool_call,
+        multimodal_capabilities=(True, False, False),
+        execution_resume_state={
+            "messages": [
+                InternalMessage(role=MessageRole.USER, content="request").model_dump(mode="json"),
+                InternalMessage(role=MessageRole.ASSISTANT, tool_calls=[tool_call]).model_dump(mode="json"),
+                tool_result.model_dump(mode="json"),
+                InternalMessage(role=MessageRole.USER, content="确认执行").model_dump(mode="json"),
+            ],
+            "turn_messages": [],
+            "files_to_user": [],
+            "current_turn": 0,
+        },
+    )
+
+    assert response["choices"][0]["message"]["content"] == "finished"
+    temporary_message = generated_calls[0]["messages"][-1]
+    assert temporary_message.role == MessageRole.USER
+    assert any(part.type == "image_url" and part.image_url["url"].startswith("data:image/") for part in temporary_message.content)
     assert unknown_calls == []
 
 

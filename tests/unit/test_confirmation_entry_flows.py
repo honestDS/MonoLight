@@ -618,7 +618,7 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
             }
         ],
         "errors": [{"path": "/allowed/reports/missing.pdf", "error": "file not found"}],
-        "allowed_file_send_dirs": ["/allowed/reports"],
+        "allowed_operation_dirs": ["/allowed/reports"],
     }
 
     stored_results, _card = await persist_pending_confirmation_bundle(
@@ -665,7 +665,7 @@ async def test_pending_confirmation_becomes_visible_with_structured_results_atom
             }
         ],
         "errors": [{"path": "/allowed/reports/missing.pdf", "error": "file not found"}],
-        "allowed_file_send_dirs": ["/allowed/reports"],
+        "allowed_operation_dirs": ["/allowed/reports"],
     }
     replacement_content_json = json.dumps(replacement_content)
     returned_content = await replace_pending_tool_result(

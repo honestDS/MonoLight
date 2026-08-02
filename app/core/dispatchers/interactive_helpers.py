@@ -14,6 +14,7 @@ from app.core.constants import (
 )
 from app.core.crud.audit import audit_crud
 from app.core.i18n import t
+from app.core.tools.read_multimodal_file import parse_multimodal_file_read_result
 from app.core.utils.context_summary import ContextSummaryTriggerMode
 from app.core.utils.dispatcher.fetch_and_merge_new_user_messages import fetch_and_merge_new_user_messages
 from app.core.utils.dispatcher.helpers import process_single_tool_with_isolated_db
@@ -22,7 +23,8 @@ from app.core.utils.dispatcher.markdown_instruction import (
     build_max_output_tokens_instruction,
 )
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
-from app.models.message import InternalMessage
+from app.core.utils.message_assembler import MessageAssembler
+from app.models.message import InternalMessage, MessageRole
 
 
 def _tool_result_succeeded(content: str | None) -> bool:
@@ -33,6 +35,59 @@ def _tool_result_succeeded(content: str | None) -> bool:
     if not isinstance(payload, dict):
         return True
     return not (payload.get("error") or payload.get("status") == "failed" or (isinstance(payload.get("exit_code"), int) and payload["exit_code"] != 0))
+
+
+def collect_pending_multimodal_file_inputs(messages: list[InternalMessage]) -> list[dict[str, str]]:
+    assistant_index = next(
+        (index for index in range(len(messages) - 1, -1, -1) if messages[index].role == MessageRole.ASSISTANT),
+        None,
+    )
+    if assistant_index is None or not messages[assistant_index].tool_calls:
+        return []
+
+    inputs: list[dict[str, str]] = []
+    for tool_call in messages[assistant_index].tool_calls:
+        if getattr(tool_call, "name", None) != "read_multimodal_file":
+            continue
+        for tool_response in messages[assistant_index + 1 :]:
+            if tool_response.role != MessageRole.TOOL or tool_response.tool_call_id != tool_call.id:
+                continue
+            result = parse_multimodal_file_read_result(tool_response.content)
+            if result is not None and result["modality"] == "image":
+                inputs.append(
+                    {
+                        "path": result["path"],
+                        "modality": result["modality"],
+                        "message": result["message"],
+                        "tool_call_id": tool_call.id,
+                    }
+                )
+            break
+    return inputs
+
+
+def build_pending_multimodal_input_message(
+    pending_inputs: list[dict[str, str]],
+    *,
+    image_understanding: bool,
+    audio_understanding: bool,
+    video_understanding: bool,
+) -> InternalMessage | None:
+    if not pending_inputs:
+        return None
+    paths = list(dict.fromkeys(item["path"] for item in pending_inputs))
+    messages = list(dict.fromkeys(item["message"] for item in pending_inputs))
+    return MessageAssembler.assemble(
+        InternalMessage(
+            role=MessageRole.USER,
+            content="\n\n".join(messages),
+            attachments=paths,
+        ),
+        image_understanding=image_understanding,
+        audio_understanding=audio_understanding,
+        video_understanding=video_understanding,
+        is_history=False,
+    )
 
 
 @dataclass

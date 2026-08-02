@@ -23,6 +23,7 @@ from app.core.constants import (
     ERR_CHAT_CHANNEL_NOT_FOUND,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_LLM_EMPTY_RESPONSE,
+    ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
 )
@@ -93,6 +94,8 @@ from .interactive_helpers import (
     _ParallelToolExecutionContext,
     _save_execution_checkpoint,
     _tool_result_succeeded,
+    build_pending_multimodal_input_message,
+    collect_pending_multimodal_file_inputs,
 )
 
 logger = get_logger(__name__)
@@ -292,13 +295,25 @@ class InteractiveDispatcherMixin:
                                         protocol=resolve_model_protocol(model_entry),
                                         previous_llm_request_metadata=(latest_llm_request_metadata if isinstance(latest_llm_request_metadata, dict) and latest_llm_request_metadata.get("input_tokens_source") == "provider" else None),
                                     )
+                                pending_file_inputs = collect_pending_multimodal_file_inputs(messages)
+                                if pending_file_inputs and not img_understanding:
+                                    raise LLMException(message=ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED)
+                                request_messages = await materialize_latest_user_environment_prompt(
+                                    db,
+                                    session_id,
+                                    messages,
+                                    chat_params["max_tokens"],
+                                )
+                                pending_multimodal_message = build_pending_multimodal_input_message(
+                                    pending_file_inputs,
+                                    image_understanding=img_understanding,
+                                    audio_understanding=audio_understanding,
+                                    video_understanding=video_understanding,
+                                )
+                                if pending_multimodal_message is not None:
+                                    request_messages.append(pending_multimodal_message)
                                 request_messages = ContextManager.trim_messages_for_model_request(
-                                    messages=await materialize_latest_user_environment_prompt(
-                                        db,
-                                        session_id,
-                                        messages,
-                                        chat_params["max_tokens"],
-                                    ),
+                                    messages=request_messages,
                                     uid=uid,
                                     session_id=session_id,
                                     context_window_k=chat_params["context_window_k"],

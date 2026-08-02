@@ -166,6 +166,34 @@
           <el-tab-pane :label="$t('profiles.tool_settings')" name="tool">
             <div class="tab-pane-content">
               <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.common_tool_config') }}</div>
+                <el-form-item :label="$t('profiles.allowed_operation_dirs')">
+                  <div class="tag-input-panel full-width-input">
+                    <el-input
+                      :model-value="allowedOperationDirInput" @update:model-value="$emit('update:allowedOperationDirInput', $event)"
+                      :placeholder="$t('profiles.allowed_operation_dirs_placeholder')"
+                      @keyup.enter="$emit('add-allowed-operation-dir')"
+                    >
+                      <template #append>
+                        <el-button @click="$emit('add-allowed-operation-dir')">{{ $t('profiles.add') }}</el-button>
+                      </template>
+                    </el-input>
+                    <div v-if="form.configs.tool.allowed_operation_dirs.length" class="tag-list">
+                      <el-tag
+                        v-for="item in form.configs.tool.allowed_operation_dirs"
+                        :key="item"
+                        closable
+                        @close="$emit('remove-allowed-operation-dir', item)"
+                      >
+                        {{ item }}
+                      </el-tag>
+                    </div>
+                  </div>
+                  <div class="help-text mt-5">{{ $t('profiles.allowed_operation_dirs_hint') }}</div>
+                </el-form-item>
+              </div>
+
+              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.scheduling_control') }}</div>
                 <div class="scheduling-control-list">
                   <el-form-item :label="$t('profiles.max_parallel_tools')">
@@ -220,30 +248,6 @@
 
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.file_send_config') }}</div>
-                <el-form-item :label="$t('profiles.allowed_file_send_dirs')">
-                  <div class="tag-input-panel full-width-input">
-                    <el-input
-                      :model-value="allowedFileSendDirInput" @update:model-value="$emit('update:allowedFileSendDirInput', $event)"
-                      :placeholder="$t('profiles.allowed_file_send_dirs_placeholder')"
-                      @keyup.enter="$emit('add-allowed-file-send-dir')"
-                    >
-                      <template #append>
-                        <el-button @click="$emit('add-allowed-file-send-dir')">{{ $t('profiles.add') }}</el-button>
-                      </template>
-                    </el-input>
-                    <div v-if="form.configs.tool.allowed_file_send_dirs.length" class="tag-list">
-                      <el-tag
-                        v-for="item in form.configs.tool.allowed_file_send_dirs"
-                        :key="item"
-                        closable
-                        @close="$emit('remove-allowed-file-send-dir', item)"
-                      >
-                        {{ item }}
-                      </el-tag>
-                    </div>
-                  </div>
-                  <div class="help-text mt-5">{{ $t('profiles.allowed_file_send_dirs_hint') }}</div>
-                </el-form-item>
                 <el-row :gutter="20">
                   <el-col :span="8">
                     <el-form-item :label="$t('profiles.file_send_max_count')">
@@ -319,7 +323,7 @@ import ChannelEditor from './ChannelEditor.vue'
 
 defineProps({
   activeTab: { type: String, required: true },
-  allowedFileSendDirInput: { type: String, required: true },
+  allowedOperationDirInput: { type: String, required: true },
   auditModelKey: { type: String, default: null },
   auditModelOptions: { type: Array, required: true },
   channels: { type: Array, required: true },
@@ -338,13 +342,13 @@ defineProps({
 })
 
 defineEmits([
-  'add-allowed-file-send-dir',
+  'add-allowed-operation-dir',
   'add-file-send-blocked-extension',
-  'remove-allowed-file-send-dir',
+  'remove-allowed-operation-dir',
   'remove-file-send-blocked-extension',
   'submit',
   'update:activeTab',
-  'update:allowedFileSendDirInput',
+  'update:allowedOperationDirInput',
   'update:auditModelKey',
   'update:dialogVisible',
   'update:fileSendBlockedExtensionInput'

@@ -93,8 +93,22 @@ class ToolConfig(BaseModel):
     background_task_max_concurrency: int = PydanticField(2, ge=1, le=20, description="允许的最大后台任务并发数量")
     scheduled_task_max_concurrency: int = PydanticField(4, ge=1, le=20, description="允许的最大计划任务回复并发数量")
     firecrawl_api_key: str | None = PydanticField(None, description="Firecrawl API Key")
-    enabled_tools: list[str] = PydanticField(default_factory=lambda: ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"], description="允许向 LLM 暴露的工具名称列表")
-    allowed_file_send_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 允许发送文件的安全目录白名单，目录必须使用绝对路径")
+    enabled_tools: list[str] = PydanticField(
+        default_factory=lambda: [
+            "execute_shell",
+            "write_file",
+            "firecrawl_search",
+            "firecrawl_scrape",
+            "send_file_to_user",
+            "list_background_tasks",
+            "cancel_background_task",
+            "generate_image",
+            "query_knowledge_base",
+            "read_multimodal_file",
+        ],
+        description="允许向 LLM 暴露的工具名称列表",
+    )
+    allowed_operation_dirs: list[str] = PydanticField(default_factory=list, description="send_file_to_user 和 read_multimodal_file 允许操作文件的安全目录白名单，目录必须使用绝对路径")
     file_send_max_count: int = PydanticField(10, ge=1, le=100, description="send_file_to_user 单次最多允许发送的文件数量")
     file_send_max_single_size_mb: int = PydanticField(50, ge=1, le=1024, description="send_file_to_user 单个文件大小上限（MB）")
     file_send_max_total_size_mb: int = PydanticField(100, ge=1, le=4096, description="send_file_to_user 单次发送总大小上限（MB）")
@@ -152,7 +166,7 @@ class ProfileConfig(BaseModel):
                 "scheduled_task_max_concurrency",
                 "firecrawl_api_key",
                 "enabled_tools",
-                "allowed_file_send_dirs",
+                "allowed_operation_dirs",
                 "file_send_max_count",
                 "file_send_max_single_size_mb",
                 "file_send_max_total_size_mb",
@@ -210,8 +224,8 @@ PROFILE_EXAMPLE = {
             "background_task_max_concurrency": 2,
             "scheduled_task_max_concurrency": 4,
             "firecrawl_api_key": "",
-            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base"],
-            "allowed_file_send_dirs": [],
+            "enabled_tools": ["execute_shell", "write_file", "firecrawl_search", "firecrawl_scrape", "send_file_to_user", "list_background_tasks", "cancel_background_task", "generate_image", "query_knowledge_base", "read_multimodal_file"],
+            "allowed_operation_dirs": [],
             "file_send_max_count": 10,
             "file_send_max_single_size_mb": 50,
             "file_send_max_total_size_mb": 100,

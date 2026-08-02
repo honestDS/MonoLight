@@ -36,4 +36,5 @@ MESSAGES = {
     "TOOL_CANCEL_BACKGROUND_TASK_LABEL": "Cancel Background Task",
     "TOOL_GENERATE_IMAGE_LABEL": "Generate Image",
     "TOOL_QUERY_KNOWLEDGE_BASE_LABEL": "Query Knowledge Base",
+    "TOOL_READ_MULTIMODAL_FILE_LABEL": "Read Multimodal File",
 }

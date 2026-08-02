@@ -312,6 +312,7 @@ app/core/utils/
 ├── message_assembler.py    # 消息组装
 ├── message_parser.py       # 消息解析
 ├── model_request_headers.py # 模型自定义请求头校验与构建
+├── operation_directories.py # 工具允许操作目录校验
 ├── request_token_baseline.py # LLM 请求令牌基线与增量估算
 ├── session.py              # 会话辅助函数
 ├── system.py               # 系统信息
@@ -334,6 +335,7 @@ app/core/tools/
 ├── knowledge_base_query.py # 知识库查询
 ├── list_background_tasks.py # 查询后台任务
 ├── read_text_file.py       # 通用只读文本文件读取
+├── read_multimodal_file.py # 读取并校验本地多模态文件
 ├── send_file_to_user.py    # 向用户发送文件
 ├── terminal.py             # 交互终端状态、读写、调整与关闭工具
 └── shell.py                # Shell 命令执行

@@ -14,18 +14,23 @@ from app.core.constants import (
     ERR_FILE_NOT_FOUND,
     ERR_FILE_PATH_MISSING,
     ERR_FILE_PATH_NOT_ABSOLUTE,
-    ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS,
-    ERR_FILE_SEND_DIRS_UNCONFIGURED,
     ERR_FILE_SENSITIVE_NOT_ALLOWED,
     ERR_FILE_SINGLE_SIZE_LIMIT_EXCEEDED,
     ERR_FILE_TOKEN_INVALID,
     ERR_FILE_TOKEN_PAYLOAD_INVALID,
     ERR_FILE_TOKEN_SIGNATURE_INVALID,
     ERR_FILE_TOTAL_SIZE_LIMIT_EXCEEDED,
+    ERR_TOOL_OPERATION_DIRS_UNCONFIGURED,
+    ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS,
     MSG_FILE_COUNT_TRUNCATED,
 )
 from app.core.crypto import _get_encryption_key
 from app.core.i18n import t
+from app.core.utils.operation_directories import (
+    get_allowed_operation_dirs,
+    is_path_within_allowed_operation_dirs,
+    normalize_allowed_operation_dirs,
+)
 
 from .base import BaseExecutor
 
@@ -80,28 +85,6 @@ def resolve_file_token(token: str) -> Path:
     return path
 
 
-def _normalize_allowed_dirs(allowed_dirs: list[str] | None = None) -> list[Path]:
-    normalized_dirs = []
-    for directory in allowed_dirs or []:
-        try:
-            directory_path = Path(directory)
-            if directory_path.is_absolute():
-                normalized_dirs.append(directory_path.resolve())
-        except Exception:
-            continue
-    return normalized_dirs
-
-
-def _is_allowed_path(path: Path, allowed_dirs: list[str] | None = None) -> bool:
-    for root in _normalize_allowed_dirs(allowed_dirs):
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
-
-
 def _is_sensitive_path(path: Path) -> bool:
     filename = path.name.lower()
     parts = {part.lower() for part in path.parts}
@@ -143,12 +126,8 @@ class SendFileToUserExecutor(BaseExecutor):
     def _get_tool_config(self) -> Any:
         return getattr(self.cfg, "tool", None)
 
-    def _get_allowed_dirs(self) -> list[str]:
-        tool_config = self._get_tool_config()
-        allowed_dirs = getattr(tool_config, "allowed_file_send_dirs", []) if tool_config else []
-        if isinstance(allowed_dirs, list):
-            return [directory for directory in allowed_dirs if isinstance(directory, str)]
-        return []
+    def _get_allowed_operation_dirs(self) -> list[str]:
+        return get_allowed_operation_dirs(self.cfg)
 
     def _get_limit_config(self) -> tuple[int, int, int, set[str]]:
         tool_config = self._get_tool_config()
@@ -166,7 +145,7 @@ class SendFileToUserExecutor(BaseExecutor):
 
     async def execute(self, files: Any) -> str:
         normalized_files = _normalize_files(files)
-        allowed_dirs = self._get_allowed_dirs()
+        allowed_dirs = self._get_allowed_operation_dirs()
         if normalized_files is None:
             return json.dumps(
                 {
@@ -174,7 +153,7 @@ class SendFileToUserExecutor(BaseExecutor):
                     "files": [],
                     "status": "failed",
                     "errors": [{"path": "", "error": t(ERR_FILE_ARGUMENT_INVALID)}],
-                    "allowed_file_send_dirs": allowed_dirs,
+                    "allowed_operation_dirs": allowed_dirs,
                 },
                 ensure_ascii=False,
             )
@@ -184,14 +163,14 @@ class SendFileToUserExecutor(BaseExecutor):
         errors = []
         total_size = 0
 
-        if not _normalize_allowed_dirs(allowed_dirs):
+        if not normalize_allowed_operation_dirs(allowed_dirs):
             return json.dumps(
                 {
                     "type": "files_to_user",
                     "files": [],
                     "status": "failed",
-                    "errors": [{"path": "", "error": t(ERR_FILE_SEND_DIRS_UNCONFIGURED)}],
-                    "allowed_file_send_dirs": allowed_dirs,
+                    "errors": [{"path": "", "error": t(ERR_TOOL_OPERATION_DIRS_UNCONFIGURED)}],
+                    "allowed_operation_dirs": allowed_dirs,
                 },
                 ensure_ascii=False,
             )
@@ -211,8 +190,8 @@ class SendFileToUserExecutor(BaseExecutor):
                     raise ValueError(t(ERR_FILE_PATH_NOT_ABSOLUTE))
 
                 resolved_path = path.resolve()
-                if not _is_allowed_path(resolved_path, allowed_dirs):
-                    raise ValueError(t(ERR_FILE_PATH_OUTSIDE_ALLOWED_DIRS))
+                if not is_path_within_allowed_operation_dirs(resolved_path, allowed_dirs):
+                    raise ValueError(t(ERR_TOOL_PATH_OUTSIDE_ALLOWED_OPERATION_DIRS))
                 if _is_sensitive_path(resolved_path):
                     raise ValueError(t(ERR_FILE_SENSITIVE_NOT_ALLOWED))
                 if resolved_path.suffix.lower() in blocked_extensions:
@@ -251,7 +230,7 @@ class SendFileToUserExecutor(BaseExecutor):
                 "files": valid_files,
                 "status": "success" if valid_files and not errors else "partial_success" if valid_files else "failed",
                 "errors": errors,
-                "allowed_file_send_dirs": allowed_dirs,
+                "allowed_operation_dirs": allowed_dirs,
             },
             ensure_ascii=False,
         )
