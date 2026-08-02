@@ -503,6 +503,8 @@ dashboard/src/views/
 dashboard/src/components/
 ├── BaseDataTable.vue       # 通用数据表格
 ├── ChannelEditor.vue       # 渠道编辑器
+├── ChannelFormDialog.vue   # 渠道表单、模型探测与测试
+├── ChannelModelEntry.vue   # 渠道单模型配置项
 ├── ChatMessageList.vue     # 虚拟化聊天消息、引导、工具结果与审计卡片展示
 ├── LanguageSwitcher.vue    # 语言切换器
 ├── MessagePlatformFormDialog.vue # 消息平台表单
@@ -531,6 +533,7 @@ dashboard/src/composables/
 dashboard/src/utils/
 ├── assistantResponseIdentity.js # 助手回复身份匹配与幂等合并
 ├── auditConfirmation.js    # 审计确认是否仍可操作的判断
+├── channelTestManager.js    # 渠道模型测试并发与取消生命周期
 ├── index.js                # 消息处理、格式化与通用函数
 ├── profileOptions.js       # Profile 筛选、展示与会话选择辅助
 └── toolOutputVisibility.js # 工具消息识别与显示过滤
@@ -543,6 +546,7 @@ dashboard/tests/
 ├── assistantResponseIdentity.test.js # 助手回复身份与幂等合并测试
 ├── auditConfirmation.test.js     # 审计确认可操作状态测试
 ├── auditConfirmationState.test.js # 审计确认事件合并测试
+├── channelTestManager.test.js    # 渠道模型测试并发与取消生命周期测试
 ├── chatConcurrentEventFlow.test.js # 并发聊天事件收敛流程测试
 ├── contextSummaryTracker.test.js # 上下文总结工作与事件顺序测试
 ├── historyMergeTracker.test.js   # 异步历史加载顺序测试

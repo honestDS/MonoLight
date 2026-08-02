@@ -6,6 +6,8 @@ CRUD 支持 model_ids 字段；移除 usage 字段
 import copy
 import json
 import re
+from enum import StrEnum
+from time import perf_counter
 
 from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, field_validator
@@ -98,6 +100,11 @@ class ChannelModelListRequest(ChannelHTTPProxyRequest):
     timeout: float = PydanticField(30.0, gt=0, le=120)
 
 
+class ChannelChatTestMode(StrEnum):
+    NON_STREAM = "non_stream"
+    STREAM = "stream"
+
+
 class ChannelChatTestRequest(ChannelHTTPProxyRequest):
     protocol: ModelProtocol | None = None
     api_key: str | None = None
@@ -108,6 +115,7 @@ class ChannelChatTestRequest(ChannelHTTPProxyRequest):
     max_tokens: int | None = PydanticField(None, ge=0)
     timeout: float = PydanticField(60.0, gt=0, le=600)
     advanced_settings: ChannelModelAdvancedSettings = PydanticField(default_factory=ChannelModelAdvancedSettings)
+    test_mode: ChannelChatTestMode = ChannelChatTestMode.NON_STREAM
 
 
 class ChannelImageGenerationTestRequest(ChannelHTTPProxyRequest):
@@ -269,20 +277,35 @@ async def test_channel_chat(
     if not model_id or not model_id.strip():
         raise ParameterException(ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
 
+    request_kwargs = {
+        "protocol": protocol.value.lower(),
+        "api_key": api_key,
+        "base_url": base_url,
+        "model_id": model_id.strip(),
+        "messages": [InternalMessage(role=MessageRole.USER, content="你好")],
+        "temperature": payload.temperature if payload.temperature is not None else 0.7,
+        "max_tokens": payload.max_tokens or 0,
+        "top_p": payload.top_p,
+        "timeout": payload.timeout,
+        "http_proxy": payload.http_proxy,
+        "custom_headers": payload.advanced_settings.custom_headers,
+    }
+    first_char_latency_ms = None
+    request_start = 0.0
+
+    async def on_content(content: str) -> None:
+        nonlocal first_char_latency_ms
+        if isinstance(content, str) and content and first_char_latency_ms is None:
+            first_char_latency_ms = round((perf_counter() - request_start) * 1000, 2)
+
     try:
-        response = await LLMClient.generate(
-            protocol=protocol.value.lower(),
-            api_key=api_key,
-            base_url=base_url,
-            model_id=model_id.strip(),
-            messages=[InternalMessage(role=MessageRole.USER, content="你好")],
-            temperature=payload.temperature if payload.temperature is not None else 0.7,
-            max_tokens=payload.max_tokens or 0,
-            top_p=payload.top_p,
-            timeout=payload.timeout,
-            http_proxy=payload.http_proxy,
-            custom_headers=payload.advanced_settings.custom_headers,
-        )
+        request_start = perf_counter()
+        if payload.test_mode == ChannelChatTestMode.NON_STREAM:
+            response = await LLMClient.generate(**request_kwargs)
+            latency_ms = round((perf_counter() - request_start) * 1000, 2)
+        else:
+            response = await LLMClient.generate_with_stream_callback(**request_kwargs, on_content=on_content)
+            total_latency_ms = round((perf_counter() - request_start) * 1000, 2)
         content = response.message.content
         if isinstance(content, str):
             reply = content.strip()
@@ -298,8 +321,16 @@ async def test_channel_chat(
     except Exception as e:
         raise ParameterException(ERR_CHANNEL_TEST_FAILED, detail=str(e)) from e
 
+    timing_data = (
+        {"latency_ms": latency_ms}
+        if payload.test_mode == ChannelChatTestMode.NON_STREAM
+        else {
+            "first_char_latency_ms": first_char_latency_ms,
+            "total_latency_ms": total_latency_ms,
+        }
+    )
     return StandardResponse.success(
-        data={"model": response.model, "reply": reply, "usage": response.usage},
+        data={"model": response.model, "reply": reply, "usage": response.usage, "test_mode": payload.test_mode.value, **timing_data},
         message=MSG_CHANNEL_CHAT_TEST_SUCCESS,
     )
 
@@ -326,6 +357,7 @@ async def test_channel_image_generation(
         raise ParameterException(ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
 
     try:
+        request_start = perf_counter()
         response = await ImageGenerationClient.generate_image(
             api_key=api_key,
             base_url=base_url,
@@ -339,6 +371,7 @@ async def test_channel_image_generation(
             http_proxy=payload.http_proxy,
             custom_headers=payload.advanced_settings.custom_headers,
         )
+        latency_ms = round((perf_counter() - request_start) * 1000, 2)
         images = response.get("data") if isinstance(response, dict) else None
         if not isinstance(images, list) or not images:
             raise ParameterException(ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE)
@@ -357,6 +390,7 @@ async def test_channel_image_generation(
         data={
             "model": response.get("model", model_id.strip()) if isinstance(response, dict) else model_id.strip(),
             "image": first_image,
+            "latency_ms": latency_ms,
         },
         message=MSG_CHANNEL_IMAGE_GENERATION_TEST_SUCCESS,
     )
