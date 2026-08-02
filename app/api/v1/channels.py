@@ -19,6 +19,7 @@ from app.core.constants import (
     ERR_CHANNEL_BASE_URL_SCHEME,
     ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID,
+    ERR_CHANNEL_CHAT_TEST_PROMPT_REQUIRED,
     ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_MODEL_IDS_ITEM_INVALID,
     ERR_CHANNEL_MODEL_LIST_FAILED,
@@ -106,6 +107,7 @@ class ChannelChatTestMode(StrEnum):
 
 
 class ChannelChatTestRequest(ChannelHTTPProxyRequest):
+    prompt: str
     protocol: ModelProtocol | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -276,13 +278,15 @@ async def test_channel_chat(
         raise ParameterException(ERR_CHANNEL_MODEL_LIST_NO_API_KEY)
     if not model_id or not model_id.strip():
         raise ParameterException(ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID)
+    if not payload.prompt.strip():
+        raise ParameterException(ERR_CHANNEL_CHAT_TEST_PROMPT_REQUIRED)
 
     request_kwargs = {
         "protocol": protocol.value.lower(),
         "api_key": api_key,
         "base_url": base_url,
         "model_id": model_id.strip(),
-        "messages": [InternalMessage(role=MessageRole.USER, content="你好")],
+        "messages": [InternalMessage(role=MessageRole.USER, content=payload.prompt)],
         "temperature": payload.temperature if payload.temperature is not None else 0.7,
         "max_tokens": payload.max_tokens or 0,
         "top_p": payload.top_p,

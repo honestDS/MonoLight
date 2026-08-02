@@ -6,7 +6,7 @@ from app.models.message import InternalMessage, InternalResponse, MessageRole
 
 
 def test_channel_chat_request_defaults_to_non_stream() -> None:
-    payload = channels.ChannelChatTestRequest()
+    payload = channels.ChannelChatTestRequest(prompt="Test prompt")
 
     assert payload.test_mode is channels.ChannelChatTestMode.NON_STREAM
 
@@ -33,6 +33,7 @@ async def test_channel_chat_non_stream_returns_latency(monkeypatch) -> None:
             api_key="key",
             base_url="https://example.invalid",
             model_id=" model ",
+            prompt="Tell me a short greeting.",
         ),
         _admin={},
     )
@@ -44,7 +45,7 @@ async def test_channel_chat_non_stream_returns_latency(monkeypatch) -> None:
     assert len(calls["messages"]) == 1
     message = calls["messages"][0]
     assert message.role == MessageRole.USER
-    assert message.content == "你好"
+    assert message.content == "Tell me a short greeting."
     assert message.refusal is None
     assert message.tool_calls is None
     assert calls["temperature"] == 0.7
@@ -91,6 +92,7 @@ async def test_channel_chat_stream_returns_first_char_and_total_latency(monkeypa
             api_key="key",
             base_url="https://example.invalid",
             model_id="model",
+            prompt="Return the first two prime numbers.",
             test_mode=channels.ChannelChatTestMode.STREAM,
         ),
         _admin={},
@@ -103,7 +105,7 @@ async def test_channel_chat_stream_returns_first_char_and_total_latency(monkeypa
     assert len(calls["messages"]) == 1
     message = calls["messages"][0]
     assert message.role == MessageRole.USER
-    assert message.content == "你好"
+    assert message.content == "Return the first two prime numbers."
     assert message.refusal is None
     assert message.tool_calls is None
     assert calls["temperature"] == 0.7
@@ -127,6 +129,26 @@ async def test_channel_chat_stream_returns_first_char_and_total_latency(monkeypa
         "first_char_latency_ms": 25.6,
         "total_latency_ms": 178.9,
     }
+
+
+@pytest.mark.asyncio
+async def test_channel_chat_rejects_whitespace_prompt_without_calling_model(monkeypatch) -> None:
+    async def generate(**_kwargs):
+        raise AssertionError("model generation must not be called")
+
+    monkeypatch.setattr(channels.LLMClient, "generate", generate)
+
+    with pytest.raises(channels.ParameterException):
+        await channels.test_channel_chat(
+            channels.ChannelChatTestRequest(
+                protocol=ModelProtocol.OPENAI,
+                api_key="key",
+                base_url="https://example.invalid",
+                model_id="model",
+                prompt=" \t\n ",
+            ),
+            _admin={},
+        )
 
 
 @pytest.mark.asyncio

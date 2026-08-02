@@ -3,17 +3,9 @@
     <div class="model-entry-header">
       <span>{{ $t('channels.model_entry') }} #{{ props.index + 1 }}</span>
       <div class="model-entry-actions">
-        <el-dropdown v-if="props.entry.usage === 'CHAT'" :disabled="props.testing" @command="testMode => emit('test-chat', testMode)">
-          <el-button type="text" :loading="props.testing" :disabled="props.testing">
-            {{ $t('channels.test') }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="non_stream">{{ $t('channels.chat_test_non_stream') }}</el-dropdown-item>
-              <el-dropdown-item command="stream">{{ $t('channels.chat_test_stream') }}</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <el-button v-if="props.entry.usage === 'CHAT'" type="text" :loading="props.testing" :disabled="props.testing" @click="emit('test-chat')">
+          {{ $t('channels.test') }}
+        </el-button>
         <el-button v-else-if="props.entry.usage === 'IMAGE_GENERATION'" type="text" :loading="props.testing" :disabled="props.testing" @click="emit('test-image-generation')">
           {{ $t('channels.test') }}
         </el-button>
@@ -239,7 +231,6 @@
 </template>
 
 <script setup>
-import { ArrowDown, Setting, TrendCharts } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 const props = defineProps({

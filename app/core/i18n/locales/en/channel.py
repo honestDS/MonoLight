@@ -21,6 +21,7 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED": "Every model must select a protocol.",
     "ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID": "The protocol must match the model usage.",
     "ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID": "Please enter Model ID before running the chat test.",
+    "ERR_CHANNEL_CHAT_TEST_PROMPT_REQUIRED": "Please enter a prompt before running the chat test.",
     "ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE": "The model did not return a valid image.",
     "ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE": "The model did not return a valid reply.",
     "ERR_CHANNEL_MODEL_LIST_NO_URL": "Please enter Base URL before detecting the model list.",

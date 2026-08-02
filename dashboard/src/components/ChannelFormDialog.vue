@@ -82,7 +82,7 @@
           :detecting-metadata="detectingMetadataIndex === idx"
           :detecting-dimension="detectingDimensionIndex === idx"
           :metadata-detection-disabled="detectingMetadataIndex !== null && detectingMetadataIndex !== idx"
-          @test-chat="mode => testChatModel(entry, idx, mode)"
+          @test-chat="openChatTestDialog(entry, idx)"
           @test-image-generation="testImageGenerationModel(entry, idx)"
           @detect-metadata="detectModelMetadata(entry, idx)"
           @remove="removeModelEntry(idx)"
@@ -104,6 +104,35 @@
     <template #footer>
       <el-button @click="dialogVisible = false">{{ $t('channels.cancel') }}</el-button>
       <el-button type="primary" @click="submitForm" :loading="submitting">{{ $t('channels.confirm') }}</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="chatTestDialogVisible"
+    :title="$t('channels.chat_test_config_title')"
+    width="520px"
+    append-to-body
+    :close-on-click-modal="true"
+    @closed="resetChatTestDialogState">
+    <el-form :model="chatTestForm" label-position="top" class="chat-test-form">
+      <el-form-item :label="$t('channels.chat_test_mode')">
+        <el-radio-group v-model="chatTestForm.testMode">
+          <el-radio label="non_stream">{{ $t('channels.chat_test_non_stream') }}</el-radio>
+          <el-radio label="stream">{{ $t('channels.chat_test_stream') }}</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item :label="$t('channels.chat_test_prompt')" :error="chatTestPromptError">
+        <el-input
+          v-model="chatTestForm.prompt"
+          type="textarea"
+          :rows="5"
+          :placeholder="$t('channels.chat_test_prompt_placeholder')"
+          @input="chatTestPromptError = ''" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="chatTestDialogVisible = false">{{ $t('channels.cancel') }}</el-button>
+      <el-button type="primary" @click="confirmChatTest">{{ $t('channels.chat_test_start') }}</el-button>
     </template>
   </el-dialog>
 </template>
@@ -159,6 +188,14 @@ const form = reactive(defaultChannelForm())
 const channelTestManager = createChannelTestManager()
 const modelTestStates = reactive(new Map())
 const modelTestResultExpanded = reactive(new Map())
+const chatTestDialogVisible = ref(false)
+const chatTestEntry = ref(null)
+const chatTestIndex = ref(null)
+const chatTestPromptError = ref('')
+const chatTestForm = reactive({
+  testMode: 'non_stream',
+  prompt: ''
+})
 
 let openRouterModelsCache = null
 let modelProtocolsPromise = null
@@ -612,7 +649,38 @@ const detectModelMetadata = async (entry, idx) => {
   }
 }
 
-const testChatModel = async (entry, idx, testMode = 'non_stream') => {
+const openChatTestDialog = (entry, idx) => {
+  chatTestEntry.value = entry
+  chatTestIndex.value = idx
+  chatTestForm.testMode = 'non_stream'
+  chatTestForm.prompt = ''
+  chatTestPromptError.value = ''
+  chatTestDialogVisible.value = true
+}
+
+const resetChatTestDialogState = () => {
+  chatTestEntry.value = null
+  chatTestIndex.value = null
+  chatTestForm.testMode = 'non_stream'
+  chatTestForm.prompt = ''
+  chatTestPromptError.value = ''
+}
+
+const confirmChatTest = () => {
+  const prompt = chatTestForm.prompt.trim()
+  if (!prompt) {
+    chatTestPromptError.value = t('channels.chat_test_prompt_required')
+    return
+  }
+
+  const entry = chatTestEntry.value
+  const idx = chatTestIndex.value
+  const testMode = chatTestForm.testMode
+  chatTestDialogVisible.value = false
+  testChatModel(entry, idx, testMode, prompt)
+}
+
+const testChatModel = async (entry, idx, testMode, prompt) => {
   if (entry.usage !== 'CHAT') {
     return ElMessage.warning(t('channels.chat_test_chat_only'))
   }
@@ -653,6 +721,7 @@ const testChatModel = async (entry, idx, testMode = 'non_stream') => {
       top_p: entry.top_p,
       max_tokens: entry.max_tokens || 0,
       test_mode: testMode,
+      prompt,
       advanced_settings: advancedSettings
     }, { signal: token.signal })
     if (!channelTestManager.isCurrent(token)) return
@@ -839,6 +908,8 @@ const validateChannelHttpProxy = () => {
 }
 
 const resetTemporaryState = () => {
+  chatTestDialogVisible.value = false
+  resetChatTestDialogState()
   invalidateModelTests()
   modelIdErrors.value = []
   protocolErrors.value = []
@@ -952,7 +1023,11 @@ watch(
   () => props.visible,
   (visible, previousVisible) => {
     if (visible && !previousVisible) initializeDialog()
-    if (!visible && previousVisible) invalidateModelTests()
+    if (!visible && previousVisible) {
+      chatTestDialogVisible.value = false
+      resetChatTestDialogState()
+      invalidateModelTests()
+    }
   },
   { immediate: true }
 )

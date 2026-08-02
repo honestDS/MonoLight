@@ -177,6 +177,18 @@
   min-width: 0;
 }
 
+.chat-test-form {
+  .el-form-item:last-child,
+  .el-textarea,
+  .el-textarea__inner {
+    width: 100%;
+  }
+
+  .el-textarea__inner {
+    resize: vertical;
+  }
+}
+
 .model-entry-field {
   min-width: 180px;
 }
