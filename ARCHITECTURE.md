@@ -55,6 +55,7 @@ app/workers/
 ├── __init__.py             # Worker 包标识
 ├── background_task.py      # 后台工具任务进程
 ├── lease.py                # Worker 数据库租约管理
+├── memory.py               # 独立长期记忆作业进程，使用作业级数据库租约
 ├── message_platform.py     # 消息平台、定时任务与发件箱进程
 ├── session_reply.py        # 会话最终回复进程
 ├── terminal.py              # 持有终端会话租约与后续 PTY 生命周期
@@ -109,6 +110,7 @@ app/core/
 ├── dispatchers/            # 对话分发实现
 ├── embedding/              # 知识库向量化
 ├── i18n/                   # 后端多语言
+├── memory_jobs/            # 长期记忆作业提交、领取、执行、重试、取消与恢复
 ├── message_platforms/      # 消息平台运行管理
 ├── rerank/                 # 知识库重排
 ├── retrieval/              # 知识库检索
@@ -164,6 +166,16 @@ app/core/background_tasks/
 ├── runner.py               # 后台工具任务执行
 ├── scheduler.py            # 定时任务调度
 └── schemas.py              # 后台任务内部数据结构
+```
+
+### 长期记忆作业：`app/core/memory_jobs/`
+
+```text
+app/core/memory_jobs/
+├── __init__.py             # 长期记忆作业能力导出
+├── manager.py              # 作业提交、去重与状态管理
+├── consumer.py             # 作业条件领取、租约维护与失效恢复
+└── executor.py             # 按已注册处理器路由内部 operation；未注册操作不领取作业
 ```
 
 ### 会话最终回复队列：`app/core/session_reply_queue/`
@@ -231,7 +243,7 @@ app/core/crud/
 ├── message_platform.py     # 消息平台访问
 ├── message_platform_outbox.py # 消息平台发件箱访问
 ├── memory.py               # 长期记忆 Store、记录、历史、embedding revision/delta 的 uid 隔离读写
-├── memory_job.py           # 专用记忆作业去重、目标占用和基础状态读写
+├── memory_job.py           # 记忆作业去重、目标占用、条件领取、作业租约、重试取消和终态清理
 ├── profile.py              # Profile 访问
 ├── prompt.py               # Prompt 访问
 ├── scheduled_task.py       # 定时任务访问
@@ -586,6 +598,7 @@ tests/
     ├── test_message_*.py             # 消息与消息平台测试
     ├── test_memory_channel_protection_stage2.py # 长期记忆渠道引用保护测试
     ├── test_memory_embedding_config_stage2.py # 长期记忆嵌入配置确认测试
+    ├── test_memory_job_worker_stage3.py # Manager、Consumer、Executor、租约恢复与并发测试
     ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
     ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
     ├── test_session_*.py             # 会话、通知与回复队列测试

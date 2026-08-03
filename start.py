@@ -82,6 +82,10 @@ def build_background_task_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.background_task"]
 
 
+def build_memory_command() -> list[str]:
+    return [sys.executable, "-m", "app.workers.memory"]
+
+
 def build_terminal_command() -> list[str]:
     return [sys.executable, "-m", "app.workers.terminal"]
 
@@ -230,6 +234,9 @@ def run() -> int:
         background_task_process = subprocess.Popen(build_background_task_command(), env=child_environment, **process_options)
         processes.append(background_task_process)
         report_process_started("Background task worker", background_task_process)
+        memory_process = subprocess.Popen(build_memory_command(), env=child_environment, **process_options)
+        processes.append(memory_process)
+        report_process_started("Memory worker", memory_process)
         terminal_process = subprocess.Popen(build_terminal_command(), env=child_environment, **process_options)
         processes.append(terminal_process)
         report_process_started("Terminal worker", terminal_process)

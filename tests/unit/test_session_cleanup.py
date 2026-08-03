@@ -11,6 +11,7 @@ from app.core.session_cleanup import delete_session_data
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
+from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation, LongTermMemoryMutationStatus
 from app.models.message import Message, MessageRole, MessageType
 from app.models.message_platform_outbox import MessagePlatformOutbox
 from app.models.scheduled_task import ScheduledTask
@@ -45,6 +46,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                     SessionEvent.__table__,
                     MessagePlatformOutbox.__table__,
                     BackgroundTask.__table__,
+                    LongTermMemoryMutationJob.__table__,
                     ScheduledTask.__table__,
                     TerminalSession.__table__,
                     TerminalControlCommand.__table__,
@@ -276,9 +278,19 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
         status=TerminalControlCommandStatus.PENDING,
     )
     db_session.add_all([target_terminal, target_command, other_terminal, other_command])
+    memory_job = LongTermMemoryMutationJob(
+        uid="user-1",
+        operation=LongTermMemoryMutationOperation.CREATE,
+        dedupe_key="memory-create:session-1:first",
+        active_mutation_key="user-1:memory:first",
+        payload={"content": "session memory"},
+        source_session_id="session-1",
+    )
+    db_session.add(memory_job)
     await db_session.commit()
     assert target_command.id is not None
     assert other_command.id is not None
+    assert memory_job.id is not None
 
     deleted = await delete_session_data(
         db_session,
@@ -331,3 +343,8 @@ async def test_delete_session_data_removes_all_associations_and_cancels_running_
     assert running_task.lock_until is None
     assert running_task.reply_locked_by is None
     assert running_task.reply_lock_until is None
+
+    retained_memory_job = await db_session.get(LongTermMemoryMutationJob, memory_job.id)
+    assert retained_memory_job is not None
+    assert retained_memory_job.status == LongTermMemoryMutationStatus.PENDING
+    assert retained_memory_job.source_session_id == "session-1"

@@ -26,17 +26,16 @@ from app.core.crud.memory import (
     memory_record_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.crud.profile import profile_crud
 from app.core.embedding.common import detect_embedding_dimensions, load_embedding_runtime_config
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.memory import build_memory_collection_name
+from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingRevisionStatus,
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationOperation,
-    LongTermMemoryMutationStatus,
     LongTermMemoryStore,
 )
 from app.models.profile import LongTermMemoryConfig, Profile, ProfileConfig, ProfileMemoryRuntime
@@ -353,14 +352,11 @@ async def _confirm_embedding_selection(
             raise ParameterException(ERR_PROFILE_MEMORY_MIGRATION_ACTIVE)
         next_revision = await memory_embedding_revision_crud.get_next_revision(db, uid=uid)
         collection_name = build_memory_collection_name(uid, selection.target_embedding_signature, next_revision, "target")
-        job, _ = await memory_job_crud.create(
+        submission = await memory_job_manager.submit(
             db,
             uid=uid,
-            commit=False,
             operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
             dedupe_key=f"embedding-migration:{token_digest}",
-            active_mutation_key=None,
-            status=LongTermMemoryMutationStatus.PENDING,
             payload={
                 "target": {
                     "channel_id": selection.target_embedding_channel_id,
@@ -380,7 +376,9 @@ async def _confirm_embedding_selection(
                 },
             },
             source_profile_id=profile_id,
+            commit=False,
         )
+        job = submission.job
         current_store = await memory_store_crud.start_embedding_migration(
             db,
             uid=uid,

@@ -431,6 +431,35 @@ class CRUDLongTermMemoryRecord:
     async def update_expected_version(self, db: AsyncSession, **kwargs: Any) -> LongTermMemoryRecord | None:
         return await self.update_if_version(db, **kwargs)
 
+    async def reserve_pending_mutation(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int | None = None,
+        commit: bool = True,
+    ) -> bool:
+        conditions = [
+            LongTermMemoryRecord.uid == uid,
+            LongTermMemoryRecord.id == memory_id,
+            LongTermMemoryRecord.pending_mutation_job_id.is_(None),
+        ]
+        if expected_version is not None:
+            conditions.append(LongTermMemoryRecord.version == expected_version)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(*conditions)
+            .values(
+                pending_mutation_job_id=job_id,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
     async def delete(self, db: AsyncSession, *, uid: str, memory_id: int, commit: bool = True) -> LongTermMemoryRecord | None:
         record = await self.get_by_id(db, uid=uid, memory_id=memory_id)
         if record is None:

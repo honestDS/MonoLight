@@ -5,6 +5,7 @@ import pytest
 
 from app.core.terminal.manager import TerminalWorkerCoordinator
 from app.workers import background_task as background_task_worker
+from app.workers import memory as memory_worker
 from app.workers import message_platform as message_platform_worker
 from app.workers import signals
 from app.workers import terminal as terminal_worker
@@ -160,6 +161,43 @@ async def test_terminal_worker_starts_and_stops_coordinator_inside_worker_lease(
         "coordinator-start",
         "coordinator-stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_memory_worker_starts_and_stops_memory_job_consumer(monkeypatch):
+    events = []
+    captured_stop_event = None
+
+    async def create_tables():
+        events.append("tables")
+
+    def install_shutdown_signal_handlers(stop_event):
+        nonlocal captured_stop_event
+        captured_stop_event = stop_event
+
+    class FakeConsumer:
+        def start(self):
+            events.append("consumer-start")
+
+        async def stop(self):
+            events.append("consumer-stop")
+
+    def create_memory_job_consumer():
+        events.append("consumer-create")
+        return FakeConsumer()
+
+    monkeypatch.setattr(memory_worker, "install_shutdown_signal_handlers", install_shutdown_signal_handlers)
+    monkeypatch.setattr(memory_worker, "create_database_tables", create_tables)
+    monkeypatch.setattr(memory_worker, "create_memory_job_consumer", create_memory_job_consumer)
+
+    task = asyncio.create_task(memory_worker.run_memory_worker())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert captured_stop_event is not None
+    captured_stop_event.set()
+    await task
+
+    assert events == ["tables", "consumer-create", "consumer-start", "consumer-stop"]
 
 
 @pytest.mark.asyncio
