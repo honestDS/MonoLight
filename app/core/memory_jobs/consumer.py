@@ -25,7 +25,6 @@ from app.core.memory_jobs.executor import (
     MemoryJobLeaseLostError,
     MemoryJobRetryableError,
     SessionFactory,
-    memory_job_executor,
 )
 from app.models.memory import LongTermMemoryMutationJob
 from app.providers.database import AsyncSessionLocal
@@ -277,14 +276,14 @@ class MemoryJobConsumer:
     async def _run_claimed(self, claimed_job: LongTermMemoryMutationJob, worker_id: str) -> None:
         try:
             try:
-                result = await self._executor.execute_claimed(claimed_job, worker_id)
+                execution_result = await self._executor.execute_claimed(claimed_job, worker_id)
             except MemoryJobLeaseLostError as exc:
-                self._log_job_exception(claimed_job, worker_id, exc, "Memory job lease lost")
+                self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_LEASE_LOST"))
             except MemoryJobCancelledError as exc:
-                self._log_job_exception(claimed_job, worker_id, exc, "Memory job cancelled")
+                self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_CANCELLED"))
                 await self._mark_cancelled(claimed_job, worker_id)
             except MemoryJobDeterministicError as exc:
-                self._log_job_exception(claimed_job, worker_id, exc, "Memory job execution failed")
+                self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_EXECUTION_FAILED"))
                 await self._handle_failure(
                     claimed_job,
                     worker_id,
@@ -292,7 +291,7 @@ class MemoryJobConsumer:
                     result=exc.result,
                 )
             except MemoryJobRetryableError as exc:
-                self._log_job_exception(claimed_job, worker_id, exc, "Memory job execution failed")
+                self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_EXECUTION_FAILED"))
                 await self._handle_retryable_failure(
                     claimed_job,
                     worker_id,
@@ -300,7 +299,7 @@ class MemoryJobConsumer:
                     result=exc.result,
                 )
             except Exception as exc:
-                self._log_job_exception(claimed_job, worker_id, exc, "Memory job execution failed")
+                self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_EXECUTION_FAILED"))
                 await self._handle_retryable_failure(
                     claimed_job,
                     worker_id,
@@ -308,14 +307,15 @@ class MemoryJobConsumer:
                     result=None,
                 )
             else:
-                marked = await self._mark_succeeded(claimed_job, worker_id, result)
-                if not marked:
-                    await self._mark_cancelled(claimed_job, worker_id)
+                if not execution_result.finalized:
+                    marked = await self._mark_succeeded(claimed_job, worker_id, execution_result.result)
+                    if not marked:
+                        await self._mark_cancelled(claimed_job, worker_id)
         except asyncio.CancelledError:
             await self._release_claim_for_shutdown(claimed_job, worker_id)
             raise
         except Exception as exc:
-            self._log_job_exception(claimed_job, worker_id, exc, "Memory job state update failed")
+            self._log_job_exception(claimed_job, worker_id, exc, t("LOG_MEMORY_JOB_STATE_UPDATE_FAILED"))
 
     async def _handle_failure(
         self,
@@ -480,17 +480,27 @@ class MemoryJobConsumer:
             job_id=job_id,
             worker_id=worker_id,
             exception_type=type(exc).__name__,
-        ).error("Memory job database operation failed")
+        ).error(t("LOG_MEMORY_JOB_DATABASE_OPERATION_FAILED"))
 
     @staticmethod
     def _log_loop_exception(exc: BaseException) -> None:
-        logger.bind(exception_type=type(exc).__name__).error("Memory job consumer loop failed")
+        logger.bind(exception_type=type(exc).__name__).error(t("LOG_MEMORY_JOB_LOOP_FAILED"))
 
 
 def create_memory_job_consumer(
-    executor: MemoryJobExecutor = memory_job_executor,
+    executor: MemoryJobExecutor | None = None,
     **kwargs: Any,
 ) -> MemoryJobConsumer:
+    if executor is None:
+        from app.core.memory_jobs.handlers import (
+            create_default_memory_job_executor,
+            default_memory_job_executor,
+        )
+
+        if "session_factory" in kwargs:
+            executor = create_default_memory_job_executor(session_factory=kwargs["session_factory"])
+        else:
+            executor = default_memory_job_executor
     return MemoryJobConsumer(executor=executor, **kwargs)
 
 

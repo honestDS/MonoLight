@@ -29,7 +29,7 @@ from app.core.crud.memory import (
 from app.core.crud.profile import profile_crud
 from app.core.embedding.common import detect_embedding_dimensions, load_embedding_runtime_config
 from app.core.exceptions import ParameterException, ResourceNotFoundException
-from app.core.memory import build_memory_collection_name
+from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.time import get_local_time
 from app.models.memory import (

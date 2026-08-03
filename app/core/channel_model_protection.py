@@ -12,7 +12,7 @@ from app.core.constants import (
 )
 from app.core.crud.knowledge_base import knowledge_base_crud
 from app.core.exceptions import ParameterException
-from app.core.memory_channel_protection import list_memory_channel_references
+from app.core.memory.channel_protection import list_memory_channel_references
 from app.models.channel import ModelUsage
 
 

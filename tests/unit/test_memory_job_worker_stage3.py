@@ -611,7 +611,7 @@ async def test_shutdown_release_at_max_attempts_fails_and_rejects_old_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", list(LongTermMemoryMutationOperation))
-async def test_executor_routes_each_memory_operation_once_and_returns_dict(
+async def test_executor_routes_each_memory_operation_once_and_returns_execution_result(
     memory_job_database: async_sessionmaker[AsyncSession],
     operation: LongTermMemoryMutationOperation,
 ) -> None:
@@ -640,7 +640,8 @@ async def test_executor_routes_each_memory_operation_once_and_returns_dict(
     assert claimed is not None
     assert claimed.id is not None
     result = await executor.execute_claimed(claimed, "executor-owner")
-    assert result == {"routed": True}
+    assert result.result == {"routed": True}
+    assert result.finalized is False
     assert routed == [operation]
 
     async with memory_job_database() as db:
@@ -649,7 +650,7 @@ async def test_executor_routes_each_memory_operation_once_and_returns_dict(
             uid=uid,
             job_id=job_id,
             owner="executor-owner",
-            result=result,
+            result=result.result,
         )
 
 

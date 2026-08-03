@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -14,9 +15,11 @@ from app.models.memory import (
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryRecord,
+    LongTermMemoryRecordIndexStatus,
     LongTermMemoryRevision,
     LongTermMemoryStore,
 )
+from app.providers.database.time import get_database_time
 
 
 def _input_data(obj_in: Any) -> dict[str, Any]:
@@ -42,6 +45,20 @@ class CRUDLongTermMemoryStore:
     async def get_snapshot_by_uid(self, db: AsyncSession, *, uid: str) -> LongTermMemoryStore | None:
         result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def lock_for_mutation(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        commit: bool = True,
+    ) -> LongTermMemoryStore | None:
+        result = await db.execute(update(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).values(updated_at=LongTermMemoryStore.updated_at).execution_options(synchronize_session=False))
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        refreshed = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
+        return refreshed.scalars().first()
 
     async def get_multi_by_uids(self, db: AsyncSession, *, uids: set[str]) -> dict[str, LongTermMemoryStore]:
         if not uids:
@@ -252,6 +269,42 @@ class CRUDLongTermMemoryStore:
         refreshed = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return refreshed.scalars().first()
 
+    async def reserve_migration_delta_sequence(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        migration_job_id: int,
+        expected_high_watermark: int,
+        commit: bool = True,
+    ) -> int | None:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryStore)
+            .where(
+                LongTermMemoryStore.uid == uid,
+                LongTermMemoryStore.migration_job_id == migration_job_id,
+                LongTermMemoryStore.migration_delta_high_watermark == expected_high_watermark,
+                LongTermMemoryStore.migration_status.in_(
+                    [
+                        LongTermMemoryMigrationStatus.PREPARING,
+                        LongTermMemoryMigrationStatus.BUILDING,
+                        LongTermMemoryMigrationStatus.CATCHING_UP,
+                        LongTermMemoryMigrationStatus.VALIDATING,
+                    ]
+                ),
+            )
+            .values(
+                migration_delta_high_watermark=LongTermMemoryStore.migration_delta_high_watermark + 1,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        return expected_high_watermark + 1
+
 
 class CRUDLongTermMemoryEmbeddingSelectionToken:
     async def get_by_digest(
@@ -344,18 +397,61 @@ class CRUDLongTermMemoryEmbeddingSelectionToken:
 
 class CRUDLongTermMemoryRecord:
     async def get_by_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> LongTermMemoryRecord | None:
-        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id))
+        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def get_by_ids(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_ids: Iterable[int],
+    ) -> list[LongTermMemoryRecord]:
+        memory_ids = tuple(memory_ids)
+        if not memory_ids:
+            return []
+        result = await db.execute(
+            select(LongTermMemoryRecord).where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id.in_(memory_ids),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def list_recallable_by_ids(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_ids: Iterable[int],
+    ) -> list[LongTermMemoryRecord]:
+        memory_ids = tuple(memory_ids)
+        if not memory_ids:
+            return []
+        result = await db.execute(
+            select(LongTermMemoryRecord).where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id.in_(memory_ids),
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.suppress_recall.is_(False),
+                LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+                LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
+                LongTermMemoryRecord.vector_item_id.is_not(None),
+                LongTermMemoryRecord.vector_item_id != "",
+            )
+        )
+        return list(result.scalars().all())
+
     async def get_by_key(self, db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord | None:
-        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.memory_key == memory_key))
+        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.memory_key == memory_key).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_memory_key(self, db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord | None:
         return await self.get_by_key(db, uid=uid, memory_key=memory_key)
 
     async def get_by_content_hash(self, db: AsyncSession, *, uid: str, content_hash: str) -> LongTermMemoryRecord | None:
-        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.content_hash == content_hash))
+        result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.content_hash == content_hash).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def list_by_uid(self, db: AsyncSession, *, uid: str, skip: int = 0, limit: int = 100) -> list[LongTermMemoryRecord]:
@@ -390,6 +486,35 @@ class CRUDLongTermMemoryRecord:
         data.pop("uid", None)
         data.update(values)
         record = LongTermMemoryRecord.model_validate({"uid": uid, **data})
+        db.add(record)
+        await _finish(db, commit=commit)
+        await db.refresh(record)
+        return record
+
+    async def create_pending_placeholder(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        job_id: int,
+        commit: bool = True,
+    ) -> LongTermMemoryRecord:
+        now = await get_database_time(db)
+        record = LongTermMemoryRecord.model_validate(
+            {
+                "uid": uid,
+                "memory_key": None,
+                "content": "",
+                "content_hash": None,
+                "version": 0,
+                "indexed_version": 0,
+                "is_active": False,
+                "pending_mutation_job_id": job_id,
+                "index_status": LongTermMemoryRecordIndexStatus.PENDING,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
         db.add(record)
         await _finish(db, commit=commit)
         await db.refresh(record)
@@ -454,6 +579,211 @@ class CRUDLongTermMemoryRecord:
             .values(
                 pending_mutation_job_id=job_id,
                 updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def suppress_for_pending_mutation(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.version == expected_version,
+            )
+            .values(
+                suppress_recall=True,
+                suppressed_by_job_id=job_id,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def tombstone_for_pending_cleanup(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.version == expected_version,
+            )
+            .values(
+                is_active=False,
+                deleted_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def resume_suppressed_current(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        expected_version: int,
+        suppressed_by_job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.pending_mutation_job_id.is_(None),
+                LongTermMemoryRecord.version == expected_version,
+                LongTermMemoryRecord.suppress_recall.is_(True),
+                LongTermMemoryRecord.suppressed_by_job_id == suppressed_by_job_id,
+            )
+            .values(
+                suppress_recall=False,
+                suppressed_by_job_id=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def publish_pending_version(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int,
+        values: dict[str, Any],
+        commit: bool = True,
+    ) -> LongTermMemoryRecord | None:
+        allowed = {
+            "memory_key",
+            "memory_type",
+            "importance",
+            "scope",
+            "content",
+            "content_hash",
+            "version",
+            "indexed_version",
+            "vector_item_id",
+            "source",
+            "source_id",
+            "source_session_id",
+            "source_profile_id",
+            "source_message_id",
+            "source_job_id",
+            "change_evidence",
+            "is_active",
+            "deleted_at",
+            "suppress_recall",
+            "suppressed_by_job_id",
+            "index_status",
+            "indexed_at",
+            "pending_mutation_job_id",
+        }
+        update_values = {key: value for key, value in values.items() if key in allowed}
+        now = await get_database_time(db)
+        next_version = expected_version + 1
+        update_values.update(
+            {
+                "version": next_version,
+                "indexed_version": next_version,
+                "pending_mutation_job_id": None,
+                "updated_at": now,
+                "indexed_at": now,
+            }
+        )
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.version == expected_version,
+            )
+            .values(**update_values)
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        refreshed = await db.execute(
+            select(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return refreshed.scalars().first()
+
+    async def finalize_deleted_tombstone(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.version == expected_version,
+                LongTermMemoryRecord.is_active.is_(False),
+                LongTermMemoryRecord.deleted_at.is_not(None),
+            )
+            .values(
+                memory_key=None,
+                content_hash=None,
+                content="",
+                indexed_version=0,
+                vector_item_id=None,
+                index_status=LongTermMemoryRecordIndexStatus.READY,
+                pending_mutation_job_id=None,
+                suppress_recall=False,
+                suppressed_by_job_id=None,
+                updated_at=now,
             )
             .execution_options(synchronize_session=False)
         )

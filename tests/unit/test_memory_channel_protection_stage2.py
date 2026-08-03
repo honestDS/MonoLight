@@ -19,7 +19,7 @@ from app.core.crud.memory import (
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.exceptions import ParameterException
-from app.core.memory_channel_protection import list_memory_channel_references
+from app.core.memory.channel_protection import list_memory_channel_references
 from app.models.channel import ChannelCreate, ModelChannel
 from app.models.knowledge_base import KnowledgeBase
 from app.models.memory import (

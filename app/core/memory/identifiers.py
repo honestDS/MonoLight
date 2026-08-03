@@ -1,14 +1,21 @@
+from __future__ import annotations
+
 import hashlib
 import re
+from typing import Any
 
+from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
     ERR_MEMORY_COLLECTION_PURPOSE_INVALID,
     ERR_MEMORY_EMBEDDING_SIGNATURE_REQUIRED,
+    ERR_MEMORY_MUTATION_TARGET_INVALID,
     ERR_MEMORY_UID_REQUIRED,
     ERR_VALUE_MUST_BE_BETWEEN,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
 from app.core.i18n import t
+from app.core.memory.errors import MemoryValidationError
+from app.core.memory.normalization import _normalize_uid, _require_positive, normalize_memory_key
 
 _PURPOSE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -37,3 +44,26 @@ def build_memory_vector_item_id(memory_id: int, version: int) -> str:
     _validate_positive_integer(memory_id, "memory_id")
     _validate_positive_integer(version, "version")
     return f"memory_{memory_id}_v{version}"
+
+
+def build_memory_active_mutation_key(
+    uid: str,
+    memory_id: int | None = None,
+    memory_key: str | None = None,
+) -> str:
+    normalized_uid = _normalize_uid(uid)
+    if (memory_id is None) == (memory_key is None):
+        raise MemoryValidationError(ERR_MEMORY_MUTATION_TARGET_INVALID)
+    if memory_id is not None:
+        target: dict[str, Any] = {"memory_id": _require_positive(memory_id, field="memory_id")}
+    else:
+        target = {"memory_key": normalize_memory_key(memory_key or "")}
+    canonical = canonical_json_dumps({"uid": normalized_uid, **target})
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+__all__ = [
+    "build_memory_active_mutation_key",
+    "build_memory_collection_name",
+    "build_memory_vector_item_id",
+]

@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlmodel import SQLModel, select
 
-from app.core import memory_embedding_config as embedding_service
 from app.core.constants import (
     ERR_PROFILE_MEMORY_ACTIVE_NOT_CONFIGURED,
     ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED,
@@ -29,6 +28,7 @@ from app.core.crud.memory_job import memory_job_crud
 from app.core.crud.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import ParameterException, ResourceNotFoundException
+from app.core.memory import embedding_config as embedding_service
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingRevision,

@@ -19,7 +19,11 @@ from app.core.constants import (
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
-from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation
+from app.models.memory import (
+    LongTermMemoryMutationJob,
+    LongTermMemoryMutationOperation,
+    LongTermMemoryMutationStatus,
+)
 from app.providers.database import AsyncSessionLocal
 
 type SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -86,7 +90,13 @@ class MemoryJobExecutionContext:
         return current_job
 
 
-type Handler = Callable[[MemoryJobExecutionContext], Awaitable[dict[str, Any] | None]]
+@dataclass(frozen=True, slots=True)
+class MemoryJobExecutionResult:
+    result: dict[str, Any]
+    finalized: bool = False
+
+
+type Handler = Callable[[MemoryJobExecutionContext], Awaitable[dict[str, Any] | None | MemoryJobExecutionResult]]
 
 
 class MemoryJobExecutor:
@@ -118,7 +128,7 @@ class MemoryJobExecutor:
     def enabled_operations(self) -> frozenset[LongTermMemoryMutationOperation]:
         return frozenset(self._handlers)
 
-    async def execute_claimed(self, job: LongTermMemoryMutationJob, worker_id: str) -> dict[str, Any]:
+    async def execute_claimed(self, job: LongTermMemoryMutationJob, worker_id: str) -> MemoryJobExecutionResult:
         if job.id is None:
             raise MemoryJobDeterministicError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="id"))
         if not isinstance(job.uid, str):
@@ -148,12 +158,30 @@ class MemoryJobExecutor:
         )
         await context.checkpoint()
         result = await handler(context)
+        if isinstance(result, MemoryJobExecutionResult):
+            if result.finalized:
+                if not isinstance(result.result, dict):
+                    raise MemoryJobDeterministicError(t(ERR_MEMORY_JOB_HANDLER_RESULT_INVALID))
+                async with self._session_factory() as db:
+                    finalized_job = await memory_job_crud.get_by_id(
+                        db,
+                        uid=job.uid,
+                        job_id=job.id,
+                    )
+                if finalized_job is None or finalized_job.status != LongTermMemoryMutationStatus.SUCCEEDED or finalized_job.active_mutation_key is not None or finalized_job.locked_by is not None or finalized_job.lock_until is not None:
+                    raise MemoryJobDeterministicError(t(ERR_MEMORY_JOB_HANDLER_RESULT_INVALID))
+                return result
+            await context.checkpoint()
+            if not isinstance(result.result, dict):
+                raise MemoryJobDeterministicError(t(ERR_MEMORY_JOB_HANDLER_RESULT_INVALID))
+            return result
+
         await context.checkpoint()
         if result is None:
-            return {}
+            return MemoryJobExecutionResult(result={})
         if not isinstance(result, dict):
             raise MemoryJobDeterministicError(t(ERR_MEMORY_JOB_HANDLER_RESULT_INVALID))
-        return result
+        return MemoryJobExecutionResult(result=result)
 
 
 memory_job_executor = MemoryJobExecutor()
@@ -165,6 +193,7 @@ __all__ = [
     "MemoryJobDeterministicError",
     "MemoryJobExecutionContext",
     "MemoryJobExecutionError",
+    "MemoryJobExecutionResult",
     "MemoryJobExecutor",
     "MemoryJobLeaseLostError",
     "MemoryJobOperationUnavailableError",

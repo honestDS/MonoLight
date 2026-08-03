@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -99,19 +99,21 @@ class MemoryJobCancelResult:
 
 class CRUDLongTermMemoryMutationJob:
     async def get_by_id(self, db: AsyncSession, *, uid: str, job_id: int) -> LongTermMemoryMutationJob | None:
-        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == job_id))
+        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == job_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_dedupe_key(self, db: AsyncSession, *, uid: str, dedupe_key: str) -> LongTermMemoryMutationJob | None:
-        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.dedupe_key == dedupe_key))
+        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.dedupe_key == dedupe_key).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_active_mutation_key(self, db: AsyncSession, *, uid: str, active_mutation_key: str) -> LongTermMemoryMutationJob | None:
         result = await db.execute(
-            select(LongTermMemoryMutationJob).where(
+            select(LongTermMemoryMutationJob)
+            .where(
                 LongTermMemoryMutationJob.uid == uid,
                 LongTermMemoryMutationJob.active_mutation_key == active_mutation_key,
             )
+            .execution_options(populate_existing=True)
         )
         return result.scalars().first()
 
@@ -193,9 +195,23 @@ class CRUDLongTermMemoryMutationJob:
         uid: str,
         memory_id: int | None,
         job_id: int,
+        operation: LongTermMemoryMutationOperation,
         updated_at: datetime,
     ) -> None:
         if memory_id is None:
+            return
+        if operation == LongTermMemoryMutationOperation.CREATE:
+            await db.execute(
+                delete(LongTermMemoryRecord)
+                .where(
+                    LongTermMemoryRecord.uid == uid,
+                    LongTermMemoryRecord.id == memory_id,
+                    LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                    LongTermMemoryRecord.version == 0,
+                    LongTermMemoryRecord.is_active.is_(False),
+                )
+                .execution_options(synchronize_session=False)
+            )
             return
         await db.execute(
             update(LongTermMemoryRecord)
@@ -301,6 +317,40 @@ class CRUDLongTermMemoryMutationJob:
             await db.flush()
         return (result.rowcount or 0) == 1
 
+    async def assign_create_memory_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        job_id: int,
+        memory_id: int,
+        owner: str | None = None,
+        worker_id: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        owner = _resolve_owner(owner, worker_id)
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == job_id,
+                LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.RUNNING,
+                LongTermMemoryMutationJob.locked_by == owner,
+                LongTermMemoryMutationJob.lock_until >= now,
+                LongTermMemoryMutationJob.cancel_requested_at.is_(None),
+                LongTermMemoryMutationJob.operation == LongTermMemoryMutationOperation.CREATE,
+                LongTermMemoryMutationJob.memory_id.is_(None),
+            )
+            .values(memory_id=memory_id, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
     async def mark_succeeded(
         self,
         db: AsyncSession,
@@ -382,13 +432,18 @@ class CRUDLongTermMemoryMutationJob:
     ) -> bool:
         owner = _resolve_owner(owner, worker_id)
         now = await get_database_time(db)
-        memory_result = await db.execute(
-            select(LongTermMemoryMutationJob.memory_id).where(
+        job_result = await db.execute(
+            select(
+                LongTermMemoryMutationJob.memory_id,
+                LongTermMemoryMutationJob.operation,
+            ).where(
                 LongTermMemoryMutationJob.uid == uid,
                 LongTermMemoryMutationJob.id == job_id,
             )
         )
-        memory_id = memory_result.scalar_one_or_none()
+        job_row = job_result.one_or_none()
+        memory_id = job_row[0] if job_row is not None else None
+        operation = job_row[1] if job_row is not None else None
         update_values: dict[str, Any] = {
             "status": status,
             "error": error,
@@ -416,6 +471,7 @@ class CRUDLongTermMemoryMutationJob:
                 uid=uid,
                 memory_id=memory_id,
                 job_id=job_id,
+                operation=operation,
                 updated_at=now,
             )
         if commit:
@@ -542,6 +598,7 @@ class CRUDLongTermMemoryMutationJob:
                     uid=job.uid,
                     memory_id=job.memory_id,
                     job_id=job.id,
+                    operation=job.operation,
                     updated_at=now,
                 )
             if next_status == LongTermMemoryMutationStatus.RETRY:
@@ -607,6 +664,7 @@ class CRUDLongTermMemoryMutationJob:
                 uid=uid,
                 memory_id=job.memory_id,
                 job_id=job_id,
+                operation=job.operation,
                 updated_at=now,
             )
             if commit:
@@ -780,6 +838,7 @@ class CRUDLongTermMemoryMutationJob:
                 uid=uid,
                 memory_id=job.memory_id,
                 job_id=job_id,
+                operation=job.operation,
                 updated_at=now,
             )
         if commit:
@@ -826,17 +885,22 @@ class CRUDLongTermMemoryMutationJob:
         if (result.rowcount or 0) != 1:
             return None
         if clear_active_mutation_key:
-            memory_result = await db.execute(
-                select(LongTermMemoryMutationJob.memory_id).where(
+            job_result = await db.execute(
+                select(
+                    LongTermMemoryMutationJob.memory_id,
+                    LongTermMemoryMutationJob.operation,
+                ).where(
                     LongTermMemoryMutationJob.uid == uid,
                     LongTermMemoryMutationJob.id == job_id,
                 )
             )
+            job_row = job_result.one_or_none()
             await self._clear_pending_mutation_job_reference(
                 db,
                 uid=uid,
-                memory_id=memory_result.scalar_one_or_none(),
+                memory_id=job_row[0] if job_row is not None else None,
                 job_id=job_id,
+                operation=job_row[1] if job_row is not None else None,
                 updated_at=update_values["updated_at"],
             )
         if commit:

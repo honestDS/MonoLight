@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel, select
 
 from app.api.v1.profile import router
-from app.core import memory_embedding_config as embedding_service
 from app.core.crud.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
+from app.core.memory import embedding_config as embedding_service
 from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding

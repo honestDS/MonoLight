@@ -110,7 +110,8 @@ app/core/
 ├── dispatchers/            # 对话分发实现
 ├── embedding/              # 知识库向量化
 ├── i18n/                   # 后端多语言
-├── memory_jobs/            # 长期记忆作业提交、领取、执行、重试、取消与恢复
+├── memory/                 # 长期记忆正文、配置、保护、服务和稳定标识
+├── memory_jobs/            # 长期记忆作业提交、领取、执行、业务处理、重试、取消与恢复
 ├── message_platforms/      # 消息平台运行管理
 ├── rerank/                 # 知识库重排
 ├── retrieval/              # 知识库检索
@@ -129,9 +130,6 @@ app/core/
 ├── exceptions.py           # 业务异常
 ├── log.py                  # 日志记录
 ├── log_broadcaster.py      # 实时日志广播
-├── memory.py               # 只包含长期记忆 collection 名和版本化 vector item ID 的稳定生成基础
-├── memory_channel_protection.py # 长期记忆嵌入渠道与模型引用保护
-├── memory_embedding_config.py # 长期记忆嵌入配置预检、确认与迁移入队
 ├── paths.py                # 数据与临时目录路径
 ├── profile_selection.py    # 会话、平台与默认 Profile 选择
 ├── profile_validation.py   # Profile 渠道配置与归属校验
@@ -175,7 +173,22 @@ app/core/memory_jobs/
 ├── __init__.py             # 长期记忆作业能力导出
 ├── manager.py              # 作业提交、去重与状态管理
 ├── consumer.py             # 作业条件领取、租约维护与失效恢复
-└── executor.py             # 按已注册处理器路由内部 operation；未注册操作不领取作业
+├── executor.py             # 按已注册处理器路由内部 operation；未注册操作不领取作业
+└── handlers.py             # create/update/restore/delete_cleanup 的嵌入、向量写入和原子发布处理器
+```
+
+### 长期记忆领域：`app/core/memory/`
+
+```text
+app/core/memory/
+├── __init__.py             # 长期记忆稳定公开入口
+├── errors.py               # 记忆业务异常
+├── results.py              # 记忆服务返回结果
+├── normalization.py        # 正文、来源和作业载荷规范化
+├── identifiers.py          # collection、vector item 和目标占用键生成
+├── service.py              # 记忆增删改恢复、召回和迁移 delta
+├── embedding_config.py     # 嵌入模型预检、确认和运行时配置
+└── channel_protection.py   # 渠道和模型引用保护
 ```
 
 ### 会话最终回复队列：`app/core/session_reply_queue/`
@@ -599,6 +612,8 @@ tests/
     ├── test_memory_channel_protection_stage2.py # 长期记忆渠道引用保护测试
     ├── test_memory_embedding_config_stage2.py # 长期记忆嵌入配置确认测试
     ├── test_memory_job_worker_stage3.py # Manager、Consumer、Executor、租约恢复与并发测试
+    ├── test_memory_service_stage4.py # 长期记忆规范化、提交、删除、恢复与召回测试
+    ├── test_memory_worker_stage4.py # 长期记忆向量发布、清理、失败和原子终态测试
     ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
     ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
     ├── test_session_*.py             # 会话、通知与回复队列测试

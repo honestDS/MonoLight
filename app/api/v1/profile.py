@@ -41,7 +41,7 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.i18n import t
-from app.core.memory_embedding_config import (
+from app.core.memory.embedding_config import (
     build_memory_runtime,
     confirm_embedding_selection,
     normalize_profile_memory_for_create,
