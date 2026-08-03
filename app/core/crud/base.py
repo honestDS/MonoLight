@@ -61,6 +61,7 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
         *,
         db_obj: ModelType,
         obj_in: UpdateSchemaType | dict[str, Any],
+        commit: bool = True,
     ) -> ModelType:
         obj_data = db_obj.model_dump()
         if isinstance(obj_in, dict):
@@ -71,7 +72,10 @@ class CRUDBase[ModelType: SQLModel, CreateSchemaType: SQLModel, UpdateSchemaType
             if field in update_data:
                 setattr(db_obj, field, update_data[field])
         db.add(db_obj)
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(db_obj)
         return db_obj
 

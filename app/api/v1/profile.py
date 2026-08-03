@@ -16,15 +16,20 @@ from app.core.constants import (
     ERR_DELETE_LAST_PROFILE,
     ERR_KB_NOT_FOUND,
     ERR_ONLY_ADMIN_ALLOWED,
+    ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED,
+    ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN,
     ERR_PROFILE_NAME_EXISTS,
     ERR_PROFILE_NOT_FOUND,
     ERR_PROMPT_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     MSG_PROFILE_CREATED,
     MSG_PROFILE_DELETED,
+    MSG_PROFILE_MEMORY_EMBEDDING_CONFIRMED,
+    MSG_PROFILE_MEMORY_EMBEDDING_PREVIEW_READY,
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
+from app.core.crud.memory import memory_store_crud
 from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
@@ -36,6 +41,13 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.i18n import t
+from app.core.memory_embedding_config import (
+    build_memory_runtime,
+    confirm_embedding_selection,
+    normalize_profile_memory_for_create,
+    normalize_profile_memory_for_update,
+    preview_embedding_selection,
+)
 from app.core.profile_validation import (
     validate_audit_model_config,
     validate_channel_configs,
@@ -46,6 +58,8 @@ from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding
 from app.models.profile import (
     ProfileConfig,
     ProfileCreate,
+    ProfileMemoryEmbeddingConfirmRequest,
+    ProfileMemoryEmbeddingPreviewRequest,
     ProfileResponse,
     ProfileUpdate,
 )
@@ -60,6 +74,9 @@ router = APIRouter(
     tags=["Profile Management"],
     dependencies=[Depends(get_current_user)],
 )
+
+
+_MEMORY_STORE_UNSET = object()
 
 
 PROFILE_TOOL_OPTIONS = [
@@ -104,12 +121,27 @@ async def replace_profile_knowledge_base_bindings(db: AsyncSession, profile_id: 
         db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id))
 
 
-async def build_profile_response(db: AsyncSession, profile: object, *, username: str | None = None) -> ProfileResponse:
+async def build_profile_response(
+    db: AsyncSession,
+    profile: object,
+    *,
+    username: str | None = None,
+    memory_store=_MEMORY_STORE_UNSET,
+) -> ProfileResponse:
     item = ProfileResponse.model_validate(profile)
     if username is not None:
         item.username = username
     if item.id is not None:
         item.knowledge_base_ids = await get_profile_knowledge_base_ids(db, item.id, item.uid)
+    if memory_store is _MEMORY_STORE_UNSET:
+        store = await memory_store_crud.get_snapshot_by_uid(db, uid=item.uid) if item.uid else None
+    else:
+        store = memory_store
+    configs = ProfileConfig.model_validate(item.configs or {}).model_dump()
+    configs["memory"]["embedding_channel_id"] = store.active_embedding_channel_id if store and store.active_embedding_revision > 0 else None
+    configs["memory"]["embedding_model_id"] = store.active_embedding_model_id if store and store.active_embedding_revision > 0 else None
+    item.configs = configs
+    item.memory_runtime = build_memory_runtime(profile, store)
     return item
 
 
@@ -132,6 +164,12 @@ async def create_profile(
     else:
         profile_in.uid = current_user.uid
     profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
+    if profile_in.confirm_memory_embedding_selection or profile_in.memory_embedding_selection_signature is not None:
+        raise ParameterException(ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN)
+    profile_in.configs = normalize_profile_memory_for_create(
+        profile_in.configs,
+        await memory_store_crud.get_snapshot_by_uid(db, uid=profile_in.uid),
+    )
     channel_config = profile_in.configs.get("channel", {})
     await validate_channel_configs(db, channel_config)
     await validate_audit_model_config(db, profile_in.configs.get("security", {}))
@@ -144,9 +182,23 @@ async def create_profile(
             raise ParameterException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
-    db_profile = await profile_crud.create(db, obj_in=profile_in.model_dump(exclude={"knowledge_base_ids"}))
-    await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
-    await db.commit()
+    try:
+        db_profile = await profile_crud.create(
+            db,
+            obj_in=profile_in.model_dump(
+                exclude={
+                    "knowledge_base_ids",
+                    "confirm_memory_embedding_selection",
+                    "memory_embedding_selection_signature",
+                }
+            ),
+            commit=False,
+        )
+        await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = await build_profile_response(db, db_profile)
     return StandardResponse.success(
@@ -177,9 +229,15 @@ async def list_profiles(
         users = await user_crud.get_multi_by_uids(db, profile_uids)
         user_map = {user.uid: user.username for user in users}
 
+    memory_stores = await memory_store_crud.get_multi_by_uids(db, uids={profile.uid for profile in profiles if profile.uid})
     results = []
     for p in profiles:
-        item = await build_profile_response(db, p, username=user_map.get(p.uid) if is_admin else None)
+        item = await build_profile_response(
+            db,
+            p,
+            username=user_map.get(p.uid) if is_admin else None,
+            memory_store=memory_stores.get(p.uid),
+        )
         results.append(item)
 
     page_data = PageData(
@@ -224,12 +282,25 @@ async def update_profile(
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
         raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+    if profile_in.confirm_memory_embedding_selection or profile_in.memory_embedding_selection_signature is not None:
+        raise ParameterException(ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED)
 
-    if profile_in.configs:
+    if profile_in.configs is not None:
         profile_in.configs = ProfileConfig.model_validate(profile_in.configs).model_dump()
+        profile_in.configs = normalize_profile_memory_for_update(
+            db_profile,
+            profile_in.configs,
+            await memory_store_crud.get_by_uid(db, uid=db_profile.uid),
+        )
         channel_config = profile_in.configs.get("channel", {})
         await validate_channel_configs(db, channel_config)
         await validate_audit_model_config(db, profile_in.configs.get("security", {}))
+    else:
+        profile_in.configs = normalize_profile_memory_for_update(
+            db_profile,
+            db_profile.configs or {},
+            await memory_store_crud.get_snapshot_by_uid(db, uid=db_profile.uid),
+        )
 
     if profile_in.name and profile_in.name != db_profile.name:
         if await profile_crud.get_by_name(db, profile_in.name, uid=db_profile.uid):
@@ -240,15 +311,73 @@ async def update_profile(
             raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
-    db_profile = await profile_crud.update(db, db_obj=db_profile, obj_in=profile_in.model_dump(exclude={"knowledge_base_ids"}, exclude_unset=True))
-    await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
-    await db.commit()
+    try:
+        db_profile = await profile_crud.update(
+            db,
+            db_obj=db_profile,
+            obj_in=profile_in.model_dump(
+                exclude={
+                    "knowledge_base_ids",
+                    "confirm_memory_embedding_selection",
+                    "memory_embedding_selection_signature",
+                },
+                exclude_unset=True,
+            ),
+            commit=False,
+        )
+        await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     db_profile = await profile_crud.get_with_relations(db, db_profile.id)
     res_data = await build_profile_response(db, db_profile)
     return StandardResponse.success(
         data=res_data,
         message=MSG_PROFILE_UPDATED,
     )
+
+
+@router.post("/memory-embedding-preview")
+async def profile_memory_embedding_preview(
+    request: ProfileMemoryEmbeddingPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    try:
+        data = await preview_embedding_selection(
+            db,
+            uid=current_user.uid,
+            profile_id=request.profile_id,
+            embedding_channel_id=request.embedding_channel_id,
+            embedding_model_id=request.embedding_model_id,
+        )
+    except Exception:
+        await db.rollback()
+        raise
+    return StandardResponse.success(data=data, message=MSG_PROFILE_MEMORY_EMBEDDING_PREVIEW_READY)
+
+
+@router.post("/memory-embedding-confirm", response_model=StandardResponse[ProfileResponse])
+async def profile_memory_embedding_confirm(
+    request: ProfileMemoryEmbeddingConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    try:
+        profile, _store = await confirm_embedding_selection(
+            db,
+            uid=current_user.uid,
+            profile_id=request.profile_id,
+            memory=request.memory,
+            embedding_selection_signature=request.embedding_selection_signature,
+        )
+    except Exception:
+        await db.rollback()
+        raise
+    refreshed_profile = await profile_crud.get_with_relations(db, profile.id)
+    data = await build_profile_response(db, refreshed_profile)
+    return StandardResponse.success(data=data, message=MSG_PROFILE_MEMORY_EMBEDDING_CONFIRMED)
 
 
 @router.post("/delete")

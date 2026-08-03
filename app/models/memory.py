@@ -12,6 +12,7 @@ __all__ = [
     "LongTermMemoryEmbeddingDeltaStatus",
     "LongTermMemoryEmbeddingRevision",
     "LongTermMemoryEmbeddingRevisionStatus",
+    "LongTermMemoryEmbeddingSelectionToken",
     "LongTermMemoryIndexStatus",
     "LongTermMemoryMigrationStatus",
     "LongTermMemoryMutationJob",
@@ -171,6 +172,32 @@ class LongTermMemoryStore(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
+class LongTermMemoryEmbeddingSelectionToken(SQLModel, table=True):
+    """一次性长期记忆嵌入模型选择凭证。"""
+
+    __tablename__ = "long_term_memory_embedding_selection_token"
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_ltm_embedding_selection_token_digest"),
+        Index("ix_ltm_embedding_selection_token_uid_profile", "uid", "profile_id"),
+        Index("ix_ltm_embedding_selection_token_expires_at", "expires_at"),
+        Index("ix_ltm_embedding_selection_token_consumed_at", "consumed_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(index=True, max_length=100)
+    profile_id: int = Field(index=True)
+    token_digest: str = Field(max_length=64, nullable=False)
+    profile_config_digest: str = Field(max_length=64, nullable=False)
+    active_embedding_revision: int = Field(default=0, ge=0)
+    target_embedding_channel_id: int = Field(gt=0)
+    target_embedding_model_id: str = Field(max_length=255)
+    target_embedding_dimensions: int = Field(gt=0)
+    target_embedding_signature: str = Field(max_length=128)
+    expires_at: datetime = Field(sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+    consumed_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
 
 
 class LongTermMemoryEmbeddingRevision(SQLModel, table=True):

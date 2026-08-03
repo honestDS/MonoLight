@@ -34,4 +34,8 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_DISABLED": "Model entry is disabled",
     "ERR_CHANNEL_HTTP_PROXY_INVALID": "Invalid channel HTTP proxy format. Only http://host:port or http://username:password@host:port is supported; special characters in the username and password must be URL-encoded; leave blank for a direct connection.",
     "ERR_CHANNEL_MODEL_CUSTOM_HEADERS_INVALID": "Model custom request headers must be an object with at most 32 valid headers, with valid names and values that do not override reserved headers.",
+    "ERR_MEMORY_CHANNEL_IN_USE": "This channel is still referenced by long-term memory's active or target configuration, a migration job, or old vector collection cleanup and cannot be deleted.",
+    "ERR_MEMORY_MODEL_IDENTITY_IN_USE": "Long-term memory is using model {model_id}; its model ID, usage, protocol, or embedding dimensions cannot be deleted or changed.",
+    "ERR_KB_CHANNEL_IN_USE": "A knowledge base still references this channel, so it cannot be deleted.",
+    "ERR_KB_MODEL_IDENTITY_IN_USE": "A knowledge base is using model {model_id}; its model ID, usage, protocol, or embedding dimensions cannot be deleted or changed.",
 }

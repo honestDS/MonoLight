@@ -14,6 +14,10 @@ from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.channel_model_protection import (
+    assert_channel_model_identity_update_allowed,
+    assert_channel_not_referenced,
+)
 from app.core.constants import (
     ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS,
     ERR_CHANNEL_BASE_URL_SCHEME,
@@ -435,6 +439,13 @@ async def update_channel(
 
     # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
     old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
+    if channel_in.model_ids is not None:
+        await assert_channel_model_identity_update_allowed(
+            db,
+            channel_id=channel_id,
+            old_model_ids=old_model_ids,
+            new_model_ids=channel_in.model_ids,
+        )
 
     update_data = channel_in.model_dump(exclude_unset=True)
     synced_profile_rules = 0
@@ -488,6 +499,8 @@ async def delete_channel(
     db_obj = await channel_crud.get(db, channel_id)
     if not db_obj:
         raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
+
+    await assert_channel_not_referenced(db, channel_id=channel_id)
 
     try:
         removed_profile_rules = await _remove_unavailable_channel_rules(db, channel_id, [])

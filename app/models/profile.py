@@ -24,7 +24,11 @@ from sqlmodel import (
     SQLModel,
 )
 
-from app.core.constants import ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED
+from app.core.constants import (
+    ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
+    ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL,
+    ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE,
+)
 from app.core.i18n import t
 from app.core.i18n.locale import DEFAULT_LOCALE, SUPPORTED_LOCALES
 from app.core.utils.config import standardize_config
@@ -130,6 +134,41 @@ class OtherConfig(BaseModel):
     )
 
 
+class LongTermMemoryConfig(BaseModel):
+    """长期记忆检索和嵌入模型配置。"""
+
+    enabled: bool = PydanticField(False, description="是否启用长期记忆")
+    embedding_channel_id: int | None = PydanticField(None, gt=0, description="长期记忆嵌入渠道 ID")
+    embedding_model_id: str | None = PydanticField(None, min_length=1, description="长期记忆嵌入模型 ID")
+    top_k: int = PydanticField(5, ge=1, le=50, description="长期记忆最终返回数量")
+    candidate_k: int = PydanticField(10, ge=1, le=100, description="长期记忆候选数量")
+    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="长期记忆结果最大字符数")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_prefixed_flat_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for field in ("enabled", "embedding_channel_id", "embedding_model_id", "top_k", "candidate_k", "result_max_chars"):
+            prefixed_name = f"memory_{field}"
+            if field not in normalized and prefixed_name in normalized:
+                normalized[field] = normalized[prefixed_name]
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_embedding_selection_pair(self) -> "LongTermMemoryConfig":
+        if (self.embedding_channel_id is None) != (self.embedding_model_id is None):
+            raise ValueError(t(ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE))
+        return self
+
+    @model_validator(mode="after")
+    def validate_candidate_k(self) -> "LongTermMemoryConfig":
+        if self.candidate_k < self.top_k:
+            raise ValueError(t(ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL))
+        return self
+
+
 class ProfileConfig(BaseModel):
     """Profile 详细配置模型，负责数据的标准化与校验"""
 
@@ -137,6 +176,7 @@ class ProfileConfig(BaseModel):
     security: SecurityConfig
     tool: ToolConfig
     other: OtherConfig
+    memory: LongTermMemoryConfig = PydanticField(default_factory=LongTermMemoryConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -174,6 +214,20 @@ class ProfileConfig(BaseModel):
                 "executor_max_workers",
             ],
             "other": ["context_summary_threshold_percent"],
+            "memory": [
+                "enabled",
+                "embedding_channel_id",
+                "embedding_model_id",
+                "top_k",
+                "candidate_k",
+                "result_max_chars",
+                "memory_enabled",
+                "memory_embedding_channel_id",
+                "memory_embedding_model_id",
+                "memory_top_k",
+                "memory_candidate_k",
+                "memory_result_max_chars",
+            ],
         }
         return standardize_config(data, schema_map)
 
@@ -235,6 +289,14 @@ PROFILE_EXAMPLE = {
         "other": {
             "context_summary_threshold_percent": 90,
         },
+        "memory": {
+            "enabled": False,
+            "embedding_channel_id": None,
+            "embedding_model_id": None,
+            "top_k": 5,
+            "candidate_k": 10,
+            "result_max_chars": 4000,
+        },
     },
 }
 
@@ -266,6 +328,8 @@ class ProfileCreate(ProfileBase):
     """Profile 创建模型"""
 
     knowledge_base_ids: list[int] | None = None
+    confirm_memory_embedding_selection: bool = False
+    memory_embedding_selection_signature: str | None = None
 
 
 class ProfileUpdate(SQLModel):
@@ -275,8 +339,40 @@ class ProfileUpdate(SQLModel):
     prompt_id: int | None = Field(None, gt=0)
     configs: dict[str, Any] | None = None
     knowledge_base_ids: list[int] | None = None
+    confirm_memory_embedding_selection: bool = False
+    memory_embedding_selection_signature: str | None = None
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
+
+
+class ProfileMemoryEmbeddingPreviewRequest(SQLModel):
+    profile_id: int = Field(gt=0)
+    embedding_channel_id: int = Field(gt=0)
+    embedding_model_id: str = Field(min_length=1, max_length=255)
+
+
+class ProfileMemoryEmbeddingConfirmRequest(SQLModel):
+    profile_id: int = Field(gt=0)
+    memory: LongTermMemoryConfig
+    embedding_selection_signature: str = Field(min_length=1, max_length=128)
+
+
+class ProfileMemoryRuntime(BaseModel):
+    """长期记忆实际生效的嵌入配置及迁移状态。"""
+
+    enabled: bool = False
+    embedding_channel_id: int | None = None
+    embedding_model_id: str | None = None
+    embedding_dimensions: int | None = None
+    embedding_signature: str | None = None
+    embedding_revision: int = 0
+    active_collection_name: str | None = None
+    target_embedding_channel_id: int | None = None
+    target_embedding_model_id: str | None = None
+    target_embedding_dimensions: int | None = None
+    target_embedding_signature: str | None = None
+    migration_status: str | None = None
+    migration_job_id: int | None = None
 
 
 class ProfileResponse(ProfileBase):
@@ -286,4 +382,5 @@ class ProfileResponse(ProfileBase):
     is_default: bool
     username: str | None = None
     knowledge_base_ids: list[int] = Field(default_factory=list)
+    memory_runtime: ProfileMemoryRuntime = PydanticField(default_factory=ProfileMemoryRuntime)
     model_config = ConfigDict(from_attributes=True)

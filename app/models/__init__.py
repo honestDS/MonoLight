@@ -13,6 +13,7 @@ from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocu
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.memory import LongTermMemoryEmbeddingDelta as LongTermMemoryEmbeddingDelta
 from app.models.memory import LongTermMemoryEmbeddingRevision as LongTermMemoryEmbeddingRevision
+from app.models.memory import LongTermMemoryEmbeddingSelectionToken as LongTermMemoryEmbeddingSelectionToken
 from app.models.memory import LongTermMemoryMutationJob as LongTermMemoryMutationJob
 from app.models.memory import LongTermMemoryRecord as LongTermMemoryRecord
 from app.models.memory import LongTermMemoryRevision as LongTermMemoryRevision

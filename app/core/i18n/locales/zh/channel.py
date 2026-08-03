@@ -34,4 +34,8 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_DISABLED": "模型条目已禁用",
     "ERR_CHANNEL_HTTP_PROXY_INVALID": "渠道 HTTP 代理格式无效，仅支持 http://host:port 或 http://username:password@host:port，用户名密码中的特殊字符需 URL 编码；留空表示直连。",
     "ERR_CHANNEL_MODEL_CUSTOM_HEADERS_INVALID": "模型自定义请求头必须是最多 32 项的有效请求头对象，名称和值必须合法，且不能覆盖保留请求头。",
+    "ERR_MEMORY_CHANNEL_IN_USE": "该渠道仍被长期记忆的当前配置、待切换配置、迁移任务或旧向量集合清理引用，不能删除。",
+    "ERR_MEMORY_MODEL_IDENTITY_IN_USE": "长期记忆正在使用模型 {model_id}，不能删除或修改其模型标识、用途、协议或向量维度。",
+    "ERR_KB_CHANNEL_IN_USE": "知识库仍引用该渠道，不能删除。",
+    "ERR_KB_MODEL_IDENTITY_IN_USE": "知识库正在使用模型 {model_id}，不能删除或修改模型标识、用途、协议或向量维度。",
 }

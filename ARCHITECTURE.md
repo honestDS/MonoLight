@@ -116,6 +116,7 @@ app/core/
 ├── terminal/               # 交互终端与 PTY 生命周期
 ├── tools/                  # 模型可调用工具
 ├── utils/                  # 通用与调度辅助函数
+├── channel_model_protection.py # 渠道模型通用引用保护
 ├── channel_router.py       # 模型渠道选择
 ├── constants.py            # 常量与消息键
 ├── context.py              # 对话上下文构建
@@ -127,6 +128,8 @@ app/core/
 ├── log.py                  # 日志记录
 ├── log_broadcaster.py      # 实时日志广播
 ├── memory.py               # 只包含长期记忆 collection 名和版本化 vector item ID 的稳定生成基础
+├── memory_channel_protection.py # 长期记忆嵌入渠道与模型引用保护
+├── memory_embedding_config.py # 长期记忆嵌入配置预检、确认与迁移入队
 ├── paths.py                # 数据与临时目录路径
 ├── profile_selection.py    # 会话、平台与默认 Profile 选择
 ├── profile_validation.py   # Profile 渠道配置与归属校验
@@ -222,6 +225,7 @@ app/core/crud/
 ├── channel_cursor.py       # 渠道路由游标访问
 ├── context_summary_fragment.py # 上下文总结片段访问
 ├── context_summary_stage.py # 上下文总结阶段访问
+├── knowledge_base.py       # 知识库数据访问
 ├── log.py                  # 系统日志访问
 ├── message.py              # 消息访问
 ├── message_platform.py     # 消息平台访问
@@ -366,12 +370,6 @@ app/core/retrieval/
 └── tokenizer.py            # 检索分词
 ```
 
-### 长期记忆基础（阶段 1）
-
-阶段 1 已建立六张无外键基础表：`LongTermMemoryStore`、`LongTermMemoryRecord`、`LongTermMemoryRevision`、`LongTermMemoryEmbeddingRevision`、`LongTermMemoryEmbeddingDelta` 和 `LongTermMemoryMutationJob`。所有新增 CRUD 用户查询都带 `uid`，并通过唯一约束、`expected_version` 和 `active_mutation_key` 处理隔离、并发与重复提交；长期记忆 collection 名使用稳定哈希生成，嵌入调用与知识库共用，Chroma 提供异步通用操作。`hybrid` 默认返回通用错误，知识库入口保留原有知识库专用错误。
-
-目前没有 Profile 开关、Memory Worker、`recall`/mutation、API 或 UI；运行服务仍无长期记忆功能。
-
 ### 多语言
 
 ```text
@@ -394,7 +392,7 @@ app/models/
 ├── channel_cursor.py       # 渠道路由游标模型
 ├── context_summary_stage.py # 上下文总结阶段与片段模型
 ├── knowledge_base.py       # 知识库、文档与分块模型
-├── memory.py               # 六张无外键长期记忆基础表
+├── memory.py               # 长期记忆基础表
 ├── message.py              # 消息与持久引导模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息平台发件箱模型
@@ -574,6 +572,7 @@ tests/
 │   ├── conftest.py                  # 接口测试数据库夹具
 │   ├── test_chat_concurrent_input.py # 并发输入接口流程测试
 │   ├── test_chat_guidance_api.py    # 外部会话引导接口请求测试
+│   ├── test_profile_memory_embedding_api.py # Profile 长期记忆嵌入配置接口测试
 │   └── test_terminal_shell_workflow.py # execute_shell 交互模式与伴随工具流程测试
 └── unit/
     ├── context_summary_*_fixture.py # 上下文总结测试夹具
@@ -582,8 +581,11 @@ tests/
     ├── session_reply_queue_test_support.py # 回复队列测试辅助
     ├── test_audit_*.py              # 审计、确认与审计存储测试
     ├── test_background_*.py          # 后台任务测试
+    ├── test_channel_model_protection.py # 渠道模型引用保护测试
     ├── test_context_*.py             # 上下文与总结测试
     ├── test_message_*.py             # 消息与消息平台测试
+    ├── test_memory_channel_protection_stage2.py # 长期记忆渠道引用保护测试
+    ├── test_memory_embedding_config_stage2.py # 长期记忆嵌入配置确认测试
     ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
     ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
     ├── test_session_*.py             # 会话、通知与回复队列测试
@@ -627,7 +629,8 @@ scripts/
 ├── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
 ├── migration_20260801_make_terminal_audit_optional.py # 终端审计绑定可选
 ├── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
-└── migration_20260803_add_longterm_memory.py         # 长期记忆基础表
+├── migration_20260803_add_longterm_memory.py         # 长期记忆基础表
+└── migration_20260803_add_memory_embedding_selection_token.py # 长期记忆嵌入配置一次性确认凭证表
 ```
 
 ## 运行期目录

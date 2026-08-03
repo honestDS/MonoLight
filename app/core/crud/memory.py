@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -9,6 +10,9 @@ from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingRevision,
+    LongTermMemoryEmbeddingSelectionToken,
+    LongTermMemoryMigrationStatus,
+    LongTermMemoryMutationJob,
     LongTermMemoryRecord,
     LongTermMemoryRevision,
     LongTermMemoryStore,
@@ -32,8 +36,18 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 class CRUDLongTermMemoryStore:
     async def get_by_uid(self, db: AsyncSession, *, uid: str) -> LongTermMemoryStore | None:
-        result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid))
+        result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def get_snapshot_by_uid(self, db: AsyncSession, *, uid: str) -> LongTermMemoryStore | None:
+        result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
+        return result.scalars().first()
+
+    async def get_multi_by_uids(self, db: AsyncSession, *, uids: set[str]) -> dict[str, LongTermMemoryStore]:
+        if not uids:
+            return {}
+        result = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid.in_(uids)).execution_options(populate_existing=True))
+        return {store.uid: store for store in result.scalars().all()}
 
     async def create(
         self,
@@ -135,6 +149,197 @@ class CRUDLongTermMemoryStore:
             await db.commit()
         await db.refresh(store)
         return store, True
+
+    async def activate_initial_embedding_if_unconfigured(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        expected_active_revision: int,
+        active_embedding_channel_id: int,
+        active_embedding_model_id: str,
+        active_embedding_dimensions: int,
+        active_embedding_signature: str,
+        active_collection_name: str,
+        commit: bool = True,
+    ) -> LongTermMemoryStore | None:
+        result = await db.execute(
+            update(LongTermMemoryStore)
+            .where(
+                LongTermMemoryStore.uid == uid,
+                LongTermMemoryStore.active_embedding_revision == expected_active_revision,
+                LongTermMemoryStore.active_embedding_channel_id.is_(None),
+            )
+            .values(
+                active_embedding_channel_id=active_embedding_channel_id,
+                active_embedding_model_id=active_embedding_model_id,
+                active_embedding_dimensions=active_embedding_dimensions,
+                active_embedding_signature=active_embedding_signature,
+                active_embedding_revision=expected_active_revision + 1,
+                active_collection_name=active_collection_name,
+                target_embedding_channel_id=None,
+                target_embedding_model_id=None,
+                target_embedding_dimensions=None,
+                target_embedding_signature=None,
+                target_collection_name=None,
+                migration_job_id=None,
+                migration_status=None,
+                index_status="pending",
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        return await self.get_snapshot_by_uid(db, uid=uid)
+
+    async def start_embedding_migration(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        job_id: int,
+        expected_active_revision: int,
+        target_embedding_channel_id: int,
+        target_embedding_model_id: str,
+        target_embedding_dimensions: int,
+        target_embedding_signature: str,
+        target_collection_name: str,
+        migration_started_at: datetime,
+        commit: bool = True,
+    ) -> LongTermMemoryStore | None:
+        terminal_statuses = [
+            LongTermMemoryMigrationStatus.SUCCEEDED.value,
+            LongTermMemoryMigrationStatus.FAILED.value,
+            LongTermMemoryMigrationStatus.CANCELLED.value,
+        ]
+        result = await db.execute(
+            update(LongTermMemoryStore)
+            .where(
+                LongTermMemoryStore.uid == uid,
+                LongTermMemoryStore.active_embedding_revision == expected_active_revision,
+                or_(
+                    LongTermMemoryStore.migration_job_id.is_(None),
+                    LongTermMemoryStore.migration_status.in_(terminal_statuses),
+                ),
+            )
+            .values(
+                target_embedding_channel_id=target_embedding_channel_id,
+                target_embedding_model_id=target_embedding_model_id,
+                target_embedding_dimensions=target_embedding_dimensions,
+                target_embedding_signature=target_embedding_signature,
+                target_collection_name=target_collection_name,
+                migration_job_id=job_id,
+                migration_status=LongTermMemoryMigrationStatus.PREPARING,
+                migration_snapshot_boundary=0,
+                migration_cursor=0,
+                migration_total_count=0,
+                migration_success_count=0,
+                migration_failure_count=0,
+                migration_delta_high_watermark=0,
+                migration_delta_applied_watermark=0,
+                migration_error=None,
+                migration_started_at=migration_started_at,
+                migration_finished_at=None,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        refreshed = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
+        return refreshed.scalars().first()
+
+
+class CRUDLongTermMemoryEmbeddingSelectionToken:
+    async def get_by_digest(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        token_digest: str,
+    ) -> LongTermMemoryEmbeddingSelectionToken | None:
+        result = await db.execute(
+            select(LongTermMemoryEmbeddingSelectionToken)
+            .where(
+                LongTermMemoryEmbeddingSelectionToken.uid == uid,
+                LongTermMemoryEmbeddingSelectionToken.profile_id == profile_id,
+                LongTermMemoryEmbeddingSelectionToken.token_digest == token_digest,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def create(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        token_digest: str,
+        profile_config_digest: str,
+        active_embedding_revision: int,
+        target_embedding_channel_id: int,
+        target_embedding_model_id: str,
+        target_embedding_dimensions: int,
+        target_embedding_signature: str,
+        expires_at: datetime,
+        commit: bool = True,
+    ) -> LongTermMemoryEmbeddingSelectionToken:
+        token = LongTermMemoryEmbeddingSelectionToken(
+            uid=uid,
+            profile_id=profile_id,
+            token_digest=token_digest,
+            profile_config_digest=profile_config_digest,
+            active_embedding_revision=active_embedding_revision,
+            target_embedding_channel_id=target_embedding_channel_id,
+            target_embedding_model_id=target_embedding_model_id,
+            target_embedding_dimensions=target_embedding_dimensions,
+            target_embedding_signature=target_embedding_signature,
+            expires_at=expires_at,
+        )
+        db.add(token)
+        await _finish(db, commit=commit)
+        await db.refresh(token)
+        return token
+
+    async def consume_if_available(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        token_digest: str,
+        consumed_at: datetime,
+        commit: bool = True,
+    ) -> LongTermMemoryEmbeddingSelectionToken | None:
+        result = await db.execute(
+            update(LongTermMemoryEmbeddingSelectionToken)
+            .where(
+                LongTermMemoryEmbeddingSelectionToken.uid == uid,
+                LongTermMemoryEmbeddingSelectionToken.profile_id == profile_id,
+                LongTermMemoryEmbeddingSelectionToken.token_digest == token_digest,
+                LongTermMemoryEmbeddingSelectionToken.consumed_at.is_(None),
+            )
+            .values(consumed_at=consumed_at)
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        refreshed = await db.execute(
+            select(LongTermMemoryEmbeddingSelectionToken)
+            .where(
+                LongTermMemoryEmbeddingSelectionToken.uid == uid,
+                LongTermMemoryEmbeddingSelectionToken.profile_id == profile_id,
+                LongTermMemoryEmbeddingSelectionToken.token_digest == token_digest,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return refreshed.scalars().first()
 
 
 class CRUDLongTermMemoryRecord:
@@ -286,6 +491,10 @@ class CRUDLongTermMemoryEmbeddingRevision:
     async def get_by_revision(self, db: AsyncSession, *, uid: str, revision: int) -> LongTermMemoryEmbeddingRevision | None:
         result = await db.execute(select(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid, LongTermMemoryEmbeddingRevision.revision == revision))
         return result.scalars().first()
+
+    async def get_next_revision(self, db: AsyncSession, *, uid: str) -> int:
+        result = await db.execute(select(func.max(LongTermMemoryEmbeddingRevision.revision)).where(LongTermMemoryEmbeddingRevision.uid == uid))
+        return int(result.scalar() or 0) + 1
 
     async def list_by_uid(
         self,
@@ -467,14 +676,44 @@ class CRUDLongTermMemoryEmbeddingDelta:
         return int(result.scalar() or 0)
 
 
+class CRUDLongTermMemoryReference:
+    """管理员保护检查使用的长期记忆基础数据读取。"""
+
+    async def list_all_stores_for_admin(self, db: AsyncSession) -> list[LongTermMemoryStore]:
+        result = await db.execute(select(LongTermMemoryStore).order_by(LongTermMemoryStore.uid))
+        return list(result.scalars().all())
+
+    async def list_all_embedding_revisions_for_admin(self, db: AsyncSession) -> list[LongTermMemoryEmbeddingRevision]:
+        result = await db.execute(
+            select(LongTermMemoryEmbeddingRevision).order_by(
+                LongTermMemoryEmbeddingRevision.uid,
+                LongTermMemoryEmbeddingRevision.revision.desc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def list_all_memory_jobs_for_admin(self, db: AsyncSession) -> list[LongTermMemoryMutationJob]:
+        result = await db.execute(
+            select(LongTermMemoryMutationJob).order_by(
+                LongTermMemoryMutationJob.uid,
+                LongTermMemoryMutationJob.id,
+            )
+        )
+        return list(result.scalars().all())
+
+
 memory_store_crud = CRUDLongTermMemoryStore()
+memory_embedding_selection_token_crud = CRUDLongTermMemoryEmbeddingSelectionToken()
 memory_record_crud = CRUDLongTermMemoryRecord()
 memory_revision_crud = CRUDLongTermMemoryRevision()
 memory_embedding_revision_crud = CRUDLongTermMemoryEmbeddingRevision()
 memory_embedding_delta_crud = CRUDLongTermMemoryEmbeddingDelta()
+memory_reference_crud = CRUDLongTermMemoryReference()
 
 long_term_memory_store_crud = memory_store_crud
+long_term_memory_embedding_selection_token_crud = memory_embedding_selection_token_crud
 long_term_memory_record_crud = memory_record_crud
 long_term_memory_revision_crud = memory_revision_crud
 long_term_memory_embedding_revision_crud = memory_embedding_revision_crud
 long_term_memory_embedding_delta_crud = memory_embedding_delta_crud
+long_term_memory_reference_crud = memory_reference_crud
