@@ -3,7 +3,7 @@ import time
 
 from fastapi import HTTPException
 
-from app.core.constants import ERR_KB_DENSE_RETRIEVAL_FAILED
+from app.core.constants import ERR_DENSE_RETRIEVAL_FAILED, ERR_KB_DENSE_RETRIEVAL_FAILED
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.retrieval.fusion import reciprocal_rank_fusion
@@ -77,7 +77,13 @@ def sparse_search(collection_name: str, query: str, candidate_k: int) -> list[Re
     return sparse_hits
 
 
-async def hybrid_query_collection(collection_name: str, query_embedding: list[float], query: str, limit: int) -> list[RetrievalHit]:
+async def hybrid_query_collection(
+    collection_name: str,
+    query_embedding: list[float],
+    query: str,
+    limit: int,
+    error_key: str = ERR_DENSE_RETRIEVAL_FAILED,
+) -> list[RetrievalHit]:
     """通用候选召回函数：并发执行 dense/sparse 检索并使用 RRF 融合，返回 RetrievalHit 列表。
 
     注：参数 limit 表示拉取候选的数量限制（候选池大小），与最终截断数量 top_k 区分。
@@ -98,7 +104,7 @@ async def hybrid_query_collection(collection_name: str, query_embedding: list[fl
         logger.bind(collection_name=collection_name, retrieval_type="dense").error(t("LOG_RETRIEVAL_DENSE_FAILED", error=str(dense_result)))
         if isinstance(dense_result, HTTPException):
             raise dense_result
-        raise HTTPException(status_code=500, detail=t(ERR_KB_DENSE_RETRIEVAL_FAILED))
+        raise HTTPException(status_code=500, detail=t(error_key))
 
     dense_hits = dense_result
     logger.bind(collection_name=collection_name, candidate_k=dense_candidate_k, hit_count=len(dense_hits), retrieval_type="dense", retrieval_stage="finished").info(t("LOG_RETRIEVAL_DENSE_FINISHED", count=len(dense_hits)))
@@ -162,5 +168,5 @@ def build_query_test_response(hits: list[RetrievalHit], retrieval_mode: str, rer
 
 async def hybrid_query_knowledge_base(collection_name: str, query_embedding: list[float], query: str, top_k: int) -> KnowledgeBaseQueryTestResponse:
     """兼容入口：纯混合检索（不走 rerank），保持原响应结构。"""
-    fused_hits = await hybrid_query_collection(collection_name, query_embedding, query, limit=top_k)
+    fused_hits = await hybrid_query_collection(collection_name, query_embedding, query, limit=top_k, error_key=ERR_KB_DENSE_RETRIEVAL_FAILED)
     return build_query_test_response(fused_hits[:top_k], retrieval_mode="hybrid")

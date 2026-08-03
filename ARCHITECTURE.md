@@ -126,6 +126,7 @@ app/core/
 ├── exceptions.py           # 业务异常
 ├── log.py                  # 日志记录
 ├── log_broadcaster.py      # 实时日志广播
+├── memory.py               # 只包含长期记忆 collection 名和版本化 vector item ID 的稳定生成基础
 ├── paths.py                # 数据与临时目录路径
 ├── profile_selection.py    # 会话、平台与默认 Profile 选择
 ├── profile_validation.py   # Profile 渠道配置与归属校验
@@ -225,6 +226,8 @@ app/core/crud/
 ├── message.py              # 消息访问
 ├── message_platform.py     # 消息平台访问
 ├── message_platform_outbox.py # 消息平台发件箱访问
+├── memory.py               # 长期记忆 Store、记录、历史、embedding revision/delta 的 uid 隔离读写
+├── memory_job.py           # 专用记忆作业去重、目标占用和基础状态读写
 ├── profile.py              # Profile 访问
 ├── prompt.py               # Prompt 访问
 ├── scheduled_task.py       # 定时任务访问
@@ -346,7 +349,8 @@ app/core/tools/
 ```text
 app/core/embedding/
 ├── __init__.py
-└── knowledge_base.py       # 文档向量化与写入
+├── common.py               # 通用嵌入渠道/模型校验、调用参数和实际维度探测
+└── knowledge_base.py       # 文档向量化与写入，复用共用嵌入代码并保持原有语义
 
 app/core/rerank/
 ├── __init__.py
@@ -361,6 +365,12 @@ app/core/retrieval/
 ├── sparse.py               # 稀疏检索
 └── tokenizer.py            # 检索分词
 ```
+
+### 长期记忆基础（阶段 1）
+
+阶段 1 已建立六张无外键基础表：`LongTermMemoryStore`、`LongTermMemoryRecord`、`LongTermMemoryRevision`、`LongTermMemoryEmbeddingRevision`、`LongTermMemoryEmbeddingDelta` 和 `LongTermMemoryMutationJob`。所有新增 CRUD 用户查询都带 `uid`，并通过唯一约束、`expected_version` 和 `active_mutation_key` 处理隔离、并发与重复提交；长期记忆 collection 名使用稳定哈希生成，嵌入调用与知识库共用，Chroma 提供异步通用操作。`hybrid` 默认返回通用错误，知识库入口保留原有知识库专用错误。
+
+目前没有 Profile 开关、Memory Worker、`recall`/mutation、API 或 UI；运行服务仍无长期记忆功能。
 
 ### 多语言
 
@@ -384,6 +394,7 @@ app/models/
 ├── channel_cursor.py       # 渠道路由游标模型
 ├── context_summary_stage.py # 上下文总结阶段与片段模型
 ├── knowledge_base.py       # 知识库、文档与分块模型
+├── memory.py               # 六张无外键长期记忆基础表
 ├── message.py              # 消息与持久引导模型
 ├── message_platform.py     # 消息平台模型
 ├── message_platform_outbox.py # 消息平台发件箱模型
@@ -425,7 +436,7 @@ app/providers/
 │   └── client.py           # 重排模型客户端
 └── vector/
     ├── __init__.py
-    └── chroma.py           # Chroma 向量库访问
+    └── chroma.py           # Chroma 向量库访问，支持异步批量写入/读取/删除、collection 校验和孤儿 item 清理，并保留同步兼容入口
 ```
 
 ## 接口结构与协议转换
@@ -573,6 +584,8 @@ tests/
     ├── test_background_*.py          # 后台任务测试
     ├── test_context_*.py             # 上下文与总结测试
     ├── test_message_*.py             # 消息与消息平台测试
+    ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
+    ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
     ├── test_session_*.py             # 会话、通知与回复队列测试
     ├── test_terminal_*.py            # 终端单元、PTY 与平台测试
     ├── test_worker_*.py              # 独立进程与租约测试
@@ -613,7 +626,8 @@ scripts/
 ├── migration_20260729_add_message_platform_use_stream_dispatch.py # 消息平台流式分发字段
 ├── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
 ├── migration_20260801_make_terminal_audit_optional.py # 终端审计绑定可选
-└── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
+├── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
+└── migration_20260803_add_longterm_memory.py         # 长期记忆基础表
 ```
 
 ## 运行期目录

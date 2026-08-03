@@ -8,24 +8,19 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.constants import (
+    ERR_KB_DENSE_RETRIEVAL_FAILED,
     ERR_KB_NOT_FOUND_FOR_QUERY,
     ERR_KB_NOT_IN_PROFILE,
-    ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED,
-    ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL,
-    ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND,
-    ERR_PROFILE_NO_EMBEDDING_MODEL,
 )
+from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
-from app.core.utils.http_proxy import get_channel_http_proxy
-from app.core.utils.model_request_headers import get_model_custom_headers
-from app.models.channel import ChannelConfig, ModelChannel, ModelUsage, resolve_model_protocol
+from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse
 from app.models.profile import Profile
-from app.providers.embedding import EmbeddingClient
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
 
@@ -59,37 +54,14 @@ async def embed_chunks_with_knowledge_base_config(
     *,
     release_connection: bool = False,
 ) -> list[list[float]]:
-    channel = await db.get(ModelChannel, kb.embedding_channel_id)
-    if not channel:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
-    if not channel.is_active:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
-    if not channel.base_url:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
-
-    model_entry = None
-    for item in channel.model_ids or []:
-        if item.get("model_id") == kb.embedding_model_id and item.get("usage") == ModelUsage.EMBEDDING and item.get("is_enabled", True):
-            model_entry = item
-            break
-    if not model_entry:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_NO_EMBEDDING_MODEL)
-
-    model_timeout = model_entry.get("embedding_timeout")
-    embedding_timeout = min(float(model_timeout), 600.0) if model_timeout else 30.0
-    if release_connection:
-        await db.commit()
-    return await EmbeddingClient.embed_texts(
-        api_key=channel.get_decrypted_api_key(),
-        base_url=channel.base_url,
-        model_id=kb.embedding_model_id,
-        input_texts=texts,
+    config = await load_embedding_runtime_config(db, kb.embedding_channel_id, kb.embedding_model_id)
+    return await embed_texts_with_config(
+        config,
+        texts,
         batch_size=batch_size,
         dimensions=kb.embedding_dimensions,
-        timeout=embedding_timeout,
-        protocol=resolve_model_protocol(model_entry),
-        http_proxy=get_channel_http_proxy(channel),
-        custom_headers=get_model_custom_headers(model_entry),
+        db=db,
+        release_connection=release_connection,
     )
 
 
@@ -163,7 +135,7 @@ async def query_knowledge_base(
         rerank_attempted = True
         effective_candidate_k = max(rerank_config.candidate_k, final_top_k)
         await db.commit()
-        fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k)
+        fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k, error_key=ERR_KB_DENSE_RETRIEVAL_FAILED)
 
         if len(fused_hits) <= final_top_k:
             return build_query_test_response(fused_hits[:final_top_k], retrieval_mode="hybrid")
@@ -198,7 +170,7 @@ async def query_knowledge_base(
         raise HTTPException(status_code=502, detail=rerank_error)
 
     await db.commit()
-    fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k)
+    fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k, error_key=ERR_KB_DENSE_RETRIEVAL_FAILED)
     return build_query_test_response(
         fused_hits[:final_top_k],
         retrieval_mode="hybrid",

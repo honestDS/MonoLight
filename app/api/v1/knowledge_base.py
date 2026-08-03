@@ -18,10 +18,6 @@ from app.core.constants import (
     ERR_KB_FILE_ENCODING_ERROR,
     ERR_KB_NOT_FOUND,
     ERR_KB_VECTOR_WRITE_FAILED,
-    ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED,
-    ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL,
-    ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND,
-    ERR_PROFILE_NO_EMBEDDING_MODEL,
     ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     MSG_KB_CREATED,
@@ -31,6 +27,7 @@ from app.core.constants import (
     MSG_KB_UPDATED,
 )
 from app.core.crud.profile import profile_crud
+from app.core.embedding.common import EmbeddingRuntimeConfig, load_embedding_runtime_config
 
 # Re-use the refactored embedding and knowledge base query core functions
 from app.core.embedding.knowledge_base import (
@@ -94,19 +91,15 @@ async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> 
     return response
 
 
-async def load_embedding_model(db: AsyncSession, channel_id: int, model_id: str) -> tuple[ModelChannel, dict[str, Any]]:
-    channel = await db.get(ModelChannel, channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
-    if not channel.is_active:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_DISABLED)
-    if not channel.base_url:
-        raise HTTPException(status_code=400, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NO_URL)
-
-    for item in channel.model_ids or []:
-        if item.get("model_id") == model_id and item.get("usage") == ModelUsage.EMBEDDING and item.get("is_enabled", True):
-            return channel, item
-    raise HTTPException(status_code=404, detail=ERR_PROFILE_NO_EMBEDDING_MODEL)
+async def load_embedding_model(db: AsyncSession, channel_id: int, model_id: str) -> tuple[EmbeddingRuntimeConfig, dict[str, Any]]:
+    config = await load_embedding_runtime_config(
+        db,
+        channel_id,
+        model_id,
+        channel_not_found_status_code=404,
+        model_not_found_status_code=404,
+    )
+    return config, {"model_id": config.model_id, "embedding_dimensions": config.declared_dimensions}
 
 
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
