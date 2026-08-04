@@ -174,7 +174,13 @@ app/core/memory_jobs/
 ├── manager.py              # 作业提交、去重与状态管理
 ├── consumer.py             # 作业条件领取、租约维护与失效恢复
 ├── executor.py             # 按已注册处理器路由内部 operation；未注册操作不领取作业
-└── handlers.py             # create/update/restore/delete_cleanup 的嵌入、向量写入和原子发布处理器
+├── maintenance_handlers.py # 阶段5重建与迁移处理器注册入口
+├── maintenance_lifecycle.py # 阶段5维护作业生命周期与终态清理
+├── maintenance_state.py    # 阶段5重建与迁移状态、快照和载荷校验
+├── maintenance_vector.py   # 阶段5向量嵌入、集合维护与抽样校验
+├── migration_handler.py    # 嵌入模型迁移处理器
+├── reindex_handler.py      # 向量索引重建处理器
+└── handlers.py             # 普通 create/update/restore/delete_cleanup 处理器及统一注册入口
 ```
 
 ### 长期记忆领域：`app/core/memory/`
@@ -188,6 +194,7 @@ app/core/memory/
 ├── identifiers.py          # collection、vector item 和目标占用键生成
 ├── service.py              # 记忆增删改恢复、召回和迁移 delta
 ├── embedding_config.py     # 嵌入模型预检、确认和运行时配置
+├── maintenance.py          # 重建索引和失败集合清理重试提交入口
 └── channel_protection.py   # 渠道和模型引用保护
 ```
 
@@ -257,6 +264,7 @@ app/core/crud/
 ├── message_platform_outbox.py # 消息平台发件箱访问
 ├── memory.py               # 长期记忆 Store、记录、历史、embedding revision/delta 的 uid 隔离读写
 ├── memory_job.py           # 记忆作业去重、目标占用、条件领取、作业租约、重试取消和终态清理
+├── memory_maintenance.py   # 阶段5重建、迁移、快照、进度、切换和清理状态数据访问
 ├── profile.py              # Profile 访问
 ├── prompt.py               # Prompt 访问
 ├── scheduled_task.py       # 定时任务访问

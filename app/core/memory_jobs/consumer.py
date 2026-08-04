@@ -26,7 +26,11 @@ from app.core.memory_jobs.executor import (
     MemoryJobRetryableError,
     SessionFactory,
 )
-from app.models.memory import LongTermMemoryMutationJob
+from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
+from app.models.memory import (
+    LongTermMemoryMutationJob,
+    LongTermMemoryMutationStatus,
+)
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -186,11 +190,20 @@ class MemoryJobConsumer:
     async def _recover_expired(self) -> None:
         try:
             async with self._session_factory() as db:
-                await memory_job_crud.recover_expired(
+                recovery = await memory_job_crud.recover_expired(
                     db,
                     delay_seconds=self._recovery_retry_delay_seconds,
                     max_attempts_error=t(ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED),
+                    commit=False,
                 )
+                for terminal in recovery.terminal_jobs:
+                    await finalize_maintenance_terminal_state(
+                        db,
+                        job=terminal.job,
+                        status=terminal.status,
+                        error=terminal.error,
+                    )
+                await db.commit()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -374,23 +387,43 @@ class MemoryJobConsumer:
         result: dict[str, Any] | None,
     ) -> bool:
         async with self._session_factory() as db:
-            return await memory_job_crud.mark_failed(
+            changed = await memory_job_crud.mark_failed(
                 db,
                 uid=job.uid,
                 job_id=job.id,
                 owner=worker_id,
                 error=error,
                 result=result,
+                commit=False,
             )
+            if changed:
+                await finalize_maintenance_terminal_state(
+                    db,
+                    job=job,
+                    status=LongTermMemoryMutationStatus.FAILED,
+                    error=error,
+                )
+            await db.commit()
+            return changed
 
     async def _mark_cancelled(self, job: LongTermMemoryMutationJob, worker_id: str) -> bool:
         async with self._session_factory() as db:
-            return await memory_job_crud.mark_cancelled(
+            changed = await memory_job_crud.mark_cancelled(
                 db,
                 uid=job.uid,
                 job_id=job.id,
                 owner=worker_id,
+                commit=False,
             )
+            if changed:
+                await finalize_maintenance_terminal_state(
+                    db,
+                    job=job,
+                    status=LongTermMemoryMutationStatus.CANCELLED,
+                    error=t("ERR_MEMORY_JOB_CANCELLATION_REQUESTED"),
+                )
+            await db.commit()
+            return changed
 
     async def _release_for_retry(
         self,
@@ -427,14 +460,28 @@ class MemoryJobConsumer:
 
     async def _release_claim(self, job: LongTermMemoryMutationJob, worker_id: str) -> None:
         async with self._session_factory() as db:
-            await memory_job_crud.release_claim_for_shutdown(
+            changed = await memory_job_crud.release_claim_for_shutdown(
                 db,
                 uid=job.uid,
                 job_id=job.id,
                 owner=worker_id,
                 delay_seconds=self._shutdown_retry_delay_seconds,
                 max_attempts_error=t(ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED),
+                commit=False,
             )
+            if changed:
+                current = await memory_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
+                if current is not None and current.status in {
+                    LongTermMemoryMutationStatus.FAILED,
+                    LongTermMemoryMutationStatus.CANCELLED,
+                }:
+                    await finalize_maintenance_terminal_state(
+                        db,
+                        job=job,
+                        status=current.status,
+                        error=current.error,
+                    )
+            await db.commit()
 
     def _on_task_done(self, job_id: int, task: asyncio.Task[None]) -> None:
         try:

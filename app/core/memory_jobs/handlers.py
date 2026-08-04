@@ -62,6 +62,7 @@ from app.core.memory_jobs.executor import (
     MemoryJobRetryableError,
     SessionFactory,
 )
+from app.core.memory_jobs.maintenance_handlers import create_memory_maintenance_job_handlers
 from app.models.memory import (
     LongTermMemoryEmbeddingDeltaAction,
     LongTermMemoryMutationJob,
@@ -968,14 +969,14 @@ async def _handle_restore(context: MemoryJobExecutionContext) -> MemoryJobExecut
 
 
 def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Handler]:
-    return MappingProxyType(
-        {
-            LongTermMemoryMutationOperation.CREATE: _handle_create,
-            LongTermMemoryMutationOperation.UPDATE: _handle_update,
-            LongTermMemoryMutationOperation.RESTORE: _handle_restore,
-            LongTermMemoryMutationOperation.DELETE_CLEANUP: _handle_delete_cleanup,
-        }
-    )
+    handlers = {
+        **create_memory_maintenance_job_handlers(),
+        LongTermMemoryMutationOperation.CREATE: _handle_create,
+        LongTermMemoryMutationOperation.UPDATE: _handle_update,
+        LongTermMemoryMutationOperation.RESTORE: _handle_restore,
+        LongTermMemoryMutationOperation.DELETE_CLEANUP: _handle_delete_cleanup,
+    }
+    return MappingProxyType(handlers)
 
 
 def create_default_memory_job_executor(session_factory: SessionFactory = AsyncSessionLocal) -> MemoryJobExecutor:

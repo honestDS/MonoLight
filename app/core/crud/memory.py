@@ -12,14 +12,29 @@ from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingRevision,
     LongTermMemoryEmbeddingSelectionToken,
+    LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
+    LongTermMemoryOldCollectionCleanupStatus,
     LongTermMemoryRecord,
     LongTermMemoryRecordIndexStatus,
     LongTermMemoryRevision,
     LongTermMemoryStore,
 )
 from app.providers.database.time import get_database_time
+
+
+def _recallable_conditions(uid: str) -> list[Any]:
+    return [
+        LongTermMemoryRecord.uid == uid,
+        LongTermMemoryRecord.is_active.is_(True),
+        LongTermMemoryRecord.deleted_at.is_(None),
+        LongTermMemoryRecord.suppress_recall.is_(False),
+        LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+        LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
+        LongTermMemoryRecord.vector_item_id.is_not(None),
+        LongTermMemoryRecord.vector_item_id != "",
+    ]
 
 
 def _input_data(obj_in: Any) -> dict[str, Any]:
@@ -231,11 +246,21 @@ class CRUDLongTermMemoryStore:
             LongTermMemoryMigrationStatus.FAILED.value,
             LongTermMemoryMigrationStatus.CANCELLED.value,
         ]
+        blocked_cleanup_statuses = [
+            LongTermMemoryOldCollectionCleanupStatus.PENDING,
+            LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+            LongTermMemoryOldCollectionCleanupStatus.FAILED,
+        ]
         result = await db.execute(
             update(LongTermMemoryStore)
             .where(
                 LongTermMemoryStore.uid == uid,
                 LongTermMemoryStore.active_embedding_revision == expected_active_revision,
+                LongTermMemoryStore.index_status != LongTermMemoryIndexStatus.REINDEXING,
+                or_(
+                    LongTermMemoryStore.old_collection_cleanup_status.is_(None),
+                    LongTermMemoryStore.old_collection_cleanup_status.notin_(blocked_cleanup_statuses),
+                ),
                 or_(
                     LongTermMemoryStore.migration_job_id.is_(None),
                     LongTermMemoryStore.migration_status.in_(terminal_statuses),
@@ -428,19 +453,7 @@ class CRUDLongTermMemoryRecord:
         memory_ids = tuple(memory_ids)
         if not memory_ids:
             return []
-        result = await db.execute(
-            select(LongTermMemoryRecord).where(
-                LongTermMemoryRecord.uid == uid,
-                LongTermMemoryRecord.id.in_(memory_ids),
-                LongTermMemoryRecord.is_active.is_(True),
-                LongTermMemoryRecord.deleted_at.is_(None),
-                LongTermMemoryRecord.suppress_recall.is_(False),
-                LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
-                LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
-                LongTermMemoryRecord.vector_item_id.is_not(None),
-                LongTermMemoryRecord.vector_item_id != "",
-            )
-        )
+        result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid), LongTermMemoryRecord.id.in_(memory_ids)))
         return list(result.scalars().all())
 
     async def get_by_key(self, db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord | None:

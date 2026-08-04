@@ -84,6 +84,7 @@ class MemoryJobRecoveryResult:
     retried: int = 0
     failed: int = 0
     cancelled: int = 0
+    terminal_jobs: tuple["MemoryJobRecoveryTerminal", ...] = ()
 
     @property
     def recovered(self) -> int:
@@ -91,10 +92,18 @@ class MemoryJobRecoveryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryJobRecoveryTerminal:
+    job: LongTermMemoryMutationJob
+    status: LongTermMemoryMutationStatus
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryJobCancelResult:
     job: LongTermMemoryMutationJob | None
     accepted: bool
     changed: bool
+    error: str | None = None
 
 
 class CRUDLongTermMemoryMutationJob:
@@ -541,6 +550,7 @@ class CRUDLongTermMemoryMutationJob:
         retried = 0
         failed = 0
         cancelled = 0
+        terminal_jobs: list[MemoryJobRecoveryTerminal] = []
         for job in expired_jobs:
             if job.id is None or job.locked_by is None or job.lock_until is None:
                 continue
@@ -601,6 +611,13 @@ class CRUDLongTermMemoryMutationJob:
                     operation=job.operation,
                     updated_at=now,
                 )
+                terminal_jobs.append(
+                    MemoryJobRecoveryTerminal(
+                        job=job,
+                        status=next_status,
+                        error=values.get("error"),
+                    )
+                )
             if next_status == LongTermMemoryMutationStatus.RETRY:
                 retried += 1
             elif next_status == LongTermMemoryMutationStatus.FAILED:
@@ -611,7 +628,12 @@ class CRUDLongTermMemoryMutationJob:
             await db.commit()
         else:
             await db.flush()
-        return MemoryJobRecoveryResult(retried=retried, failed=failed, cancelled=cancelled)
+        return MemoryJobRecoveryResult(
+            retried=retried,
+            failed=failed,
+            cancelled=cancelled,
+            terminal_jobs=tuple(terminal_jobs),
+        )
 
     async def request_cancel(
         self,

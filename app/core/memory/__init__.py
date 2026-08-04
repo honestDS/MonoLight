@@ -8,6 +8,7 @@ from app.core.memory.identifiers import (
     build_memory_collection_name,
     build_memory_vector_item_id,
 )
+from app.core.memory.maintenance import submit_memory_cleanup_retry, submit_memory_reindex
 from app.core.memory.normalization import (
     build_memory_content_hash,
     normalize_change_evidence,
@@ -50,4 +51,6 @@ __all__ = [
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_scope",
+    "submit_memory_cleanup_retry",
+    "submit_memory_reindex",
 ]

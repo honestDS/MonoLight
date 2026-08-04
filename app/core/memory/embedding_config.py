@@ -34,8 +34,10 @@ from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingRevisionStatus,
+    LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationOperation,
+    LongTermMemoryOldCollectionCleanupStatus,
     LongTermMemoryStore,
 )
 from app.models.profile import LongTermMemoryConfig, Profile, ProfileConfig, ProfileMemoryRuntime
@@ -348,8 +350,16 @@ async def _confirm_embedding_selection(
             commit=False,
         )
     else:
+        if current_store.index_status == LongTermMemoryIndexStatus.REINDEXING:
+            raise ParameterException(ERR_PROFILE_MEMORY_MIGRATION_CONFLICT)
         if _migration_is_active(current_store):
             raise ParameterException(ERR_PROFILE_MEMORY_MIGRATION_ACTIVE)
+        if current_store.old_collection_cleanup_status in {
+            LongTermMemoryOldCollectionCleanupStatus.PENDING,
+            LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+            LongTermMemoryOldCollectionCleanupStatus.FAILED,
+        }:
+            raise ParameterException(ERR_PROFILE_MEMORY_MIGRATION_CONFLICT)
         next_revision = await memory_embedding_revision_crud.get_next_revision(db, uid=uid)
         collection_name = build_memory_collection_name(uid, selection.target_embedding_signature, next_revision, "target")
         submission = await memory_job_manager.submit(
