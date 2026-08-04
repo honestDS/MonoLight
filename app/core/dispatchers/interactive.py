@@ -24,6 +24,9 @@ from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     ERR_LLM_EMPTY_RESPONSE,
     ERR_LLM_MULTIMODAL_INPUT_UNSUPPORTED,
+    ERR_MEMORY_RECALL_BOUNDARY_INVALID,
+    ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED,
+    ERR_MEMORY_RECALL_STATUS_INVALID,
     ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
 )
@@ -32,6 +35,8 @@ from app.core.crud.audit import audit_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
+from app.core.dispatchers.memory_recall import run_memory_recall_precheck
+from app.core.dispatchers.memory_recall_types import MemoryRecallContext
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import channel_log_extra, get_logger
@@ -96,6 +101,8 @@ from .interactive_helpers import (
     _tool_result_succeeded,
     build_pending_multimodal_input_message,
     collect_pending_multimodal_file_inputs,
+    memory_recall_needs_precheck,
+    update_memory_recall_boundary,
 )
 
 logger = get_logger(__name__)
@@ -175,11 +182,22 @@ class InteractiveDispatcherMixin:
             is_first_iter = execution_resume_state is None
             resumed_total_output_tokens = execution_resume_state.get("total_output_tokens", 0) if execution_resume_state else 0
             resumed_session_total_output_tokens = execution_resume_state.get("session_total_output_tokens") if execution_resume_state else None
+            initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
+            resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
+            resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
+            if resumed_memory_recall_boundary is not None and (not isinstance(resumed_memory_recall_boundary, int) or isinstance(resumed_memory_recall_boundary, bool) or resumed_memory_recall_boundary <= 0):
+                raise ValueError(t(ERR_MEMORY_RECALL_BOUNDARY_INVALID))
+            if resumed_memory_recall_status is not None and (not isinstance(resumed_memory_recall_status, str) or resumed_memory_recall_status not in {"pending", "completed", "failed"}):
+                raise ValueError(t(ERR_MEMORY_RECALL_STATUS_INVALID))
+            if resumed_memory_recall_status is not None and resumed_memory_recall_boundary is None:
+                raise ValueError(t(ERR_MEMORY_RECALL_STATUS_BOUNDARY_REQUIRED))
             checkpoint_state = _ExecutionCheckpointState(
                 callback=execution_checkpoint_callback,
                 turn_messages=turn_messages,
                 files_to_user=files_to_user,
                 upper_message_id=min(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id,
+                memory_recall_boundary_message_id=initial_memory_recall_boundary,
+                memory_recall_status=(resumed_memory_recall_status if resumed_memory_recall_boundary == initial_memory_recall_boundary else None),
                 total_output_tokens=(resumed_total_output_tokens if isinstance(resumed_total_output_tokens, int) and not isinstance(resumed_total_output_tokens, bool) and resumed_total_output_tokens >= 0 else 0),
                 session_total_output_tokens=(resumed_session_total_output_tokens if isinstance(resumed_session_total_output_tokens, int) and not isinstance(resumed_session_total_output_tokens, bool) and resumed_session_total_output_tokens >= 0 else None),
             )
@@ -192,6 +210,14 @@ class InteractiveDispatcherMixin:
             while True:
                 try:
                     cfg = await validate_profile_and_cfg(db, profile)
+                    memory_enabled = bool(getattr(getattr(cfg, "memory", None), "enabled", False))
+                    if not memory_enabled:
+                        checkpoint_state.memory_recall_boundary_message_id = None
+                        checkpoint_state.memory_recall_status = None
+                    elif checkpoint_state.memory_recall_boundary_message_id is None:
+                        update_memory_recall_boundary(checkpoint_state, initial_memory_recall_boundary)
+                        if resumed_memory_recall_boundary == initial_memory_recall_boundary:
+                            checkpoint_state.memory_recall_status = resumed_memory_recall_status
 
                     if is_first_iter:
                         await mark_initial_message_processed(db, initial_msg.id)
@@ -250,6 +276,57 @@ class InteractiveDispatcherMixin:
                             current_turn = 0
                             append_new_user_messages(cfg, messages, new_user_batch.messages, img_understanding, audio_understanding, video_understanding)
                             checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                            if memory_enabled:
+                                update_memory_recall_boundary(checkpoint_state, new_user_batch.latest_message_id)
+
+                        if memory_enabled and memory_recall_needs_precheck(checkpoint_state):
+                            checkpoint_state.memory_recall_status = "pending"
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
+                            memory_recall_result = await run_memory_recall_precheck(
+                                MemoryRecallContext(
+                                    db=db,
+                                    uid=uid,
+                                    session_id=session_id,
+                                    profile=profile,
+                                    cfg=cfg,
+                                    username=username,
+                                    messages=messages,
+                                    turn_messages=turn_messages,
+                                    current_user_boundary_message_id=checkpoint_state.memory_recall_boundary_message_id,
+                                    upper_message_id=checkpoint_state.upper_message_id,
+                                    chat_channel=chat_channel,
+                                    chat_cursor_key=chat_cursor_key,
+                                    chat_channel_obj=chat_channel_obj,
+                                    model_entry=model_entry,
+                                    channel_rule=_channel_rule,
+                                    chat_params=chat_params,
+                                    dispatcher_mode=dispatcher_mode,
+                                    stream_event_callback=stream_event_callback,
+                                    show_tool_calls=show_tool_calls,
+                                    expose_tool_call_content=expose_tool_call_content,
+                                    context_summary_callback=context_summary_lifecycle_callback,
+                                    context_summary_checker=context_summary_work_validity_checker,
+                                    allowed_knowledge_base_ids=allowed_knowledge_base_ids,
+                                    latest_llm_request_metadata=latest_llm_request_metadata,
+                                    total_output_tokens=checkpoint_state.total_output_tokens,
+                                    session_total_output_tokens=checkpoint_state.session_total_output_tokens,
+                                )
+                            )
+                            messages = memory_recall_result.messages
+                            turn_messages = memory_recall_result.turn_messages
+                            checkpoint_state.turn_messages = turn_messages
+                            chat_channel = memory_recall_result.chat_channel
+                            chat_cursor_key = memory_recall_result.chat_cursor_key
+                            chat_channel_obj = memory_recall_result.chat_channel_obj
+                            model_entry = memory_recall_result.model_entry
+                            _channel_rule = memory_recall_result.channel_rule
+                            chat_params = memory_recall_result.chat_params
+                            latest_llm_request_metadata = memory_recall_result.latest_llm_request_metadata
+                            checkpoint_state.total_output_tokens = memory_recall_result.total_output_tokens
+                            checkpoint_state.session_total_output_tokens = memory_recall_result.session_total_output_tokens
+                            img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
+                            checkpoint_state.memory_recall_status = memory_recall_result.status
+                            await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
 
                         current_turn += 1
 
@@ -529,6 +606,8 @@ class InteractiveDispatcherMixin:
                             dispatch_logger.bind(uid=uid, session_id=session_id).info(t("LOG_DISPATCHER_NON_STREAM_RESPONSE_CONTINUE"))
                             append_new_user_messages(cfg, messages, new_user_batch.messages, img_understanding, audio_understanding, video_understanding)
                             checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                            if memory_enabled:
+                                update_memory_recall_boundary(checkpoint_state, new_user_batch.latest_message_id)
 
                             current_turn = 0
                             await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
@@ -622,6 +701,8 @@ class InteractiveDispatcherMixin:
                                             )
                                     append_new_user_messages(cfg, messages, new_user_batch.messages, img_understanding, audio_understanding, video_understanding)
                                     checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                                    if memory_enabled:
+                                        update_memory_recall_boundary(checkpoint_state, new_user_batch.latest_message_id)
                                     current_turn = 0
                                     await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                     continue
@@ -659,6 +740,8 @@ class InteractiveDispatcherMixin:
                                             )
                                     append_new_user_messages(cfg, messages, new_user_batch.messages, img_understanding, audio_understanding, video_understanding)
                                     checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                                    if memory_enabled:
+                                        update_memory_recall_boundary(checkpoint_state, new_user_batch.latest_message_id)
                                     current_turn = 0
                                     await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
                                     continue
@@ -831,6 +914,7 @@ class InteractiveDispatcherMixin:
                             allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                             context_window_k=chat_params["context_window_k"],
                             context_summary_boundary_message_id=checkpoint_state.upper_message_id,
+                            source_message_id=checkpoint_state.memory_recall_boundary_message_id,
                         )
                         tasks = [asyncio.create_task(_execute_isolated_tool_call(parallel_tool_context, tc)) for tc in ai_msg.tool_calls]
                         try:
@@ -933,6 +1017,8 @@ class InteractiveDispatcherMixin:
                 if new_user_batch is None:
                     break
                 checkpoint_state.upper_message_id = new_user_batch.summary_boundary_message_id
+                if memory_enabled:
+                    update_memory_recall_boundary(checkpoint_state, new_user_batch.latest_message_id)
 
             response = LLMResponse(
                 choices=[

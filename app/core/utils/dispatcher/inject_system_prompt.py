@@ -12,6 +12,7 @@ from app.core.log import (
 )
 from app.core.prompts import (
     KNOWLEDGE_BASES_WRAPPER,
+    LONGTERM_MEMORY_SYSTEM_PROMPT,
     SYSTEM_INSTRUCTIONS_WRAPPER,
     SYSTEM_RUNTIME_CONTEXT_POLICY,
 )
@@ -29,6 +30,8 @@ logger = get_logger(__name__)
 async def build_system_prompt(
     db: AsyncSession,
     profile: Profile,
+    *,
+    include_longterm_memory: bool = True,
 ) -> str:
     """
     构造系统提示词字符串（不注入消息列表）。
@@ -45,7 +48,13 @@ async def build_system_prompt(
             instruction_part = SYSTEM_INSTRUCTIONS_WRAPPER.format(content=prompt.content)
             full_parts.append(instruction_part)
 
-    # 2. 查询该 Profile 关联的可用知识库并注入
+    # 长期记忆规则放在 Profile Prompt 之后，避免被普通 Profile 指令覆盖。
+    profile_configs = profile.configs if isinstance(profile.configs, dict) else {}
+    memory_config = profile_configs.get("memory")
+    if include_longterm_memory and isinstance(memory_config, dict) and memory_config.get("enabled") is True:
+        full_parts.append(LONGTERM_MEMORY_SYSTEM_PROMPT)
+
+    # 查询该 Profile 关联的可用知识库并注入
     try:
         knowledge_bases = await list_available_knowledge_bases(db, profile)
         if knowledge_bases:

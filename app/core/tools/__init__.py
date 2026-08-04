@@ -16,6 +16,14 @@ from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecu
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
 from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
 from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
+from .longterm_memory import (
+    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+    LongTermMemoryExecutor,
+)
+from .longterm_memory import (
+    validate_longterm_memory_arguments as validate_longterm_memory_arguments,
+)
 from .read_multimodal_file import READ_MULTIMODAL_FILE_TOOL_SCHEMA, ReadMultimodalFileExecutor
 from .read_text_file import READ_TEXT_FILE_TOOL_SCHEMA as READ_TEXT_FILE_TOOL_SCHEMA
 from .read_text_file import TextFileReadResult as TextFileReadResult
@@ -61,6 +69,11 @@ CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS = [
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
 ]
 
+# 仅由 Profile 的长期记忆开关控制的工具 Schema
+CONFIGURABLE_MEMORY_TOOL_SCHEMAS = [
+    MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
+]
+
 # 可由模型通过 run_in_background 参数选择后台执行的工具名称
 BACKGROUND_CAPABLE_TOOL_NAMES = {}
 
@@ -84,6 +97,7 @@ TOOL_EXECUTOR_MAP = {
     READ_MULTIMODAL_FILE_TOOL_SCHEMA["function"]["name"]: ReadMultimodalFileExecutor,
     IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"]: ImageGenerationExecutor,
     KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA["function"]["name"]: KnowledgeBaseQueryExecutor,
+    MANAGE_LONGTERM_MEMORY_TOOL_NAME: LongTermMemoryExecutor,
     TERMINAL_STATUS_TOOL_SCHEMA["function"]["name"]: TerminalStatusExecutor,
     TERMINAL_READ_TOOL_SCHEMA["function"]["name"]: TerminalReadExecutor,
     TERMINAL_WRITE_TOOL_SCHEMA["function"]["name"]: TerminalWriteExecutor,
@@ -106,6 +120,8 @@ def get_registered_tool_names():
     for schema in CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     for schema in CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS:
+        registered_tool_names.append(schema["function"]["name"])
+    for schema in CONFIGURABLE_MEMORY_TOOL_SCHEMAS:
         registered_tool_names.append(schema["function"]["name"])
     return registered_tool_names
 
@@ -134,6 +150,7 @@ def _iter_tool_schemas() -> list[dict[str, Any]]:
         *SHELL_COMPANION_TOOL_SCHEMAS,
         *CONFIGURABLE_CONDITIONAL_TOOL_SCHEMAS,
         *CONFIGURABLE_DYNAMIC_TOOL_SCHEMAS,
+        *CONFIGURABLE_MEMORY_TOOL_SCHEMAS,
     ]
 
 
@@ -185,6 +202,14 @@ def _get_enabled_tool_names(profile: Profile) -> set[str]:
     return {name for name in enabled_tools if isinstance(name, str)}
 
 
+def _is_memory_enabled(profile: Profile) -> bool:
+    configs = profile.configs or {}
+    if not isinstance(configs, dict):
+        return False
+    memory_config = configs.get("memory")
+    return isinstance(memory_config, dict) and memory_config.get("enabled") is True
+
+
 async def _is_image_generation_profile_available(db: AsyncSession, profile: Profile) -> bool:
     configs = profile.configs or {}
     if not isinstance(configs, dict):
@@ -232,6 +257,8 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
                 base_tools.extend(copy.deepcopy(companion_schema) for companion_schema in SHELL_COMPANION_TOOL_SCHEMAS)
     if allow_background and IMAGE_GENERATION_TOOL_SCHEMA["function"]["name"] in enabled_tool_names and await _is_image_generation_profile_available(db, profile):
         base_tools.append(copy.deepcopy(IMAGE_GENERATION_TOOL_SCHEMA))
+    if _is_memory_enabled(profile):
+        base_tools.extend(copy.deepcopy(schema) for schema in CONFIGURABLE_MEMORY_TOOL_SCHEMAS)
     whitelist_ids = []
 
     try:

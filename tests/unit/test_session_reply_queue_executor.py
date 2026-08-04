@@ -37,6 +37,8 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         "turn_messages": [],
         "files_to_user": [],
         "current_turn": 1,
+        "memory_recall_boundary_message_id": 1,
+        "memory_recall_status": "completed",
     }
     work = SessionReplyWorkItem(
         id=7,
@@ -83,7 +85,13 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     async def dispatch(**kwargs):
         dispatch_kwargs.update(kwargs)
         assert await kwargs["context_summary_work_validity_checker"]() is True
-        await kwargs["execution_checkpoint_callback"]({"messages": [{"role": "user", "content": "updated"}]})
+        await kwargs["execution_checkpoint_callback"](
+            {
+                "messages": [{"role": "user", "content": "updated"}],
+                "memory_recall_boundary_message_id": 1,
+                "memory_recall_status": "completed",
+            }
+        )
         return {"choices": []}
 
     async def get_active_claims(db, claims):
@@ -122,11 +130,13 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
     response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
 
     assert response == {"choices": []}
-    assert dispatch_kwargs["execution_resume_state"] == checkpoint
+    assert dispatch_kwargs["execution_resume_state"] is checkpoint
     assert dispatch_kwargs["message"] == "original"
     assert dispatch_kwargs["additional_system_prompt"] == "channel instruction"
     assert checkpoint_updates[0]["values"]["execution_state"]["stream_requested"] is False
     assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["messages"][0]["content"] == "updated"
+    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["memory_recall_boundary_message_id"] == 1
+    assert checkpoint_updates[0]["values"]["execution_state"]["dispatcher_checkpoint"]["memory_recall_status"] == "completed"
 
 
 @pytest.mark.asyncio

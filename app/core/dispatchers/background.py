@@ -36,7 +36,10 @@ from app.core.prompts import (
     BACKGROUND_PROACTIVE_UNSUPPORTED_TOOL_FALLBACK_PROMPT,
     TEXT_ONLY_REPLY_TOOL_CORRECTION_PROMPT,
 )
-from app.core.tools import get_tools_for_profile
+from app.core.tools import (
+    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+    get_tools_for_profile,
+)
 from app.core.utils.assistant_files import build_assistant_files_content, parse_assistant_files_content
 from app.core.utils.background_task_result import serialize_execution_summary
 from app.core.utils.context_summary import ContextSummaryTriggerMode
@@ -161,6 +164,7 @@ class BackgroundDispatcherMixin:
         allowed_tool_names = None
         if allow_tools:
             profile_tools, allowed_knowledge_base_ids = await get_tools_for_profile(db, profile, allow_background=False)
+            profile_tools = [tool for tool in profile_tools if tool.get("function", {}).get("name") != MANAGE_LONGTERM_MEMORY_TOOL_NAME]
             if restrict_tools_to_background_allowlist:
                 profile_tools = filter_background_proactive_tools(profile_tools)
                 allowed_tool_names = BACKGROUND_PROACTIVE_ALLOWED_TOOL_NAMES
@@ -184,9 +188,14 @@ class BackgroundDispatcherMixin:
                     max_tokens=chat_params["max_tokens"],
                     tools=tools,
                     additional_system_prompt=cleaned_additional_system_prompt or None,
+                    include_longterm_memory=False,
                 )
             else:
-                system_prompt = await build_system_prompt(db, profile)
+                system_prompt = await build_system_prompt(
+                    db,
+                    profile,
+                    include_longterm_memory=False,
+                )
                 if cleaned_additional_system_prompt:
                     system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt
                 messages = inject_system_prompt_text(

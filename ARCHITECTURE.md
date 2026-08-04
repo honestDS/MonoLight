@@ -286,6 +286,10 @@ app/core/dispatchers/
 ├── background.py           # 后台对话分发
 ├── interactive.py          # HTTP/WebSocket/队列交互式流式与非流式对话共用执行流程
 ├── interactive_helpers.py   # 交互式分发的消息、工具与执行检查点辅助逻辑
+├── memory_recall.py         # 每轮召回预检编排
+├── memory_recall_types.py   # 召回上下文与结果结构
+├── memory_recall_request.py  # 渠道选择、请求裁剪、模型调用与令牌元数据
+├── memory_recall_persistence.py # 召回工具消息幂等恢复、保存、执行与展示事件
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用逻辑
 └── stream.py               # 流式对话分发
@@ -374,6 +378,7 @@ app/core/tools/
 ├── image_generation.py     # 图像生成
 ├── knowledge_base_query.py # 知识库查询
 ├── list_background_tasks.py # 查询后台任务
+├── longterm_memory.py      # 统一 recall/create/update/delete 工具
 ├── read_text_file.py       # 通用只读文本文件读取
 ├── read_multimodal_file.py # 读取并校验本地多模态文件
 ├── send_file_to_user.py    # 向用户发送文件
@@ -622,6 +627,10 @@ tests/
     ├── test_memory_job_worker_stage3.py # Manager、Consumer、Executor、租约恢复与并发测试
     ├── test_memory_service_stage4.py # 长期记忆规范化、提交、删除、恢复与召回测试
     ├── test_memory_worker_stage4.py # 长期记忆向量发布、清理、失败和原子终态测试
+    ├── test_memory_chat_tool_stage6.py # 阶段6聊天工具与开关注册测试
+    ├── test_memory_recall_precheck_stage6.py # 阶段6召回预检、一次纠正与渠道降级测试
+    ├── test_memory_recall_persistence_stage6.py # 阶段6召回持久化、幂等恢复与新消息边界测试
+    ├── test_memory_interactive_stage6.py # 阶段6普通、流式、交互与队列测试
     ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
     ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
     ├── test_session_*.py             # 会话、通知与回复队列测试

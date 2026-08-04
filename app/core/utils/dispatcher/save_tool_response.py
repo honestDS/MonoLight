@@ -19,6 +19,7 @@ async def save_tool_response(
     messages: list[InternalMessage],
     turn_messages: list[InternalMessage],
     audit_record_id: int | None = None,
+    dedupe_key: str | None = None,
 ) -> InternalMessage:
     stored_tool_res = tool_res.model_copy()
 
@@ -33,6 +34,7 @@ async def save_tool_response(
         is_processed=True,
         audit_record_id=audit_record_id,
         audit_tool_call_id=tool_res.tool_call_id if audit_record_id is not None else None,
+        dedupe_key=dedupe_key,
     )
     stored_tool_res.id = saved_msg.id
     stored_tool_res.created_at = saved_msg.created_at

@@ -30,12 +30,14 @@ from app.core.log import (
 from app.core.prompts import BACKGROUND_TASK_UNSUPPORTED_PROMPT
 from app.core.terminal.schemas import ShellInteractiveHandoffResult
 from app.core.tools import (
+    MANAGE_LONGTERM_MEMORY_TOOL_NAME,
     SHELL_COMPANION_TOOL_NAMES,
     TOOL_EXECUTOR_MAP,
     get_tool_parameters_schema,
     get_tool_required_parameters,
     tool_runs_in_background,
     tool_schema_has_parameter,
+    validate_longterm_memory_arguments,
 )
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget
@@ -50,6 +52,8 @@ from app.models.profile import (
 
 
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
+    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+        return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
     enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
     if not isinstance(enabled_tools, list):
         return False
@@ -232,6 +236,42 @@ def _build_schema_validation_result(tool_name: str, errors: list[str]) -> str:
     return _build_tool_error_result(tool_name, t(ERR_TOOL_ARGUMENT_SCHEMA_INVALID, tool_name=tool_name, detail=detail))
 
 
+def _serialize_longterm_memory_log_arguments(arguments: dict[str, Any]) -> str:
+    safe_arguments: dict[str, Any] = {}
+    for field, value in arguments.items():
+        if field in {"content", "change_evidence"}:
+            continue
+        if field == "query":
+            safe_arguments["query_length"] = len(value) if isinstance(value, str) else None
+            continue
+        safe_arguments[field] = value
+    return json.dumps(safe_arguments, ensure_ascii=False, default=str)
+
+
+def _serialize_longterm_memory_log_result(result: str) -> str:
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return json.dumps({"status": "unavailable"}, ensure_ascii=False)
+    if not isinstance(payload, dict):
+        return json.dumps({}, ensure_ascii=False)
+
+    safe_payload: dict[str, Any] = {}
+    for field, value in payload.items():
+        if field in {"content", "change_evidence", "query"}:
+            continue
+        if field == "items" and isinstance(value, list):
+            safe_items = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                safe_items.append({key: item_value for key, item_value in item.items() if key not in {"content", "change_evidence", "query"}})
+            safe_payload["items"] = safe_items
+            continue
+        safe_payload[field] = value
+    return json.dumps(safe_payload, ensure_ascii=False, default=str)
+
+
 def prevalidate_tool_round(
     tool_calls: list[Any],
     cfg: ProfileConfig,
@@ -263,6 +303,12 @@ def prevalidate_tool_round(
             )
         elif parameters_schema is not None and (schema_errors := _validate_schema_value(args, parameters_schema, "arguments")):
             errors[tool_call.id] = _build_schema_validation_result(tool_name, schema_errors)
+        elif tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+            _, validation_error = validate_longterm_memory_arguments(args)
+            if validation_error:
+                errors[tool_call.id] = _build_tool_error_result(tool_name, validation_error)
+            elif (tool_runs_in_background(tool_name) or background_requested) and not allow_background_submission:
+                errors[tool_call.id] = _build_background_task_unsupported_result(tool_name)
         elif (tool_runs_in_background(tool_name) or background_requested) and not allow_background_submission:
             errors[tool_call.id] = _build_background_task_unsupported_result(tool_name)
     return errors
@@ -284,6 +330,7 @@ async def process_single_tool(
     allow_background_submission: bool = True,
     *,
     context_summary_boundary_message_id: int | None = None,
+    source_message_id: int | None = None,
 ) -> InternalMessage:
     tool_name = tool_call.name
     args = dict(tool_call.arguments or {})
@@ -293,7 +340,8 @@ async def process_single_tool(
     background_required = tool_runs_in_background(tool_name)
     run_in_background = background_required or background_requested
 
-    LogManager.log_tool_call(turn, tool_name, json.dumps(args, ensure_ascii=False), session_id, uid)
+    log_args = _serialize_longterm_memory_log_arguments(args) if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME else json.dumps(args, ensure_ascii=False)
+    LogManager.log_tool_call(turn, tool_name, log_args, session_id, uid)
 
     if not _is_tool_enabled(tool_name, cfg):
         cmd_result = _build_tool_disabled_result(tool_name)
@@ -345,6 +393,7 @@ async def process_single_tool(
                     profile=profile,
                     db=db,
                     tool_call_id=tool_call.id,
+                    source_message_id=source_message_id,
                     allowed_knowledge_base_ids=allowed_knowledge_base_ids,
                 )
                 instance.set_runtime_context(
@@ -402,8 +451,7 @@ async def process_single_tool(
             tool_name=tool_name,
         ).warning(t("LOG_TOOL_RESULT_TRUNCATED", tool_name=tool_name, context_window_k=context_window_k))
 
-    # 使用原始工具结果记录日志，确保文件日志保留完整数据用于审计；
-    # ws/db sink 中的字符级截断仅影响前端推送与数据库存储，不影响文件日志
-    LogManager.log_tool_result(turn, cmd_result, session_id, uid)
+    log_result = _serialize_longterm_memory_log_result(cmd_result) if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME else cmd_result
+    LogManager.log_tool_result(turn, log_result, session_id, uid)
 
     return tool_msg

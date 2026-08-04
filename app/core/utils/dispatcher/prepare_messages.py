@@ -38,10 +38,18 @@ async def prepare_messages(
     tools: list[dict] | None = None,
     history_before_id: int | None = None,
     additional_system_prompt: str | None = None,
+    include_longterm_memory: bool = True,
 ) -> list[InternalMessage]:
     # 预先构造系统提示词并估算其 Token 数，作为历史消息加载的预留量。
     # 总结阈值与硬窗口由模型调用前的统一检查点按完整请求重新计算。
-    system_prompt = await build_system_prompt(db, profile)
+    if include_longterm_memory:
+        system_prompt = await build_system_prompt(db, profile)
+    else:
+        system_prompt = await build_system_prompt(
+            db,
+            profile,
+            include_longterm_memory=False,
+        )
     cleaned_additional_system_prompt = additional_system_prompt.strip() if isinstance(additional_system_prompt, str) else ""
     if cleaned_additional_system_prompt:
         system_prompt = f"{system_prompt}\n\n{cleaned_additional_system_prompt}" if system_prompt.strip() else cleaned_additional_system_prompt

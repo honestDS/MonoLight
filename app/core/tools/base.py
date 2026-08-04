@@ -20,6 +20,7 @@ class BaseExecutor(abc.ABC):
         self.db = None
         self.profile = None
         self.session_id = None
+        self.source_message_id = None
         self.allowed_knowledge_base_ids = []
         self.dispatch_context: DispatchContext | None = None
 
@@ -38,11 +39,13 @@ class BaseExecutor(abc.ABC):
         session_id: str | None = None,
         allowed_knowledge_base_ids: list[int] | None = None,
         dispatch_context: DispatchContext | None = None,
+        source_message_id: int | None = None,
     ):
         self.dispatch_context = dispatch_context
         self.db = dispatch_context.db if dispatch_context else db
         self.profile = dispatch_context.profile if dispatch_context else profile
         self.session_id = dispatch_context.session_id if dispatch_context else session_id
+        self.source_message_id = dispatch_context.source_message_id if dispatch_context else source_message_id
         self.allowed_knowledge_base_ids = dispatch_context.allowed_knowledge_base_ids if dispatch_context else (allowed_knowledge_base_ids or [])
 
     @abc.abstractmethod

@@ -19,6 +19,7 @@ class DispatchContext:
     tool_call_id: str | None = None
     task_id: int | None = None
     allowed_knowledge_base_ids: list[int] = field(default_factory=list)
+    source_message_id: int | None = None
 
     @property
     def is_background(self) -> bool:
@@ -32,6 +33,7 @@ def build_background_dispatch_context(
     profile: Profile,
     db: AsyncSession | None = None,
     tool_call_id: str | None = None,
+    source_message_id: int | None = None,
     task_id: int | None = None,
     source: str = "background_task",
     allowed_knowledge_base_ids: list[int] | None = None,
@@ -44,6 +46,7 @@ def build_background_dispatch_context(
         profile=profile,
         db=db,
         tool_call_id=tool_call_id,
+        source_message_id=source_message_id,
         task_id=task_id,
         allowed_knowledge_base_ids=allowed_knowledge_base_ids or [],
     )
@@ -58,6 +61,7 @@ def build_dispatch_context(
     profile: Profile,
     db: AsyncSession | None = None,
     tool_call_id: str | None = None,
+    source_message_id: int | None = None,
     task_id: int | None = None,
     allowed_knowledge_base_ids: list[int] | None = None,
 ) -> DispatchContext:
@@ -69,6 +73,7 @@ def build_dispatch_context(
         profile=profile,
         db=db,
         tool_call_id=tool_call_id,
+        source_message_id=source_message_id,
         task_id=task_id,
         allowed_knowledge_base_ids=allowed_knowledge_base_ids or [],
     )

@@ -151,8 +151,29 @@ class _ExecutionCheckpointState:
     turn_messages: list[InternalMessage]
     files_to_user: list[str]
     upper_message_id: int | None
+    memory_recall_boundary_message_id: int | None = None
+    memory_recall_status: str | None = None
     total_output_tokens: int = 0
     session_total_output_tokens: int | None = None
+
+
+def _is_valid_memory_recall_boundary(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def update_memory_recall_boundary(
+    state: _ExecutionCheckpointState,
+    boundary_message_id: int | None,
+) -> None:
+    if not _is_valid_memory_recall_boundary(boundary_message_id):
+        return
+    if state.memory_recall_boundary_message_id != boundary_message_id:
+        state.memory_recall_boundary_message_id = boundary_message_id
+        state.memory_recall_status = "pending"
+
+
+def memory_recall_needs_precheck(state: _ExecutionCheckpointState) -> bool:
+    return _is_valid_memory_recall_boundary(state.memory_recall_boundary_message_id) and state.memory_recall_status not in {"completed", "failed"}
 
 
 async def _save_execution_checkpoint(
@@ -176,6 +197,9 @@ async def _save_execution_checkpoint(
     }
     if state.session_total_output_tokens is not None:
         checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
+    if _is_valid_memory_recall_boundary(state.memory_recall_boundary_message_id):
+        checkpoint["memory_recall_boundary_message_id"] = state.memory_recall_boundary_message_id
+        checkpoint["memory_recall_status"] = state.memory_recall_status
     if update_active_audit_execution:
         checkpoint[SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] = active_audit_execution
     await state.callback(checkpoint)
@@ -252,6 +276,7 @@ class _ParallelToolExecutionContext:
     allowed_knowledge_base_ids: list[int]
     context_window_k: int
     context_summary_boundary_message_id: int | None
+    source_message_id: int | None = None
 
 
 async def _execute_isolated_tool_call(
@@ -272,6 +297,7 @@ async def _execute_isolated_tool_call(
                 allowed_knowledge_base_ids=context.allowed_knowledge_base_ids,
                 context_window_k=context.context_window_k,
                 context_summary_boundary_message_id=context.context_summary_boundary_message_id,
+                source_message_id=context.source_message_id,
             )
         )
         if context.active_tasks is not None:
