@@ -94,8 +94,6 @@ async def test_hard_delete_migration_backfills_snapshots_and_keeps_unrecoverable
                         version=2,
                         memory_key="historical-key",
                         memory_type=LongTermMemoryType.FACT,
-                        importance=6,
-                        scope="project",
                         content=content,
                         content_hash=content_hash,
                         source=LongTermMemorySource.USER_API,

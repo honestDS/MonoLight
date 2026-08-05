@@ -45,8 +45,6 @@ class MemoryRecallItem:
     memory_key: str
     content: str
     memory_type: str
-    importance: int
-    scope: str | None
     version: int
     updated_at: datetime
     source: str

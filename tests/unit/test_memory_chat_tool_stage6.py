@@ -65,7 +65,6 @@ def _valid_arguments(operation: str) -> dict:
             "content": "remember this stable fact",
             "memory_key": "stable-fact",
             "memory_type": "fact",
-            "importance": 4,
         },
         "update": {
             "operation": "update",
@@ -74,7 +73,6 @@ def _valid_arguments(operation: str) -> dict:
             "content": "updated stable fact",
             "memory_key": "stable-fact",
             "memory_type": "fact",
-            "importance": 5,
         },
         "delete": {"operation": "delete", "memory_id": 12},
     }
@@ -203,7 +201,7 @@ def test_prevalidate_tool_round_rejects_operation_specific_missing_fields(operat
     ("operation", "field", "value"),
     [
         ("recall", "query", 12),
-        ("create", "importance", "high"),
+        ("create", "memory_type", 12),
         ("update", "expected_version", "2"),
         ("delete", "memory_id", "12"),
     ],
@@ -261,8 +259,6 @@ async def test_executor_recall_passes_memory_limits_and_returns_plain_text_in_or
         memory_key="stable-fact",
         content="private recalled content",
         memory_type="fact",
-        importance=4,
-        scope="global",
         version=2,
         updated_at=datetime(2026, 8, 4, 12, 30, tzinfo=UTC),
         source="llm_tool",
@@ -273,8 +269,6 @@ async def test_executor_recall_passes_memory_limits_and_returns_plain_text_in_or
         memory_key="another-fact",
         content="second recalled content",
         memory_type="fact",
-        importance=3,
-        scope="global",
         version=1,
         updated_at=datetime(2026, 8, 4, 12, 31, tzinfo=UTC),
         source="llm_tool",
@@ -428,7 +422,6 @@ def test_longterm_memory_log_serializers_remove_sensitive_arguments_and_results(
             "query": "private query body",
             "content": "private content body",
             "change_evidence": "private evidence body",
-            "importance": 4,
         }
     )
     log_result = process_single_tool_module._serialize_longterm_memory_log_result("private recalled item body\n\nsecond recalled item body")

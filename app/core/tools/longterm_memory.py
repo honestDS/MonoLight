@@ -11,7 +11,6 @@ from app.core.constants import (
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
-    MEMORY_SCOPE_MAX_CHARS,
 )
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
@@ -60,7 +59,7 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                 "memory_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The exact existing memory record ID explicitly provided by the user or bound to the concrete topic in trusted context. Required for update or delete; never infer it from recall results, memory type, scope, memory_key, or semantic similarity. Recall does not return memory IDs.",
+                    "description": "The exact existing memory record ID explicitly provided by the user or bound to the concrete topic in trusted context. Required for update or delete; never infer it from recall results, memory type, memory_key, or semantic similarity. Recall does not return memory IDs.",
                 },
                 "expected_version": {
                     "type": "integer",
@@ -84,18 +83,6 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "enum": ["fact", "preference", "project", "todo", "constraint"],
                     "description": "Classify this memory from its content itself as fact, preference, project, todo, or constraint. Objective information from tools, searches, or knowledge bases remains objective information and must not be labeled preference solely because the user asks to remember it.",
                 },
-                "importance": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 10,
-                    "description": "The importance from 0 to 10.",
-                },
-                "scope": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MEMORY_SCOPE_MAX_CHARS,
-                    "description": "Optional applicability scope.",
-                },
                 "change_evidence": {
                     "type": "string",
                     "minLength": 1,
@@ -116,7 +103,7 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
 
 _OPERATION_FIELDS = {
     "recall": {"operation", "query", "top_k"},
-    "create": {"operation", "content", "memory_key", "memory_type", "importance", "scope", "change_evidence"},
+    "create": {"operation", "content", "memory_key", "memory_type", "change_evidence"},
     "update": {
         "operation",
         "memory_id",
@@ -124,8 +111,6 @@ _OPERATION_FIELDS = {
         "content",
         "memory_key",
         "memory_type",
-        "importance",
-        "scope",
         "change_evidence",
         "suppress_current",
     },
@@ -133,8 +118,8 @@ _OPERATION_FIELDS = {
 }
 _REQUIRED_FIELDS = {
     "recall": ("query",),
-    "create": ("content", "memory_key", "memory_type", "importance"),
-    "update": ("memory_id", "expected_version", "content", "memory_key", "memory_type", "importance"),
+    "create": ("content", "memory_key", "memory_type"),
+    "update": ("memory_id", "expected_version", "content", "memory_key", "memory_type"),
     "delete": ("memory_id",),
 }
 
@@ -261,8 +246,6 @@ class LongTermMemoryExecutor(BaseExecutor):
                 content=arguments["content"],
                 memory_key=arguments["memory_key"],
                 memory_type=arguments["memory_type"],
-                importance=arguments["importance"],
-                scope=arguments.get("scope"),
                 change_evidence=arguments.get("change_evidence"),
                 **context,
             )
@@ -275,8 +258,6 @@ class LongTermMemoryExecutor(BaseExecutor):
                 content=arguments["content"],
                 memory_key=arguments["memory_key"],
                 memory_type=arguments["memory_type"],
-                importance=arguments["importance"],
-                scope=arguments.get("scope"),
                 change_evidence=arguments.get("change_evidence"),
                 suppress_current=arguments.get("suppress_current", False),
                 **context,

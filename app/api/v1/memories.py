@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     MEMORY_CONTENT_MAX_CHARS,
-    MEMORY_SCOPE_MAX_CHARS,
     MSG_MEMORY_CLEANUP_RETRY_SUBMITTED,
     MSG_MEMORY_CREATED,
     MSG_MEMORY_DELETED,
@@ -121,7 +120,6 @@ async def list_memories_api(
     size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None, max_length=MEMORY_CONTENT_MAX_CHARS),
     memory_type: LongTermMemoryType | None = Query(default=None),
-    scope: str | None = Query(default=None, max_length=MEMORY_SCOPE_MAX_CHARS),
     sort_by: MemorySortField = Query(default="updated_at"),
     sort_order: MemorySortOrder = Query(default="desc"),
     db: AsyncSession = Depends(get_db),
@@ -134,7 +132,6 @@ async def list_memories_api(
         limit=size,
         keyword=keyword,
         memory_type=memory_type,
-        scope=scope,
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -164,8 +161,6 @@ async def create_memory_api(
         content=request.content,
         memory_key=request.memory_key,
         memory_type=request.memory_type,
-        importance=request.importance,
-        scope=request.scope,
         change_evidence=request.change_evidence,
         source=LongTermMemorySource.USER_API,
         max_attempts=request.max_attempts,
@@ -188,8 +183,6 @@ async def update_memory_api(
         content=request.content,
         memory_key=request.memory_key,
         memory_type=request.memory_type,
-        importance=request.importance,
-        scope=request.scope,
         change_evidence=request.change_evidence,
         source=LongTermMemorySource.USER_API,
         suppress_current=request.suppress_current,

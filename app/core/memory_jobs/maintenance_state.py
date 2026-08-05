@@ -326,14 +326,11 @@ def record_metadata(record: LongTermMemoryRecord, embedding_revision: int) -> di
         "uid": record.uid,
         "memory_key": record.memory_key,
         "memory_type": getattr(record.memory_type, "value", record.memory_type),
-        "importance": record.importance,
         "version": record.version,
         "updated_at": updated_at_value,
         "source": getattr(record.source, "value", record.source),
         "embedding_revision": embedding_revision,
     }
-    if record.scope:
-        metadata["scope"] = record.scope
     return metadata
 
 

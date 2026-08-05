@@ -381,8 +381,6 @@ async def create_recallable_record(
     vector_item_id: str | None = None,
     content_hash: str | None = None,
     memory_type: LongTermMemoryType = LongTermMemoryType.FACT,
-    importance: int = 1,
-    scope: str | None = "test",
     source: LongTermMemorySource = LongTermMemorySource.USER_API,
     memory_id: int | None = None,
 ) -> LongTermMemoryRecord:
@@ -395,8 +393,6 @@ async def create_recallable_record(
     values: dict[str, Any] = {
         "memory_key": memory_key,
         "memory_type": memory_type,
-        "importance": importance,
-        "scope": scope,
         "content": content,
         "content_hash": content_hash,
         "version": version,

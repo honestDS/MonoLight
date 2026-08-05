@@ -31,7 +31,6 @@ from app.core.memory.normalization import (
     normalize_memory_key,
     normalize_memory_publication_payload,
     normalize_memory_record_snapshot,
-    normalize_memory_scope,
 )
 from app.core.memory.results import (
     MemoryMutationResult,
@@ -78,7 +77,6 @@ __all__ = [
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_record_snapshot",
-    "normalize_memory_scope",
     "retry_embedding_migration",
     "retry_job",
     "submit_memory_cleanup_retry",

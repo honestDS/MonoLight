@@ -92,8 +92,6 @@ async def _create_record(
     values = {
         "memory_key": memory_key,
         "memory_type": LongTermMemoryType.FACT,
-        "importance": 5,
-        "scope": "project",
         "content": content,
         "content_hash": build_memory_content_hash(content),
         "version": version,
@@ -135,8 +133,6 @@ def _publication_payload(*, key: str, content: str) -> dict:
         "memory_key": key,
         "content_hash": build_memory_content_hash(content),
         "memory_type": "fact",
-        "importance": 5,
-        "scope": None,
         "change_evidence": None,
         "source": "user_api",
         "source_id": None,
@@ -213,8 +209,6 @@ async def test_memory_crud_api_uses_real_uid_paths_and_standard_responses(api_ap
                 "content": "created content",
                 "memory_key": "created",
                 "memory_type": "fact",
-                "importance": 7,
-                "scope": "project",
                 "change_evidence": "user request",
             },
         )
@@ -237,7 +231,6 @@ async def test_memory_crud_api_uses_real_uid_paths_and_standard_responses(api_ap
                 "content": "updated content",
                 "memory_key": "first-updated",
                 "memory_type": "fact",
-                "importance": 8,
             },
         )
         update_payload = _assert_standard(update_response, 200)
@@ -269,7 +262,6 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
         version=1,
         memory_key="memory-a",
         memory_type=LongTermMemoryType.FACT,
-        importance=5,
         content="content-a",
         content_hash=build_memory_content_hash("content-a"),
         source=LongTermMemorySource.USER_API,
@@ -290,7 +282,6 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
                     "content": "other update",
                     "memory_key": "other-key",
                     "memory_type": "fact",
-                    "importance": 1,
                 },
             ),
             client.post("/api/v1/memories/delete", json={"memory_id": record_id}),
@@ -308,14 +299,13 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_field", ["uid", "source", "source_message_id", "collection", "dimensions"])
+@pytest.mark.parametrize("extra_field", ["uid", "source", "source_message_id", "collection", "dimensions", "importance", "scope"])
 async def test_memory_api_forbids_internal_and_embedding_fields(api_app: tuple[FastAPI, SimpleNamespace], extra_field: str) -> None:
     app, _current_user = api_app
     body = {
         "content": "content",
         "memory_key": "key",
         "memory_type": "fact",
-        "importance": 1,
         extra_field: 1 if extra_field in {"source_message_id", "dimensions"} else "forbidden",
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -331,11 +321,6 @@ async def test_memory_api_validates_fields_versions_and_state_transitions(api_ap
     pending_job = await _create_job(db_session, dedupe_key="pending-job")
     record_id, pending_job_id = record.id, pending_job.id
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        bad_importance = await client.post(
-            "/api/v1/memories/create",
-            json={"content": "x", "memory_key": "x", "memory_type": "fact", "importance": 11},
-        )
-        _assert_standard(bad_importance, 422)
         _assert_standard(await client.get("/api/v1/memories/list?page=0"), 422)
         _assert_standard(await client.get("/api/v1/memories/list?sort_by=invalid"), 422)
         _assert_standard(await client.get("/api/v1/memories/jobs/0"), 422)
@@ -348,7 +333,6 @@ async def test_memory_api_validates_fields_versions_and_state_transitions(api_ap
                 "content": "changed",
                 "memory_key": "changed",
                 "memory_type": "fact",
-                "importance": 1,
             },
         )
         _assert_standard(version_conflict, 409)
@@ -380,7 +364,6 @@ async def test_memory_jobs_list_detail_retry_and_cancel(api_app: tuple[FastAPI, 
                     "content": "cancel content",
                     "memory_key": "cancel-key",
                     "memory_type": "fact",
-                    "importance": 1,
                 },
             ),
             200,
@@ -417,7 +400,6 @@ async def test_memory_history_restore_and_resume_current(api_app: tuple[FastAPI,
             version=version,
             memory_key="memory-a",
             memory_type=LongTermMemoryType.FACT,
-            importance=5,
             content=content,
             content_hash=build_memory_content_hash(content),
             source=LongTermMemorySource.USER_API,
@@ -476,8 +458,6 @@ async def test_deleted_memory_history_is_read_only_without_current_record(
         version=1,
         memory_key=record.memory_key,
         memory_type=record.memory_type,
-        importance=record.importance,
-        scope=record.scope,
         content=record.content,
         content_hash=record.content_hash,
         source=record.source,

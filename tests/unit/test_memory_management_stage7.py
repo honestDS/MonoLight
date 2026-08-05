@@ -147,8 +147,6 @@ async def _create_failed_update_job(
             content=f"after-{memory_key}",
             memory_key=f"{memory_key}-updated",
             memory_type=LongTermMemoryType.FACT,
-            importance=5,
-            scope="test",
             change_evidence="stage7 retry",
             source=LongTermMemorySource.USER_API,
             source_id="stage7-source",
@@ -188,8 +186,6 @@ async def test_list_memories_filters_pages_and_isolates_uid(memory_session_facto
         memory_key="needle-low",
         content="needle low",
         memory_type=LongTermMemoryType.FACT,
-        importance=1,
-        scope="shared",
     )
     await create_recallable_record(
         memory_session_factory,
@@ -197,26 +193,22 @@ async def test_list_memories_filters_pages_and_isolates_uid(memory_session_facto
         memory_key="needle-todo",
         content="needle todo",
         memory_type=LongTermMemoryType.TODO,
-        importance=5,
-        scope="shared",
     )
     await create_recallable_record(
         memory_session_factory,
         uid=uid,
         memory_key="needle-high",
         content="needle high",
+        version=3,
         memory_type=LongTermMemoryType.FACT,
-        importance=9,
-        scope="shared",
     )
     await create_recallable_record(
         memory_session_factory,
         uid="stage7-memory-other",
         memory_key="needle-foreign",
         content="needle foreign",
+        version=4,
         memory_type=LongTermMemoryType.FACT,
-        importance=10,
-        scope="shared",
     )
 
     async with memory_session_factory() as db:
@@ -227,8 +219,7 @@ async def test_list_memories_filters_pages_and_isolates_uid(memory_session_facto
             limit=1,
             keyword="needle",
             memory_type=LongTermMemoryType.FACT,
-            scope="shared",
-            sort_by="importance",
+            sort_by="version",
             sort_order="desc",
         )
 
@@ -307,8 +298,6 @@ async def test_memory_history_page_reports_real_total(memory_session_factory) ->
                 version=version,
                 memory_key="history",
                 memory_type=LongTermMemoryType.FACT,
-                importance=version,
-                scope="history",
                 content=f"history-{version}",
                 content_hash=f"history-hash-{version}",
                 source=LongTermMemorySource.AUTO_EXTRACT,

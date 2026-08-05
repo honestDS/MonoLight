@@ -7,7 +7,6 @@ from app.core.constants import (
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
-    MEMORY_SCOPE_MAX_CHARS,
 )
 from app.core.memory.results import MemoryMutationStatus
 from app.models.memory import (
@@ -28,8 +27,6 @@ class MemoryCreateRequest(_MemoryRequest):
     content: StrictStr = Field(min_length=1, max_length=MEMORY_CONTENT_MAX_CHARS)
     memory_key: StrictStr = Field(min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
     memory_type: LongTermMemoryType
-    importance: StrictInt = Field(ge=0, le=10)
-    scope: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_SCOPE_MAX_CHARS)
     change_evidence: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_CHANGE_EVIDENCE_MAX_CHARS)
     max_attempts: StrictInt = Field(default=3, ge=1)
 
@@ -41,8 +38,6 @@ class MemoryUpdateRequest(_MemoryRequest):
     content: StrictStr = Field(min_length=1, max_length=MEMORY_CONTENT_MAX_CHARS)
     memory_key: StrictStr = Field(min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
     memory_type: LongTermMemoryType
-    importance: StrictInt = Field(ge=0, le=10)
-    scope: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_SCOPE_MAX_CHARS)
     change_evidence: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_CHANGE_EVIDENCE_MAX_CHARS)
     suppress_current: StrictBool = False
     max_attempts: StrictInt = Field(default=3, ge=1)
@@ -75,8 +70,6 @@ class MemoryRecordResponse(BaseModel):
     id: int
     memory_key: str | None = None
     memory_type: LongTermMemoryType
-    importance: int
-    scope: str | None = None
     content: str
     content_hash: str | None = None
     version: int
@@ -108,8 +101,6 @@ class MemoryRevisionResponse(BaseModel):
     version: int
     memory_key: str
     memory_type: LongTermMemoryType
-    importance: int
-    scope: str | None = None
     content: str
     content_hash: str | None = None
     source: LongTermMemorySource
@@ -171,7 +162,7 @@ class MemoryCancelResponse(BaseModel):
     error: str | None = None
 
 
-MemorySortField = Literal["updated_at", "created_at", "importance", "version"]
+MemorySortField = Literal["updated_at", "created_at", "version"]
 MemorySortOrder = Literal["asc", "desc"]
 
 

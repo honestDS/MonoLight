@@ -31,7 +31,6 @@ from app.core.memory import (
     normalize_change_evidence,
     normalize_memory_content,
     normalize_memory_key,
-    normalize_memory_scope,
 )
 from app.core.memory import service as memory_service_module
 from app.core.memory_jobs.manager import memory_job_manager
@@ -130,8 +129,6 @@ async def _create_record(
     content: str,
     version: int = 1,
     memory_type: LongTermMemoryType = LongTermMemoryType.FACT,
-    importance: int = 3,
-    scope: str | None = "global",
     source: LongTermMemorySource = LongTermMemorySource.USER_API,
     source_id: str | None = "seed-source",
     source_message_id: int | None = 1,
@@ -153,8 +150,6 @@ async def _create_record(
         content=content,
         content_hash=build_memory_content_hash(content),
         memory_type=memory_type,
-        importance=importance,
-        scope=scope,
         version=version,
         indexed_version=indexed_version,
         vector_item_id=vector_item_id,
@@ -193,8 +188,6 @@ async def _create_revision(
         version=version,
         memory_key=memory_key,
         memory_type=LongTermMemoryType.FACT,
-        importance=version,
-        scope="history",
         content=content,
         content_hash=build_memory_content_hash(content),
         source=source,
@@ -244,8 +237,6 @@ def _create_kwargs(**overrides: Any) -> dict[str, Any]:
         "content": "memory content",
         "memory_key": "memory-key",
         "memory_type": LongTermMemoryType.FACT,
-        "importance": 3,
-        "scope": "global",
         "change_evidence": "created by test",
         "source": LongTermMemorySource.USER_API,
         "source_id": "source-id",
@@ -262,9 +253,7 @@ def test_memory_normalization_hash_and_active_target_identity_are_stable() -> No
     assert normalize_memory_content(content) == "A B C"
     assert normalize_memory_content("Ａ  B") == "A B"
     assert normalize_memory_key("  ｋｅｙ\nvalue ") == "key value"
-    assert normalize_memory_scope(" \t scope  value \n") == "scope value"
     assert normalize_change_evidence("  reason\n\tfor update ") == "reason for update"
-    assert normalize_memory_scope(" \t ") is None
     assert build_memory_content_hash(content) == build_memory_content_hash("A B C")
 
     by_key = build_memory_active_mutation_key("uid-with-secret", memory_key="key-with-secret")
@@ -294,8 +283,6 @@ async def test_create_normalizes_publication_but_preserves_nonempty_identifiers(
             content="  Ａ\tB\nＣ  ",
             memory_key="  ｋｅｙ\nname ",
             memory_type=LongTermMemoryType.FACT,
-            importance=4,
-            scope=" scope\tvalue ",
             change_evidence=" evidence\nline ",
             source=LongTermMemorySource.LLM_TOOL,
             source_id=" source id ",
@@ -314,8 +301,6 @@ async def test_create_normalizes_publication_but_preserves_nonempty_identifiers(
         "content": "A B C",
         "content_hash": build_memory_content_hash("A B C"),
         "memory_type": "fact",
-        "importance": 4,
-        "scope": "scope value",
         "source": "llm_tool",
         "source_id": " source id ",
         "source_session_id": " session id ",
@@ -404,8 +389,6 @@ async def test_create_returns_unchanged_for_exact_published_record_and_existing_
             uid=uid,
             memory_key="exact-key",
             content="exact content",
-            importance=4,
-            scope="exact-scope",
         )
         same_key = await _create_record(
             db,
@@ -428,8 +411,6 @@ async def test_create_returns_unchanged_for_exact_published_record_and_existing_
             content="exact content",
             memory_key="exact-key",
             memory_type=LongTermMemoryType.FACT,
-            importance=4,
-            scope="exact-scope",
         )
         key_existing = await memory_service.create(
             db,
@@ -438,7 +419,6 @@ async def test_create_returns_unchanged_for_exact_published_record_and_existing_
             content="different content",
             memory_key="key-only",
             memory_type=LongTermMemoryType.FACT,
-            importance=3,
         )
         hash_existing = await memory_service.create(
             db,
@@ -447,7 +427,6 @@ async def test_create_returns_unchanged_for_exact_published_record_and_existing_
             content="hash-only content",
             memory_key="different-key",
             memory_type=LongTermMemoryType.FACT,
-            importance=3,
         )
 
     assert unchanged.status == MemoryMutationStatus.UNCHANGED
@@ -570,8 +549,6 @@ async def test_update_unchanged_ignores_source_evidence_and_does_not_search(
             uid="unchanged-update-user",
             memory_key="same-key",
             content="same content",
-            importance=5,
-            scope="same-scope",
             source_id="original-source",
             source_message_id=1,
             change_evidence="original evidence",
@@ -586,8 +563,6 @@ async def test_update_unchanged_ignores_source_evidence_and_does_not_search(
             content="same content",
             memory_key="same-key",
             memory_type=LongTermMemoryType.FACT,
-            importance=5,
-            scope="same-scope",
             change_evidence="new evidence",
             source_id="new-source",
             source_message_id=99,
@@ -893,7 +868,6 @@ async def _create_deleted_memory_with_history(
         uid=uid,
         memory_key="current-key",
         content="current content",
-        importance=2,
         version=2,
         indexed_version=2,
         is_active=False,

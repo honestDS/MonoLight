@@ -99,7 +99,7 @@ def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(cont
         _assistant(content="assistant body"),
         _assistant(refusal="refused"),
         _assistant(),
-        _assistant(arguments={"operation": "create", "content": "mutation", "memory_key": "k", "memory_type": "fact", "importance": 1}),
+        _assistant(arguments={"operation": "create", "content": "mutation", "memory_key": "k", "memory_type": "fact"}),
         _assistant(arguments={"operation": "recall"}),
         _assistant(arguments={"operation": "recall", "query": "user context", "unexpected": True}),
         _assistant(name="unrelated_tool"),

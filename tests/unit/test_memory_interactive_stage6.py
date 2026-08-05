@@ -452,7 +452,6 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
             "content": "a project fact",
             "memory_key": "project.fact",
             "memory_type": "project",
-            "importance": 5,
         },
     )
 

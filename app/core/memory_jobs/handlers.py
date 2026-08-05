@@ -92,8 +92,6 @@ _PUBLICATION_PAYLOAD_FIELDS = frozenset(
         "content",
         "memory_key",
         "memory_type",
-        "importance",
-        "scope",
         "change_evidence",
         "source",
         "source_id",
@@ -574,14 +572,11 @@ def _build_vector_metadata(snapshot: _MemoryPublicationSnapshot, version: int) -
         "uid": snapshot.uid,
         "memory_key": payload["memory_key"],
         "memory_type": payload["memory_type"],
-        "importance": payload["importance"],
         "version": version,
         "source": payload["source"],
         "embedding_revision": snapshot.active_embedding_revision,
         "updated_at": snapshot.updated_at,
     }
-    if payload.get("scope"):
-        metadata["scope"] = payload["scope"]
     return metadata
 
 
@@ -684,8 +679,6 @@ async def _publish_version(
                 values={
                     "memory_key": payload["memory_key"],
                     "memory_type": payload["memory_type"],
-                    "importance": payload["importance"],
-                    "scope": payload["scope"],
                     "content": payload["content"],
                     "content_hash": payload["content_hash"],
                     "source": payload["source"],
@@ -716,8 +709,6 @@ async def _publish_version(
                 version=next_version,
                 memory_key=payload["memory_key"],
                 memory_type=payload["memory_type"],
-                importance=payload["importance"],
-                scope=payload["scope"],
                 content=payload["content"],
                 content_hash=payload["content_hash"],
                 source=payload["source"],

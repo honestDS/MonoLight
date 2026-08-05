@@ -64,11 +64,9 @@
             <el-option :label="$t('memories.all_types')" value="" />
             <el-option v-for="type in memoryTypes" :key="type" :label="typeLabel(type)" :value="type" />
           </el-select>
-          <el-input v-model="filters.scope" :placeholder="$t('memories.scope_placeholder')" clearable class="filter-input" @keyup.enter="resetAndLoadMemories" />
           <el-select v-model="filters.sort_by" class="sort-input" @change="loadMemories">
             <el-option :label="$t('memories.updated_at')" value="updated_at" />
             <el-option :label="$t('memories.created_at')" value="created_at" />
-            <el-option :label="$t('memories.importance')" value="importance" />
             <el-option :label="$t('memories.version')" value="version" />
           </el-select>
           <el-select v-model="filters.sort_order" class="order-input" @change="loadMemories">
@@ -86,8 +84,6 @@
             <template #default="{ row }"><div class="content-preview">{{ row.content || '-' }}</div></template>
           </el-table-column>
           <el-table-column :label="$t('memories.type')" width="120" align="center"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column>
-          <el-table-column prop="importance" :label="$t('memories.importance')" width="90" align="center" />
-          <el-table-column prop="scope" :label="$t('memories.scope')" width="130" show-overflow-tooltip />
           <el-table-column :label="$t('memories.current_status')" width="130" align="center"><template #default="{ row }"><el-tag :type="recordStatusType(row)">{{ recordStatus(row) }}</el-tag></template></el-table-column>
           <el-table-column prop="version" :label="$t('memories.version')" width="76" align="center" />
           <el-table-column :label="$t('memories.updated_at')" width="170"><template #default="{ row }">{{ formatTime(row.updated_at) }}</template></el-table-column>
@@ -132,8 +128,6 @@
       <el-form :model="form" label-width="120px">
         <el-form-item :label="$t('memories.memory_key')" required><el-input v-model="form.memory_key" :placeholder="$t('memories.memory_key_placeholder')" /></el-form-item>
         <el-form-item :label="$t('memories.type')" required><el-select v-model="form.memory_type" class="full-width-input"><el-option v-for="type in memoryTypes" :key="type" :label="typeLabel(type)" :value="type" /></el-select></el-form-item>
-        <el-form-item :label="$t('memories.importance')" required><el-input-number v-model="form.importance" :min="0" :max="10" class="full-width-input" /><div class="help-text">{{ $t('memories.importance_hint') }}</div></el-form-item>
-        <el-form-item :label="$t('memories.scope')"><el-input v-model="form.scope" :placeholder="$t('memories.scope_placeholder')" /></el-form-item>
         <el-form-item :label="$t('memories.content')" required><el-input v-model="form.content" type="textarea" :rows="9" :placeholder="$t('memories.content_placeholder')" /></el-form-item>
         <el-form-item :label="$t('memories.change_evidence')"><el-input v-model="form.change_evidence" type="textarea" :rows="3" :placeholder="$t('memories.change_evidence_placeholder')" /></el-form-item>
         <el-form-item v-if="editorMode === 'edit'" :label="$t('memories.suppress_current')"><el-checkbox v-model="form.suppress_current">{{ $t('memories.suppress_current') }}</el-checkbox><div class="help-text">{{ $t('memories.suppress_hint') }}</div></el-form-item>
@@ -142,7 +136,7 @@
     </el-dialog>
 
     <el-dialog v-model="detailsVisible" :title="$t('memories.details')" width="760px" class="standard-dialog" align-center>
-      <el-descriptions v-if="selectedMemory" :column="2" border><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedMemory.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.version')">{{ selectedMemory.version }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_key')">{{ selectedMemory.memory_key }}</el-descriptions-item><el-descriptions-item :label="$t('memories.type')">{{ typeLabel(selectedMemory.memory_type) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.importance')">{{ selectedMemory.importance }}</el-descriptions-item><el-descriptions-item :label="$t('memories.scope')">{{ selectedMemory.scope || '-' }}</el-descriptions-item><el-descriptions-item :label="$t('memories.source')">{{ sourceLabel(selectedMemory.source) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.current_status')">{{ recordStatus(selectedMemory) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.content')" :span="2"><pre class="memory-content">{{ selectedMemory.content || '-' }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.change_evidence')" :span="2"><pre class="memory-content">{{ selectedMemory.change_evidence || '-' }}</pre></el-descriptions-item></el-descriptions>
+      <el-descriptions v-if="selectedMemory" :column="2" border><el-descriptions-item :label="$t('memories.memory_id')">{{ selectedMemory.id }}</el-descriptions-item><el-descriptions-item :label="$t('memories.version')">{{ selectedMemory.version }}</el-descriptions-item><el-descriptions-item :label="$t('memories.memory_key')">{{ selectedMemory.memory_key }}</el-descriptions-item><el-descriptions-item :label="$t('memories.type')">{{ typeLabel(selectedMemory.memory_type) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.source')">{{ sourceLabel(selectedMemory.source) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.current_status')">{{ recordStatus(selectedMemory) }}</el-descriptions-item><el-descriptions-item :label="$t('memories.content')" :span="2"><pre class="memory-content">{{ selectedMemory.content || '-' }}</pre></el-descriptions-item><el-descriptions-item :label="$t('memories.change_evidence')" :span="2"><pre class="memory-content">{{ selectedMemory.change_evidence || '-' }}</pre></el-descriptions-item></el-descriptions>
       <template #footer><el-button @click="detailsVisible = false">{{ $t('memories.close') }}</el-button></template>
     </el-dialog>
 
@@ -203,9 +197,9 @@ const selectedJob = ref(null)
 const migrationVisible = ref(false)
 const selectedMigration = ref(null)
 const pollTimer = ref(null)
-const filters = reactive({ keyword: '', memory_type: '', scope: '', sort_by: 'updated_at', sort_order: 'desc' })
+const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
 const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
-const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', importance: 0, scope: '', content: '', change_evidence: '', suppress_current: false })
+const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
 
 const unwrap = (response) => response?.data?.data ?? response?.data ?? {}
 const pageData = (response) => {
@@ -248,7 +242,7 @@ const loadSettings = async (silent = false) => {
 const loadMemories = async (silent = false) => {
   memoriesLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, scope: filters.scope || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }))
+    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }))
     memories.value = data.items
     memoryTotal.value = data.total
   } catch (error) {
@@ -281,19 +275,18 @@ const resetAndLoadMigrations = () => { migrationPage.value = 1; loadMigrations()
 const handleTabChange = (tab) => { if (tab === 'jobs') loadJobs(); if (tab === 'migrations') loadMigrations() }
 const refreshAll = () => { loadSettings(true); loadMemories(true); loadJobs(true); if (activeTab.value === 'migrations') loadMigrations(true) }
 
-const resetForm = () => Object.assign(form, { id: null, version: 0, memory_key: '', memory_type: 'fact', importance: 0, scope: '', content: '', change_evidence: '', suppress_current: false })
+const resetForm = () => Object.assign(form, { id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
 const openEditor = (row = null) => {
   editorMode.value = row ? 'edit' : 'create'
   resetForm()
-  if (row) Object.assign(form, { id: row.id, version: row.version, memory_key: row.memory_key || '', memory_type: row.memory_type || 'fact', importance: row.importance ?? 0, scope: row.scope || '', content: row.content || '', change_evidence: row.change_evidence || '', suppress_current: false })
+  if (row) Object.assign(form, { id: row.id, version: row.version, memory_key: row.memory_key || '', memory_type: row.memory_type || 'fact', content: row.content || '', change_evidence: row.change_evidence || '', suppress_current: false })
   editorVisible.value = true
 }
 const submitMemory = async () => {
   if (!form.memory_key.trim() || !form.content.trim()) return ElMessage.warning(t('memories.required'))
-  if (!Number.isInteger(form.importance) || form.importance < 0 || form.importance > 10) return ElMessage.warning(t('memories.invalid_importance'))
   submitting.value = true
   try {
-    const payload = { dedupe_key: newDedupeKey(), content: form.content, memory_key: form.memory_key, memory_type: form.memory_type, importance: form.importance, scope: form.scope || null, change_evidence: form.change_evidence || null }
+    const payload = { dedupe_key: newDedupeKey(), content: form.content, memory_key: form.memory_key, memory_type: form.memory_type, change_evidence: form.change_evidence || null }
     if (editorMode.value === 'create') await memoryApi.create(payload)
     else await memoryApi.update({ ...payload, memory_id: form.id, expected_version: form.version, suppress_current: form.suppress_current })
     ElMessage.info(t('memories.accepted_processing'))

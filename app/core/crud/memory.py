@@ -27,7 +27,6 @@ from app.providers.database.time import get_database_time
 _MEMORY_RECORD_SORT_COLUMNS = {
     "updated_at": LongTermMemoryRecord.updated_at,
     "created_at": LongTermMemoryRecord.created_at,
-    "importance": LongTermMemoryRecord.importance,
     "version": LongTermMemoryRecord.version,
 }
 
@@ -58,7 +57,6 @@ def _memory_record_conditions(
     uid: str,
     keyword: str | None = None,
     memory_type: LongTermMemoryType | str | None = None,
-    scope: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = [LongTermMemoryRecord.uid == uid]
     if keyword:
@@ -71,8 +69,6 @@ def _memory_record_conditions(
         )
     if memory_type is not None:
         conditions.append(LongTermMemoryRecord.memory_type == memory_type)
-    if scope is not None:
-        conditions.append(LongTermMemoryRecord.scope == scope)
     return conditions
 
 
@@ -533,7 +529,6 @@ class CRUDLongTermMemoryRecord:
         limit: int = 100,
         keyword: str | None = None,
         memory_type: LongTermMemoryType | str | None = None,
-        scope: str | None = None,
         sort_by: str | None = None,
         sort_order: str = "desc",
     ) -> list[LongTermMemoryRecord]:
@@ -541,7 +536,6 @@ class CRUDLongTermMemoryRecord:
             uid=uid,
             keyword=keyword,
             memory_type=memory_type,
-            scope=scope,
         )
         result = await db.execute(select(LongTermMemoryRecord).where(*conditions).order_by(*_memory_record_order_by(sort_by=sort_by, sort_order=sort_order)).offset(skip).limit(limit))
         return list(result.scalars().all())
@@ -553,7 +547,6 @@ class CRUDLongTermMemoryRecord:
         uid: str,
         keyword: str | None = None,
         memory_type: LongTermMemoryType | str | None = None,
-        scope: str | None = None,
     ) -> int:
         result = await db.execute(
             select(func.count())
@@ -563,7 +556,6 @@ class CRUDLongTermMemoryRecord:
                     uid=uid,
                     keyword=keyword,
                     memory_type=memory_type,
-                    scope=scope,
                 )
             )
         )
@@ -804,8 +796,6 @@ class CRUDLongTermMemoryRecord:
         allowed = {
             "memory_key",
             "memory_type",
-            "importance",
-            "scope",
             "content",
             "content_hash",
             "version",

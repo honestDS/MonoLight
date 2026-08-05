@@ -68,7 +68,6 @@ async def list_memories(
     limit: int = 100,
     keyword: str | None = None,
     memory_type: LongTermMemoryType | str | None = None,
-    scope: str | None = None,
     sort_by: str | None = None,
     sort_order: str = "desc",
 ) -> dict[str, Any]:
@@ -82,7 +81,6 @@ async def list_memories(
         limit=normalized_limit,
         keyword=keyword,
         memory_type=normalized_type,
-        scope=scope,
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -91,7 +89,6 @@ async def list_memories(
         uid=normalized_uid,
         keyword=keyword,
         memory_type=normalized_type,
-        scope=scope,
     )
     return {"items": [_record_view(item) for item in items], "total": total, "skip": normalized_skip, "limit": normalized_limit}
 
@@ -206,8 +203,6 @@ async def _retry_publication_job(
         "content": payload["content"],
         "memory_key": payload["memory_key"],
         "memory_type": payload["memory_type"],
-        "importance": payload["importance"],
-        "scope": payload["scope"],
         "change_evidence": payload["change_evidence"],
         "source": payload["source"],
         "source_id": payload["source_id"],

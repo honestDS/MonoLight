@@ -16,11 +16,9 @@ from app.core.constants import (
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
     ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN,
     ERR_MEMORY_VERSION_INVALID,
-    ERR_VALUE_MUST_BE_BETWEEN,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
-    MEMORY_SCOPE_MAX_CHARS,
 )
 from app.core.memory.errors import MemoryValidationError
 from app.models.memory import LongTermMemoryRecord, LongTermMemoryRevision, LongTermMemorySource, LongTermMemoryType
@@ -28,15 +26,11 @@ from app.models.memory import LongTermMemoryRecord, LongTermMemoryRevision, Long
 _MEMORY_UID_MAX_CHARS = 100
 _SOURCE_ID_MAX_CHARS = 255
 _SOURCE_SESSION_ID_MAX_CHARS = 100
-_IMPORTANCE_MIN = 0
-_IMPORTANCE_MAX = 10
 _MEMORY_RECORD_SNAPSHOT_FIELDS = (
     "memory_key",
     "content",
     "content_hash",
     "memory_type",
-    "importance",
-    "scope",
     "source",
     "source_id",
     "source_session_id",
@@ -86,10 +80,6 @@ def normalize_memory_content(content: str) -> str:
 
 def normalize_memory_key(memory_key: str) -> str:
     return _normalize_text(memory_key, field="memory_key", maximum=MEMORY_KEY_MAX_CHARS) or ""
-
-
-def normalize_memory_scope(scope: str | None) -> str | None:
-    return _normalize_text(scope, field="scope", maximum=MEMORY_SCOPE_MAX_CHARS, required=False) if scope is not None else None
 
 
 def normalize_change_evidence(change_evidence: str | None) -> str | None:
@@ -154,17 +144,6 @@ def _require_non_negative(value: Any, *, field: str, error_key: str = ERR_MEMORY
     return value
 
 
-def _normalize_importance(importance: Any) -> int:
-    if isinstance(importance, bool) or not isinstance(importance, int):
-        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "importance"})
-    if not _IMPORTANCE_MIN <= importance <= _IMPORTANCE_MAX:
-        raise MemoryValidationError(
-            ERR_VALUE_MUST_BE_BETWEEN,
-            params={"field": "importance", "minimum": _IMPORTANCE_MIN, "maximum": _IMPORTANCE_MAX},
-        )
-    return importance
-
-
 def _validate_commit(commit: Any) -> bool:
     if not isinstance(commit, bool):
         raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "commit"})
@@ -202,8 +181,6 @@ def _publication_payload(
     content: str,
     memory_key: str,
     memory_type: Any,
-    importance: Any,
-    scope: str | None,
     change_evidence: str | None,
     source: Any,
     source_id: str | None,
@@ -221,16 +198,12 @@ def _publication_payload(
     normalized_content = normalize_memory_content(content)
     normalized_key = normalize_memory_key(memory_key)
     normalized_type = _normalize_enum(memory_type, LongTermMemoryType, field="memory_type")
-    normalized_importance = _normalize_importance(importance)
-    normalized_scope = normalize_memory_scope(scope)
     normalized_evidence = normalize_change_evidence(change_evidence)
     return {
         "memory_key": normalized_key,
         "content": normalized_content,
         "content_hash": hashlib.sha256(normalized_content.encode("utf-8")).hexdigest(),
         "memory_type": normalized_type.value,
-        "importance": normalized_importance,
-        "scope": normalized_scope,
         "source": normalized_source.value,
         "source_id": normalized_source_id,
         "source_session_id": normalized_session_id,
@@ -244,8 +217,6 @@ _PUBLICATION_PAYLOAD_INPUT_FIELDS = (
     "content",
     "memory_key",
     "memory_type",
-    "importance",
-    "scope",
     "change_evidence",
     "source",
     "source_id",
@@ -270,8 +241,6 @@ def normalize_memory_publication_payload(payload: dict[str, Any]) -> dict[str, A
         content=payload["content"],
         memory_key=payload["memory_key"],
         memory_type=payload["memory_type"],
-        importance=payload["importance"],
-        scope=payload["scope"],
         change_evidence=payload["change_evidence"],
         source=payload["source"],
         source_id=payload["source_id"],
@@ -299,8 +268,6 @@ def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
         content=snapshot["content"],
         memory_key=snapshot["memory_key"],
         memory_type=snapshot["memory_type"],
-        importance=snapshot["importance"],
-        scope=snapshot["scope"],
         change_evidence=snapshot["change_evidence"],
         source=snapshot["source"],
         source_id=snapshot["source_id"],
@@ -318,8 +285,6 @@ def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
         "content": publication["content"],
         "content_hash": publication["content_hash"],
         "memory_type": publication["memory_type"],
-        "importance": publication["importance"],
-        "scope": publication["scope"],
         "source": publication["source"],
         "source_id": publication["source_id"],
         "source_session_id": publication["source_session_id"],
@@ -341,8 +306,6 @@ def build_memory_record_snapshot(record: LongTermMemoryRecord | LongTermMemoryRe
             "content": record.content,
             "content_hash": record.content_hash,
             "memory_type": record.memory_type,
-            "importance": record.importance,
-            "scope": record.scope,
             "source": record.source,
             "source_id": record.source_id,
             "source_session_id": record.source_session_id,
@@ -363,5 +326,4 @@ __all__ = [
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_record_snapshot",
-    "normalize_memory_scope",
 ]
