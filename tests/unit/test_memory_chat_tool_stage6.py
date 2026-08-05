@@ -9,6 +9,7 @@ import pytest
 from app.core.dispatch_context import build_dispatch_context
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
+from app.core.exceptions import BaseBusinessException
 from app.core.memory import MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
 from app.core.prompts import LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
@@ -225,10 +226,10 @@ def test_longterm_memory_executor_does_not_require_audit():
 
 
 @pytest.mark.asyncio
-async def test_executor_recall_passes_memory_limits_and_returns_structured_items(monkeypatch):
+async def test_executor_recall_passes_memory_limits_and_returns_plain_text_in_order(monkeypatch):
     executor, context = _build_executor()
     captured = {}
-    item = MemoryRecallItem(
+    first_item = MemoryRecallItem(
         memory_id=12,
         memory_key="stable-fact",
         content="private recalled content",
@@ -240,15 +241,27 @@ async def test_executor_recall_passes_memory_limits_and_returns_structured_items
         source="llm_tool",
         fusion_score=0.91,
     )
+    second_item = MemoryRecallItem(
+        memory_id=13,
+        memory_key="another-fact",
+        content="second recalled content",
+        memory_type="fact",
+        importance=3,
+        scope="global",
+        version=1,
+        updated_at=datetime(2026, 8, 4, 12, 31, tzinfo=UTC),
+        source="llm_tool",
+        fusion_score=0.82,
+    )
 
     class FakeMemoryService:
         async def recall(self, **kwargs):
             captured.update(kwargs)
-            return MemoryRecallResult(status=MemoryRecallStatus.OK, items=(item,))
+            return MemoryRecallResult(status=MemoryRecallStatus.OK, items=(first_item, second_item))
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
 
-    result = json.loads(await executor.execute(operation="recall", query="private query", top_k=3))
+    result = await executor.execute(operation="recall", query="private query", top_k=3)
 
     assert captured == {
         "db": context.db,
@@ -258,13 +271,62 @@ async def test_executor_recall_passes_memory_limits_and_returns_structured_items
         "candidate_k": 8,
         "result_max_chars": 1234,
     }
-    assert result["status"] == "ok"
-    assert result["operation"] == "recall"
-    assert result["items"][0]["memory_id"] == 12
-    assert result["items"][0]["memory_key"] == "stable-fact"
-    assert result["items"][0]["content"] == "private recalled content"
-    assert result["items"][0]["updated_at"] == "2026-08-04T12:30:00+00:00"
-    assert result["items"][0]["fusion_score"] == 0.91
+    assert result == "private recalled content\n\nsecond recalled content"
+    for metadata in ("memory_id", "memory_key", "version", "score", "status", "operation"):
+        assert metadata not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [MemoryRecallStatus.EMPTY, MemoryRecallStatus.NOT_CONFIGURED, MemoryRecallStatus.DEGRADED],
+)
+async def test_executor_recall_returns_empty_for_non_ok_status(monkeypatch, status):
+    executor, _context = _build_executor()
+
+    class FakeMemoryService:
+        async def recall(self, **_kwargs):
+            return MemoryRecallResult(status=status)
+
+    monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
+
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": "recall"},
+        {"operation": "recall", "query": ""},
+        {"operation": "recall", "query": 12},
+        {"operation": "recall", "query": "private query", "content": "unexpected"},
+    ],
+)
+async def test_executor_recall_argument_errors_return_empty_string(monkeypatch, arguments):
+    executor, _context = _build_executor()
+
+    class FakeMemoryService:
+        async def recall(self, **_kwargs):
+            raise AssertionError("invalid recall arguments must not call the service")
+
+    monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
+
+    assert await executor.execute(**arguments) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception", [BaseBusinessException(message="business failure"), RuntimeError("unexpected failure")])
+async def test_executor_recall_exceptions_return_empty_string(monkeypatch, exception):
+    executor, _context = _build_executor()
+
+    class FakeMemoryService:
+        async def recall(self, **_kwargs):
+            raise exception
+
+    monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
+
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == ""
 
 
 class _MutationMemoryService:
@@ -342,34 +404,15 @@ def test_longterm_memory_log_serializers_remove_sensitive_arguments_and_results(
             "importance": 4,
         }
     )
-    log_result = process_single_tool_module._serialize_longterm_memory_log_result(
-        json.dumps(
-            {
-                "operation": "recall",
-                "status": "ok",
-                "query": "private query body",
-                "items": [
-                    {
-                        "memory_id": 12,
-                        "content": "private recalled item body",
-                        "change_evidence": "private evidence body",
-                    }
-                ],
-            }
-        )
-    )
+    log_result = process_single_tool_module._serialize_longterm_memory_log_result("private recalled item body\n\nsecond recalled item body")
 
     arguments_payload = json.loads(log_arguments)
-    result_payload = json.loads(log_result)
     assert arguments_payload["query_length"] == len("private query body")
     assert "private query body" not in log_arguments
     assert "private content body" not in log_arguments
     assert "private evidence body" not in log_arguments
-    assert "query" not in result_payload
-    assert "content" not in result_payload["items"][0]
-    assert "change_evidence" not in result_payload["items"][0]
     assert "private recalled item body" not in log_result
-    assert "private evidence body" not in log_result
+    assert "second recalled item body" not in log_result
 
 
 @pytest.mark.asyncio
@@ -394,6 +437,10 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
     )
 
     assert (LONGTERM_MEMORY_SYSTEM_PROMPT in prompt) is expected_in_prompt
+    if expected_in_prompt:
+        assert "recall 只返回按最终排序拼接的记忆正文原文" in prompt
+        assert "不得从正文猜测 memory_id 或 version" in prompt
+        assert "没有用户明确提供或可信上下文中的明确 ID 时，不得执行 update 或 delete" in prompt
 
 
 @pytest.mark.asyncio

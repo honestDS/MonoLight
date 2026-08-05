@@ -20,8 +20,16 @@ from app.models.memory import (
     LongTermMemoryRecordIndexStatus,
     LongTermMemoryRevision,
     LongTermMemoryStore,
+    LongTermMemoryType,
 )
 from app.providers.database.time import get_database_time
+
+_MEMORY_RECORD_SORT_COLUMNS = {
+    "updated_at": LongTermMemoryRecord.updated_at,
+    "created_at": LongTermMemoryRecord.created_at,
+    "importance": LongTermMemoryRecord.importance,
+    "version": LongTermMemoryRecord.version,
+}
 
 
 def _recallable_conditions(uid: str) -> list[Any]:
@@ -43,6 +51,38 @@ def _input_data(obj_in: Any) -> dict[str, Any]:
     if isinstance(obj_in, dict):
         return dict(obj_in)
     return obj_in.model_dump(exclude_unset=True)
+
+
+def _memory_record_conditions(
+    *,
+    uid: str,
+    keyword: str | None = None,
+    memory_type: LongTermMemoryType | str | None = None,
+    scope: str | None = None,
+) -> list[Any]:
+    conditions: list[Any] = [LongTermMemoryRecord.uid == uid]
+    if keyword:
+        keyword_pattern = f"%{keyword}%"
+        conditions.append(
+            or_(
+                LongTermMemoryRecord.content.ilike(keyword_pattern),
+                LongTermMemoryRecord.memory_key.ilike(keyword_pattern),
+            )
+        )
+    if memory_type is not None:
+        conditions.append(LongTermMemoryRecord.memory_type == memory_type)
+    if scope is not None:
+        conditions.append(LongTermMemoryRecord.scope == scope)
+    return conditions
+
+
+def _memory_record_order_by(*, sort_by: str | None, sort_order: str):
+    if sort_by is None:
+        column = LongTermMemoryRecord.id
+    else:
+        column = _MEMORY_RECORD_SORT_COLUMNS.get(sort_by, LongTermMemoryRecord.updated_at)
+    ascending = sort_order.lower() == "asc"
+    return (column.asc(), LongTermMemoryRecord.id.asc()) if ascending else (column.desc(), LongTermMemoryRecord.id.desc())
 
 
 async def _finish(db: AsyncSession, *, commit: bool) -> None:
@@ -471,8 +511,50 @@ class CRUDLongTermMemoryRecord:
         result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid).order_by(LongTermMemoryRecord.id.desc()).offset(skip).limit(limit))
         return list(result.scalars().all())
 
-    async def get_page(self, db: AsyncSession, *, uid: str, skip: int = 0, limit: int = 100) -> list[LongTermMemoryRecord]:
-        return await self.list_by_uid(db, uid=uid, skip=skip, limit=limit)
+    async def get_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        skip: int = 0,
+        limit: int = 100,
+        keyword: str | None = None,
+        memory_type: LongTermMemoryType | str | None = None,
+        scope: str | None = None,
+        sort_by: str | None = None,
+        sort_order: str = "desc",
+    ) -> list[LongTermMemoryRecord]:
+        conditions = _memory_record_conditions(
+            uid=uid,
+            keyword=keyword,
+            memory_type=memory_type,
+            scope=scope,
+        )
+        result = await db.execute(select(LongTermMemoryRecord).where(*conditions).order_by(*_memory_record_order_by(sort_by=sort_by, sort_order=sort_order)).offset(skip).limit(limit))
+        return list(result.scalars().all())
+
+    async def count(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        keyword: str | None = None,
+        memory_type: LongTermMemoryType | str | None = None,
+        scope: str | None = None,
+    ) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(LongTermMemoryRecord)
+            .where(
+                *_memory_record_conditions(
+                    uid=uid,
+                    keyword=keyword,
+                    memory_type=memory_type,
+                    scope=scope,
+                )
+            )
+        )
+        return int(result.scalar_one() or 0)
 
     async def count_active(self, db: AsyncSession, *, uid: str) -> int:
         result = await db.execute(
@@ -835,6 +917,17 @@ class CRUDLongTermMemoryRevision:
         result = await db.execute(select(LongTermMemoryRevision).where(LongTermMemoryRevision.uid == uid, LongTermMemoryRevision.memory_id == memory_id).order_by(LongTermMemoryRevision.version.desc()).offset(skip).limit(limit))
         return list(result.scalars().all())
 
+    async def count_by_memory_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(LongTermMemoryRevision)
+            .where(
+                LongTermMemoryRevision.uid == uid,
+                LongTermMemoryRevision.memory_id == memory_id,
+            )
+        )
+        return int(result.scalar_one() or 0)
+
     async def create(
         self,
         db: AsyncSession,
@@ -863,6 +956,21 @@ class CRUDLongTermMemoryEmbeddingRevision:
     async def get_by_revision(self, db: AsyncSession, *, uid: str, revision: int) -> LongTermMemoryEmbeddingRevision | None:
         result = await db.execute(select(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid, LongTermMemoryEmbeddingRevision.revision == revision))
         return result.scalars().first()
+
+    async def get_by_job_id(self, db: AsyncSession, *, uid: str, job_id: int) -> LongTermMemoryEmbeddingRevision | None:
+        result = await db.execute(
+            select(LongTermMemoryEmbeddingRevision)
+            .where(
+                LongTermMemoryEmbeddingRevision.uid == uid,
+                LongTermMemoryEmbeddingRevision.job_id == job_id,
+            )
+            .order_by(LongTermMemoryEmbeddingRevision.revision.desc())
+        )
+        return result.scalars().first()
+
+    async def count_by_uid(self, db: AsyncSession, *, uid: str) -> int:
+        result = await db.execute(select(func.count()).select_from(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == uid))
+        return int(result.scalar_one() or 0)
 
     async def get_next_revision(self, db: AsyncSession, *, uid: str) -> int:
         result = await db.execute(select(func.max(LongTermMemoryEmbeddingRevision.revision)).where(LongTermMemoryEmbeddingRevision.uid == uid))

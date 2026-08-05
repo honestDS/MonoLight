@@ -9,6 +9,20 @@ from app.core.memory.identifiers import (
     build_memory_vector_item_id,
 )
 from app.core.memory.maintenance import submit_memory_cleanup_retry, submit_memory_reindex
+from app.core.memory.management import (
+    cancel_embedding_migration,
+    cancel_job,
+    get_embedding_migration,
+    get_job,
+    get_memory,
+    get_memory_settings,
+    list_embedding_migrations,
+    list_jobs,
+    list_memories,
+    list_memory_history,
+    retry_embedding_migration,
+    retry_job,
+)
 from app.core.memory.normalization import (
     build_memory_content_hash,
     normalize_change_evidence,
@@ -40,6 +54,16 @@ __all__ = [
     "MemoryRecallStatus",
     "MemoryValidationError",
     "LongTermMemoryService",
+    "cancel_embedding_migration",
+    "cancel_job",
+    "get_embedding_migration",
+    "get_job",
+    "get_memory",
+    "get_memory_settings",
+    "list_embedding_migrations",
+    "list_jobs",
+    "list_memory_history",
+    "list_memories",
     "append_memory_embedding_delta",
     "build_memory_active_mutation_key",
     "build_memory_collection_name",
@@ -51,6 +75,8 @@ __all__ = [
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_scope",
+    "retry_embedding_migration",
+    "retry_job",
     "submit_memory_cleanup_retry",
     "submit_memory_reindex",
 ]

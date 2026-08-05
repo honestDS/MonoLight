@@ -1,5 +1,7 @@
 # MonoLight 项目架构说明
 
+本文只描述项目的目录分层、模块职责、持久化边界和依赖方向，不记录具体接口格式、执行流程或实现规则。
+
 ## 顶层目录
 
 ```text
@@ -7,10 +9,10 @@ Monoligh/
 ├── app/                    # FastAPI 后端源码
 ├── dashboard/              # Vue 管理与聊天前端
 ├── data/                   # 运行期持久化数据
-├── scripts/                # 数据迁移与维护脚本
-├── temp/                   # 临时文件与工具工作目录
+├── scripts/                # 数据库迁移与维护脚本
+├── temp/                   # 运行期临时文件
 ├── tests/                  # 后端自动化测试
-├── .env                    # 本地环境变量
+├── .env                    # 本地运行配置
 ├── .gitattributes          # Git 属性配置
 ├── .gitignore              # Git 忽略配置
 ├── ARCHITECTURE.md         # 项目架构说明
@@ -18,60 +20,80 @@ Monoligh/
 ├── LICENSE                 # 项目许可证
 ├── README.md               # 项目说明
 ├── logo.jpg                # 项目 Logo
-├── main.py                 # FastAPI 应用入口
-├── start.py                # 多进程启动器
+├── main.py                 # Web 应用入口
+├── start.py                # 多进程启动协调
 ├── pytest.ini              # Pytest 配置
 ├── requirements.txt        # 后端依赖
 └── ruff.toml               # Ruff 配置
 ```
 
-`.git/`、`.venv/`、`__pycache__/`、`.pytest_cache/`、`.ruff_cache/` 和 `node_modules/` 等版本控制、虚拟环境及缓存目录不在本文展开。`.clinerules/`、`.kilo/` 和 `参考项目/` 是本地忽略的工具配置或参考资料目录，不属于受版本控制的产品架构。
+版本控制目录、虚拟环境、缓存目录和本地工具配置不属于产品模块，不在本文展开。
 
-## 后端目录：`app/`
+## 后端分层：`app/`
 
 ```text
 app/
-├── adapters/               # 对话入口与消息平台适配
+├── adapters/               # 外部对话与消息平台适配
 ├── api/                    # HTTP 与 WebSocket 接口
-├── core/                   # 核心业务与通用能力
-├── models/                 # 数据库与业务数据模型
-├── providers/              # 数据库和模型服务封装
+├── core/                   # 应用服务、领域能力与通用组件
+├── models/                 # 持久化模型
+├── providers/              # 数据库、模型和外部服务封装
 ├── schemas/                # 接口数据结构
-├── transformers/           # 模型协议转换
+├── transformers/           # 外部模型协议转换
 ├── workers/                # 独立后台进程
-├── __init__.py             # 后端包标识
-├── handler.py              # 中间件、路由与异常处理注册
-├── tasks.py                # 周期清理任务
+├── handler.py              # 应用中间件、路由和异常处理装配
+├── tasks.py                # 后台任务定义
 └── warning_filters.py      # 运行时告警过滤
 ```
 
-### 应用入口与后台进程
+### 应用入口与 Worker
+
+`main.py` 提供 Web 应用入口，`start.py` 负责 Web 进程和独立后台进程的启动协调。
 
 ```text
-main.py                     # 创建 FastAPI 应用
-start.py                    # 启动 Web 与独立后台进程
-
 app/workers/
 ├── __init__.py             # Worker 包标识
-├── background_task.py      # 后台工具任务进程
-├── lease.py                # Worker 数据库租约管理
-├── memory.py               # 独立长期记忆作业进程，使用作业级数据库租约
-├── message_platform.py     # 消息平台、定时任务与发件箱进程
-├── session_reply.py        # 会话最终回复进程
-├── terminal.py              # 持有终端会话租约与后续 PTY 生命周期
-└── signals.py              # Worker 退出信号处理
+├── background_task.py      # 通用后台任务 Worker
+├── lease.py                # Worker 协调支持
+├── memory.py               # 长期记忆作业 Worker
+├── message_platform.py     # 消息平台与定时任务 Worker
+├── session_reply.py        # 会话回复 Worker
+├── terminal.py             # 交互终端 Worker
+└── signals.py              # Worker 进程信号支持
 ```
 
-## 接口层：`app/api/v1/`
+### 对话适配层：`app/adapters/`
+
+```text
+app/adapters/
+├── base.py                 # 对话适配器抽象
+├── chat_web.py             # Web 对话适配
+├── chat_ws.py              # WebSocket 对话适配
+└── weixin_openclaw/
+    ├── __init__.py         # 微信适配包标识
+    ├── adapter.py          # 微信对话适配
+    ├── client.py           # OpenClaw 客户端封装
+    ├── config.py           # 平台配置结构
+    ├── constants.py        # 平台常量
+    ├── crypto.py           # 平台敏感配置处理
+    ├── media.py            # 媒体与文件适配
+    ├── message.py          # 入站消息结构
+    ├── outbound.py         # 出站消息适配
+    ├── response.py         # 出站响应结构
+    └── schemas.py          # 平台内部数据结构
+```
+
+### 接口层：`app/api/v1/`
 
 ```text
 app/api/v1/
-├── auth.py                 # 登录、令牌与管理员重置接口
+├── auth.py                 # 认证与令牌接口
 ├── channels.py             # 模型渠道与模型条目接口
 ├── chat.py                 # 对话、会话、消息与任务接口
-├── files.py                # 文件上传与下载接口
-├── knowledge_base.py       # 知识库、文档与检索接口
-├── message_platforms.py    # 消息平台与微信登录接口
+├── files.py                # 文件接口
+├── knowledge_base.py       # 知识库接口
+├── memories.py             # 长期记忆管理接口
+├── message_platforms.py    # 消息平台接口
 ├── profile.py              # Profile 配置接口
 ├── prompts.py              # Prompt 管理接口
 ├── scheduled_tasks.py      # 定时任务接口
@@ -79,89 +101,70 @@ app/api/v1/
 └── users.py                # 用户管理接口
 ```
 
-## 对话适配层：`app/adapters/`
-
-```text
-app/adapters/
-├── base.py                 # 对话适配器基类
-├── chat_web.py             # HTTP 对话适配
-├── chat_ws.py              # WebSocket 对话适配
-└── weixin_openclaw/
-    ├── __init__.py         # 微信 OpenClaw 适配包标识
-    ├── adapter.py          # 微信对话适配入口
-    ├── client.py           # OpenClaw 请求客户端
-    ├── config.py           # 平台配置解析
-    ├── constants.py        # 平台常量
-    ├── crypto.py           # 敏感配置加解密
-    ├── media.py            # 媒体与文件处理
-    ├── message.py          # 入站消息解析
-    ├── outbound.py         # 微信出站文本约束策略
-    ├── response.py         # 出站响应处理
-    └── schemas.py          # 平台内部数据结构
-```
+接口层负责对外协议和访问入口，业务能力由 `app/core/` 提供，接口数据结构由 `app/schemas/` 描述。
 
 ## 核心层：`app/core/`
 
 ```text
 app/core/
-├── audit/                  # 整轮审计、确认判定、结果版本与文件存储
-├── background_tasks/       # 后台任务与定时任务
-├── crud/                   # 数据访问
-├── dispatchers/            # 对话分发实现
-├── embedding/              # 知识库向量化
+├── audit/                  # 审计领域与审计持久化
+├── background_tasks/       # 通用后台任务应用服务
+├── crud/                   # 持久化数据访问
+├── dispatchers/            # 对话分发应用服务
+├── embedding/              # 知识库嵌入能力
 ├── i18n/                   # 后端多语言
-├── memory/                 # 长期记忆正文、配置、保护、服务和稳定标识
-├── memory_jobs/            # 长期记忆作业提交、领取、执行、业务处理、重试、取消与恢复
-├── message_platforms/      # 消息平台运行管理
-├── rerank/                 # 知识库重排
-├── retrieval/              # 知识库检索
-├── session_reply_queue/    # 会话最终回复队列
-├── terminal/               # 交互终端与 PTY 生命周期
+├── memory/                 # 长期记忆领域与管理服务
+├── memory_jobs/            # 长期记忆作业组件
+├── message_platforms/      # 消息平台应用服务
+├── rerank/                 # 知识库重排能力
+├── retrieval/              # 知识库检索能力
+├── session_reply_queue/    # 会话回复队列
+├── terminal/               # 交互终端与 PTY 能力
 ├── tools/                  # 模型可调用工具
-├── utils/                  # 通用与调度辅助函数
-├── channel_model_protection.py # 渠道模型通用引用保护
-├── channel_router.py       # 模型渠道选择
-├── constants.py            # 常量与消息键
-├── context.py              # 对话上下文构建
-├── crypto.py               # API Key 加解密
-├── dispatch_context.py     # 工具执行上下文
+├── utils/                  # 通用辅助组件
+├── channel_model_protection.py # 渠道与模型引用管理
+├── channel_router.py       # 模型渠道路由
+├── constants.py            # 核心常量
+├── context.py              # 对话上下文
+├── crypto.py               # 通用敏感数据处理
+├── dispatch_context.py     # 工具分发上下文
 ├── dispatcher.py           # 对话分发入口
-├── event_loop.py           # Uvicorn 跨平台事件循环选择
-├── exceptions.py           # 业务异常
-├── log.py                  # 日志记录
-├── log_broadcaster.py      # 实时日志广播
-├── paths.py                # 数据与临时目录路径
-├── profile_selection.py    # 会话、平台与默认 Profile 选择
-├── profile_validation.py   # Profile 渠道配置与归属校验
+├── event_loop.py           # 平台事件循环支持
+├── exceptions.py           # 应用异常类型
+├── log.py                  # 日志服务
+├── log_broadcaster.py      # 日志广播
+├── paths.py                # 数据和临时目录定义
+├── profile_selection.py    # Profile 选择服务
+├── profile_validation.py   # Profile 配置检查
 ├── prompts.py              # 内置提示内容
 ├── security.py             # 认证与安全辅助
-├── session_cleanup.py      # 会话关联数据清理
+├── session_cleanup.py      # 会话清理服务
 ├── session_notifier.py     # 会话事件通知
-└── session_source.py       # 会话来源与工具调用展示默认值
+└── session_source.py       # 会话来源信息
 ```
 
-### 审计记录：`app/core/audit/`
+### 审计：`app/core/audit/`
 
 ```text
 app/core/audit/
 ├── __init__.py             # 审计能力导出
-├── confirmation.py         # 确认词识别与确认消息状态更新
-├── integrity.py            # 整轮和逐工具参数摘要及文件摘要
-├── persistence.py          # 审计文件与数据库明细保存编排
-├── service.py              # 整轮评分、按需只读文件证据与确认摘要
-├── startup.py              # 启动恢复及保留期清理
-└── storage.py              # 审计文件原子写入与路径核对
+├── confirmation.py         # 审计确认数据
+├── integrity.py            # 审计完整性数据
+├── persistence.py          # 审计持久化协调
+├── service.py              # 审计应用服务
+├── startup.py              # 审计启动支持
+└── storage.py              # 审计文件存储
 ```
 
-### 后台任务：`app/core/background_tasks/`
+### 通用后台任务：`app/core/background_tasks/`
 
 ```text
 app/core/background_tasks/
-├── __init__.py             # 后台任务包标识
-├── manager.py              # 任务提交与状态管理
-├── recovery.py             # 未完成任务恢复
-├── reply_trigger.py        # 任务完成后的总结回复触发
-├── runner.py               # 后台工具任务执行
+├── __init__.py             # 后台任务能力导出
+├── manager.py              # 后台任务管理
+├── recovery.py             # 后台任务恢复支持
+├── reply_trigger.py        # 任务回复协调
+├── runner.py               # 后台任务执行组件
 ├── scheduler.py            # 定时任务调度
 └── schemas.py              # 后台任务内部数据结构
 ```
@@ -170,112 +173,110 @@ app/core/background_tasks/
 
 ```text
 app/core/memory_jobs/
-├── __init__.py             # 长期记忆作业能力导出
-├── manager.py              # 作业提交、去重与状态管理
-├── consumer.py             # 作业条件领取、租约维护与失效恢复
-├── executor.py             # 按已注册处理器路由内部 operation；未注册操作不领取作业
-├── maintenance_handlers.py # 阶段5重建与迁移处理器注册入口
-├── maintenance_lifecycle.py # 阶段5维护作业生命周期与终态清理
-├── maintenance_state.py    # 阶段5重建与迁移状态、快照和载荷校验
-├── maintenance_vector.py   # 阶段5向量嵌入、集合维护与抽样校验
+├── __init__.py             # 记忆作业能力导出
+├── manager.py              # 作业管理
+├── consumer.py             # 作业消费与租约协调
+├── executor.py             # 作业执行器
+├── handlers.py             # 记忆作业处理器
+├── maintenance_handlers.py # 记忆维护作业处理器
+├── maintenance_lifecycle.py # 维护作业生命周期组件
+├── maintenance_state.py    # 维护作业状态数据
+├── maintenance_vector.py   # 维护作业向量组件
 ├── migration_handler.py    # 嵌入模型迁移处理器
-├── reindex_handler.py      # 向量索引重建处理器
-└── handlers.py             # 普通 create/update/restore/delete_cleanup 处理器及统一注册入口
+└── reindex_handler.py      # 向量索引处理器
 ```
+
+该目录承载长期记忆的独立作业能力，与长期记忆领域服务和 Worker 进程协作。
 
 ### 长期记忆领域：`app/core/memory/`
 
 ```text
 app/core/memory/
-├── __init__.py             # 长期记忆稳定公开入口
-├── errors.py               # 记忆业务异常
-├── results.py              # 记忆服务返回结果
-├── normalization.py        # 正文、来源和作业载荷规范化
-├── identifiers.py          # collection、vector item 和目标占用键生成
-├── service.py              # 记忆增删改恢复、召回和迁移 delta
-├── embedding_config.py     # 嵌入模型预检、确认和运行时配置
-├── maintenance.py          # 重建索引和失败集合清理重试提交入口
-└── channel_protection.py   # 渠道和模型引用保护
+├── __init__.py             # 长期记忆公开入口
+├── errors.py               # 记忆领域异常
+├── results.py              # 记忆领域结果类型
+├── normalization.py        # 记忆数据规范化
+├── identifiers.py          # 记忆持久化标识
+├── service.py              # 长期记忆领域服务
+├── management.py           # 长期记忆管理应用服务
+├── management_helpers.py   # 记忆管理辅助组件
+├── embedding_config.py     # 记忆嵌入配置服务
+├── maintenance.py          # 记忆维护服务
+└── channel_protection.py   # 记忆渠道与模型引用管理
 ```
 
-### 会话最终回复队列：`app/core/session_reply_queue/`
+长期记忆领域由 `service.py` 提供核心领域服务，由 `management.py` 面向管理接口组织管理能力；`management_helpers.py` 提供管理层共用的数据辅助能力。
+
+### 会话回复队列：`app/core/session_reply_queue/`
 
 ```text
 app/core/session_reply_queue/
 ├── __init__.py             # 队列能力导出
-├── consumer.py             # 工作认领、并发执行与恢复
-├── executor.py             # 前台、任务总结及已确认工具执行
-└── manager.py              # 统一用户消息提交、确认判定与工作入队
+├── consumer.py             # 回复工作消费
+├── executor.py             # 回复工作执行
+└── manager.py              # 回复工作管理
 ```
 
 ### 交互终端：`app/core/terminal/`
 
 ```text
 app/core/terminal/
-├── __init__.py             # 交互终端能力导出
-├── schemas.py              # 终端协议、状态、权限与输出结果结构
-├── manager.py              # 终端会话、控制命令、租约与 Worker 编排
-├── process_config.py        # 交互 Shell 命令参数与子进程环境
-├── pty_base.py             # PTY 抽象、资源快照与有界输出缓冲
-├── pty_factory.py           # 按平台创建 PTY 驱动
-├── pty_unix.py              # Linux PTY 驱动
-├── pty_windows.py           # Windows ConPTY 驱动
-└── recovery.py              # 进程身份校验与孤儿进程清理
+├── __init__.py             # 终端能力导出
+├── schemas.py              # 终端协议数据结构
+├── manager.py              # 终端会话管理
+├── process_config.py       # 终端进程配置
+├── pty_base.py             # PTY 抽象
+├── pty_factory.py           # PTY 驱动创建
+├── pty_unix.py              # Unix PTY 驱动
+├── pty_windows.py           # Windows PTY 驱动
+└── recovery.py              # 终端资源恢复支持
 ```
-
-交互终端由 `execute_shell` 统一创建。该工具必须提供 `execution_mode`，模式描述的是同一条原命令的输入输出和生命周期，不代表编程语言；两种模式都执行未修改的原命令，不因模式选择替换或包装命令。`non_interactive` 始终使用 PIPE 子进程路径，适合不需要后续输入且应在 `tool_timeout` 内结束的命令；`interactive` 从进程创建开始就使用 PTY，适合需要后续输入、TTY 行为或在本次工具调用结束后继续运行的命令。当前仅支持 Windows ConPTY 和 Linux PTY，其他平台不支持 `interactive`。
-
-Web 进程和会话最终回复 Worker 不直接持有 PTY，只通过数据库中的 `terminal_session` 会话记录和 `terminal_control_command` 控制命令寻址；只有 terminal Worker 认领会话租约并持有 PTY。PTY 输出正文只保存在 terminal Worker 的有界内存缓冲中，数据库只保存输出容量、offset 和 sequence 等边界元数据；stdout 与 stderr 在 PTY 层合并为一个按字节 offset 读取的输出流。terminal Worker 重启后不会恢复旧输出正文，遗留会话按租约恢复规则处理。
-
-`terminal_write` 在 Worker 实际写入 PTY 之前记录 `output_offset_before_write`，并将该位置作为本次读取起点。写入、等待命令完成和内部读取共用当前 Profile 的 `tool_timeout` 时间预算；超时只结束等待，不关闭终端，并返回 `read_timed_out=true`、`read_result=null` 和 `read_offset`，后续通过 `terminal_read` 从该 offset 继续读取。终端自然退出或显式关闭后分别记录 `EXITED` 或对应失败终态；审计配置完整并成功绑定时，终端终态会完成原始审计执行记录，未配置审计时允许使用空绑定。
-
-终端会话租约失效时，持有者关闭 PTY，后续恢复流程清理孤儿进程并将无法继续持有的会话标记为 `LOST`，未完成的控制命令失败；terminal Worker 正常停止时会关闭其持有的 PTY、结束未完成命令，并将未完成会话标记为 `LOST`。删除聊天会话时，系统先按保存的进程身份清理终端进程，再处理活动会话的 `LOST` 终态和审计收尾，最后删除终端会话及控制命令记录。进程清理同时核对 PID、`create_time` 和系统 `boot_time`，避免 PID 复用导致误杀其他进程。
 
 ### 消息平台：`app/core/message_platforms/`
 
 ```text
 app/core/message_platforms/
-├── __init__.py             # 消息平台包标识
-├── base.py                 # 平台处理器基类
-├── inbound_collector.py    # 入站消息收集与合并
-├── manager.py              # 平台轮询与发件箱投递管理
-├── notifier.py             # 会话事件和平台消息入队
-├── outbound_text.py        # 出站文本长度约束、精简与回退
-├── tool_output.py          # 主动回复中的工具调用正文合并
-└── weixin_openclaw.py      # 微信 OpenClaw 平台处理器
+├── __init__.py             # 消息平台能力导出
+├── base.py                 # 平台处理器抽象
+├── inbound_collector.py    # 入站消息收集
+├── manager.py              # 消息平台管理
+├── notifier.py             # 平台事件通知
+├── outbound_text.py        # 出站文本适配
+├── tool_output.py          # 工具输出适配
+└── weixin_openclaw.py      # 微信平台处理器
 ```
 
 ### 数据访问：`app/core/crud/`
 
 ```text
 app/core/crud/
-├── audit.py                # 审计整轮、工具明细、确认占用与执行记录访问
-├── audit_tool_result_version.py # 工具结果不可变版本访问
+├── base.py                 # 通用数据访问抽象
+├── audit.py                # 审计数据访问
+├── audit_tool_result_version.py # 审计结果版本数据访问
 ├── background_task.py      # 后台任务数据访问
-├── base.py                 # 通用数据访问基类
-├── channel.py              # 渠道与模型数据访问
-├── channel_cursor.py       # 渠道路由游标访问
-├── context_summary_fragment.py # 上下文总结片段访问
-├── context_summary_stage.py # 上下文总结阶段访问
+├── channel.py              # 渠道和模型数据访问
+├── channel_cursor.py       # 渠道路由数据访问
+├── context_summary_fragment.py # 上下文总结片段数据访问
+├── context_summary_stage.py # 上下文总结阶段数据访问
 ├── knowledge_base.py       # 知识库数据访问
-├── log.py                  # 系统日志访问
-├── message.py              # 消息访问
-├── message_platform.py     # 消息平台访问
-├── message_platform_outbox.py # 消息平台发件箱访问
-├── memory.py               # 长期记忆 Store、记录、历史、embedding revision/delta 的 uid 隔离读写
-├── memory_job.py           # 记忆作业去重、目标占用、条件领取、作业租约、重试取消和终态清理
-├── memory_maintenance.py   # 阶段5重建、迁移、快照、进度、切换和清理状态数据访问
-├── profile.py              # Profile 访问
-├── prompt.py               # Prompt 访问
-├── scheduled_task.py       # 定时任务访问
-├── session.py              # 会话访问
-├── session_event.py        # 会话通知事件访问
-├── session_reply_stream_event.py # 回复流事件访问
-├── session_reply_work_item.py # 回复工作与顺序访问
-├── system_setting.py       # 系统设置访问
-├── terminal_session.py      # 终端会话与控制命令访问
-├── user.py                 # 用户访问
-└── worker_lease.py         # Worker 租约访问
+├── log.py                  # 系统日志数据访问
+├── message.py              # 消息数据访问
+├── message_platform.py     # 消息平台数据访问
+├── message_platform_outbox.py # 消息发件箱数据访问
+├── memory.py               # 长期记忆数据访问
+├── memory_job.py           # 长期记忆作业数据访问
+├── memory_maintenance.py   # 长期记忆维护数据访问
+├── profile.py              # Profile 数据访问
+├── prompt.py               # Prompt 数据访问
+├── scheduled_task.py       # 定时任务数据访问
+├── session.py              # 会话数据访问
+├── session_event.py        # 会话事件数据访问
+├── session_reply_stream_event.py # 回复流事件数据访问
+├── session_reply_work_item.py # 回复工作数据访问
+├── system_setting.py       # 系统设置数据访问
+├── terminal_session.py     # 终端会话数据访问
+├── user.py                 # 用户数据访问
+└── worker_lease.py         # Worker 协调数据访问
 ```
 
 ### 对话分发：`app/core/dispatchers/`
@@ -284,123 +285,32 @@ app/core/crud/
 app/core/dispatchers/
 ├── __init__.py             # 分发器导出
 ├── background.py           # 后台对话分发
-├── interactive.py          # HTTP/WebSocket/队列交互式流式与非流式对话共用执行流程
-├── interactive_helpers.py   # 交互式分发的消息、工具与执行检查点辅助逻辑
-├── memory_recall.py         # 每轮召回预检编排
-├── memory_recall_types.py   # 召回上下文与结果结构
-├── memory_recall_request.py  # 渠道选择、请求裁剪、模型调用与令牌元数据
-├── memory_recall_persistence.py # 召回工具消息幂等恢复、保存、执行与展示事件
+├── interactive.py          # 交互式对话分发
+├── interactive_helpers.py  # 交互式分发辅助
+├── memory_recall.py        # 对话记忆召回集成
+├── memory_recall_types.py  # 记忆召回数据结构
+├── memory_recall_request.py # 记忆召回请求组件
+├── memory_recall_persistence.py # 记忆召回持久化组件
 ├── non_stream.py           # 非流式对话分发
-├── shared.py               # 分发器共用逻辑
+├── shared.py               # 分发器共用组件
 └── stream.py               # 流式对话分发
-```
-
-### 调度辅助：`app/core/utils/dispatcher/`
-
-```text
-app/core/utils/dispatcher/
-├── __init__.py
-├── append_new_user_messages.py       # 追加用户消息
-├── channel_call.py                   # 模型渠道调用
-├── context_summary_checkpoint.py     # Agent 循环中的上下文总结检查点
-├── fetch_and_merge_new_user_messages.py # 获取并合并新消息
-├── handle_parallel_tool_limit.py     # 并行工具数量限制
-├── helpers.py                        # 调度共用函数
-├── inject_system_prompt.py           # 系统提示注入
-├── mark_initial_message_processed.py # 初始消息状态更新
-├── markdown_instruction.py           # Markdown 输出指令
-├── prepare_messages.py               # 模型消息准备
-├── process_markdown_response.py      # Markdown 响应处理
-├── process_single_tool.py            # 单个工具调用处理
-├── save_assistant_message.py         # 助手消息保存
-├── save_initial_message.py           # 初始消息保存
-├── save_message.py                   # 通用消息保存
-├── save_tool_response.py             # 工具响应保存
-├── truncate_tool_result.py           # 工具结果截断
-├── user_input_batch.py               # 用户输入批次及来源消息标识
-└── validate_profile_and_cfg.py       # Profile 与配置校验
-```
-
-### 上下文总结：`app/core/utils/context_summary/`
-
-```text
-app/core/utils/context_summary/
-├── __init__.py             # 上下文总结能力导出
-├── boundary.py              # 总结触发边界解析与校验
-├── cleanup.py              # 过期总结任务与阶段清理
-├── common.py               # 共用状态与令牌计算
-├── history.py              # 历史消息测量与分页
-├── merge.py                # 已完成总结片段归并
-├── model_call.py           # 总结模型调用
-├── pipeline.py             # 总结片段处理管线
-├── reduction.py            # 多层总结归约与精炼
-├── selection.py            # 总结模型选择
-├── service.py              # 总结生成与保存入口
-├── snapshot.py             # 消息快照构建
-├── split.py                # 总结来源单元拆分
-├── stage.py                # 总结阶段执行与状态更新
-└── user_message_block.py    # 总结中已覆盖用户消息的编码与解析
-```
-
-### 其他通用函数：`app/core/utils/`
-
-```text
-app/core/utils/
-├── assistant_files.py      # 助手文件信息提取
-├── background_task_result.py # 后台任务结果整理
-├── channel_profile_sync.py # 渠道与 Profile 配置同步
-├── config.py               # 配置读取
-├── context_budget.py       # 上下文令牌预算
-├── context_messages.py     # 上下文消息处理
-├── http_proxy.py           # 渠道 HTTP 代理校验与请求参数
-├── message_assembler.py    # 消息组装
-├── message_parser.py       # 消息解析
-├── model_request_headers.py # 模型自定义请求头校验与构建
-├── operation_directories.py # 工具允许操作目录校验
-├── request_token_baseline.py # LLM 请求令牌基线与增量估算
-├── session.py              # 会话辅助函数
-├── system.py               # 系统信息
-├── text_splitter.py        # 文本切分
-├── time.py                 # 时间处理
-└── tokenizer.py            # 令牌计算
-```
-
-### 工具系统：`app/core/tools/`
-
-```text
-app/core/tools/
-├── __init__.py             # 工具注册与过滤
-├── base.py                 # 工具基类
-├── cancel_background_task.py # 取消后台任务
-├── file_writer.py          # 写入文件
-├── firecrawl_scrape.py     # Firecrawl 网页抓取
-├── firecrawl_search.py     # Firecrawl 搜索
-├── image_generation.py     # 图像生成
-├── knowledge_base_query.py # 知识库查询
-├── list_background_tasks.py # 查询后台任务
-├── longterm_memory.py      # 统一 recall/create/update/delete 工具
-├── read_text_file.py       # 通用只读文本文件读取
-├── read_multimodal_file.py # 读取并校验本地多模态文件
-├── send_file_to_user.py    # 向用户发送文件
-├── terminal.py             # 交互终端状态、读写、调整与关闭工具
-└── shell.py                # Shell 命令执行
 ```
 
 ### 知识库能力
 
 ```text
 app/core/embedding/
-├── __init__.py
-├── common.py               # 通用嵌入渠道/模型校验、调用参数和实际维度探测
-└── knowledge_base.py       # 文档向量化与写入，复用共用嵌入代码并保持原有语义
+├── __init__.py             # 嵌入能力导出
+├── common.py               # 嵌入共用组件
+└── knowledge_base.py       # 知识库嵌入服务
 
 app/core/rerank/
-├── __init__.py
-├── knowledge_base.py       # 检索结果重排
+├── __init__.py             # 重排能力导出
+├── knowledge_base.py       # 知识库重排服务
 └── schemas.py              # 重排数据结构
 
 app/core/retrieval/
-├── __init__.py
+├── __init__.py             # 检索能力导出
 ├── fusion.py               # 检索结果融合
 ├── hybrid.py               # 混合检索
 ├── schemas.py              # 检索数据结构
@@ -408,107 +318,153 @@ app/core/retrieval/
 └── tokenizer.py            # 检索分词
 ```
 
-### 多语言
+### 工具与通用组件
+
+```text
+app/core/tools/
+├── __init__.py             # 工具注册入口
+├── base.py                 # 工具抽象
+├── cancel_background_task.py # 后台任务工具
+├── file_writer.py          # 文件写入工具
+├── firecrawl_scrape.py     # 网页抓取工具
+├── firecrawl_search.py     # 网页搜索工具
+├── image_generation.py     # 图像生成工具
+├── knowledge_base_query.py # 知识库查询工具
+├── list_background_tasks.py # 后台任务查询工具
+├── longterm_memory.py      # 长期记忆工具
+├── read_text_file.py       # 文本文件读取工具
+├── read_multimodal_file.py # 多模态文件读取工具
+├── send_file_to_user.py    # 文件发送工具
+├── terminal.py             # 交互终端工具
+└── shell.py                # Shell 工具
+
+app/core/utils/
+├── dispatcher/             # 对话分发辅助
+├── context_summary/        # 上下文总结辅助
+├── assistant_files.py      # 助手文件辅助
+├── background_task_result.py # 后台任务结果辅助
+├── channel_profile_sync.py # 渠道与 Profile 同步辅助
+├── config.py               # 配置读取辅助
+├── context_budget.py       # 上下文预算辅助
+├── context_messages.py     # 上下文消息辅助
+├── http_proxy.py           # HTTP 代理辅助
+├── message_assembler.py    # 消息组装辅助
+├── message_parser.py       # 消息解析辅助
+├── model_request_headers.py # 模型请求头辅助
+├── operation_directories.py # 文件系统目录辅助
+├── request_token_baseline.py # 请求令牌统计辅助
+├── session.py              # 会话辅助
+├── system.py               # 系统信息辅助
+├── text_splitter.py        # 文本切分辅助
+├── time.py                 # 时间辅助
+└── tokenizer.py            # 令牌统计辅助
+```
+
+### 多语言：`app/core/i18n/`
 
 ```text
 app/core/i18n/
-├── __init__.py
-├── context.py              # 当前语言上下文
-├── locale.py               # 语言解析
-├── translator.py           # 文本翻译入口
-└── locales/                # 多语言消息
+├── __init__.py             # 多语言能力导出
+├── context.py              # 语言上下文
+├── locale.py               # 语言结构
+├── translator.py           # 翻译服务
+└── locales/                # 后端语言资源
 ```
 
-## 数据模型层：`app/models/`
+## 持久化模型：`app/models/`
 
 ```text
 app/models/
 ├── __init__.py             # 模型导出
-├── audit.py                # 审计整轮、工具明细、确认占用、执行记录与结果版本模型
+├── audit.py                # 审计模型
 ├── background_task.py      # 后台任务模型
 ├── channel.py              # 渠道与模型条目模型
-├── channel_cursor.py       # 渠道路由游标模型
-├── context_summary_stage.py # 上下文总结阶段与片段模型
+├── channel_cursor.py       # 渠道路由模型
+├── context_summary_stage.py # 上下文总结模型
 ├── knowledge_base.py       # 知识库、文档与分块模型
-├── memory.py               # 长期记忆基础表
-├── message.py              # 消息与持久引导模型
+├── memory.py               # 长期记忆模型
+├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
-├── message_platform_outbox.py # 消息平台发件箱模型
-├── profile.py              # Profile 配置模型
+├── message_platform_outbox.py # 消息发件箱模型
+├── profile.py              # Profile 模型
 ├── prompt.py               # Prompt 模型
 ├── scheduled_task.py       # 定时任务模型
 ├── session.py              # 会话模型
-├── session_event.py        # 会话通知事件模型
+├── session_event.py        # 会话事件模型
 ├── session_reply_stream_event.py # 回复流事件模型
-├── session_reply_work_item.py # 回复工作与顺序模型
+├── session_reply_work_item.py # 回复工作模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型
-├── terminal_session.py      # 终端会话与控制命令模型
+├── terminal_session.py     # 终端会话模型
 ├── user.py                 # 用户模型
-└── worker_lease.py         # Worker 租约模型
+└── worker_lease.py         # Worker 协调模型
 ```
+
+`app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
 
 ## 外部能力封装：`app/providers/`
 
 ```text
 app/providers/
-├── __init__.py
 ├── database/
-│   ├── __init__.py
-│   ├── bootstrap.py        # 数据表与初始数据创建
+│   ├── __init__.py         # 数据库能力导出
+│   ├── bootstrap.py        # 数据库初始化
 │   ├── client.py           # 异步数据库连接与会话
-│   └── time.py             # 数据库时间读取
+│   └── time.py             # 数据库时间能力
 ├── embedding/
-│   ├── __init__.py
-│   └── client.py           # 向量模型客户端
+│   ├── __init__.py         # 嵌入能力导出
+│   └── client.py           # 嵌入模型客户端
 ├── image_generation/
-│   ├── __init__.py
+│   ├── __init__.py         # 图像生成能力导出
 │   └── client.py           # 图像生成客户端
 ├── llm/
-│   ├── __init__.py
+│   ├── __init__.py         # 大模型能力导出
 │   └── client.py           # 大模型客户端
 ├── rerank/
-│   ├── __init__.py
+│   ├── __init__.py         # 重排能力导出
 │   └── client.py           # 重排模型客户端
 └── vector/
-    ├── __init__.py
-    └── chroma.py           # Chroma 向量库访问，支持异步批量写入/读取/删除、collection 校验和孤儿 item 清理，并保留同步兼容入口
+    ├── __init__.py         # 向量存储能力导出
+    └── chroma.py           # Chroma 向量存储适配
 ```
 
-## 接口结构与协议转换
+Provider 层隔离数据库、向量存储、语言模型、嵌入、重排和图像生成等外部依赖。
+
+## 接口数据与协议转换
 
 ```text
 app/schemas/
 ├── auth.py                 # 认证接口数据结构
-├── background_task.py      # 后台任务数据结构
-├── response.py             # 通用响应与分页结构
+├── background_task.py      # 后台任务接口数据结构
+├── memory.py               # 长期记忆接口数据结构
+├── response.py             # 通用响应和分页结构
 └── scheduled_task.py       # 定时任务接口数据结构
 
 app/transformers/
-├── base.py                 # 聊天、嵌入、生图与重排转换基类
+├── base.py                 # 模型协议转换抽象
 ├── cohere_rerank.py        # Cohere 重排协议转换
 └── openai/
     ├── __init__.py         # OpenAI 转换器导出
-    ├── base.py             # OpenAI HTTP、SSE 与异常处理基类
-    ├── chat_completions.py # OpenAI Chat Completions 协议转换
-    ├── embedding.py        # OpenAI 嵌入协议转换
-    ├── image_generation.py # OpenAI 生图协议转换
-    └── responses.py        # OpenAI Responses 协议转换
+    ├── base.py             # OpenAI 协议转换基础组件
+    ├── chat_completions.py # Chat Completions 协议转换
+    ├── embedding.py        # 嵌入协议转换
+    ├── image_generation.py # 图像生成协议转换
+    └── responses.py        # Responses 协议转换
 ```
 
-## 前端目录：`dashboard/`
+`schemas` 描述应用对外的数据契约，`transformers` 隔离不同外部模型协议与内部模型表示。
+
+## 前端分层：`dashboard/`
 
 ```text
 dashboard/
-├── dist/                   # 执行构建后生成的前端产物
-├── public/                 # 静态页面模板
+├── dist/                   # 构建产物
+├── public/                 # 静态资源模板
 ├── src/                    # Vue 源码
-├── tests/                  # 前端聊天状态与事件跟踪测试
-├── package-lock.json       # 依赖锁定文件
-└── package.json            # 前端依赖与命令
+├── tests/                  # 前端自动化测试
+├── package-lock.json       # 前端依赖锁定
+└── package.json            # 前端依赖与脚本配置
 ```
-
-`dashboard/dist/` 和 `dashboard/node_modules/` 均为按需生成且被忽略的目录，未执行构建或安装依赖时可以不存在。
 
 ### 前端源码：`dashboard/src/`
 
@@ -516,172 +472,80 @@ dashboard/
 dashboard/src/
 ├── api/                    # HTTP 与 WebSocket 请求封装
 ├── assets/                 # 样式与图标
-├── components/             # 通用组件
-├── composables/            # 页面共用逻辑
+├── components/             # 通用界面组件
+├── composables/            # 可复用组合逻辑
 ├── constants/              # 前端常量
 ├── i18n/                   # 前端多语言
-├── router/                 # 页面路由与登录检查
-├── utils/                  # 前端通用函数
+├── router/                 # 页面路由
+├── utils/                  # 前端通用辅助
 ├── views/                  # 页面组件
 ├── App.vue                 # 根组件
 └── main.js                 # 前端入口
 ```
 
-### 页面：`dashboard/src/views/`
-
 ```text
 dashboard/src/views/
-├── ChannelsView.vue        # 渠道管理
-├── ChatView.vue            # 聊天
-├── HistoryLogs.vue         # 历史日志
-├── KnowledgeBase.vue       # 知识库管理
-├── LoginView.vue           # 登录
-├── MessagePlatformsView.vue # 消息平台管理
-├── ProfilesView.vue        # Profile 管理
-├── PromptsView.vue         # Prompt 管理
-├── RealTimeLogs.vue        # 实时日志
-├── ScheduledTasksView.vue  # 定时任务管理
-└── UsersView.vue           # 用户管理
+├── ChannelsView.vue        # 渠道管理页面
+├── ChatView.vue            # 聊天页面
+├── HistoryLogs.vue         # 历史日志页面
+├── KnowledgeBase.vue       # 知识库管理页面
+├── LoginView.vue           # 登录页面
+├── MemoriesView.vue        # 长期记忆管理页面
+├── MessagePlatformsView.vue # 消息平台管理页面
+├── ProfilesView.vue        # Profile 管理页面
+├── PromptsView.vue         # Prompt 管理页面
+├── RealTimeLogs.vue        # 实时日志页面
+├── ScheduledTasksView.vue  # 定时任务管理页面
+└── UsersView.vue           # 用户管理页面
 ```
 
-### 通用组件、组合逻辑与工具函数
+`dashboard/src/api/` 对应后端接口层，`components/` 提供共享界面组件，`composables/` 提供页面共用逻辑，`router/`、`i18n/` 和 `utils/` 分别承载路由、多语言和前端辅助能力。
+
+## 测试与脚本
 
 ```text
-dashboard/src/components/
-├── BaseDataTable.vue       # 通用数据表格
-├── ChannelEditor.vue       # 渠道编辑器
-├── ChannelFormDialog.vue   # 渠道表单、模型探测与测试
-├── ChannelModelEntry.vue   # 渠道单模型配置项
-├── ChatMessageList.vue     # 虚拟化聊天消息、引导、工具结果与审计卡片展示
-├── LanguageSwitcher.vue    # 语言切换器
-├── MessagePlatformFormDialog.vue # 消息平台表单
-├── ProfileFormDialog.vue   # Profile 表单
-├── StatusTag.vue           # 状态标签
-├── VirtualizedCode.vue     # 大段代码展示
-└── weixin_oc/              # 微信 OpenClaw 登录组件
-
-dashboard/src/composables/
-├── chat/
-│   ├── auditConfirmationState.js # 审计确认状态与工具结果事件合并
-│   ├── contextSummaryTracker.js # 上下文总结工作与事件顺序跟踪
-│   ├── historyMergeTracker.js   # 异步历史加载失效与顺序控制
-│   ├── thinkingTracker.js       # Thinking 占位生命周期与请求归属跟踪
-│   ├── useChatSession.js         # 聊天会话模块编排
-│   ├── useChatState.js           # 消息列表与滚动状态
-│   ├── useChatTransport.js       # HTTP/WebSocket 通信与生命周期事件分发
-│   ├── useMessageProcessor.js    # 流式消息、工具调用与去重处理
-│   ├── useSessionManager.js      # 会话列表、历史分页与会话切换
-│   └── workLifecycleTracker.js   # 用户输入、Agent 循环与工作结束状态跟踪
-├── useDeleteConfirm.js     # 删除确认
-├── useResizeObserver.js    # 尺寸监听
-├── useToolParser.js        # 工具调用内容解析
-└── useWebSocket.js         # WebSocket 连接管理
-
-dashboard/src/utils/
-├── assistantResponseIdentity.js # 助手回复身份匹配与幂等合并
-├── auditConfirmation.js    # 审计确认是否仍可操作的判断
-├── channelTestManager.js    # 渠道模型测试并发与取消生命周期
-├── index.js                # 消息处理、格式化与通用函数
-├── profileOptions.js       # Profile 筛选、展示与会话选择辅助
-└── toolOutputVisibility.js # 工具消息识别与显示过滤
+tests/                      # 后端单元测试与集成测试
+dashboard/tests/            # 前端自动化测试
+scripts/                    # 数据库迁移和运行维护脚本
 ```
 
-### 前端测试：`dashboard/tests/`
+测试目录和脚本目录只作为工程支持层，不在架构文档中展开文件清单。
+
+## 持久化目录：`data/` 与 `temp/`
 
 ```text
-dashboard/tests/
-├── assistantResponseIdentity.test.js # 助手回复身份与幂等合并测试
-├── auditConfirmation.test.js     # 审计确认可操作状态测试
-├── auditConfirmationState.test.js # 审计确认事件合并测试
-├── channelTestManager.test.js    # 渠道模型测试并发与取消生命周期测试
-├── chatConcurrentEventFlow.test.js # 并发聊天事件收敛流程测试
-├── contextSummaryTracker.test.js # 上下文总结工作与事件顺序测试
-├── historyMergeTracker.test.js   # 异步历史加载顺序测试
-├── profileOptions.test.js        # Profile 选项与归属测试
-├── thinkingTracker.test.js       # Thinking 占位生命周期测试
-└── workLifecycleTracker.test.js  # 聊天工作生命周期测试
+data/                       # SQLite、Chroma、日志与审计等持久化数据
+├── audit/                  # 审计文件
+
+temp/                       # 上传文件、工具结果和其他临时数据
 ```
 
-## 测试目录：`tests/`
+关系型数据由 `app/providers/database/` 管理，向量数据由 `app/providers/vector/` 管理，文件型持久化由核心服务和路径组件管理。
+
+## 依赖方向
 
 ```text
-tests/
-├── integration/
-│   ├── conftest.py                  # 接口测试数据库夹具
-│   ├── test_chat_concurrent_input.py # 并发输入接口流程测试
-│   ├── test_chat_guidance_api.py    # 外部会话引导接口请求测试
-│   ├── test_profile_memory_embedding_api.py # Profile 长期记忆嵌入配置接口测试
-│   └── test_terminal_shell_workflow.py # execute_shell 交互模式与伴随工具流程测试
-└── unit/
-    ├── context_summary_*_fixture.py # 上下文总结测试夹具
-    ├── context_summary_*_support.py # 上下文总结测试辅助
-    ├── session_reply_queue_fixture.py # 回复队列测试夹具
-    ├── session_reply_queue_test_support.py # 回复队列测试辅助
-    ├── test_audit_*.py              # 审计、确认与审计存储测试
-    ├── test_background_*.py          # 后台任务测试
-    ├── test_channel_model_protection.py # 渠道模型引用保护测试
-    ├── test_context_*.py             # 上下文与总结测试
-    ├── test_message_*.py             # 消息与消息平台测试
-    ├── test_memory_channel_protection_stage2.py # 长期记忆渠道引用保护测试
-    ├── test_memory_embedding_config_stage2.py # 长期记忆嵌入配置确认测试
-    ├── test_memory_job_worker_stage3.py # Manager、Consumer、Executor、租约恢复与并发测试
-    ├── test_memory_service_stage4.py # 长期记忆规范化、提交、删除、恢复与召回测试
-    ├── test_memory_worker_stage4.py # 长期记忆向量发布、清理、失败和原子终态测试
-    ├── test_memory_chat_tool_stage6.py # 阶段6聊天工具与开关注册测试
-    ├── test_memory_recall_precheck_stage6.py # 阶段6召回预检、一次纠正与渠道降级测试
-    ├── test_memory_recall_persistence_stage6.py # 阶段6召回持久化、幂等恢复与新消息边界测试
-    ├── test_memory_interactive_stage6.py # 阶段6普通、流式、交互与队列测试
-    ├── test_memory_storage_foundation.py # 长期记忆存储基础测试
-    ├── test_memory_embedding_vector_foundation.py # 长期记忆嵌入与向量基础测试
-    ├── test_session_*.py             # 会话、通知与回复队列测试
-    ├── test_terminal_*.py            # 终端单元、PTY 与平台测试
-    ├── test_worker_*.py              # 独立进程与租约测试
-    └── test_*.py                     # 其他后端单元测试
+dashboard / adapters
+        ↓
+api / application entry
+        ↓
+core application and domain services
+        ↓
+crud / models / providers / transformers
+        ↓
+database / vector storage / external model services
 ```
 
-## 数据迁移脚本：`scripts/`
+- `dashboard` 依赖后端公开接口，不依赖后端内部模块。
+- `adapters` 和 `api` 是后端入口层，依赖 `core` 与 `schemas`。
+- `core` 组织应用服务和领域能力，依赖数据访问、持久化模型、Provider 及协议转换组件。
+- `crud` 面向 `models` 和数据库 Provider，负责持久化访问抽象。
+- `providers` 隔离外部服务和持久化基础设施。
+- `workers` 使用核心服务和持久化抽象，不依赖前端模块。
 
-```text
-scripts/
-├── migration_20260629_add_scheduled_task_profile_id.py # 定时任务 Profile 字段
-├── migration_20260703_add_message_platform.py          # 消息平台表
-├── migration_20260709_add_chat_session_reply_target_source.py # 会话回复目标来源字段
-├── migration_20260709_add_chat_session_source.py       # 会话来源字段
-├── migration_20260710_add_message_platform_outbox.py   # 消息平台发件箱表
-├── migration_20260710_add_session_event.py             # 会话事件表
-├── migration_20260711_add_message_dedupe_key.py        # 消息去重键
-├── migration_20260711_add_session_event_dedupe_key.py  # 会话事件去重键
-├── migration_20260711_add_worker_lease.py              # Worker 租约表
-├── migration_20260712_add_chat_session_context_summary.py # 会话上下文总结字段
-├── migration_20260712_add_session_reply_queue.py       # 会话回复队列表
-├── migration_20260712_add_session_reply_stream_event.py # 会话回复流事件表
-├── migration_20260712_drop_active_session.py           # 删除旧活跃会话表
-├── migration_20260714_add_context_summary_stages.py    # 上下文总结阶段与片段表
-├── migration_20260715_add_message_system_prompt.py     # 旧消息系统提醒字段
-├── migration_20260715_migrate_message_environment_prompt.py # 消息环境提示字段迁移
-├── migration_20260717_add_audit_confirmation_records.py # 审计与确认记录表
-├── migration_20260719_add_background_task_audit_binding.py # 后台任务审计绑定
-├── migration_20260724_add_audit_tool_result_versions.py # 审计工具结果版本表
-├── migration_20260725_add_chat_session_llm_request_metadata.py # 会话 LLM 请求元数据
-├── migration_20260726_add_chat_session_llm_request_metadata_order.py # LLM 请求元数据顺序字段
-├── migration_20260727_add_channel_http_proxy.py # 渠道 HTTP 代理字段及旧配置迁移
-├── migration_20260727_add_message_guidance_prompt.py # 消息持久引导字段
-├── migration_20260727_drop_channel_type.py       # 删除旧渠道类型字段
-├── migration_20260728_add_profile_selection_priority.py # Profile 默认值、会话覆盖与平台绑定字段
-├── migration_20260729_add_chat_session_show_tool_calls.py # 会话工具调用展示字段
-├── migration_20260729_add_message_platform_language.py # 消息平台语言字段
-├── migration_20260729_add_message_platform_use_stream_dispatch.py # 消息平台流式分发字段
-├── migration_20260731_add_terminal_sessions.py       # 终端会话与控制命令表
-├── migration_20260801_make_terminal_audit_optional.py # 终端审计绑定可选
-├── migration_20260801_terminal_process_identity.py   # 终端进程身份字段
-├── migration_20260803_add_longterm_memory.py         # 长期记忆基础表
-└── migration_20260803_add_memory_embedding_selection_token.py # 长期记忆嵌入配置一次性确认凭证表
-```
+## 进程边界
 
-## 运行期目录
-
-```text
-data/                       # SQLite、Chroma、日志与独立审计文件
-├── audit/                  # 按用户保存的审计文件，只在系统启动阶段清理
-temp/                       # 上传文件、工具结果与其他临时文件
-```
+- Web 进程承载 FastAPI 接口、WebSocket 接口和对话适配入口。
+- 后台 Worker 进程承载通用任务、长期记忆作业、消息平台、会话回复和交互终端等独立能力。
+- Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
+- 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。

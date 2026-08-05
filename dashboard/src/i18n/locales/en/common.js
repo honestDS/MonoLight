@@ -23,6 +23,7 @@ export default {
   menu: {
     chat: 'Chat',
     users: 'Users',
+    memories: 'Long-term Memory',
     knowledge_base: 'Knowledge Base',
     system: 'System Config',
     profiles: 'Profiles',

@@ -6,6 +6,56 @@
           <el-tab-pane :label="$t('profiles.base_settings')" name="base">
             <div class="tab-pane-content">
               <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.long_term_memory_settings') }}</div>
+                <el-form-item :label="$t('profiles.long_term_memory_enabled')">
+                  <el-switch v-model="form.configs.memory.enabled"></el-switch>
+                  <div class="help-text mt-5">{{ $t('profiles.long_term_memory_enabled_hint') }}</div>
+                </el-form-item>
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item :label="$t('profiles.memory_top_k')">
+                      <el-input-number v-model="form.configs.memory.top_k" :min="1" :max="50" class="full-width-input" controls-position="right" />
+                      <div class="help-text mt-5">{{ $t('profiles.memory_top_k_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item :label="$t('profiles.memory_candidate_k')">
+                      <el-input-number v-model="form.configs.memory.candidate_k" :min="1" :max="100" class="full-width-input" controls-position="right" />
+                      <div class="help-text mt-5">{{ $t('profiles.memory_candidate_k_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item :label="$t('profiles.memory_result_max_chars')">
+                      <el-input-number v-model="form.configs.memory.result_max_chars" :min="256" :max="50000" class="full-width-input" controls-position="right" />
+                      <div class="help-text mt-5">{{ $t('profiles.memory_result_max_chars_hint') }}</div>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <template v-if="dialogType === 'edit'">
+                  <el-form-item :label="$t('profiles.memory_embedding_target')">
+                    <el-select
+                      :model-value="memoryEmbeddingTargetKey"
+                      :placeholder="$t('profiles.memory_embedding_target_placeholder')"
+                      class="full-width-input"
+                      filterable
+                      clearable
+                      @update:model-value="$emit('update:memoryEmbeddingTargetKey', $event)"
+                    >
+                      <el-option v-for="item in memoryEmbeddingOptions" :key="item.key" :label="item.label" :value="item.key" />
+                    </el-select>
+                    <div class="help-text mt-5">{{ $t('profiles.memory_embedding_target_hint') }}</div>
+                  </el-form-item>
+                  <div class="help-text memory-current-config">
+                    {{ $t('profiles.memory_embedding_current') }}: {{ memoryEmbeddingCurrentLabel || $t('profiles.memory_embedding_not_configured') }}
+                  </div>
+                  <el-button type="primary" plain :loading="memoryEmbeddingPreviewing" :disabled="!memoryEmbeddingTargetKey" @click="$emit('preview-memory-embedding')">
+                    {{ $t('profiles.memory_embedding_preview') }}
+                  </el-button>
+                  <div class="help-text mt-5">{{ $t('profiles.memory_embedding_preview_hint') }}</div>
+                </template>
+                <div v-else class="help-text">{{ $t('profiles.memory_embedding_create_hint') }}</div>
+              </div>
+              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.base_settings') }}</div>
                 <el-form-item :label="$t('profiles.profile_name')">
                   <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
@@ -334,6 +384,10 @@ defineProps({
   form: { type: Object, required: true },
   knowledgeBaseOptions: { type: Array, required: true },
   localeOptions: { type: Array, required: true },
+  memoryEmbeddingCurrentLabel: { type: String, default: '' },
+  memoryEmbeddingOptions: { type: Array, required: true },
+  memoryEmbeddingPreviewing: { type: Boolean, required: true },
+  memoryEmbeddingTargetKey: { type: String, default: '' },
   prompts: { type: Array, required: true },
   showOwnerColumn: { type: Boolean, required: true },
   submitting: { type: Boolean, required: true },
@@ -346,11 +400,13 @@ defineEmits([
   'add-file-send-blocked-extension',
   'remove-allowed-operation-dir',
   'remove-file-send-blocked-extension',
+  'preview-memory-embedding',
   'submit',
   'update:activeTab',
   'update:allowedOperationDirInput',
   'update:auditModelKey',
   'update:dialogVisible',
-  'update:fileSendBlockedExtensionInput'
+  'update:fileSendBlockedExtensionInput',
+  'update:memoryEmbeddingTargetKey'
 ])
 </script>

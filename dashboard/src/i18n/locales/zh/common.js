@@ -23,6 +23,7 @@ export default {
   menu: {
     chat: '智能交互',
     users: '用户管理',
+    memories: '长期记忆',
     knowledge_base: '知识库管理',
     system: '系统配置',
     profiles: '配置管理',

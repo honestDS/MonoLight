@@ -64,6 +64,10 @@
       :form="form"
       :knowledge-base-options="knowledgeBaseOptions"
       :locale-options="localeOptions"
+      :memory-embedding-current-label="memoryEmbeddingCurrentLabel"
+      :memory-embedding-options="memoryEmbeddingOptions"
+      :memory-embedding-previewing="memoryEmbeddingPreviewing"
+      v-model:memory-embedding-target-key="memoryEmbeddingTargetKey"
       :prompts="prompts"
       :show-owner-column="showOwnerColumn"
       :submitting="submitting"
@@ -73,8 +77,51 @@
       @add-file-send-blocked-extension="addFileSendBlockedExtension"
       @remove-allowed-operation-dir="removeAllowedOperationDir"
       @remove-file-send-blocked-extension="removeFileSendBlockedExtension"
+      @preview-memory-embedding="previewMemoryEmbedding"
       @submit="submitForm"
     />
+
+    <el-dialog
+      v-model="memoryConfirmationVisible"
+      :title="$t('profiles.memory_embedding_confirmation_title')"
+      width="min(560px, 92vw)"
+      class="standard-dialog"
+      center
+      align-center
+      @close="closeMemoryConfirmation"
+    >
+      <template v-if="memoryPreview">
+        <el-alert
+          :title="memoryPreview.is_initial_selection ? $t('profiles.memory_embedding_confirmation_first_notice') : memoryPreviewRequiresMigration ? $t('profiles.memory_embedding_confirmation_change_notice') : $t('profiles.memory_embedding_confirmation_same_notice')"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+        <el-descriptions :column="1" border class="mt-5">
+          <el-descriptions-item :label="$t('profiles.memory_embedding_current')">
+            {{ formatMemorySelection(memoryPreview.current_active) }}
+          </el-descriptions-item>
+          <el-descriptions-item :label="$t('profiles.memory_embedding_target')">
+            {{ memoryPreview.channel_name }} / {{ memoryPreview.model_id }}
+          </el-descriptions-item>
+          <el-descriptions-item :label="$t('profiles.memory_embedding_dimensions')">
+            {{ memoryPreview.current_active?.dimensions || $t('profiles.memory_embedding_not_configured') }} -> {{ memoryPreview.actual_dimensions || memoryPreview.dimensions }}
+          </el-descriptions-item>
+          <el-descriptions-item :label="$t('profiles.memory_embedding_estimated_records')">
+            {{ memoryPreview.estimated_record_count }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-checkbox v-model="memoryConfirmationChecked" class="mt-5">
+          {{ $t('profiles.memory_embedding_confirmation_check') }}
+        </el-checkbox>
+      </template>
+      <template #footer>
+        <el-button @click="closeMemoryConfirmation">{{ $t('profiles.cancel') }}</el-button>
+        <el-button type="warning" :loading="memoryEmbeddingConfirming" :disabled="!memoryConfirmationChecked" @click="confirmMemoryEmbedding">
+          {{ $t('profiles.memory_embedding_confirm') }}
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
       <el-form :model="systemSettings" label-width="150px" size="default">
@@ -143,6 +190,13 @@ const settingsSubmitting = ref(false)
 const activeTab = ref('base')
 const allowedOperationDirInput = ref('')
 const fileSendBlockedExtensionInput = ref('')
+const memoryEmbeddingTargetKey = ref('')
+const memoryPreview = ref(null)
+const memoryEmbeddingPreviewing = ref(false)
+const memoryConfirmationVisible = ref(false)
+const memoryConfirmationChecked = ref(false)
+const memoryEmbeddingConfirming = ref(false)
+const memoryRuntime = ref({})
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 
@@ -173,6 +227,23 @@ const auditModelOptions = computed(() => {
   return options
 })
 
+const memoryEmbeddingOptions = computed(() => channels.value
+  .filter(channel => channel.is_active !== false)
+  .flatMap(channel => (channel.model_ids || [])
+    .filter(model => model.usage === 'EMBEDDING' && model.model_id && model.is_enabled !== false)
+    .map(model => ({
+      key: `${channel.id}::${model.model_id}`,
+      channel_id: channel.id,
+      model_id: model.model_id,
+      label: `${channel.name} / ${model.model_id}`
+    }))))
+
+const formatMemorySelection = (selection) => {
+  if (!selection?.channel_id || !selection?.model_id) return t('profiles.memory_embedding_not_configured')
+  const channel = channels.value.find(item => item.id === selection.channel_id)
+  return channel ? `${channel.name} / ${selection.model_id}` : `${selection.channel_id} / ${selection.model_id}`
+}
+
 const form = reactive({
   id: null,
   uid: null,
@@ -190,8 +261,30 @@ const knowledgeBaseOptions = computed(() => knowledgeBases.value
     description: item.description || ''
   })))
 
+const currentMemoryEmbedding = computed(() => ({
+  channel_id: memoryRuntime.value.embedding_channel_id ?? form.configs.memory?.embedding_channel_id,
+  model_id: memoryRuntime.value.embedding_model_id ?? form.configs.memory?.embedding_model_id,
+  dimensions: memoryRuntime.value.embedding_dimensions
+}))
+
+const memoryEmbeddingCurrentLabel = computed(() => formatMemorySelection(currentMemoryEmbedding.value))
+
+const memoryPreviewRequiresMigration = computed(() => {
+  const preview = memoryPreview.value
+  const current = preview?.current_active
+  if (!preview || preview.is_initial_selection || !current) return false
+  return current.channel_id !== preview.channel_id
+    || current.model_id !== preview.model_id
+    || current.dimensions !== (preview.actual_dimensions || preview.dimensions)
+})
+
 watch(() => form.uid, () => {
   form.knowledge_base_ids = form.knowledge_base_ids.filter(id => knowledgeBaseOptions.value.some(item => item.value === id))
+})
+
+watch(memoryEmbeddingTargetKey, () => {
+  memoryPreview.value = null
+  memoryConfirmationChecked.value = false
 })
 
 const canSetDefaultProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
@@ -350,6 +443,68 @@ const removeFileSendBlockedExtension = (value) => {
   form.configs.tool.file_send_blocked_extensions = form.configs.tool.file_send_blocked_extensions.filter(item => item !== value)
 }
 
+const previewMemoryEmbedding = async () => {
+  if (dialogType.value !== 'edit' || !form.id) return
+  const target = memoryEmbeddingOptions.value.find(item => item.key === memoryEmbeddingTargetKey.value)
+  if (!target) return ElMessage.warning(t('profiles.memory_embedding_target_placeholder'))
+
+  memoryEmbeddingPreviewing.value = true
+  try {
+    const res = await profileApi.memoryEmbeddingPreview({
+      profile_id: form.id,
+      embedding_channel_id: target.channel_id,
+      embedding_model_id: target.model_id
+    })
+    memoryPreview.value = res.data.data || null
+    memoryConfirmationChecked.value = false
+    memoryConfirmationVisible.value = true
+  } catch (err) {
+    ElMessage.error(err.message || t('profiles.submit_failed'))
+  } finally {
+    memoryEmbeddingPreviewing.value = false
+  }
+}
+
+const closeMemoryConfirmation = () => {
+  memoryConfirmationVisible.value = false
+  memoryConfirmationChecked.value = false
+  memoryPreview.value = null
+}
+
+const confirmMemoryEmbedding = async () => {
+  if (!memoryPreview.value || !memoryConfirmationChecked.value || !form.id) return
+  const target = memoryEmbeddingOptions.value.find(item => item.key === memoryEmbeddingTargetKey.value)
+  if (!target) return
+
+  const currentMemory = form.configs.memory || {}
+  memoryEmbeddingConfirming.value = true
+  try {
+    const res = await profileApi.memoryEmbeddingConfirm({
+      profile_id: form.id,
+      memory: {
+        enabled: currentMemory.enabled,
+        top_k: currentMemory.top_k,
+        candidate_k: currentMemory.candidate_k,
+        result_max_chars: currentMemory.result_max_chars,
+        embedding_channel_id: target.channel_id,
+        embedding_model_id: target.model_id
+      },
+      embedding_selection_signature: memoryPreview.value.embedding_selection_signature
+    })
+    const confirmed = res.data.data || {}
+    if (confirmed.configs?.memory) form.configs.memory = { ...form.configs.memory, ...confirmed.configs.memory }
+    memoryRuntime.value = confirmed.memory_runtime || memoryRuntime.value
+    memoryEmbeddingTargetKey.value = `${target.channel_id}::${target.model_id}`
+    closeMemoryConfirmation()
+    ElMessage.success(t('profiles.memory_embedding_confirm_success'))
+    loadProfiles()
+  } catch (err) {
+    ElMessage.error(err.message || t('profiles.submit_failed'))
+  } finally {
+    memoryEmbeddingConfirming.value = false
+  }
+}
+
 const migrateToolConfig = (toolConfig) => {
   if (!toolConfig || toolConfig.tool_timeout !== undefined) return toolConfig
   if (toolConfig.tool_timeout !== undefined) {
@@ -387,6 +542,9 @@ const showDialog = (type, row = null) => {
   activeTab.value = 'base'
   allowedOperationDirInput.value = ''
   fileSendBlockedExtensionInput.value = ''
+  memoryPreview.value = null
+  memoryConfirmationVisible.value = false
+  memoryConfirmationChecked.value = false
   if (type === 'edit' && row) {
     form.id = row.id
     form.uid = row.uid || null
@@ -411,8 +569,13 @@ const showDialog = (type, row = null) => {
       if (row.configs.security) Object.assign(base.security, migrateSecurityConfig(row.configs.security))
       if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
       if (row.configs.other) Object.assign(base.other, row.configs.other)
+      if (row.configs.memory) Object.assign(base.memory, row.configs.memory)
     }
     form.configs = base
+    memoryRuntime.value = row.memory_runtime || {}
+    memoryEmbeddingTargetKey.value = base.memory.embedding_channel_id && base.memory.embedding_model_id
+      ? `${base.memory.embedding_channel_id}::${base.memory.embedding_model_id}`
+      : ''
   } else {
     form.id = null
     form.uid = users.value[0]?.uid || null
@@ -420,8 +583,18 @@ const showDialog = (type, row = null) => {
     form.prompt_id = null
     form.knowledge_base_ids = []
     form.configs = defaultProfileConfigs()
+    memoryRuntime.value = {}
+    memoryEmbeddingTargetKey.value = ''
   }
   dialogVisible.value = true
+}
+
+const buildConfigsForSave = () => {
+  const configs = JSON.parse(JSON.stringify(form.configs))
+  const active = currentMemoryEmbedding.value
+  configs.memory.embedding_channel_id = active.channel_id || null
+  configs.memory.embedding_model_id = active.model_id || null
+  return configs
 }
 
 const submitForm = async () => {
@@ -462,14 +635,14 @@ const submitForm = async () => {
         name: form.name,
         prompt_id: form.prompt_id,
         knowledge_base_ids: form.knowledge_base_ids,
-        configs: form.configs
+        configs: buildConfigsForSave()
       })
     } else {
       await profileApi.update(form.id, {
         name: form.name,
         prompt_id: form.prompt_id,
         knowledge_base_ids: form.knowledge_base_ids,
-        configs: form.configs
+        configs: buildConfigsForSave()
       })
     }
     ElMessage.success(t('profiles.save_success'))

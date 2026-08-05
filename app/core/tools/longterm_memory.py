@@ -1,6 +1,5 @@
 import hashlib
 import json
-from datetime import datetime
 from typing import Any
 
 from app.core.constants import (
@@ -49,7 +48,7 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                 "memory_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The memory record ID returned by recall.",
+                    "description": "The memory record ID explicitly provided by the user or available in trusted context; recall does not return memory IDs.",
                 },
                 "expected_version": {
                     "type": "integer",
@@ -236,32 +235,9 @@ class LongTermMemoryExecutor(BaseExecutor):
             candidate_k=effective_candidate_k,
             result_max_chars=memory_config.result_max_chars,
         )
-        items = []
-        for item in result.items:
-            updated_at = item.updated_at.isoformat() if isinstance(item.updated_at, datetime) else item.updated_at
-            items.append(
-                {
-                    "memory_id": item.memory_id,
-                    "memory_key": item.memory_key,
-                    "content": item.content,
-                    "memory_type": _value(item.memory_type),
-                    "importance": item.importance,
-                    "scope": item.scope,
-                    "version": item.version,
-                    "updated_at": updated_at,
-                    "source": _value(item.source),
-                    "dense_distance": item.dense_distance,
-                    "dense_rank": item.dense_rank,
-                    "sparse_score": item.sparse_score,
-                    "sparse_rank": item.sparse_rank,
-                    "fusion_score": item.fusion_score,
-                    "truncated": item.truncated,
-                }
-            )
-        payload: dict[str, Any] = {"items": items}
-        if result.error_key:
-            payload["error"] = t(result.error_key)
-        return _json_result("recall", _value(result.status), **payload)
+        if _value(result.status) != "ok":
+            return ""
+        return "\n\n".join(item.content for item in result.items)
 
     async def _mutate(self, operation: str, arguments: dict[str, Any]) -> str:
         memory_service = _get_memory_service()
@@ -317,10 +293,14 @@ class LongTermMemoryExecutor(BaseExecutor):
     async def execute(self, **kwargs: Any) -> str:
         operation, validation_error = validate_longterm_memory_arguments(kwargs)
         if validation_error:
+            if operation == "recall":
+                return ""
             return _json_result(operation, "failed", error=validation_error)
 
         memory_config = self._memory_config()
         if self.db is None or memory_config is None:
+            if operation == "recall":
+                return ""
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
         if operation != "recall" and not self._has_mutation_runtime_context(memory_config):
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
@@ -330,8 +310,12 @@ class LongTermMemoryExecutor(BaseExecutor):
                 return await self._recall(kwargs, memory_config)
             return await self._mutate(operation, kwargs)
         except BaseBusinessException as exc:
+            if operation == "recall":
+                return ""
             return _json_result(operation, "failed", error=exc.render_message())
         except Exception:
+            if operation == "recall":
+                return ""
             return _json_result(operation, "failed", error=t(ERR_INTERNAL_SERVER_ERROR))
 
 

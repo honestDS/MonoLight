@@ -10,6 +10,7 @@ from app.api.v1.channels import router as channel_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.files import router as files_router
 from app.api.v1.knowledge_base import router as knowledge_base_router
+from app.api.v1.memories import router as memories_router
 from app.api.v1.message_platforms import router as message_platform_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
@@ -63,6 +64,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(prompt_router, prefix="/api/v1")
     app.include_router(knowledge_base_router, prefix="/api/v1")
     app.include_router(message_platform_router, prefix="/api/v1")
+    app.include_router(memories_router, prefix="/api/v1")
     app.include_router(scheduled_task_router, prefix="/api/v1")
 
 

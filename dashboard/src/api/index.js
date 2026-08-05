@@ -167,7 +167,31 @@ export const profileApi = {
   setDefault: (id) => request.post(`/profiles/set-default?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),
   delete: (id) => request.post(`/profiles/delete?profile_id=${id}`),
+  memoryEmbeddingPreview: (data) => request.post('/profiles/memory-embedding-preview', data),
+  memoryEmbeddingConfirm: (data) => request.post('/profiles/memory-embedding-confirm', data),
   types: () => request.get('/profiles/types'),
+}
+
+export const memoryApi = {
+  list: (params) => request.get('/memories/list', { params }),
+  get: (id) => request.get('/memories/get', { params: { memory_id: id } }),
+  create: (data) => request.post('/memories/create', data),
+  update: (data) => request.post('/memories/update', data),
+  delete: (data) => request.post('/memories/delete', data),
+  jobs: (params) => request.get('/memories/jobs', { params }),
+  job: (id) => request.get(`/memories/jobs/${id}`),
+  retryJob: (id) => request.post(`/memories/jobs/${id}/retry`),
+  cancelJob: (id) => request.post(`/memories/jobs/${id}/cancel`),
+  history: (id, params) => request.get(`/memories/${id}/history`, { params }),
+  restore: (id, data) => request.post(`/memories/${id}/restore`, data),
+  resumeCurrent: (id, data) => request.post(`/memories/${id}/resume-current`, data),
+  settings: () => request.get('/memories/settings'),
+  reindex: (data) => request.post('/memories/reindex', data),
+  migrations: (params) => request.get('/memories/embedding-migrations', { params }),
+  migration: (id) => request.get(`/memories/embedding-migrations/${id}`),
+  retryMigration: (id) => request.post(`/memories/embedding-migrations/${id}/retry`),
+  cancelMigration: (id) => request.post(`/memories/embedding-migrations/${id}/cancel`),
+  retryCleanup: (id) => request.post(`/memories/collections/${id}/cleanup-retry`)
 }
 
 export const promptApi = {

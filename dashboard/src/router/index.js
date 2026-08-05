@@ -9,6 +9,7 @@ const routes = [
   { path: '/channels', component: () => import('../views/ChannelsView.vue') },
   { path: '/message-platforms', component: () => import('../views/MessagePlatformsView.vue') },
   { path: '/users', component: () => import('../views/UsersView.vue') },
+  { path: '/memories', component: () => import('../views/MemoriesView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },
   { path: '/logs/history', component: () => import('../views/HistoryLogs.vue') }

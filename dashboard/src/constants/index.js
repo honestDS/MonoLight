@@ -6,6 +6,7 @@ export const PAGE_SIZE = 20
 export const routeNameMap = {
   '/': 'common.menu.chat',
   '/users': 'common.menu.users',
+  '/memories': 'common.menu.memories',
   '/knowledge-base': 'common.menu.knowledge_base',
   '/profiles': 'common.menu.system',
   '/channels': 'common.menu.system',
@@ -15,6 +16,11 @@ export const routeNameMap = {
   '/logs/realtime': 'common.menu.logs',
   '/logs/history': 'common.menu.logs'
 }
+
+export const MEMORY_TYPES = ['fact', 'preference', 'project', 'todo', 'constraint']
+export const MEMORY_JOB_STATUSES = ['pending', 'running', 'retry', 'succeeded', 'failed', 'cancelled']
+export const MEMORY_JOB_OPERATIONS = ['create', 'update', 'restore', 'reindex', 'delete_cleanup', 'embedding_migration']
+export const MEMORY_MIGRATION_STATUSES = ['preparing', 'building', 'catching_up', 'validating', 'switching', 'succeeded', 'failed', 'cancelled']
 
 // 默认渠道配置
 const defaultChannelConfig = () => ({
@@ -53,6 +59,14 @@ export const defaultProfileConfigs = () => ({
   other: {
     context_summary_threshold_percent: 90
   },
+  memory: {
+    enabled: false,
+    embedding_channel_id: null,
+    embedding_model_id: null,
+    top_k: 5,
+    candidate_k: 10,
+    result_max_chars: 4000
+  }
 })
 
 // 默认渠道规则

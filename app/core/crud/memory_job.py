@@ -126,9 +126,75 @@ class CRUDLongTermMemoryMutationJob:
         )
         return result.scalars().first()
 
-    async def list_by_uid(self, db: AsyncSession, *, uid: str, skip: int = 0, limit: int = 100) -> list[LongTermMemoryMutationJob]:
-        result = await db.execute(select(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid).order_by(LongTermMemoryMutationJob.created_at.desc(), LongTermMemoryMutationJob.id.desc()).offset(skip).limit(limit))
+    async def list_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        skip: int = 0,
+        limit: int = 100,
+        status: LongTermMemoryMutationStatus | str | None = None,
+        operation: LongTermMemoryMutationOperation | str | None = None,
+        memory_id: int | None = None,
+    ) -> list[LongTermMemoryMutationJob]:
+        conditions: list[Any] = [LongTermMemoryMutationJob.uid == uid]
+        if status is not None:
+            conditions.append(LongTermMemoryMutationJob.status == status)
+        if operation is not None:
+            conditions.append(LongTermMemoryMutationJob.operation == operation)
+        if memory_id is not None:
+            conditions.append(LongTermMemoryMutationJob.memory_id == memory_id)
+        result = await db.execute(
+            select(LongTermMemoryMutationJob)
+            .where(*conditions)
+            .order_by(
+                LongTermMemoryMutationJob.created_at.desc(),
+                LongTermMemoryMutationJob.id.desc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
         return list(result.scalars().all())
+
+    async def get_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        skip: int = 0,
+        limit: int = 100,
+        status: LongTermMemoryMutationStatus | str | None = None,
+        operation: LongTermMemoryMutationOperation | str | None = None,
+        memory_id: int | None = None,
+    ) -> list[LongTermMemoryMutationJob]:
+        return await self.list_by_uid(
+            db,
+            uid=uid,
+            skip=skip,
+            limit=limit,
+            status=status,
+            operation=operation,
+            memory_id=memory_id,
+        )
+
+    async def count(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        status: LongTermMemoryMutationStatus | str | None = None,
+        operation: LongTermMemoryMutationOperation | str | None = None,
+        memory_id: int | None = None,
+    ) -> int:
+        conditions: list[Any] = [LongTermMemoryMutationJob.uid == uid]
+        if status is not None:
+            conditions.append(LongTermMemoryMutationJob.status == status)
+        if operation is not None:
+            conditions.append(LongTermMemoryMutationJob.operation == operation)
+        if memory_id is not None:
+            conditions.append(LongTermMemoryMutationJob.memory_id == memory_id)
+        result = await db.execute(select(func.count()).select_from(LongTermMemoryMutationJob).where(*conditions))
+        return int(result.scalar_one() or 0)
 
     async def list_claimable(
         self,
