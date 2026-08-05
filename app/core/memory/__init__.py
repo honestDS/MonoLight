@@ -1,3 +1,9 @@
+from app.core.memory.chat_history import (
+    ChatHistoryRecallItem,
+    ChatHistoryRecallResult,
+    ChatHistoryRecallService,
+    chat_history_recall_service,
+)
 from app.core.memory.errors import (
     MemoryConflictError,
     MemoryNotFoundError,
@@ -47,6 +53,9 @@ from app.core.memory.service import (
 
 __all__ = [
     "MemoryConflictError",
+    "ChatHistoryRecallItem",
+    "ChatHistoryRecallResult",
+    "ChatHistoryRecallService",
     "MemoryMutationResult",
     "MemoryMutationStatus",
     "MemoryNotFoundError",
@@ -71,6 +80,7 @@ __all__ = [
     "build_memory_content_hash",
     "build_memory_record_snapshot",
     "build_memory_vector_item_id",
+    "chat_history_recall_service",
     "memory_service",
     "normalize_change_evidence",
     "normalize_memory_content",

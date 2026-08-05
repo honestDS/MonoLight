@@ -268,6 +268,14 @@ def _serialize_longterm_memory_log_result(result: str) -> str:
                 safe_items.append({key: item_value for key, item_value in item.items() if key not in {"content", "change_evidence", "query"}})
             safe_payload["items"] = safe_items
             continue
+        if field == "chat_history" and isinstance(value, list):
+            safe_chat_history = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                safe_chat_history.append({key: item[key] for key in ("role", "truncated") if key in item})
+            safe_payload["chat_history"] = safe_chat_history
+            continue
         safe_payload[field] = value
     return json.dumps(safe_payload, ensure_ascii=False, default=str)
 

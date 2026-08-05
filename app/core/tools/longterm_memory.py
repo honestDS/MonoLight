@@ -28,8 +28,13 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
             "Use a concise normalized retrieval expression for recall, and keep each memory to one "
             "independently maintainable concrete topic and property. "
             "Use separate create calls for different entities, topics, or unrelated facts. "
-            "Recall returns a compact JSON object whose items contain only the exact memory identifiers, "
-            "memory key, type, and content in final ranking order. "
+            "Recall returns a compact JSON object whose items always contain all published long-term memory "
+            "results first, with only the exact memory identifiers, memory key, type, and content in final "
+            "ranking order. When available, chat_history follows as secondary BM25 matches from "
+            "the current user's ordinary USER/ASSISTANT TEXT records; each chat_history item contains only role and "
+            "content, with optional truncated:true. Chat history is context only and must never be used for "
+            "update or delete, and it never replaces or displaces an items result. Assistant-role content is "
+            "not a user fact; historical user content may be stale and cannot alone trigger a memory mutation. "
             "For update, use memory_id and expected_version as a pair only when they come from the same exact "
             "recall item, are explicitly supplied by the user, or are supplied by other trusted context that "
             "binds them to the exact topic. For delete, memory_id is required and expected_version is optional; "
@@ -159,7 +164,7 @@ def _empty_recall_result() -> str:
     return json.dumps({"items": []}, ensure_ascii=False, separators=(",", ":"))
 
 
-def _format_recall_items(items: Any) -> str:
+def _format_recall_items(items: Any, chat_items: Any) -> str:
     formatted_items = []
     for item in items:
         formatted_item = {
@@ -172,7 +177,20 @@ def _format_recall_items(items: Any) -> str:
         if item.truncated:
             formatted_item["truncated"] = True
         formatted_items.append(formatted_item)
-    return json.dumps({"items": formatted_items}, ensure_ascii=False, separators=(",", ":"))
+
+    payload = {"items": formatted_items}
+    formatted_chat_items = []
+    for item in chat_items:
+        formatted_item = {
+            "role": _value(item.role),
+            "content": item.content,
+        }
+        if item.truncated:
+            formatted_item["truncated"] = True
+        formatted_chat_items.append(formatted_item)
+    if formatted_chat_items:
+        payload["chat_history"] = formatted_chat_items
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _field_error(field: str) -> str:
@@ -211,6 +229,12 @@ def _get_memory_service() -> Any:
     from app.core.memory.service import memory_service
 
     return memory_service
+
+
+def _get_chat_history_recall_service() -> Any:
+    from app.core.memory.chat_history import chat_history_recall_service
+
+    return chat_history_recall_service
 
 
 class LongTermMemoryExecutor(BaseExecutor):
@@ -264,20 +288,43 @@ class LongTermMemoryExecutor(BaseExecutor):
         return getattr(self.cfg, "memory", None)
 
     async def _recall(self, arguments: dict[str, Any], memory_config: Any) -> str:
-        memory_service = _get_memory_service()
         effective_top_k = arguments.get("top_k", memory_config.top_k)
         effective_candidate_k = max(memory_config.candidate_k, effective_top_k)
-        result = await memory_service.recall(
-            db=self.db,
-            uid=self.uid,
-            query=arguments["query"],
-            top_k=effective_top_k,
-            candidate_k=effective_candidate_k,
-            result_max_chars=memory_config.result_max_chars,
-        )
-        if _value(result.status) != "ok":
-            return _empty_recall_result()
-        return _format_recall_items(result.items)
+        memory_items = ()
+        try:
+            memory_service = _get_memory_service()
+            result = await memory_service.recall(
+                db=self.db,
+                uid=self.uid,
+                query=arguments["query"],
+                top_k=effective_top_k,
+                candidate_k=effective_candidate_k,
+                result_max_chars=memory_config.result_max_chars,
+            )
+            if _value(result.status) == "ok":
+                memory_items = result.items or ()
+        except Exception:
+            memory_items = ()
+
+        active_content_chars = sum(len(getattr(item, "content", "")) for item in memory_items)
+        remaining_chat_chars = memory_config.result_max_chars - active_content_chars
+        chat_items = ()
+        if remaining_chat_chars > 0:
+            try:
+                chat_history_service = _get_chat_history_recall_service()
+                chat_result = await chat_history_service.recall(
+                    db=self.db,
+                    uid=self.uid,
+                    query=arguments["query"],
+                    top_k=effective_top_k,
+                    result_max_chars=remaining_chat_chars,
+                    before_message_id=self._runtime_source_message_id(),
+                )
+                chat_items = getattr(chat_result, "items", ()) or ()
+            except Exception:
+                chat_items = ()
+
+        return _format_recall_items(memory_items, chat_items)
 
     async def _mutate(self, operation: str, arguments: dict[str, Any]) -> str:
         memory_service = _get_memory_service()

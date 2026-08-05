@@ -263,6 +263,27 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit).execution_options(populate_existing=True))
         return result.scalars().all()
 
+    async def list_recallable_chat_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        before_message_id: int | None = None,
+        page_after_id: int | None = None,
+        limit: int = 500,
+    ) -> list[Message]:
+        if not 1 <= limit <= 500:
+            raise ValueError(t(ERR_VALUE_MUST_BE_BETWEEN, field="limit", minimum=1, maximum=500))
+
+        stmt = select(Message).where(Message.uid == uid).where(Message.type == MessageType.TEXT).where(Message.role.in_((MessageRole.USER, MessageRole.ASSISTANT))).where(Message.content.is_not(None)).where(func.trim(Message.content) != "")
+        if before_message_id is not None:
+            stmt = stmt.where(Message.id < before_message_id)
+        if page_after_id is not None:
+            stmt = stmt.where(Message.id > page_after_id)
+
+        result = await db.execute(stmt.order_by(Message.id.asc()).limit(limit))
+        return list(result.scalars().all())
+
     async def get_history_backward_by_id(
         self,
         db: AsyncSession,
