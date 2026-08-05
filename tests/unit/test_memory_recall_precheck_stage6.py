@@ -7,6 +7,7 @@ from app.core.dispatchers import memory_recall as precheck_module
 from app.core.dispatchers import memory_recall_persistence as persistence_module
 from app.core.dispatchers.memory_recall_types import MemoryRecallContext
 from app.core.exceptions import LLMException
+from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
@@ -250,6 +251,18 @@ async def test_precheck_invalid_then_valid_corrects_once_without_polluting_main_
     assert requests[1][0][2].tool_call_id == "invalid-call"
     assert json.loads(requests[1][0][2].content) == {"status": "ignored"}
     assert requests[1][0][3].role == MessageRole.USER
+    correction = requests[1][0][3].content
+    assert LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT in correction
+    assert LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT.isascii()
+    correction_text = correction.lower()
+    assert "exactly one structured tool call" in correction_text
+    assert "the operation must be recall" in correction_text
+    assert "concise, normalized long-term-memory retrieval expression" in correction_text
+    assert "do not copy the full user message" in correction_text
+    assert "remove request actions" in correction_text
+    assert "no assistant prose or refusal" in correction_text
+    assert "do not call create, update, or delete" in correction_text
+    assert "any other operation or tool" in correction_text
     assert [message.id for message in context.messages] == [1]
     assert [message.id for message in context.turn_messages] == []
     assert [message.tool_calls[0].id for message in saved] == ["valid-call"]

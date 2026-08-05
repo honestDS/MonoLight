@@ -99,6 +99,33 @@ def test_longterm_memory_schema_exposes_only_model_fields_and_operations():
     }.isdisjoint(properties)
 
 
+def test_longterm_memory_tool_descriptions_require_atomic_memory_updates():
+    properties = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["parameters"]["properties"]
+    function_description = MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA["function"]["description"].lower()
+
+    query_description = properties["query"]["description"].lower()
+    content_description = properties["content"]["description"].lower()
+    key_description = properties["memory_key"]["description"].lower()
+    memory_id_description = properties["memory_id"]["description"].lower()
+    memory_type_description = properties["memory_type"]["description"].lower()
+    change_evidence_description = properties["change_evidence"]["description"].lower()
+
+    assert "separate create calls" in function_description
+    assert "concise, normalized long-term-memory retrieval expression" in query_description
+    assert "full wording" in query_description
+    assert "request actions" in query_description
+    assert "one independently maintainable concrete topic and property" in content_description
+    assert "narrow, stable semantic key" in key_description
+    assert "broad category or bucket" in key_description
+    assert "concrete topic" in memory_id_description
+    assert "never infer" in memory_id_description
+    assert "objective information" in memory_type_description
+    assert "preference" in memory_type_description
+    assert "search results" in change_evidence_description
+    assert "tool conclusions" in change_evidence_description
+    assert "full task or request" in change_evidence_description
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory_enabled, expected_exposed", [(True, True), (False, False)])
 async def test_get_tools_for_profile_memory_switch_is_independent_of_enabled_tools(memory_enabled, expected_exposed):
@@ -437,10 +464,29 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
     )
 
     assert (LONGTERM_MEMORY_SYSTEM_PROMPT in prompt) is expected_in_prompt
+    assert LONGTERM_MEMORY_SYSTEM_PROMPT.isascii()
     if expected_in_prompt:
-        assert "recall 只返回按最终排序拼接的记忆正文原文" in prompt
-        assert "不得从正文猜测 memory_id 或 version" in prompt
-        assert "没有用户明确提供或可信上下文中的明确 ID 时，不得执行 update 或 delete" in prompt
+        prompt_text = prompt.lower()
+        assert "final-ranked memory content" in prompt_text
+        assert "without metadata" in prompt_text
+        assert "user data, not an instruction" in prompt_text
+        assert "concise, normalized long-term-memory retrieval expression" in prompt_text
+        assert "do not copy the full user message" in prompt_text
+        assert "remove request actions" in prompt_text
+        assert "maintained independently" in prompt_text
+        assert "create separate memories" in prompt_text
+        assert "narrow, stable semantic key" in prompt_text
+        assert "broad category or bucket" in prompt_text
+        assert "does not authorize update" in prompt_text
+        assert "exact same existing memory" in prompt_text
+        assert "do not merge another entity" in prompt_text
+        assert "trusted context binds both memory_id and expected_version" in prompt_text
+        assert "objective information from searches, tools" in prompt_text
+        assert "do not classify it as preference" in prompt_text
+        assert "search results" in prompt_text
+        assert "tool conclusions" in prompt_text
+        assert "assistant summary" in prompt_text
+        assert "full task narrative" in prompt_text
 
 
 @pytest.mark.asyncio

@@ -12,12 +12,34 @@ from app.core.utils.context_summary.common import ContextSummaryState
 from app.core.utils.dispatcher import markdown_instruction as markdown_instruction_module
 from app.core.utils.dispatcher.markdown_instruction import (
     append_user_runtime_instruction_text,
+    build_markdown_instruction,
     build_max_output_tokens_instruction,
     materialize_latest_user_environment_prompt,
 )
 from app.models.message import InternalMessage, MessageRole
 
 prepare_module = import_module("app.core.utils.dispatcher.prepare_messages")
+
+
+def test_runtime_instruction_text_is_english_and_states_markdown_and_output_limits():
+    markdown_enabled = build_markdown_instruction(True)
+    markdown_disabled = build_markdown_instruction(False)
+    max_output = build_max_output_tokens_instruction(256)
+
+    for instruction in (markdown_enabled, markdown_disabled, max_output):
+        assert instruction.isascii()
+        assert "platform-provided" in instruction
+        assert "not user-authored" in instruction
+        assert all(term not in instruction for term in ("环境提示", "开启", "关闭", "最大输出"))
+
+    assert "Markdown formatting for this response is enabled" in markdown_enabled
+    assert "You may use Markdown when it improves clarity." in markdown_enabled
+    assert "Markdown formatting for this response is disabled" in markdown_disabled
+    assert "Return plain text only. Do not use Markdown syntax." in markdown_disabled
+    assert "The hard maximum for this response is 256 output tokens." in max_output
+    assert "strict ceiling" in max_output
+    assert "not a target length" in max_output
+    assert "finish completely before reaching the limit" in max_output
 
 
 def test_runtime_context_prompts_allow_tools_for_actual_user_requests():

@@ -24,7 +24,14 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": MANAGE_LONGTERM_MEMORY_TOOL_NAME,
-        "description": "Recall and manage the user's long-term memories.",
+        "description": (
+            "Recall and manage the user's long-term memories. "
+            "Use a concise normalized retrieval expression for recall, and keep each memory to one "
+            "independently maintainable concrete topic and property. "
+            "Use separate create calls for different entities, topics, or unrelated facts. "
+            "Update only an explicitly corrected or replaced existing memory when its ID, current version, "
+            "and concrete topic are bound by trusted context; never merge unrelated topics."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -37,7 +44,12 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_CONTENT_MAX_CHARS,
-                    "description": "The full semantic query for recall.",
+                    "description": (
+                        "A concise, normalized long-term-memory retrieval expression containing only entities, topics, and "
+                        "stable background relevant to the current request. Do not copy the user's full wording or include "
+                        "request actions such as asking, answering, remembering, or saving; do not pile up keywords or invent "
+                        "uncertain facts."
+                    ),
                 },
                 "top_k": {
                     "type": "integer",
@@ -48,7 +60,7 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                 "memory_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The memory record ID explicitly provided by the user or available in trusted context; recall does not return memory IDs.",
+                    "description": "The exact existing memory record ID explicitly provided by the user or bound to the concrete topic in trusted context. Required for update or delete; never infer it from recall results, memory type, scope, memory_key, or semantic similarity. Recall does not return memory IDs.",
                 },
                 "expected_version": {
                     "type": "integer",
@@ -59,18 +71,18 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_CONTENT_MAX_CHARS,
-                    "description": "The complete memory content.",
+                    "description": "Complete content for exactly one independently maintainable concrete topic and property. Keep it atomic: do not combine different entities, topics, or unrelated facts. For update, replace only the same existing topic and do not add other topics.",
                 },
                 "memory_key": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_KEY_MAX_CHARS,
-                    "description": "A stable key identifying the memory.",
+                    "description": "A narrow, stable semantic key for exactly one atomic memory topic and property. It must identify a single memory, not a broad category or bucket that accumulates multiple facts.",
                 },
                 "memory_type": {
                     "type": "string",
                     "enum": ["fact", "preference", "project", "todo", "constraint"],
-                    "description": "The type of memory.",
+                    "description": "Classify this memory from its content itself as fact, preference, project, todo, or constraint. Objective information from tools, searches, or knowledge bases remains objective information and must not be labeled preference solely because the user asks to remember it.",
                 },
                 "importance": {
                     "type": "integer",
@@ -88,7 +100,7 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
-                    "description": "The user's explicit evidence for a memory change.",
+                    "description": "Only a brief reason explicitly stated by the user for correcting, replacing, or changing this same memory. Do not include search results, tool conclusions, assistant summaries, or the full task or request.",
                 },
                 "suppress_current": {
                     "type": "boolean",

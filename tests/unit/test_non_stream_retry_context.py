@@ -481,9 +481,9 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     )
 
     assert [request["model_id"] for request in model_requests] == ["model-1", "model-2"]
-    assert "最大输出 Token 数为 1024" in model_requests[0]["messages"][0].content
-    assert "最大输出 Token 数为 256" in model_requests[1]["messages"][0].content
-    assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
+    assert "The hard maximum for this response is 1024 output tokens." in model_requests[0]["messages"][0].content
+    assert "The hard maximum for this response is 256 output tokens." in model_requests[1]["messages"][0].content
+    assert "The hard maximum for this response is 1024 output tokens." not in model_requests[1]["messages"][0].content
     assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [None]
@@ -626,9 +626,9 @@ async def test_stream_retry_refreshes_max_tokens_instruction_for_new_channel(mon
 
     assert [request["model_id"] for request in model_requests] == ["model-1", "model-2"]
     assert channel_call_contexts == ["chat_dispatch_stream", "chat_dispatch_stream_retry"]
-    assert "最大输出 Token 数为 1024" in model_requests[0]["messages"][0].content
-    assert "最大输出 Token 数为 256" in model_requests[1]["messages"][0].content
-    assert "最大输出 Token 数为 1024" not in model_requests[1]["messages"][0].content
+    assert "The hard maximum for this response is 1024 output tokens." in model_requests[0]["messages"][0].content
+    assert "The hard maximum for this response is 256 output tokens." in model_requests[1]["messages"][0].content
+    assert "The hard maximum for this response is 1024 output tokens." not in model_requests[1]["messages"][0].content
     assert persisted_environment_prompts[-1] == (1, build_max_output_tokens_instruction(256))
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [datetime(2026, 7, 21, 6, 1, tzinfo=UTC)]

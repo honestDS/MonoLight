@@ -8,8 +8,8 @@ from app.models.message import InternalMessage, MessageRole, TextPart
 
 
 def build_markdown_instruction(enable_markdown: bool) -> str:
-    status = "开启" if enable_markdown else "关闭"
-    requirement = "可以使用 Markdown 格式组织回答。" if enable_markdown else "请使用纯文本回答，避免 Markdown 标记。"
+    status = "enabled" if enable_markdown else "disabled"
+    requirement = "You may use Markdown when it improves clarity." if enable_markdown else "Return plain text only. Do not use Markdown syntax."
     return "\n\n" + MARKDOWN_FORMAT_INSTRUCTION_PROMPT.format(status=status, requirement=requirement)
 
 
