@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -29,7 +30,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         memory_store_crud,
     )
     from app.core.crud.memory_job import memory_job_crud
-    from app.core.memory_jobs import maintenance_vector
+    from app.core.memory_jobs import maintenance_vector, migration_handler
     from app.core.memory_jobs.executor import MemoryJobExecutor, MemoryJobRetryableError
     from app.core.memory_jobs.manager import memory_job_manager
     from app.core.memory_jobs.migration_handler import handle_embedding_migration
@@ -47,6 +48,59 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
 
 
 pytest_plugins = ("tests.unit.memory_stage5_fixture",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        LongTermMemoryEmbeddingDeltaAction.DELETE,
+        LongTermMemoryEmbeddingDeltaAction.SUPPRESS,
+    ],
+)
+async def test_migration_removal_delta_does_not_require_current_record(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
+    action: LongTermMemoryEmbeddingDeltaAction,
+) -> None:
+    uid = f"stage5-removal-delta-{action.value}"
+    collection_name = f"stage5-removal-target-{action.value}"
+    record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key=f"removal-{action.value}",
+        content=f"removal content {action.value}",
+        vector_item_id=f"removal-vector-{action.value}",
+    )
+    assert record.id is not None
+    await vector_backend.get_or_create_collection(collection_name)
+    await vector_backend.upsert(
+        collection_name,
+        [record.vector_item_id],
+        [record.content],
+        [[0.1, 0.2, 0.3]],
+        [{"memory_id": record.id, "version": record.version}],
+    )
+    async with memory_session_factory() as db:
+        deleted = await memory_record_crud.delete(
+            db,
+            uid=uid,
+            memory_id=record.id,
+        )
+    assert deleted is not None
+
+    context = SimpleNamespace(
+        session_factory=memory_session_factory,
+        job=SimpleNamespace(uid=uid),
+    )
+    delta = SimpleNamespace(memory_id=record.id, action=action)
+    await migration_handler._apply_migration_delta(
+        context,
+        delta,
+        {"collection": collection_name},
+    )
+
+    assert vector_backend.collections[collection_name]["items"] == {}
 
 
 async def _prepare_embedding_migration(

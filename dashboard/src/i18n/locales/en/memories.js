@@ -82,6 +82,7 @@ export default {
   restore_confirm: 'A new version will be created from the current version. Continue?',
   restore_success: 'Restore request submitted',
   no_history: 'No published history',
+  deleted_history_read_only: 'History after deletion is view-only and cannot be restored',
   job_id: 'Job ID',
   operation: 'Operation',
   status: 'Status',

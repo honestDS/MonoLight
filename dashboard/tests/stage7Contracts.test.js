@@ -234,7 +234,7 @@ const requiredMemoryKeys = [
   'suppress_current', 'suppress_hint', 'save', 'cancel', 'required', 'invalid_importance',
   'accepted_processing', 'delete_confirm', 'save_failed', 'load_failed', 'delete_success',
   'operation_success', 'operation_failed', 'details', 'history_title', 'revision_version', 'published_at',
-  'restore', 'restore_confirm', 'restore_success', 'no_history', 'job_id', 'operation', 'status', 'attempt',
+  'restore', 'restore_confirm', 'restore_success', 'no_history', 'deleted_history_read_only', 'job_id', 'operation', 'status', 'attempt',
   'error', 'retry', 'cancel_job', 'retry_confirm', 'cancel_confirm', 'retry_success', 'cancel_success',
   'migration_detail', 'migration_job', 'snapshot', 'delta', 'total_count', 'success_count', 'failure_count',
   'target', 'migration_retry', 'migration_cancel', 'migration_retry_success', 'migration_cancel_success',
@@ -253,4 +253,13 @@ test('English and Chinese memories namespaces contain the complete stage 7 key s
     }
   }
   assert.deepEqual(Object.keys(enMemories).sort(), Object.keys(zhMemories).sort())
+})
+
+test('MemoriesView exposes deleted history as view-only from delete jobs', () => {
+  assert.match(memoriesSource, /const historyReadOnly = ref\(false\)/)
+  assert.match(memoriesSource, /const canShowDeletedHistory = \(row\) => row\.operation === 'delete_cleanup'/)
+  assert.match(memoriesSource, /row\?\.result\?\.record_snapshot/)
+  assert.match(memoriesSource, /row\?\.payload\?\.record_snapshot/)
+  assert.match(memoriesSource, /v-if="!historyReadOnly"[\s\S]*restoreRevision\(row\)/)
+  assert.match(memoriesSource, /memories\.deleted_history_read_only/)
 })

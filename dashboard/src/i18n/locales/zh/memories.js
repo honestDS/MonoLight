@@ -82,6 +82,7 @@ export default {
   restore_confirm: '将以当前版本为基础创建新版本恢复，确定继续吗？',
   restore_success: '恢复请求已提交',
   no_history: '暂无已发布历史',
+  deleted_history_read_only: '删除后的历史仅供查看，不能恢复',
   job_id: '作业 ID',
   operation: '操作',
   status: '状态',

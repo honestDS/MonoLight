@@ -461,6 +461,19 @@ class CRUDLongTermMemoryEmbeddingSelectionToken:
 
 
 class CRUDLongTermMemoryRecord:
+    async def get_next_memory_id(self, db: AsyncSession, *, minimum_id: int = 1) -> int:
+        result = await db.execute(
+            select(
+                select(func.max(LongTermMemoryRecord.id)).scalar_subquery(),
+                select(func.max(LongTermMemoryRevision.memory_id)).scalar_subquery(),
+                select(func.max(LongTermMemoryMutationJob.memory_id)).scalar_subquery(),
+                select(func.max(LongTermMemoryEmbeddingDelta.memory_id)).scalar_subquery(),
+            )
+        )
+        max_values = result.one()
+        next_id = max((int(value) for value in max_values if value is not None), default=0) + 1
+        return max(minimum_id, next_id)
+
     async def get_by_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> LongTermMemoryRecord | None:
         result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id).execution_options(populate_existing=True))
         return result.scalars().first()
@@ -592,24 +605,26 @@ class CRUDLongTermMemoryRecord:
         *,
         uid: str,
         job_id: int,
+        memory_id: int | None = None,
         commit: bool = True,
     ) -> LongTermMemoryRecord:
         now = await get_database_time(db)
-        record = LongTermMemoryRecord.model_validate(
-            {
-                "uid": uid,
-                "memory_key": None,
-                "content": "",
-                "content_hash": None,
-                "version": 0,
-                "indexed_version": 0,
-                "is_active": False,
-                "pending_mutation_job_id": job_id,
-                "index_status": LongTermMemoryRecordIndexStatus.PENDING,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
+        values = {
+            "uid": uid,
+            "memory_key": None,
+            "content": "",
+            "content_hash": None,
+            "version": 0,
+            "indexed_version": 0,
+            "is_active": False,
+            "pending_mutation_job_id": job_id,
+            "index_status": LongTermMemoryRecordIndexStatus.PENDING,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if memory_id is not None:
+            values["id"] = memory_id
+        record = LongTermMemoryRecord.model_validate(values)
         db.add(record)
         await _finish(db, commit=commit)
         await db.refresh(record)
@@ -881,6 +896,29 @@ class CRUDLongTermMemoryRecord:
                 updated_at=now,
             )
             .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def delete_tombstone_after_cleanup(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        job_id: int,
+        expected_version: int,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(
+            delete(LongTermMemoryRecord).where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.version == expected_version,
+                LongTermMemoryRecord.is_active.is_(False),
+                LongTermMemoryRecord.deleted_at.is_not(None),
+            )
         )
         await _finish(db, commit=commit)
         return (result.rowcount or 0) == 1

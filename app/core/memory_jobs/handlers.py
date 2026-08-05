@@ -47,8 +47,10 @@ from app.core.memory import (
     MemoryValidationError,
     append_memory_embedding_delta,
     build_memory_active_mutation_key,
+    build_memory_record_snapshot,
     build_memory_vector_item_id,
     normalize_memory_publication_payload,
+    normalize_memory_record_snapshot,
 )
 from app.core.memory_jobs.executor import (
     Handler,
@@ -103,6 +105,7 @@ _PUBLICATION_PAYLOAD_FIELDS = frozenset(
 )
 _DELETE_CLEANUP_PAYLOAD_FIELDS = frozenset(
     {
+        "record_snapshot",
         "version",
         "source",
         "source_id",
@@ -143,6 +146,7 @@ class _MemoryDeleteCleanupSnapshot:
     active_mutation_key: str
     active_collection_name: str
     vector_item_id: str | None
+    record_snapshot: dict[str, Any]
 
 
 def _deterministic(message_key: str, **kwargs: Any) -> MemoryJobDeterministicError:
@@ -231,6 +235,13 @@ def _validate_delete_payload(job: LongTermMemoryMutationJob, expected_version: i
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     if payload["version"] != expected_version:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    try:
+        record_snapshot = normalize_memory_record_snapshot(payload["record_snapshot"])
+    except (MemoryValidationError, KeyError, TypeError, ValueError) as exc:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+    if not isinstance(record_snapshot, Mapping) or record_snapshot.get("version") != expected_version:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    payload["record_snapshot"] = dict(record_snapshot)
     try:
         LongTermMemorySource(payload["source"])
     except (TypeError, ValueError) as exc:
@@ -411,7 +422,14 @@ async def _prepare_publication(
             if operation == LongTermMemoryMutationOperation.CREATE and memory_id is None:
                 if await memory_record_crud.count_active(db, uid=uid) >= max_active_records:
                     raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
-                placeholder = await memory_record_crud.create_pending_placeholder(db, uid=uid, job_id=job_id, commit=False)
+                next_memory_id = await memory_record_crud.get_next_memory_id(db, minimum_id=job_id)
+                placeholder = await memory_record_crud.create_pending_placeholder(
+                    db,
+                    uid=uid,
+                    job_id=job_id,
+                    memory_id=next_memory_id,
+                    commit=False,
+                )
                 if placeholder.id is None:
                     raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
                 if not await memory_job_crud.assign_create_memory_id(
@@ -507,6 +525,9 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
             record = await memory_record_crud.get_by_id(db, uid=claim.uid, memory_id=memory_id)
             if record is None or record.pending_mutation_job_id != job_id or record.version != expected_version or record.is_active or record.deleted_at is None:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            current_snapshot = build_memory_record_snapshot(record)
+            if current_snapshot != payload["record_snapshot"]:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
             await db.commit()
             return _MemoryDeleteCleanupSnapshot(
                 uid=claim.uid,
@@ -517,6 +538,7 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
                 active_mutation_key=active_key,
                 active_collection_name=collection_name,
                 vector_item_id=getattr(record, "vector_item_id", None),
+                record_snapshot=current_snapshot,
             )
         except Exception:
             await db.rollback()
@@ -871,15 +893,19 @@ async def _finalize_delete_cleanup(
             )
             memory_id = _require_positive_int(claim.memory_id)
             expected_version = _require_non_negative_int(claim.expected_version)
-            _validate_delete_payload(claim, expected_version)
+            payload = _validate_delete_payload(claim, expected_version)
             if memory_id != snapshot.memory_id or expected_version != snapshot.expected_version:
                 raise _deterministic(ERR_MEMORY_VERSION_CONFLICT)
             if claim.active_mutation_key != snapshot.active_mutation_key:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            if payload["record_snapshot"] != snapshot.record_snapshot:
+                raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
             record = await memory_record_crud.get_by_id(db, uid=snapshot.uid, memory_id=memory_id)
             if record is None or record.pending_mutation_job_id != snapshot.job_id or record.version != expected_version or record.is_active or record.deleted_at is None:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-            if not await memory_record_crud.finalize_deleted_tombstone(
+            if build_memory_record_snapshot(record) != snapshot.record_snapshot:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            if not await memory_record_crud.delete_tombstone_after_cleanup(
                 db,
                 uid=snapshot.uid,
                 memory_id=memory_id,
@@ -893,6 +919,7 @@ async def _finalize_delete_cleanup(
                 "version": expected_version,
                 "vector_item_id": snapshot.vector_item_id,
                 "operation": LongTermMemoryMutationOperation.DELETE_CLEANUP.value,
+                "record_snapshot": snapshot.record_snapshot,
             }
             if not await memory_job_crud.mark_succeeded(
                 db,

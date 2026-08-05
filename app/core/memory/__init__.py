@@ -25,10 +25,12 @@ from app.core.memory.management import (
 )
 from app.core.memory.normalization import (
     build_memory_content_hash,
+    build_memory_record_snapshot,
     normalize_change_evidence,
     normalize_memory_content,
     normalize_memory_key,
     normalize_memory_publication_payload,
+    normalize_memory_record_snapshot,
     normalize_memory_scope,
 )
 from app.core.memory.results import (
@@ -68,12 +70,14 @@ __all__ = [
     "build_memory_active_mutation_key",
     "build_memory_collection_name",
     "build_memory_content_hash",
+    "build_memory_record_snapshot",
     "build_memory_vector_item_id",
     "memory_service",
     "normalize_change_evidence",
     "normalize_memory_content",
     "normalize_memory_key",
     "normalize_memory_publication_payload",
+    "normalize_memory_record_snapshot",
     "normalize_memory_scope",
     "retry_embedding_migration",
     "retry_job",

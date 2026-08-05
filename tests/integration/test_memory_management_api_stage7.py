@@ -461,6 +461,53 @@ async def test_memory_history_restore_and_resume_current(api_app: tuple[FastAPI,
 
 
 @pytest.mark.asyncio
+async def test_deleted_memory_history_is_read_only_without_current_record(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, content="deleted history content")
+    record_id = record.id
+    await memory_revision_crud.create(
+        db_session,
+        uid="user-a",
+        memory_id=record_id,
+        version=1,
+        memory_key=record.memory_key,
+        memory_type=record.memory_type,
+        importance=record.importance,
+        scope=record.scope,
+        content=record.content,
+        content_hash=record.content_hash,
+        source=record.source,
+        commit=False,
+    )
+    deleted = await memory_record_crud.delete(
+        db_session,
+        uid="user-a",
+        memory_id=record_id,
+        commit=False,
+    )
+    assert deleted is not None
+    await db_session.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        history = _assert_standard(
+            await client.get(f"/api/v1/memories/{record_id}/history"),
+            200,
+        )
+        restore = await client.post(
+            f"/api/v1/memories/{record_id}/restore",
+            json={"revision_version": 1, "expected_version": 1},
+        )
+
+    _assert_page(history, total=1)
+    assert history["data"]["items"][0]["content"] == "deleted history content"
+    _assert_standard(restore, 404)
+
+
+@pytest.mark.asyncio
 async def test_memory_settings_and_reindex_api_with_state_guard(api_app: tuple[FastAPI, SimpleNamespace], db_session: AsyncSession) -> None:
     app, _current_user = api_app
     await _create_store(db_session)

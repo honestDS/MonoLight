@@ -98,7 +98,7 @@
                 <el-button size="small" type="primary" @click="openEditor(row)" :disabled="Boolean(row.pending_mutation_job_id || row.deleted_at || row.is_active === false)">{{ $t('memories.edit') }}</el-button>
                 <el-button size="small" @click="showHistory(row)">{{ $t('memories.history') }}</el-button>
                 <el-button v-if="row.suppress_recall && !row.pending_mutation_job_id" size="small" type="warning" @click="resumeCurrent(row)">{{ $t('memories.resume_current') }}</el-button>
-                <el-button size="small" type="danger" @click="deleteMemory(row)">{{ $t('memories.delete') }}</el-button>
+                <el-button size="small" type="danger" @click="deleteMemory(row)" :disabled="Boolean(row.deleted_at)">{{ $t('memories.delete') }}</el-button>
               </div>
             </template>
           </el-table-column>
@@ -114,7 +114,7 @@
           <el-button type="primary" @click="resetAndLoadJobs">{{ $t('common.confirm') }}</el-button><el-button @click="loadJobs">{{ $t('memories.refresh') }}</el-button>
         </div>
         <el-table :data="jobs" v-loading="jobsLoading" border stripe>
-          <el-table-column prop="id" :label="$t('memories.job_id')" width="90" align="center" /><el-table-column prop="operation" :label="$t('memories.operation')" width="170"><template #default="{ row }">{{ operationLabel(row.operation) }}</template></el-table-column><el-table-column prop="memory_id" :label="$t('memories.memory_id')" width="100" align="center" /><el-table-column :label="$t('memories.status')" width="120" align="center"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag></template></el-table-column><el-table-column prop="attempt_count" :label="$t('memories.attempt')" width="90" align="center" /><el-table-column :label="$t('memories.error')" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ row.error || row.result?.error || '-' }}</template></el-table-column><el-table-column :label="$t('memories.created_at')" width="170"><template #default="{ row }">{{ formatTime(row.created_at) }}</template></el-table-column><el-table-column :label="$t('memories.actions')" width="190" fixed="right" align="center"><template #default="{ row }"><div class="action-buttons"><el-button v-if="canRetry(row)" size="small" type="warning" @click="retryJob(row)">{{ $t('memories.retry') }}</el-button><el-button v-if="canCancel(row)" size="small" type="danger" @click="cancelJob(row)">{{ $t('memories.cancel_job') }}</el-button><el-button size="small" type="info" @click="showJob(row)">{{ $t('memories.view') }}</el-button></div></template></el-table-column>
+          <el-table-column prop="id" :label="$t('memories.job_id')" width="90" align="center" /><el-table-column prop="operation" :label="$t('memories.operation')" width="170"><template #default="{ row }">{{ operationLabel(row.operation) }}</template></el-table-column><el-table-column prop="memory_id" :label="$t('memories.memory_id')" width="100" align="center" /><el-table-column :label="$t('memories.status')" width="120" align="center"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag></template></el-table-column><el-table-column prop="attempt_count" :label="$t('memories.attempt')" width="90" align="center" /><el-table-column :label="$t('memories.error')" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ row.error || row.result?.error || '-' }}</template></el-table-column><el-table-column :label="$t('memories.created_at')" width="170"><template #default="{ row }">{{ formatTime(row.created_at) }}</template></el-table-column><el-table-column :label="$t('memories.actions')" width="250" fixed="right" align="center"><template #default="{ row }"><div class="action-buttons"><el-button v-if="canRetry(row)" size="small" type="warning" @click="retryJob(row)">{{ $t('memories.retry') }}</el-button><el-button v-if="canCancel(row)" size="small" type="danger" @click="cancelJob(row)">{{ $t('memories.cancel_job') }}</el-button><el-button v-if="canShowDeletedHistory(row)" size="small" @click="showDeletedHistory(row)">{{ $t('memories.history') }}</el-button><el-button size="small" type="info" @click="showJob(row)">{{ $t('memories.view') }}</el-button></div></template></el-table-column>
         </el-table>
         <div class="table-footer"><span>{{ $t('common.total_items', { total: jobTotal }) }}</span><el-pagination v-model:current-page="jobPage" v-model:page-size="jobPageSize" :total="jobTotal" :page-sizes="[10, 20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="loadJobs" @size-change="resetAndLoadJobs" /></div>
       </el-tab-pane>
@@ -147,7 +147,8 @@
     </el-dialog>
 
     <el-dialog v-model="historyVisible" :title="$t('memories.history_title', { key: selectedMemory?.memory_key || '' })" width="900px" class="standard-dialog" align-center>
-      <el-table :data="history" v-loading="historyLoading" border stripe><el-table-column prop="version" :label="$t('memories.revision_version')" width="100" align="center" /><el-table-column prop="memory_type" :label="$t('memories.type')" width="120"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column><el-table-column prop="content" :label="$t('memories.content')" min-width="350" show-overflow-tooltip /><el-table-column prop="published_at" :label="$t('memories.published_at')" width="180"><template #default="{ row }">{{ formatTime(row.published_at || row.created_at) }}</template></el-table-column><el-table-column :label="$t('memories.actions')" width="150" align="center"><template #default="{ row }"><el-button size="small" type="warning" @click="restoreRevision(row)">{{ $t('memories.restore') }}</el-button></template></el-table-column></el-table>
+        <el-alert v-if="historyReadOnly" type="info" :closable="false" show-icon :title="$t('memories.deleted_history_read_only')" />
+        <el-table :data="history" v-loading="historyLoading" border stripe><el-table-column prop="version" :label="$t('memories.revision_version')" width="100" align="center" /><el-table-column prop="memory_type" :label="$t('memories.type')" width="120"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column><el-table-column prop="content" :label="$t('memories.content')" min-width="350" show-overflow-tooltip /><el-table-column prop="published_at" :label="$t('memories.published_at')" width="180"><template #default="{ row }">{{ formatTime(row.published_at || row.created_at) }}</template></el-table-column><el-table-column v-if="!historyReadOnly" :label="$t('memories.actions')" width="150" align="center"><template #default="{ row }"><el-button size="small" type="warning" @click="restoreRevision(row)">{{ $t('memories.restore') }}</el-button></template></el-table-column></el-table>
       <el-empty v-if="!historyLoading && !history.length" :description="$t('memories.no_history')" />
     </el-dialog>
 
@@ -194,6 +195,7 @@ const submitting = ref(false)
 const detailsVisible = ref(false)
 const selectedMemory = ref(null)
 const historyVisible = ref(false)
+const historyReadOnly = ref(false)
 const historyLoading = ref(false)
 const history = ref([])
 const jobVisible = ref(false)
@@ -310,9 +312,27 @@ const deleteMemory = async (row) => {
 }
 const showHistory = async (row) => {
   selectedMemory.value = row
+  historyReadOnly.value = Boolean(row.deleted_at || row.is_active === false)
   historyVisible.value = true
   historyLoading.value = true
   try { history.value = pageData(await memoryApi.history(row.id, { page: 1, size: 100 })).items } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { historyLoading.value = false }
+}
+const isRecordSnapshot = (value) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
+const deletedRecordSnapshot = (row) => {
+  const resultSnapshot = row?.result?.record_snapshot
+  if (isRecordSnapshot(resultSnapshot)) return resultSnapshot
+  const payloadSnapshot = row?.payload?.record_snapshot
+  return isRecordSnapshot(payloadSnapshot) ? payloadSnapshot : null
+}
+const canShowDeletedHistory = (row) => row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
+const showDeletedHistory = async (row) => {
+  const snapshot = deletedRecordSnapshot(row)
+  if (!snapshot || !row.memory_id) return
+  selectedMemory.value = { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version }
+  historyReadOnly.value = true
+  historyVisible.value = true
+  historyLoading.value = true
+  try { history.value = pageData(await memoryApi.history(row.memory_id, { page: 1, size: 100 })).items } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { historyLoading.value = false }
 }
 const restoreRevision = async (revision) => {
   try {

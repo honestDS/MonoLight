@@ -20,6 +20,7 @@ from app.core.crud.memory import (
 from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.memory import (
+    MemoryNotFoundError,
     MemoryRecallStatus,
     build_memory_content_hash,
     build_memory_vector_item_id,
@@ -880,15 +881,19 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
             status=LongTermMemoryMutationStatus.SUCCEEDED,
         )
         cleaned = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert cleaned is not None
-        assert cleaned.version == 2
-        assert cleaned.memory_key is None
-        assert cleaned.content == ""
-        assert cleaned.content_hash is None
-        assert cleaned.vector_item_id is None
-        assert cleaned.indexed_version == 0
-        assert cleaned.pending_mutation_job_id is None
+        assert cleaned is None
         assert vector_backend.collections["memory-collection-v1"]["items"] == {}
+
+        delete_job = await _get_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=delete_result.job.id,
+        )
+        assert delete_job is not None
+        assert delete_job.payload["record_snapshot"]["content"] == expected_update
+        assert delete_job.payload["record_snapshot"]["memory_key"] == update_key
+        assert delete_job.payload["record_snapshot"]["version"] == 2
+        assert delete_job.result["record_snapshot"] == delete_job.payload["record_snapshot"]
 
         revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
         assert [revision.version for revision in revisions] == [2, 1]
@@ -1003,7 +1008,7 @@ async def test_update_suppress_current_is_cleared_after_success_and_worker_reche
 
 
 @pytest.mark.asyncio
-async def test_restore_from_tombstone_publishes_higher_version_and_keeps_history(
+async def test_completed_delete_rejects_restore_and_keeps_history(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
 ) -> None:
@@ -1035,40 +1040,28 @@ async def test_restore_from_tombstone_publishes_higher_version_and_keeps_history
         )
 
         async with memory_session_factory() as db:
-            restored = await memory_service.restore(
-                db,
-                uid=uid,
-                dedupe_key="restore-v1",
-                memory_id=memory_id,
-                revision_version=1,
-                expected_version=1,
-            )
-        assert restored.job is not None
-        finished = await _run_job(
-            consumer,
-            memory_session_factory,
-            uid=uid,
-            job_id=restored.job.id,
-            status=LongTermMemoryMutationStatus.SUCCEEDED,
-        )
+            with pytest.raises(MemoryNotFoundError):
+                await memory_service.restore(
+                    db,
+                    uid=uid,
+                    dedupe_key="restore-v1",
+                    memory_id=memory_id,
+                    revision_version=1,
+                    expected_version=1,
+                )
         record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert record is not None
-        assert record.version == 2
-        assert record.indexed_version == 2
-        assert record.is_active is True
-        assert record.deleted_at is None
-        assert record.content == "old content"
-        assert record.vector_item_id == build_memory_vector_item_id(memory_id, 2)
-        assert build_memory_vector_item_id(memory_id, 2) in vector_backend.collections["memory-collection-v1"]["items"]
-        assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [2, 1]
-        assert finished.result["version"] == 2
+        assert record is None
+        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
+        assert [revision.version for revision in revisions] == [1]
+        assert revisions[0].content == "old content"
+        assert vector_backend.collections["memory-collection-v1"]["items"] == {}
     finally:
         await consumer.stop()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("collection_present", [True, False])
-async def test_delete_cleanup_tombstones_immediately_clears_payload_and_is_idempotent(
+async def test_delete_cleanup_tombstones_immediately_then_physically_deletes_record(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
     collection_present: bool,
@@ -1105,25 +1098,81 @@ async def test_delete_cleanup_tombstones_immediately_clears_payload_and_is_idemp
             status=LongTermMemoryMutationStatus.SUCCEEDED,
         )
         record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert record is not None
-        assert record.version == 1
-        assert record.deleted_at is not None
-        assert record.is_active is False
-        assert record.memory_key is None
-        assert record.content == ""
-        assert record.content_hash is None
-        assert record.vector_item_id is None
-        assert record.indexed_version == 0
-        assert record.pending_mutation_job_id is None
-        assert record.index_status == LongTermMemoryRecordIndexStatus.READY
+        assert record is None
         assert len(await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)) == 1
         assert finished.active_mutation_key is None
+        assert finished.payload["record_snapshot"]["content"] == "old content"
+        assert finished.result["record_snapshot"] == finished.payload["record_snapshot"]
 
         if collection_present:
             item_id = build_memory_vector_item_id(memory_id, 1)
             await vector_backend.delete("memory-collection-v1", [item_id])
             await vector_backend.delete("memory-collection-v1", [item_id])
             assert item_id not in vector_backend.collections["memory-collection-v1"]["items"]
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_create_after_physical_delete_does_not_reuse_memory_id(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "delete-id-allocation-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    deleted_memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid)
+    consumer = _consumer(memory_session_factory)
+    try:
+        async with memory_session_factory() as db:
+            deleted = await memory_service.delete(
+                db,
+                uid=uid,
+                dedupe_key="delete-before-create",
+                memory_id=deleted_memory_id,
+                expected_version=1,
+            )
+        assert deleted.job is not None
+        await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=deleted.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+
+        created = await _create_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="create-after-delete",
+            content="new memory after deletion",
+            memory_key="new-key-after-delete",
+        )
+        finished = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=created.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+
+        assert finished.memory_id > deleted_memory_id
+        assert (
+            await _get_record(
+                memory_session_factory,
+                uid=uid,
+                memory_id=deleted_memory_id,
+            )
+            is None
+        )
+        assert (
+            await _get_record(
+                memory_session_factory,
+                uid=uid,
+                memory_id=finished.memory_id,
+            )
+            is not None
+        )
     finally:
         await consumer.stop()
 

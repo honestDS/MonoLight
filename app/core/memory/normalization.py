@@ -23,13 +23,29 @@ from app.core.constants import (
     MEMORY_SCOPE_MAX_CHARS,
 )
 from app.core.memory.errors import MemoryValidationError
-from app.models.memory import LongTermMemorySource, LongTermMemoryType
+from app.models.memory import LongTermMemoryRecord, LongTermMemoryRevision, LongTermMemorySource, LongTermMemoryType
 
 _MEMORY_UID_MAX_CHARS = 100
 _SOURCE_ID_MAX_CHARS = 255
 _SOURCE_SESSION_ID_MAX_CHARS = 100
 _IMPORTANCE_MIN = 0
 _IMPORTANCE_MAX = 10
+_MEMORY_RECORD_SNAPSHOT_FIELDS = (
+    "memory_key",
+    "content",
+    "content_hash",
+    "memory_type",
+    "importance",
+    "scope",
+    "source",
+    "source_id",
+    "source_session_id",
+    "source_profile_id",
+    "source_message_id",
+    "source_job_id",
+    "change_evidence",
+    "version",
+)
 
 
 def _normalize_text(value: Any, *, field: str, maximum: int, required: bool = True) -> str | None:
@@ -270,11 +286,82 @@ def normalize_memory_publication_payload(payload: dict[str, Any]) -> dict[str, A
     return dict(payload)
 
 
+def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Validate and return an independent normalized memory record snapshot."""
+    if not isinstance(snapshot, dict):
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    if "uid" in snapshot:
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN)
+    if set(snapshot) != set(_MEMORY_RECORD_SNAPSHOT_FIELDS):
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+
+    publication = _publication_payload(
+        content=snapshot["content"],
+        memory_key=snapshot["memory_key"],
+        memory_type=snapshot["memory_type"],
+        importance=snapshot["importance"],
+        scope=snapshot["scope"],
+        change_evidence=snapshot["change_evidence"],
+        source=snapshot["source"],
+        source_id=snapshot["source_id"],
+        source_session_id=snapshot["source_session_id"],
+        source_profile_id=snapshot["source_profile_id"],
+        source_message_id=snapshot["source_message_id"],
+    )
+    if snapshot["content_hash"] != publication["content_hash"]:
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+
+    normalized_source_job_id = _require_positive(snapshot["source_job_id"], field="source_job_id") if snapshot["source_job_id"] is not None else None
+    normalized_version = _require_positive(snapshot["version"], field="version", error_key=ERR_MEMORY_VERSION_INVALID)
+    return {
+        "memory_key": publication["memory_key"],
+        "content": publication["content"],
+        "content_hash": publication["content_hash"],
+        "memory_type": publication["memory_type"],
+        "importance": publication["importance"],
+        "scope": publication["scope"],
+        "source": publication["source"],
+        "source_id": publication["source_id"],
+        "source_session_id": publication["source_session_id"],
+        "source_profile_id": publication["source_profile_id"],
+        "source_message_id": publication["source_message_id"],
+        "source_job_id": normalized_source_job_id,
+        "change_evidence": publication["change_evidence"],
+        "version": normalized_version,
+    }
+
+
+def build_memory_record_snapshot(record: LongTermMemoryRecord | LongTermMemoryRevision) -> dict[str, Any]:
+    """Build an independent JSON snapshot from a memory record or revision."""
+    if not isinstance(record, (LongTermMemoryRecord, LongTermMemoryRevision)):
+        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "record"})
+    return normalize_memory_record_snapshot(
+        {
+            "memory_key": record.memory_key,
+            "content": record.content,
+            "content_hash": record.content_hash,
+            "memory_type": record.memory_type,
+            "importance": record.importance,
+            "scope": record.scope,
+            "source": record.source,
+            "source_id": record.source_id,
+            "source_session_id": record.source_session_id,
+            "source_profile_id": record.source_profile_id,
+            "source_message_id": record.source_message_id,
+            "source_job_id": getattr(record, "source_job_id", None),
+            "change_evidence": record.change_evidence,
+            "version": record.version,
+        }
+    )
+
+
 __all__ = [
     "build_memory_content_hash",
+    "build_memory_record_snapshot",
     "normalize_change_evidence",
     "normalize_memory_content",
     "normalize_memory_key",
     "normalize_memory_publication_payload",
+    "normalize_memory_record_snapshot",
     "normalize_memory_scope",
 ]

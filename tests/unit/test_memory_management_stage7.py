@@ -314,6 +314,13 @@ async def test_memory_history_page_reports_real_total(memory_session_factory) ->
                 source=LongTermMemorySource.AUTO_EXTRACT,
                 commit=False,
             )
+        deleted = await memory_record_crud.delete(
+            db,
+            uid=uid,
+            memory_id=record.id,
+            commit=False,
+        )
+        assert deleted is not None
         await db.commit()
 
     async with memory_session_factory() as db:

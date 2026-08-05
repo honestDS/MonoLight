@@ -61,6 +61,7 @@ from app.core.memory_jobs.maintenance_vector import (
     validate_sample_query,
 )
 from app.models.memory import (
+    LongTermMemoryEmbeddingDeltaAction,
     LongTermMemoryEmbeddingDeltaStatus,
     LongTermMemoryEmbeddingRevisionStatus,
     LongTermMemoryMigrationStatus,
@@ -266,6 +267,25 @@ async def _apply_migration_delta(
 ) -> None:
     if not positive_int(delta.memory_id):
         raise deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+    try:
+        action = LongTermMemoryEmbeddingDeltaAction(delta.action)
+    except (TypeError, ValueError) as exc:
+        raise deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+    item_ids: list[str] = []
+    items = await collection_items(config["collection"])
+    for item_id, item in items.items():
+        metadata = item[1]
+        if metadata.get("memory_id") == delta.memory_id:
+            item_ids.append(item_id)
+    if action in {
+        LongTermMemoryEmbeddingDeltaAction.DELETE,
+        LongTermMemoryEmbeddingDeltaAction.SUPPRESS,
+    }:
+        if item_ids:
+            await async_delete_collection_items(config["collection"], item_ids, batch_size=BATCH_SIZE)
+        return
+    if action != LongTermMemoryEmbeddingDeltaAction.UPSERT:
+        raise deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
     async with context.session_factory() as db:
         record = await memory_maintenance_record_crud.get_recallable_by_memory_id(
             db,
@@ -273,12 +293,6 @@ async def _apply_migration_delta(
             memory_id=delta.memory_id,
         )
         await db.commit()
-    items = await collection_items(config["collection"])
-    item_ids: list[str] = []
-    for item_id, item in items.items():
-        metadata = item[1]
-        if metadata.get("memory_id") == delta.memory_id:
-            item_ids.append(item_id)
     if record is not None:
         await upsert_records(context, config["collection"], [record], config)
         current_id = record.vector_item_id

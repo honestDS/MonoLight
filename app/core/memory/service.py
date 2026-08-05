@@ -52,7 +52,9 @@ from app.core.memory.normalization import (
     _require_positive,
     _validate_commit,
     _validate_source_fields,
+    build_memory_record_snapshot,
     normalize_memory_content,
+    normalize_memory_record_snapshot,
 )
 from app.core.memory.results import (
     MemoryMutationResult,
@@ -599,6 +601,7 @@ class LongTermMemoryService:
                     raise MemoryConflictError(ERR_MEMORY_PUBLICATION_CONFLICT)
                 if normalized_expected_version is not None and normalized_expected_version != existing_version:
                     raise MemoryConflictError(ERR_MEMORY_PUBLICATION_CONFLICT)
+                record_snapshot = normalize_memory_record_snapshot((existing_job.payload or {}).get("record_snapshot"))
                 payload = {
                     "version": existing_version,
                     "source": normalized_source.value,
@@ -606,6 +609,7 @@ class LongTermMemoryService:
                     "source_session_id": normalized_session_id,
                     "source_profile_id": normalized_profile_id,
                     "source_message_id": normalized_message_id,
+                    "record_snapshot": record_snapshot,
                 }
                 submission = await _accept_existing_job(
                     db,
@@ -659,6 +663,7 @@ class LongTermMemoryService:
                 "source_session_id": normalized_session_id,
                 "source_profile_id": normalized_profile_id,
                 "source_message_id": normalized_message_id,
+                "record_snapshot": build_memory_record_snapshot(record),
             }
             submission = await _submit_job(
                 db,

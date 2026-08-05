@@ -125,7 +125,7 @@ async def list_memory_history(
     normalized_memory_id = _require_positive(memory_id, field="memory_id")
     normalized_skip, normalized_limit = _page(skip, limit)
     record = await memory_record_crud.get_by_id(db, uid=normalized_uid, memory_id=normalized_memory_id)
-    if record is None:
+    if record is None and not await memory_revision_crud.list_by_memory_id(db, uid=normalized_uid, memory_id=normalized_memory_id, skip=0, limit=1):
         raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
     items = await memory_revision_crud.list_by_memory_id(
         db,
