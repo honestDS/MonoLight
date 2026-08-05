@@ -28,8 +28,14 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
             "Use a concise normalized retrieval expression for recall, and keep each memory to one "
             "independently maintainable concrete topic and property. "
             "Use separate create calls for different entities, topics, or unrelated facts. "
-            "Update only an explicitly corrected or replaced existing memory when its ID, current version, "
-            "and concrete topic are bound by trusted context; never merge unrelated topics."
+            "Recall returns a compact JSON object whose items contain only the exact memory identifiers, "
+            "memory key, type, and content in final ranking order. "
+            "For update, use memory_id and expected_version as a pair only when they come from the same exact "
+            "recall item, are explicitly supplied by the user, or are supplied by other trusted context that "
+            "binds them to the exact topic. For delete, memory_id is required and expected_version is optional; "
+            "provide it only when known from that same source. Never infer or transfer identifiers from content, "
+            "similarity, memory_key, memory_type, or another item. Never mix identifiers across recall items. "
+            "Never merge unrelated topics."
         ),
         "parameters": {
             "type": "object",
@@ -59,12 +65,29 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                 "memory_id": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The exact existing memory record ID explicitly provided by the user or bound to the concrete topic in trusted context. Required for update or delete; never infer it from recall results, memory type, memory_key, or semantic similarity. Recall does not return memory IDs.",
+                    "description": (
+                        "The memory_id for the target concrete topic. Required for both update and delete. "
+                        "For update, it must be paired with expected_version, and both must come from the same exact "
+                        "recall item, be explicitly supplied by the user, or be supplied by other trusted context "
+                        "that binds them to the exact topic. For delete, memory_id is required; expected_version is "
+                        "optional and may be supplied only when known from the same exact recall item, explicitly "
+                        "supplied by the user, or supplied by other trusted context. Never infer it from content, "
+                        "similarity, memory_key, memory_type, or another recall item, and never mix it with an "
+                        "expected_version from another item."
+                    ),
                 },
                 "expected_version": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "The current memory version required for an update or delete.",
+                    "description": (
+                        "The expected_version for the target topic. For update, it is required and must be paired "
+                        "with memory_id, and both must come from the same exact recall item, be explicitly supplied "
+                        "by the user, or be supplied by other trusted context that binds them to the exact topic. "
+                        "For delete, it is optional and may be supplied only when known from the same exact recall "
+                        "item, explicitly supplied by the user, or supplied by other trusted context. Never infer "
+                        "it from content, similarity, memory_key, memory_type, or another recall item, and never "
+                        "mix it with a memory_id from another item."
+                    ),
                 },
                 "content": {
                     "type": "string",
@@ -130,6 +153,26 @@ def _value(value: Any) -> Any:
 
 def _json_result(operation: Any, status: str, **payload: Any) -> str:
     return json.dumps({"operation": operation, "status": status, **payload}, ensure_ascii=False)
+
+
+def _empty_recall_result() -> str:
+    return json.dumps({"items": []}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_recall_items(items: Any) -> str:
+    formatted_items = []
+    for item in items:
+        formatted_item = {
+            "memory_id": item.memory_id,
+            "expected_version": item.version,
+            "memory_key": item.memory_key,
+            "memory_type": item.memory_type,
+            "content": item.content,
+        }
+        if item.truncated:
+            formatted_item["truncated"] = True
+        formatted_items.append(formatted_item)
+    return json.dumps({"items": formatted_items}, ensure_ascii=False, separators=(",", ":"))
 
 
 def _field_error(field: str) -> str:
@@ -233,8 +276,8 @@ class LongTermMemoryExecutor(BaseExecutor):
             result_max_chars=memory_config.result_max_chars,
         )
         if _value(result.status) != "ok":
-            return ""
-        return "\n\n".join(item.content for item in result.items)
+            return _empty_recall_result()
+        return _format_recall_items(result.items)
 
     async def _mutate(self, operation: str, arguments: dict[str, Any]) -> str:
         memory_service = _get_memory_service()
@@ -287,13 +330,13 @@ class LongTermMemoryExecutor(BaseExecutor):
         operation, validation_error = validate_longterm_memory_arguments(kwargs)
         if validation_error:
             if operation == "recall":
-                return ""
+                return _empty_recall_result()
             return _json_result(operation, "failed", error=validation_error)
 
         memory_config = self._memory_config()
         if self.db is None or memory_config is None:
             if operation == "recall":
-                return ""
+                return _empty_recall_result()
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
         if operation != "recall" and not self._has_mutation_runtime_context(memory_config):
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
@@ -304,11 +347,11 @@ class LongTermMemoryExecutor(BaseExecutor):
             return await self._mutate(operation, kwargs)
         except BaseBusinessException as exc:
             if operation == "recall":
-                return ""
+                return _empty_recall_result()
             return _json_result(operation, "failed", error=exc.render_message())
         except Exception:
             if operation == "recall":
-                return ""
+                return _empty_recall_result()
             return _json_result(operation, "failed", error=t(ERR_INTERNAL_SERVER_ERROR))
 
 
