@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.exc import IntegrityError
@@ -10,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_ACTIVE_MUTATION_KEY_CLEAR_STATUS_INVALID
+import app.models as app_models
+from app.core.constants import (
+    ERR_MEMORY_ACTIVE_MUTATION_KEY_CLEAR_STATUS_INVALID,
+    MEMORY_MAX_ACTIVE_RECORDS,
+    MEMORY_ORGANIZE_POLICY_VERSION,
+    MEMORY_ORGANIZE_TRIGGER_RECORDS,
+)
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_embedding_revision_crud,
@@ -22,6 +29,7 @@ from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
 from app.core.memory import build_memory_collection_name, build_memory_vector_item_id
 from app.models.memory import (
+    LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingDeltaStatus,
     LongTermMemoryEmbeddingRevision,
@@ -31,6 +39,7 @@ from app.models.memory import (
     LongTermMemoryMutationStatus,
     LongTermMemoryRecord,
     LongTermMemoryRevision,
+    LongTermMemorySource,
     LongTermMemoryStore,
 )
 from scripts import migration_20260803_add_longterm_memory as memory_migration
@@ -243,6 +252,91 @@ async def _migrate_memory_database() -> object:
         await memory_migration.migrate(session)
         await session.commit()
     return engine
+
+
+def test_long_term_memory_v2_models_expose_defaults_enums_constraints_and_indexes():
+    store = LongTermMemoryStore.model_validate({"uid": "model-user"})
+    record = LongTermMemoryRecord.model_validate({"uid": "model-user"})
+    revision = LongTermMemoryRevision.model_validate({"uid": "model-user", "memory_id": 1, "version": 1})
+
+    assert store.max_active_records == MEMORY_MAX_ACTIVE_RECORDS
+    assert store.organize_trigger_records == MEMORY_ORGANIZE_TRIGGER_RECORDS
+    assert store.auto_organize_enabled is False
+    assert store.organization_policy_version == MEMORY_ORGANIZE_POLICY_VERSION
+    assert store.capacity_status == LongTermMemoryCapacityStatus.NORMAL
+    assert record.content_token_count == 0
+    assert record.pinned is False
+    assert record.last_recalled_at is None
+    assert revision.content_token_count == 0
+    assert LongTermMemorySource.AUTO_ORGANIZE.value == "auto_organize"
+    assert LongTermMemoryMutationOperation.CREATE_WITH_EVICTION.value == "create_with_eviction"
+    assert LongTermMemoryMutationOperation.ORGANIZE.value == "organize"
+    assert LongTermMemoryMutationOperation.ORGANIZE_MERGE.value == "organize_merge"
+    assert app_models.LongTermMemoryCapacityStatus is LongTermMemoryCapacityStatus
+    assert app_models.LongTermMemoryMutationOperation is LongTermMemoryMutationOperation
+    assert app_models.LongTermMemorySource is LongTermMemorySource
+
+    assert {
+        "organize_trigger_records",
+        "auto_organize_enabled",
+        "organization_channel_id",
+        "organization_model_id",
+        "organization_policy_version",
+        "organization_last_job_id",
+        "organization_last_run_at",
+        "organization_error",
+        "capacity_status",
+    } <= set(LongTermMemoryStore.__table__.c.keys())
+    assert {"content_token_count", "pinned", "last_recalled_at"} <= set(LongTermMemoryRecord.__table__.c.keys())
+    assert "content_token_count" in LongTermMemoryRevision.__table__.c
+
+    eviction_index = next(index for index in LongTermMemoryRecord.__table__.indexes if index.name == "ix_ltm_record_eviction_candidate")
+    assert tuple(eviction_index.columns.keys()) == (
+        "uid",
+        "is_active",
+        "pinned",
+        "last_recalled_at",
+        "updated_at",
+        "id",
+    )
+
+    with pytest.raises(ValidationError):
+        LongTermMemoryStore.model_validate({"uid": "model-user", "max_active_records": 51})
+    with pytest.raises(ValidationError):
+        LongTermMemoryStore.model_validate({"uid": "model-user", "organize_trigger_records": 44})
+
+
+def test_long_term_memory_v2_models_compile_for_sqlite_and_mysql():
+    dialects = [sqlite.dialect(), mysql.dialect()]
+    v2_tables = [
+        LongTermMemoryStore.__table__,
+        LongTermMemoryRecord.__table__,
+        LongTermMemoryRevision.__table__,
+    ]
+
+    store_columns = set(LongTermMemoryStore.__table__.c.keys())
+    record_columns = set(LongTermMemoryRecord.__table__.c.keys())
+    revision_columns = set(LongTermMemoryRevision.__table__.c.keys())
+    assert {
+        "organize_trigger_records",
+        "auto_organize_enabled",
+        "organization_channel_id",
+        "organization_model_id",
+        "organization_policy_version",
+        "organization_last_job_id",
+        "organization_last_run_at",
+        "organization_error",
+        "capacity_status",
+    } <= store_columns
+    assert {"content_token_count", "pinned", "last_recalled_at"} <= record_columns
+    assert "content_token_count" in revision_columns
+    assert any(index.name == "ix_ltm_record_eviction_candidate" for index in LongTermMemoryRecord.__table__.indexes)
+
+    for dialect in dialects:
+        for table in v2_tables:
+            assert str(CreateTable(table).compile(dialect=dialect)).strip()
+            for index in table.indexes:
+                assert str(CreateIndex(index).compile(dialect=dialect)).strip()
 
 
 @pytest.mark.asyncio

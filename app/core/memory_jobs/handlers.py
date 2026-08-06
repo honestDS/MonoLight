@@ -25,8 +25,11 @@ from app.core.constants import (
     ERR_MEMORY_JOB_VECTOR_DIMENSION_INVALID,
     ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
     ERR_MEMORY_NOT_CONFIGURED,
+    ERR_MEMORY_OVER_LIMIT,
     ERR_MEMORY_RECORD_NOT_FOUND,
     ERR_MEMORY_VERSION_CONFLICT,
+    MEMORY_MAX_ACTIVE_RECORDS,
+    MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
 from app.core.crud.memory import (
     memory_record_crud,
@@ -265,6 +268,7 @@ def _validate_active_store(store: Any) -> tuple[int, str, int, str, int, str, in
     revision = getattr(store, "active_embedding_revision", None)
     collection_name = getattr(store, "active_collection_name", None)
     max_active_records = getattr(store, "max_active_records", None)
+    organize_trigger_records = getattr(store, "organize_trigger_records", None)
     if (
         isinstance(channel_id, bool)
         or not isinstance(channel_id, int)
@@ -285,6 +289,10 @@ def _validate_active_store(store: Any) -> tuple[int, str, int, str, int, str, in
         or not isinstance(max_active_records, int)
         or max_active_records < 1
     ):
+        raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
+    if max_active_records > MEMORY_MAX_ACTIVE_RECORDS:
+        raise _deterministic(ERR_MEMORY_OVER_LIMIT)
+    if organize_trigger_records != MEMORY_ORGANIZE_TRIGGER_RECORDS:
         raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
     return channel_id, model_id, dimensions, signature, revision, collection_name, max_active_records
 

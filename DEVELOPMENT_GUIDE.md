@@ -41,7 +41,7 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
    - 迁移脚本必须定义全局唯一的 `MIGRATION_ID`，并提供 `async def migrate(session): ...` 入口函数。
    - 应用启动时会自动扫描并按文件名排序执行 `scripts/migration_*.py`，执行成功后写入 `migration_record` 表；同一个 `MIGRATION_ID` 后续启动会自动跳过。
    - 已执行过的迁移脚本禁止修改语义；如需补充或修复迁移逻辑，必须新增下一个迁移脚本。
-   - 迁移脚本中应使用 `sqlalchemy.text` 或现有 CRUD/模型完成数据修正，并自行处理 SQLite/PostgreSQL 等数据库方言差异。
+   - 迁移脚本中应使用 `sqlalchemy.text` 或现有 CRUD/模型完成数据修正，并自行处理 SQLite/Mysql 等数据库方言差异。
 
 ## 六、 新增功能与测试要求
 - **后端目录结构**：单元测试存放在 `tests/unit`，集成测试存放在 `tests/integration`。

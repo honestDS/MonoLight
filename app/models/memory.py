@@ -4,6 +4,11 @@ from typing import Any
 
 from sqlmodel import JSON, Column, DateTime, Field, Index, SQLModel, Text, UniqueConstraint
 
+from app.core.constants import (
+    MEMORY_MAX_ACTIVE_RECORDS,
+    MEMORY_ORGANIZE_POLICY_VERSION,
+    MEMORY_ORGANIZE_TRIGGER_RECORDS,
+)
 from app.core.utils.time import get_local_time
 
 __all__ = [
@@ -13,6 +18,7 @@ __all__ = [
     "LongTermMemoryEmbeddingRevision",
     "LongTermMemoryEmbeddingRevisionStatus",
     "LongTermMemoryEmbeddingSelectionToken",
+    "LongTermMemoryCapacityStatus",
     "LongTermMemoryIndexStatus",
     "LongTermMemoryMigrationStatus",
     "LongTermMemoryMutationJob",
@@ -56,6 +62,11 @@ class LongTermMemoryOldCollectionCleanupStatus(StrEnum):
     FAILED = "failed"
 
 
+class LongTermMemoryCapacityStatus(StrEnum):
+    NORMAL = "normal"
+    OVER_LIMIT = "over_limit"
+
+
 class LongTermMemoryIndexStatus(StrEnum):
     PENDING = "pending"
     READY = "ready"
@@ -95,6 +106,7 @@ class LongTermMemorySource(StrEnum):
     LLM_TOOL = "llm_tool"
     USER_API = "user_api"
     AUTO_EXTRACT = "auto_extract"
+    AUTO_ORGANIZE = "auto_organize"
 
 
 class LongTermMemoryMutationOperation(StrEnum):
@@ -105,6 +117,9 @@ class LongTermMemoryMutationOperation(StrEnum):
     DELETE_CLEANUP = "delete_cleanup"
     EMBEDDING_MIGRATION = "embedding_migration"
     EXTRACT = "extract"
+    CREATE_WITH_EVICTION = "create_with_eviction"
+    ORGANIZE = "organize"
+    ORGANIZE_MERGE = "organize_merge"
 
 
 class LongTermMemoryMutationStatus(StrEnum):
@@ -163,7 +178,24 @@ class LongTermMemoryStore(SQLModel, table=True):
     old_collection_cleanup_error: str | None = Field(default=None, sa_column=Column(Text))
     old_collection_cleanup_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
 
-    max_active_records: int = Field(default=500, ge=1)
+    max_active_records: int = Field(default=MEMORY_MAX_ACTIVE_RECORDS, ge=1, le=MEMORY_MAX_ACTIVE_RECORDS)
+    organize_trigger_records: int = Field(
+        default=MEMORY_ORGANIZE_TRIGGER_RECORDS,
+        ge=MEMORY_ORGANIZE_TRIGGER_RECORDS,
+        le=MEMORY_ORGANIZE_TRIGGER_RECORDS,
+    )
+    auto_organize_enabled: bool = Field(default=False)
+    organization_channel_id: int | None = Field(default=None, index=True, gt=0)
+    organization_model_id: str | None = Field(default=None, index=True, max_length=255)
+    organization_policy_version: int = Field(default=MEMORY_ORGANIZE_POLICY_VERSION, ge=1)
+    organization_last_job_id: int | None = Field(default=None, index=True)
+    organization_last_run_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    organization_error: str | None = Field(default=None, sa_column=Column(Text))
+    capacity_status: LongTermMemoryCapacityStatus = Field(
+        default=LongTermMemoryCapacityStatus.NORMAL,
+        index=True,
+        max_length=20,
+    )
     index_revision: int = Field(default=0, ge=0, index=True)
     index_status: LongTermMemoryIndexStatus = Field(
         default=LongTermMemoryIndexStatus.PENDING,
@@ -277,6 +309,15 @@ class LongTermMemoryRecord(SQLModel, table=True):
         UniqueConstraint("vector_item_id", name="uq_long_term_memory_record_vector_item_id"),
         Index("ix_long_term_memory_record_uid_is_active_deleted_at", "uid", "is_active", "deleted_at"),
         Index("ix_long_term_memory_record_uid_updated_at", "uid", "updated_at"),
+        Index(
+            "ix_ltm_record_eviction_candidate",
+            "uid",
+            "is_active",
+            "pinned",
+            "last_recalled_at",
+            "updated_at",
+            "id",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
@@ -284,6 +325,7 @@ class LongTermMemoryRecord(SQLModel, table=True):
     memory_key: str | None = Field(default=None, index=True, max_length=255)
     memory_type: LongTermMemoryType = Field(default=LongTermMemoryType.FACT, index=True, max_length=50)
     content: str = Field(default="", sa_column=Column(Text, nullable=False))
+    content_token_count: int = Field(default=0, ge=0)
     content_hash: str | None = Field(default=None, index=True, max_length=64)
     version: int = Field(default=0, ge=0, index=True)
     indexed_version: int = Field(default=0, ge=0, index=True)
@@ -296,6 +338,8 @@ class LongTermMemoryRecord(SQLModel, table=True):
     source_job_id: int | None = Field(default=None, index=True)
     change_evidence: str | None = Field(default=None, sa_column=Column(Text))
     is_active: bool = Field(default=False, index=True)
+    pinned: bool = Field(default=False)
+    last_recalled_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True)))
     pending_mutation_job_id: int | None = Field(default=None, index=True)
     suppress_recall: bool = Field(default=False, index=True)
     suppressed_by_job_id: int | None = Field(default=None, index=True)
@@ -324,6 +368,7 @@ class LongTermMemoryRevision(SQLModel, table=True):
     memory_key: str = Field(default="", index=True, max_length=255)
     memory_type: LongTermMemoryType = Field(default=LongTermMemoryType.FACT, index=True, max_length=50)
     content: str = Field(default="", sa_column=Column(Text, nullable=False))
+    content_token_count: int = Field(default=0, ge=0)
     content_hash: str | None = Field(default=None, index=True, max_length=64)
     source: LongTermMemorySource = Field(default=LongTermMemorySource.USER_API, index=True, max_length=50)
     source_id: str | None = Field(default=None, index=True, max_length=255)

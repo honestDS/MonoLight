@@ -10,6 +10,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.constants import ERR_MEMORY_OVER_LIMIT
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_record_crud,
@@ -90,7 +91,7 @@ async def _create_store(
     *,
     uid: str,
     configured: bool = True,
-    max_active_records: int = 500,
+    max_active_records: int = 50,
     migration_job_id: int | None = None,
     migration_status: LongTermMemoryMigrationStatus | None = None,
     migration_delta_high_watermark: int = 0,
@@ -246,6 +247,25 @@ def _create_kwargs(**overrides: Any) -> dict[str, Any]:
     }
     values.update(overrides)
     return values
+
+
+def test_validate_active_store_rejects_over_limit_capacity_configuration() -> None:
+    store = LongTermMemoryStore.model_construct(
+        uid="over-limit-user",
+        active_embedding_channel_id=1,
+        active_embedding_model_id="memory-model",
+        active_embedding_dimensions=2,
+        active_embedding_signature="memory-signature",
+        active_embedding_revision=1,
+        active_collection_name="memory-collection",
+        max_active_records=51,
+        organize_trigger_records=45,
+    )
+
+    with pytest.raises(MemoryConflictError) as exc_info:
+        memory_service_module._validate_active_store(store)
+
+    assert exc_info.value.message == ERR_MEMORY_OVER_LIMIT
 
 
 def test_memory_normalization_hash_and_active_target_identity_are_stable() -> None:
@@ -860,7 +880,7 @@ async def _create_deleted_memory_with_history(
     db: AsyncSession,
     *,
     uid: str,
-    max_active_records: int = 500,
+    max_active_records: int = 50,
 ) -> tuple[LongTermMemoryRecord, LongTermMemoryRevision, LongTermMemoryRevision]:
     await _create_store(db, uid=uid, max_active_records=max_active_records)
     record = await _create_record(

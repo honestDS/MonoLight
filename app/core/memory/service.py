@@ -16,6 +16,7 @@ from app.core.constants import (
     ERR_MEMORY_MIGRATION_DELTA_CONFLICT,
     ERR_MEMORY_MUTATION_PENDING,
     ERR_MEMORY_NOT_CONFIGURED,
+    ERR_MEMORY_OVER_LIMIT,
     ERR_MEMORY_PUBLICATION_CONFLICT,
     ERR_MEMORY_RECALL_UNAVAILABLE,
     ERR_MEMORY_RECORD_NOT_FOUND,
@@ -28,6 +29,8 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
     MEMORY_CONTENT_MAX_CHARS,
+    MEMORY_MAX_ACTIVE_RECORDS,
+    MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
@@ -149,6 +152,13 @@ def _validate_active_store(store: LongTermMemoryStore) -> None:
     if isinstance(store.active_embedding_channel_id, bool) or not isinstance(store.active_embedding_channel_id, int) or store.active_embedding_channel_id < 1:
         raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
     if isinstance(store.active_embedding_dimensions, bool) or not isinstance(store.active_embedding_dimensions, int) or store.active_embedding_dimensions < 1:
+        raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+    max_active_records = store.max_active_records
+    if isinstance(max_active_records, bool) or not isinstance(max_active_records, int) or max_active_records < 1:
+        raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+    if max_active_records > MEMORY_MAX_ACTIVE_RECORDS:
+        raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
+    if store.organize_trigger_records != MEMORY_ORGANIZE_TRIGGER_RECORDS:
         raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
 
 

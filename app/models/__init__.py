@@ -11,12 +11,15 @@ from app.models.context_summary_stage import ContextSummaryStage as ContextSumma
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
+from app.models.memory import LongTermMemoryCapacityStatus as LongTermMemoryCapacityStatus
 from app.models.memory import LongTermMemoryEmbeddingDelta as LongTermMemoryEmbeddingDelta
 from app.models.memory import LongTermMemoryEmbeddingRevision as LongTermMemoryEmbeddingRevision
 from app.models.memory import LongTermMemoryEmbeddingSelectionToken as LongTermMemoryEmbeddingSelectionToken
 from app.models.memory import LongTermMemoryMutationJob as LongTermMemoryMutationJob
+from app.models.memory import LongTermMemoryMutationOperation as LongTermMemoryMutationOperation
 from app.models.memory import LongTermMemoryRecord as LongTermMemoryRecord
 from app.models.memory import LongTermMemoryRevision as LongTermMemoryRevision
+from app.models.memory import LongTermMemorySource as LongTermMemorySource
 from app.models.memory import LongTermMemoryStore as LongTermMemoryStore
 from app.models.message import Message as Message
 from app.models.message_platform import MessagePlatform as MessagePlatform

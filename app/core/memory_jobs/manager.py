@@ -48,9 +48,9 @@ _NON_TARGET_OPERATIONS = frozenset(
     {
         LongTermMemoryMutationOperation.REINDEX,
         LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
-        LongTermMemoryMutationOperation.EXTRACT,
     }
 )
+_SUBMITTABLE_OPERATIONS = _TARGET_OPERATIONS | _NON_TARGET_OPERATIONS
 _ACTIVE_MUTATION_KEY_CONSTRAINT = "uq_long_term_memory_mutation_job_active_key"
 
 
@@ -174,6 +174,8 @@ class MemoryJobManager:
                 operation = LongTermMemoryMutationOperation(operation)
             except (TypeError, ValueError) as exc:
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_OPERATION_INVALID)) from exc
+            if operation not in _SUBMITTABLE_OPERATIONS:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_OPERATION_INVALID))
             if not _is_integer(max_attempts):
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="max_attempts"))
             if max_attempts < 1:

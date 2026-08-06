@@ -9,7 +9,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED
+from app.core.constants import ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED, ERR_MEMORY_JOB_OPERATION_INVALID
 from app.core.crud.memory import memory_record_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
@@ -241,6 +241,35 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
         assert await manager.get_job(db, uid="user-b", job_id=first.job.id) is None
         assert [job.uid for job in await manager.list_jobs(db, uid="user-a")] == ["user-a"]
         assert [job.uid for job in await manager.list_jobs(db, uid="user-b")] == ["user-b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [
+        LongTermMemoryMutationOperation.EXTRACT,
+        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+        LongTermMemoryMutationOperation.ORGANIZE,
+        LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+    ],
+)
+async def test_manager_rejects_non_currently_submittable_operations(
+    memory_job_database: async_sessionmaker[AsyncSession],
+    operation: LongTermMemoryMutationOperation,
+) -> None:
+    manager = MemoryJobManager()
+
+    async with memory_job_database() as db:
+        with pytest.raises(MemoryJobValidationError) as exc_info:
+            await manager.submit(
+                db,
+                uid="operation-validation-user",
+                operation=operation,
+                dedupe_key=f"invalid-{operation.value}",
+                payload={},
+            )
+
+    assert str(exc_info.value) == t(ERR_MEMORY_JOB_OPERATION_INVALID)
 
 
 @pytest.mark.asyncio
