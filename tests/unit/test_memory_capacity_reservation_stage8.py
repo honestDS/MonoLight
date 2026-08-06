@@ -12,6 +12,7 @@ from sqlmodel import SQLModel
 from app.core.constants import (
     ERR_MEMORY_CAPACITY_FULL,
     ERR_MEMORY_CAPACITY_PENDING,
+    ERR_MEMORY_MUTATION_PENDING,
     ERR_MEMORY_OVER_LIMIT,
     MEMORY_CONTENT_MAX_TOKENS,
     MEMORY_MAX_ACTIVE_RECORDS,
@@ -320,6 +321,74 @@ async def test_full_capacity_create_accepts_replacement_and_reserves_candidate_w
         },
     }
     assert job.payload["store"]["active_collection_name"] == store.active_collection_name
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_eviction_candidate_reserved_by_replacement_job_without_changes(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "capacity-replacement-update-owner"
+    async with memory_database() as db:
+        await _create_store(db, uid=uid)
+        await _seed_active_records(db, uid=uid, count=MEMORY_MAX_ACTIVE_RECORDS)
+        await db.commit()
+
+    replacement = await _submit_create(
+        memory_database,
+        uid=uid,
+        dedupe_key="replacement-before-update",
+        memory_key="replacement-before-update-key",
+    )
+    assert replacement.job is not None
+    assert replacement.job.id is not None
+    assert replacement.job.operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION
+    candidate_id = replacement.job.payload["candidate"]["memory_id"]
+
+    async with memory_database() as db:
+        candidate = await memory_record_crud.get_by_id(db, uid=uid, memory_id=candidate_id)
+        assert candidate is not None
+        before = {
+            "version": candidate.version,
+            "content": candidate.content,
+            "vector_item_id": candidate.vector_item_id,
+            "indexed_version": candidate.indexed_version,
+            "index_status": candidate.index_status,
+        }
+
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await memory_service.update(
+                db,
+                uid=uid,
+                dedupe_key="update-reserved-candidate",
+                memory_id=candidate_id,
+                expected_version=candidate.version,
+                content="candidate update must be rejected",
+                memory_key="candidate-update-key",
+                memory_type=LongTermMemoryType.FACT,
+                source=LongTermMemorySource.USER_API,
+                source_id="stage8-capacity-update-request",
+            )
+
+        update_jobs = await memory_job_crud.count(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.UPDATE,
+        )
+        candidate_after = await memory_record_crud.get_by_id(db, uid=uid, memory_id=candidate_id)
+        active_count = await memory_record_crud.count_active(db, uid=uid)
+
+    assert exc_info.value.message == ERR_MEMORY_MUTATION_PENDING
+    assert update_jobs == 0
+    assert candidate_after is not None
+    assert {
+        "version": candidate_after.version,
+        "content": candidate_after.content,
+        "vector_item_id": candidate_after.vector_item_id,
+        "indexed_version": candidate_after.indexed_version,
+        "index_status": candidate_after.index_status,
+    } == before
+    assert candidate_after.pending_mutation_job_id == replacement.job.id
+    assert active_count == MEMORY_MAX_ACTIVE_RECORDS
 
 
 @pytest.mark.asyncio

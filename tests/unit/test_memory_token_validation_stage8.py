@@ -81,6 +81,56 @@ def test_publication_content_result_rejects_over_limit_without_truncation() -> N
     assert len(content) > 160
 
 
+@pytest.mark.parametrize("target_tokens", [159, 160])
+def test_publication_content_result_accepts_exact_token_limit_boundaries_without_truncation(target_tokens: int) -> None:
+    content = " ".join(["x"] * target_tokens)
+    normalized_content = normalize_memory_content(content)
+
+    assert estimate_tokens(normalized_content) == target_tokens
+
+    result = normalize_memory_content_for_publication(content)
+
+    assert result.content == normalized_content
+    assert result.content == content
+    assert result.content_token_count == target_tokens
+
+
+def test_publication_content_result_rejects_one_token_over_limit_with_exact_error_data() -> None:
+    content = " ".join(["x"] * 161)
+    normalized_content = normalize_memory_content(content)
+
+    assert estimate_tokens(normalized_content) == 161
+
+    with pytest.raises(MemoryContentTooLongError) as exc_info:
+        normalize_memory_content_for_publication(content)
+
+    assert exc_info.value.data == {
+        "status": "content_too_long",
+        "actual_tokens": 161,
+        "max_tokens": 160,
+        "retryable": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        pytest.param("  Ａlpha\tbeta\n", "Alpha beta", id="english"),
+        pytest.param("\u3000你好\t世界\n", "你好 世界", id="chinese"),
+        pytest.param("  Ｈｅｌｌｏ\t世界 \n", "Hello 世界", id="mixed"),
+    ],
+)
+def test_publication_content_result_normalizes_unicode_and_whitespace_before_counting_tokens(
+    content: str,
+    expected: str,
+) -> None:
+    result = normalize_memory_content_for_publication(content)
+
+    assert result.content == expected
+    assert result.content_token_count == estimate_tokens(expected)
+    assert result.content_token_count <= MEMORY_CONTENT_MAX_TOKENS
+
+
 def test_publication_payload_fills_legacy_token_count_and_rejects_inconsistent_values() -> None:
     payload = _publication_payload("short memory")
     expected_count = payload["content_token_count"]
