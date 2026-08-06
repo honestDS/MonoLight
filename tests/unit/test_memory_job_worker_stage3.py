@@ -588,6 +588,90 @@ async def test_recover_expired_max_attempts_fails_and_clears_target(
 
 
 @pytest.mark.asyncio
+async def test_recover_expired_create_preserves_reservation_until_max_attempts_and_dedupe_is_idempotent(
+    memory_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    manager = MemoryJobManager()
+    uid = "recovery-create-user"
+    payload = {"kind": "recovery-create"}
+    active_key = f"{uid}:create:recovery"
+
+    async with memory_job_database() as db:
+        submission = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE,
+            dedupe_key="recovery-create",
+            active_mutation_key=active_key,
+            max_attempts=2,
+            payload=payload,
+        )
+    assert submission.created
+    assert submission.job.id is not None
+    job_id = submission.job.id
+
+    async with memory_job_database() as db:
+        duplicate = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE,
+            dedupe_key="recovery-create",
+            active_mutation_key=active_key,
+            max_attempts=2,
+            payload=payload,
+        )
+        assert not duplicate.created
+        assert duplicate.job.id == job_id
+        assert await memory_job_crud.count_pending_create(db, uid=uid) == 1
+
+    first_claim = await _claim(
+        memory_job_database,
+        uid=uid,
+        job_id=job_id,
+        owner="expired-create-owner",
+        enabled_operations=[LongTermMemoryMutationOperation.CREATE],
+        lease_seconds=1,
+    )
+    assert first_claim is not None
+    async with memory_job_database() as db:
+        now = await get_database_time(db)
+        await db.execute(update(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == job_id).values(lock_until=now - timedelta(seconds=10)))
+        await db.commit()
+        recovery = await memory_job_crud.recover_expired(db, delay_seconds=0)
+    assert recovery.retried == 1
+    assert recovery.failed == 0
+    async with memory_job_database() as db:
+        assert await memory_job_crud.count_pending_create(db, uid=uid) == 1
+
+    second_claim = await _claim(
+        memory_job_database,
+        uid=uid,
+        job_id=job_id,
+        owner="expired-create-owner-2",
+        enabled_operations=[LongTermMemoryMutationOperation.CREATE],
+        lease_seconds=1,
+    )
+    assert second_claim is not None
+    assert second_claim.attempt_count == 2
+    async with memory_job_database() as db:
+        now = await get_database_time(db)
+        await db.execute(update(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == job_id).values(lock_until=now - timedelta(seconds=10)))
+        await db.commit()
+        max_attempts_error = t(ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED)
+        recovery = await memory_job_crud.recover_expired(
+            db,
+            max_attempts_error=max_attempts_error,
+        )
+    assert recovery.failed == 1
+    assert recovery.retried == 0
+    failed = await _get_job(memory_job_database, uid=uid, job_id=job_id)
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.active_mutation_key is None
+    async with memory_job_database() as db:
+        assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+
+
+@pytest.mark.asyncio
 async def test_shutdown_release_at_max_attempts_fails_and_rejects_old_owner(
     memory_job_database: async_sessionmaker[AsyncSession],
 ) -> None:

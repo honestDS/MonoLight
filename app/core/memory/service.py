@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import (
     ERR_DENSE_RETRIEVAL_FAILED,
     ERR_MEMORY_CAPACITY_EXCEEDED,
+    ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_EMBEDDING_DIMENSION_INVALID,
     ERR_MEMORY_EMBEDDING_VECTOR_INVALID,
     ERR_MEMORY_FIELD_REQUIRED,
@@ -42,6 +43,7 @@ from app.core.crud.memory import (
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.i18n import t
 from app.core.log import get_logger
+from app.core.memory.capacity import load_memory_capacity_snapshot
 from app.core.memory.errors import MemoryConflictError, MemoryNotFoundError, MemoryValidationError
 from app.core.memory.identifiers import (
     build_memory_active_mutation_key,
@@ -430,6 +432,35 @@ class LongTermMemoryService:
                 return _accepted(submission)
 
             store = await _lock_active_store(db, normalized_uid)
+            existing_job = await memory_job_manager.get_job_by_dedupe_key(
+                db,
+                uid=normalized_uid,
+                dedupe_key=normalized_dedupe_key,
+            )
+            if existing_job is not None:
+                submission = await _accept_existing_job(
+                    db,
+                    existing_job,
+                    fallback_active_mutation_key=active_key,
+                    operation=LongTermMemoryMutationOperation.CREATE,
+                    payload=payload,
+                    source_session_id=normalized_session_id,
+                    source_profile_id=normalized_profile_id,
+                    source_message_id=normalized_message_id,
+                    max_attempts=attempts,
+                    use_existing_identity=False,
+                )
+                await _finish(db, commit=commit)
+                return _accepted(submission)
+            if (
+                await memory_job_manager.get_job_by_active_mutation_key(
+                    db,
+                    uid=normalized_uid,
+                    active_mutation_key=active_key,
+                )
+                is not None
+            ):
+                raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
             key_record = await memory_record_crud.get_by_key(db, uid=normalized_uid, memory_key=payload["memory_key"])
             hash_record = await memory_record_crud.get_by_content_hash(db, uid=normalized_uid, content_hash=payload["content_hash"])
             if key_record is not None and hash_record is not None and key_record.id == hash_record.id and _same_publication(key_record, payload):
@@ -438,9 +469,13 @@ class LongTermMemoryService:
             if key_record is not None or hash_record is not None:
                 await _finish(db, commit=commit)
                 return MemoryMutationResult(status=MemoryMutationStatus.EXISTING, record=key_record or hash_record)
-            active_count = await memory_record_crud.count_active(db, uid=normalized_uid)
-            if active_count >= store.max_active_records:
+            capacity = await load_memory_capacity_snapshot(db, normalized_uid, store.max_active_records)
+            if capacity.is_over_limit:
+                raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
+            if capacity.active_count == store.max_active_records:
                 raise MemoryConflictError(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
+            if capacity.occupied_count >= store.max_active_records:
+                raise MemoryConflictError(ERR_MEMORY_CAPACITY_PENDING, maximum=store.max_active_records)
             submission = await _submit_job(
                 db,
                 uid=normalized_uid,
@@ -545,6 +580,9 @@ class LongTermMemoryService:
             if _same_publication(record, payload):
                 await _finish(db, commit=commit)
                 return MemoryMutationResult(status=MemoryMutationStatus.UNCHANGED, record=record)
+            capacity = await load_memory_capacity_snapshot(db, normalized_uid, store.max_active_records)
+            if capacity.is_over_limit and payload["content_token_count"] >= record.content_token_count:
+                raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
             submission = await _submit_job(
                 db,
                 uid=normalized_uid,
@@ -814,8 +852,6 @@ class LongTermMemoryService:
                 raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
             if record.version != normalized_expected_version:
                 raise MemoryConflictError(ERR_MEMORY_VERSION_CONFLICT)
-            if not record.is_active and await memory_record_crud.count_active(db, uid=normalized_uid) >= store.max_active_records:
-                raise MemoryConflictError(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
             if record.is_active and _same_publication(record, payload):
                 await _finish(db, commit=commit)
                 return MemoryMutationResult(status=MemoryMutationStatus.UNCHANGED, record=record)
@@ -824,6 +860,14 @@ class LongTermMemoryService:
             if (key_record is not None and key_record.id != normalized_memory_id) or (hash_record is not None and hash_record.id != normalized_memory_id):
                 await _finish(db, commit=commit)
                 return MemoryMutationResult(status=MemoryMutationStatus.EXISTING, record=key_record or hash_record)
+            capacity = await load_memory_capacity_snapshot(db, normalized_uid, store.max_active_records)
+            if capacity.is_over_limit:
+                raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
+            if not record.is_active:
+                if capacity.active_count == store.max_active_records:
+                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
+                if capacity.occupied_count >= store.max_active_records:
+                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_PENDING, maximum=store.max_active_records)
             submission = await _submit_job(
                 db,
                 uid=normalized_uid,

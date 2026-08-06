@@ -194,6 +194,7 @@ app/core/memory_jobs/
 app/core/memory/
 ├── __init__.py             # 长期记忆公开入口
 ├── errors.py               # 记忆领域异常
+├── capacity.py             # 长期记忆容量状态
 ├── results.py              # 记忆领域结果类型
 ├── normalization.py        # 记忆数据规范化
 ├── identifiers.py          # 记忆持久化标识

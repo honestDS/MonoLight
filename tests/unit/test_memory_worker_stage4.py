@@ -11,6 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.constants import ERR_MEMORY_OVER_LIMIT, MEMORY_CONTENT_MAX_TOKENS
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_record_crud,
@@ -19,6 +20,7 @@ from app.core.crud.memory import (
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
+from app.core.i18n import t
 from app.core.memory import (
     MemoryNotFoundError,
     MemoryRecallStatus,
@@ -584,6 +586,9 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
             content="Alice uses a local test store.",
             memory_key="profile.fact",
         )
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 1
+            assert await memory_record_crud.count_active(db, uid=uid) == 0
         job = await _wait_for_job(
             memory_session_factory,
             uid=uid,
@@ -630,12 +635,119 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
         assert "content" not in (finished.payload or {}) or finished.result.get("content") is None
         assert finished.active_mutation_key is None
         assert finished.result["version"] == 1
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+            assert await memory_record_crud.count_active(db, uid=uid) == 1
 
         deltas = await _get_deltas(memory_session_factory, uid=uid, migration_job_id=migration_job_id)
         assert len(deltas) == 1
         assert deltas[0].action == LongTermMemoryEmbeddingDeltaAction.UPSERT
         assert deltas[0].memory_id == record.id
         assert deltas[0].memory_version == 1
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_create_fails_before_embedding_when_existing_active_record_is_over_limit(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "create-over-limit-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    consumer = _consumer(memory_session_factory)
+    try:
+        result = await _create_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="create-over-limit",
+            content="new create content",
+            memory_key="new-create-key",
+        )
+        async with memory_session_factory() as db:
+            await memory_record_crud.create(
+                db,
+                uid=uid,
+                memory_key="legacy-over-limit",
+                content="legacy content",
+                content_token_count=MEMORY_CONTENT_MAX_TOKENS + 1,
+                content_hash=build_memory_content_hash("legacy content"),
+                memory_type=LongTermMemoryType.FACT,
+                version=1,
+                indexed_version=1,
+                source=LongTermMemorySource.USER_API,
+                is_active=True,
+                index_status=LongTermMemoryRecordIndexStatus.READY,
+            )
+
+        failed = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=result.job.id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+        assert failed.error == t(ERR_MEMORY_OVER_LIMIT)
+        assert failed.memory_id is None
+        assert vector_backend.embedding_calls == []
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+            assert await memory_record_crud.count_active(db, uid=uid) == 1
+            assert await memory_record_crud.get_by_key(db, uid=uid, memory_key="new-create-key") is None
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_update_shortens_existing_active_over_limit_record_and_publishes(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "update-over-limit-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    async with memory_session_factory() as db:
+        old_record = await memory_record_crud.create(
+            db,
+            uid=uid,
+            memory_key="legacy-over-limit",
+            content="legacy content",
+            content_token_count=MEMORY_CONTENT_MAX_TOKENS + 1,
+            content_hash=build_memory_content_hash("legacy content"),
+            memory_type=LongTermMemoryType.FACT,
+            version=1,
+            indexed_version=1,
+            source=LongTermMemorySource.USER_API,
+            is_active=True,
+            index_status=LongTermMemoryRecordIndexStatus.READY,
+        )
+    assert old_record.id is not None
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        result = await _update_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="update-over-limit",
+            memory_id=old_record.id,
+            expected_version=1,
+            content="short content",
+            memory_key="shortened-key",
+        )
+        finished = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=result.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert finished.memory_id == old_record.id
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=old_record.id)
+        assert record is not None
+        assert record.version == 2
+        assert record.content == "short content"
+        assert record.content_token_count == estimate_tokens(record.content)
     finally:
         await consumer.stop()
 
@@ -1266,6 +1378,54 @@ async def test_max_attempt_embedding_failure_fails_create_and_clears_placeholder
         assert failed.active_mutation_key is None
         assert await _get_record(memory_session_factory, uid=uid, memory_id=failed.memory_id) is None
         assert await _get_revisions(memory_session_factory, uid=uid, memory_id=failed.memory_id) == []
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_retryable_create_failure_keeps_reservation_until_success(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "retry-create-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    vector_backend.embedding_error = RuntimeError("temporary embedding failure")
+    consumer = _consumer(memory_session_factory)
+    try:
+        result = await _create_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="retry-create",
+            content="retryable create",
+            memory_key="retryable-create",
+            max_attempts=2,
+        )
+        await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=result.job.id,
+            status=LongTermMemoryMutationStatus.RETRY,
+        )
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 1
+            assert await memory_record_crud.count_active(db, uid=uid) == 0
+
+        vector_backend.embedding_error = None
+        await _make_available_now(memory_session_factory, uid=uid, job_id=result.job.id)
+        await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=result.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+            assert await memory_record_crud.count_active(db, uid=uid) == 1
     finally:
         await consumer.stop()
 
@@ -1396,6 +1556,8 @@ async def test_running_cancel_after_embedding_does_not_publish_create_and_preser
         assert cancelled_create.active_mutation_key is None
         assert await _get_record(memory_session_factory, uid=uid, memory_id=cancelled_create.memory_id) is None
         assert vector_backend.collections["memory-collection-v1"]["items"] == {}
+        async with memory_session_factory() as db:
+            assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
 
         vector_backend.embedding_hook = None
         old_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid, memory_key="cancel-old")

@@ -12,6 +12,7 @@ from typing import Any
 
 from app.core.constants import (
     ERR_MEMORY_CAPACITY_EXCEEDED,
+    ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_EMBEDDING_VECTOR_INVALID,
     ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED,
     ERR_MEMORY_JOB_CANCELLATION_REQUESTED,
@@ -55,6 +56,7 @@ from app.core.memory import (
     normalize_memory_publication_payload,
     normalize_memory_record_snapshot,
 )
+from app.core.memory.capacity import load_memory_capacity_snapshot
 from app.core.memory_jobs.executor import (
     Handler,
     MemoryJobCancelledError,
@@ -370,6 +372,33 @@ def _validate_record_state(
     raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
 
 
+def _validate_publication_capacity(
+    capacity: Any,
+    *,
+    operation: LongTermMemoryMutationOperation,
+    record: Any,
+    payload: dict[str, Any],
+    max_active_records: int,
+) -> None:
+    if capacity.is_over_limit:
+        if operation == LongTermMemoryMutationOperation.UPDATE and payload["content_token_count"] < record.content_token_count:
+            return
+        raise _deterministic(ERR_MEMORY_OVER_LIMIT)
+
+    if operation == LongTermMemoryMutationOperation.CREATE:
+        if capacity.active_count >= max_active_records:
+            raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
+        if capacity.occupied_count > max_active_records:
+            raise _deterministic(ERR_MEMORY_CAPACITY_PENDING)
+        return
+
+    if operation == LongTermMemoryMutationOperation.RESTORE and not record.is_active:
+        if capacity.active_count >= max_active_records:
+            raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
+        if capacity.occupied_count >= max_active_records:
+            raise _deterministic(ERR_MEMORY_CAPACITY_PENDING)
+
+
 async def _validate_unique_publication(
     db: Any,
     *,
@@ -425,41 +454,50 @@ async def _prepare_publication(
                 active_collection_name,
                 max_active_records,
             ) = _validate_active_store(store)
+            capacity = await load_memory_capacity_snapshot(db, uid, max_active_records)
 
-            if operation == LongTermMemoryMutationOperation.CREATE and memory_id is None:
-                if await memory_record_crud.count_active(db, uid=uid) >= max_active_records:
-                    raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
-                next_memory_id = await memory_record_crud.get_next_memory_id(db, minimum_id=job_id)
-                placeholder = await memory_record_crud.create_pending_placeholder(
-                    db,
-                    uid=uid,
-                    job_id=job_id,
-                    memory_id=next_memory_id,
-                    commit=False,
+            if operation == LongTermMemoryMutationOperation.CREATE:
+                _validate_publication_capacity(
+                    capacity,
+                    operation=operation,
+                    record=None,
+                    payload=payload,
+                    max_active_records=max_active_records,
                 )
-                if placeholder.id is None:
-                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-                if not await memory_job_crud.assign_create_memory_id(
-                    db,
-                    uid=uid,
-                    job_id=job_id,
-                    memory_id=placeholder.id,
-                    owner=context.worker_id,
-                    commit=False,
-                ):
-                    current = await memory_job_crud.get_active_claim(
+                if memory_id is None:
+                    next_memory_id = await memory_record_crud.get_next_memory_id(db, minimum_id=job_id)
+                    placeholder = await memory_record_crud.create_pending_placeholder(
                         db,
                         uid=uid,
                         job_id=job_id,
-                        owner=context.worker_id,
+                        memory_id=next_memory_id,
+                        commit=False,
                     )
-                    if current is None:
-                        raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
-                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-                memory_id = placeholder.id
-                expected_version = 0
+                    if placeholder.id is None:
+                        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                    if not await memory_job_crud.assign_create_memory_id(
+                        db,
+                        uid=uid,
+                        job_id=job_id,
+                        memory_id=placeholder.id,
+                        owner=context.worker_id,
+                        commit=False,
+                    ):
+                        current = await memory_job_crud.get_active_claim(
+                            db,
+                            uid=uid,
+                            job_id=job_id,
+                            owner=context.worker_id,
+                        )
+                        if current is None:
+                            raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+                        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                    memory_id = placeholder.id
+                    expected_version = 0
+                else:
+                    expected_version = 0
             else:
-                expected_version = 0 if operation == LongTermMemoryMutationOperation.CREATE else _require_non_negative_int(claim.expected_version)
+                expected_version = _require_non_negative_int(claim.expected_version)
 
             record = await memory_record_crud.get_by_id(db, uid=uid, memory_id=memory_id)
             _validate_record_state(
@@ -469,10 +507,15 @@ async def _prepare_publication(
                 expected_version=expected_version,
                 payload=payload,
             )
+            if operation != LongTermMemoryMutationOperation.CREATE:
+                _validate_publication_capacity(
+                    capacity,
+                    operation=operation,
+                    record=record,
+                    payload=payload,
+                    max_active_records=max_active_records,
+                )
             await _validate_unique_publication(db, uid=uid, memory_id=memory_id, payload=payload)
-            if operation == LongTermMemoryMutationOperation.RESTORE and not record.is_active:
-                if await memory_record_crud.count_active(db, uid=uid) >= max_active_records:
-                    raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
 
             runtime_config = await load_embedding_runtime_config(db, active_channel_id, active_model_id)
             updated_at_text = datetime.now(UTC).isoformat()
@@ -664,7 +707,8 @@ async def _publish_version(
             store = await memory_store_crud.lock_for_mutation(db, uid=snapshot.uid, commit=False)
             if store is None:
                 raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
-            _validate_active_store(store)
+            _, _, _, _, _, _, max_active_records = _validate_active_store(store)
+            capacity = await load_memory_capacity_snapshot(db, snapshot.uid, max_active_records)
             _store_matches_snapshot(store, snapshot)
             record = await memory_record_crud.get_by_id(db, uid=snapshot.uid, memory_id=memory_id)
             _validate_record_state(
@@ -674,9 +718,14 @@ async def _publish_version(
                 expected_version=snapshot.expected_version,
                 payload=payload,
             )
+            _validate_publication_capacity(
+                capacity,
+                operation=snapshot.operation,
+                record=record,
+                payload=payload,
+                max_active_records=max_active_records,
+            )
             await _validate_unique_publication(db, uid=snapshot.uid, memory_id=memory_id, payload=payload)
-            if not record.is_active and await memory_record_crud.count_active(db, uid=snapshot.uid) >= store.max_active_records:
-                raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
 
             next_version = snapshot.expected_version + 1
             published = await memory_record_crud.publish_pending_version(

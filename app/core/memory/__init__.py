@@ -1,3 +1,4 @@
+from app.core.memory.capacity import MemoryCapacitySnapshot, load_memory_capacity_snapshot
 from app.core.memory.chat_history import (
     ChatHistoryRecallItem,
     ChatHistoryRecallResult,
@@ -64,6 +65,7 @@ from app.core.memory.service import (
 
 __all__ = [
     "MemoryConflictError",
+    "MemoryCapacitySnapshot",
     "MemoryContentTooLongError",
     "MemoryContentPublicationResult",
     "MemoryContentValidationResult",
@@ -99,6 +101,7 @@ __all__ = [
     "chat_history_recall_service",
     "evaluate_organization_merge_pins",
     "memory_service",
+    "load_memory_capacity_snapshot",
     "normalize_change_evidence",
     "normalize_memory_content",
     "normalize_memory_content_for_publication",

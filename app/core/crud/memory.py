@@ -643,6 +643,19 @@ class CRUDLongTermMemoryRecord:
         )
         return int(result.scalar_one() or 0)
 
+    async def count_active_oversized(self, db: AsyncSession, *, uid: str, max_tokens: int) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.content_token_count > max_tokens,
+            )
+        )
+        return int(result.scalar_one() or 0)
+
     async def create(
         self,
         db: AsyncSession,

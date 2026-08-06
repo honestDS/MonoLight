@@ -315,6 +315,15 @@ class MemoryJobManager:
     ) -> LongTermMemoryMutationJob | None:
         return await memory_job_crud.get_by_dedupe_key(db, uid=uid, dedupe_key=dedupe_key)
 
+    async def get_job_by_active_mutation_key(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        active_mutation_key: str,
+    ) -> LongTermMemoryMutationJob | None:
+        return await memory_job_crud.get_by_active_mutation_key(db, uid=uid, active_mutation_key=active_mutation_key)
+
     async def list_jobs(
         self,
         db: AsyncSession,

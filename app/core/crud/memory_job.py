@@ -196,6 +196,24 @@ class CRUDLongTermMemoryMutationJob:
         result = await db.execute(select(func.count()).select_from(LongTermMemoryMutationJob).where(*conditions))
         return int(result.scalar_one() or 0)
 
+    async def count_pending_create(self, db: AsyncSession, *, uid: str) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.operation == LongTermMemoryMutationOperation.CREATE,
+                LongTermMemoryMutationJob.status.in_(
+                    [
+                        LongTermMemoryMutationStatus.PENDING,
+                        LongTermMemoryMutationStatus.RUNNING,
+                        LongTermMemoryMutationStatus.RETRY,
+                    ]
+                ),
+            )
+        )
+        return int(result.scalar_one() or 0)
+
     async def list_claimable(
         self,
         db: AsyncSession,
