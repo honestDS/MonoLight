@@ -94,6 +94,7 @@ def test_longterm_memory_schema_exposes_only_model_fields_and_operations():
         "dedupe_key",
         "memory_embedding_channel_id",
         "memory_embedding_model_id",
+        "pinned",
     }.isdisjoint(properties)
 
 
@@ -174,7 +175,9 @@ def test_prevalidate_tool_round_accepts_each_valid_memory_operation(operation, a
     [
         ("recall", "content"),
         ("create", "memory_id"),
+        ("create", "pinned"),
         ("update", "query"),
+        ("update", "pinned"),
         ("delete", "content"),
     ],
 )

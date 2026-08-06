@@ -309,17 +309,39 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_field", ["uid", "source", "source_message_id", "collection", "dimensions", "importance", "scope"])
-async def test_memory_api_forbids_internal_and_embedding_fields(api_app: tuple[FastAPI, SimpleNamespace], extra_field: str) -> None:
+@pytest.mark.parametrize(
+    ("operation", "extra_field"),
+    [
+        ("create", "uid"),
+        ("create", "source"),
+        ("create", "source_message_id"),
+        ("create", "collection"),
+        ("create", "dimensions"),
+        ("create", "importance"),
+        ("create", "scope"),
+        ("create", "pinned"),
+        ("update", "pinned"),
+    ],
+)
+async def test_memory_api_forbids_internal_and_embedding_fields(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+    operation: str,
+    extra_field: str,
+) -> None:
     app, _current_user = api_app
     body = {
         "content": "content",
         "memory_key": "key",
         "memory_type": "fact",
-        extra_field: 1 if extra_field in {"source_message_id", "dimensions"} else "forbidden",
+        extra_field: True if extra_field == "pinned" else 1 if extra_field in {"source_message_id", "dimensions"} else "forbidden",
     }
+    if operation == "update":
+        await _create_store(db_session)
+        record = await _create_record(db_session)
+        body.update({"memory_id": record.id, "expected_version": 1})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        payload = _assert_standard(await client.post("/api/v1/memories/create", json=body), 422)
+        payload = _assert_standard(await client.post(f"/api/v1/memories/{operation}", json=body), 422)
     assert payload["data"] is None
 
 

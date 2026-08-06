@@ -28,6 +28,7 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_BETWEEN,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
+    LOG_MEMORY_RECALL_TOUCH_FAILED,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_MAX_ACTIVE_RECORDS,
     MEMORY_ORGANIZE_TRIGGER_RECORDS,
@@ -926,6 +927,74 @@ class LongTermMemoryService:
             limit=normalized_limit,
         )
 
+    async def set_pinned(
+        self,
+        db: AsyncSession,
+        uid: str,
+        memory_id: int,
+        pinned: bool,
+        commit: bool = True,
+    ) -> LongTermMemoryRecord:
+        try:
+            _validate_commit(commit)
+            normalized_uid = _normalize_uid(uid)
+            normalized_memory_id = _require_positive(memory_id, field="memory_id")
+            if not isinstance(pinned, bool):
+                raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, field="pinned")
+            current_record = await memory_record_crud.get_by_id(
+                db,
+                uid=normalized_uid,
+                memory_id=normalized_memory_id,
+            )
+            if current_record is None or not current_record.is_active or current_record.deleted_at is not None:
+                raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
+            if current_record.pinned == pinned:
+                await _finish(db, commit=commit)
+                return current_record
+            record = await memory_record_crud.set_pinned(
+                db,
+                uid=normalized_uid,
+                memory_id=normalized_memory_id,
+                pinned=pinned,
+                commit=commit,
+            )
+            if record is None:
+                raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
+            return record
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def pin(
+        self,
+        db: AsyncSession,
+        uid: str,
+        memory_id: int,
+        commit: bool = True,
+    ) -> LongTermMemoryRecord:
+        return await self.set_pinned(
+            db,
+            uid=uid,
+            memory_id=memory_id,
+            pinned=True,
+            commit=commit,
+        )
+
+    async def unpin(
+        self,
+        db: AsyncSession,
+        uid: str,
+        memory_id: int,
+        commit: bool = True,
+    ) -> LongTermMemoryRecord:
+        return await self.set_pinned(
+            db,
+            uid=uid,
+            memory_id=memory_id,
+            pinned=False,
+            commit=commit,
+        )
+
     async def recall(
         self,
         db: AsyncSession,
@@ -1081,7 +1150,28 @@ class LongTermMemoryService:
                 break
         if not items:
             return MemoryRecallResult(status=MemoryRecallStatus.EMPTY)
-        return MemoryRecallResult(status=MemoryRecallStatus.OK, items=tuple(items))
+        recall_result = MemoryRecallResult(status=MemoryRecallStatus.OK, items=tuple(items))
+        recalled_memory_ids = {item.memory_id for item in items}
+        try:
+            await memory_record_crud.touch_last_recalled_at(
+                db,
+                uid=normalized_uid,
+                memory_ids=recalled_memory_ids,
+                commit=True,
+            )
+        except Exception as exc:
+            rollback_error_type: str | None = None
+            try:
+                await db.rollback()
+            except Exception as rollback_exc:
+                rollback_error_type = type(rollback_exc).__name__
+            logger.bind(
+                uid=normalized_uid,
+                memory_ids=sorted(recalled_memory_ids),
+                error_type=type(exc).__name__,
+                rollback_error_type=rollback_error_type,
+            ).warning(t(LOG_MEMORY_RECALL_TOUCH_FAILED))
+        return recall_result
 
 
 memory_service = LongTermMemoryService()

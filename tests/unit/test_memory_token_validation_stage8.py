@@ -96,6 +96,12 @@ def test_publication_payload_fills_legacy_token_count_and_rejects_inconsistent_v
             normalize_memory_publication_payload(invalid_payload)
         assert exc_info.value.message == ERR_MEMORY_JOB_PAYLOAD_INVALID
 
+    invalid_payload = dict(normalized)
+    invalid_payload["pinned"] = True
+    with pytest.raises(MemoryValidationError) as exc_info:
+        normalize_memory_publication_payload(invalid_payload)
+    assert exc_info.value.message == ERR_MEMORY_JOB_PAYLOAD_INVALID
+
 
 def test_record_snapshot_persists_token_count_and_fills_legacy_snapshot_without_limit() -> None:
     short_snapshot = _record_snapshot("short memory")

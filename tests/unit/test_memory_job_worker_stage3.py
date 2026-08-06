@@ -9,7 +9,11 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED, ERR_MEMORY_JOB_OPERATION_INVALID
+from app.core.constants import (
+    ERR_MEMORY_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED,
+    ERR_MEMORY_JOB_OPERATION_INVALID,
+    ERR_MEMORY_JOB_PAYLOAD_INVALID,
+)
 from app.core.crud.memory import memory_record_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
@@ -237,6 +241,15 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
                 dedupe_key="migration-2",
                 payload={"uid": "must-be-rejected"},
             )
+        with pytest.raises(MemoryJobValidationError) as exc_info:
+            await manager.submit(
+                db,
+                uid="user-a",
+                operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+                dedupe_key="migration-3",
+                payload={"pinned": True},
+            )
+        assert str(exc_info.value) == t(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
         assert await manager.get_job(db, uid="user-b", job_id=first.job.id) is None
         assert [job.uid for job in await manager.list_jobs(db, uid="user-a")] == ["user-a"]

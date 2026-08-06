@@ -42,7 +42,9 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         list_memories,
         list_memory_history,
         memory_service,
+        pin_memory,
         retry_job,
+        unpin_memory,
     )
     from app.models.memory import (
         LongTermMemoryMutationJob,
@@ -242,6 +244,40 @@ async def test_memory_detail_cross_uid_is_not_found(memory_session_factory) -> N
             await get_memory(db, uid="stage7-detail-other", memory_id=record.id)
 
     assert exc_info.value.message == ERR_MEMORY_RECORD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_pin_management_entry_is_idempotent_persistent_and_uid_scoped(memory_session_factory) -> None:
+    owner = "stage7-pin-owner"
+    other = "stage7-pin-other"
+    record = await create_recallable_record(
+        memory_session_factory,
+        uid=owner,
+        memory_key="managed-pin",
+    )
+
+    async with memory_session_factory() as db:
+        pinned = await pin_memory(db, uid=owner, memory_id=record.id)
+        pinned_again = await pin_memory(db, uid=owner, memory_id=record.id)
+        unpinned = await unpin_memory(db, uid=owner, memory_id=record.id)
+
+        with pytest.raises(MemoryNotFoundError):
+            await pin_memory(db, uid=other, memory_id=record.id)
+        with pytest.raises(MemoryNotFoundError):
+            await unpin_memory(db, uid=other, memory_id=record.id)
+
+    assert pinned["id"] == record.id
+    assert pinned["pinned"] is True
+    assert pinned_again["id"] == record.id
+    assert pinned_again["pinned"] is True
+    assert unpinned["id"] == record.id
+    assert unpinned["pinned"] is False
+
+    async with memory_session_factory() as db:
+        persisted = await memory_record_crud.get_by_id(db, uid=owner, memory_id=record.id)
+
+    assert persisted is not None
+    assert persisted.pinned is False
 
 
 @pytest.mark.asyncio

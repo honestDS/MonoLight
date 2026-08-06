@@ -27,8 +27,10 @@ from app.core.memory.management import (
     list_jobs,
     list_memories,
     list_memory_history,
+    pin_memory,
     retry_embedding_migration,
     retry_job,
+    unpin_memory,
 )
 from app.core.memory.normalization import (
     MemoryContentPublicationResult,
@@ -41,6 +43,11 @@ from app.core.memory.normalization import (
     normalize_memory_key,
     normalize_memory_publication_payload,
     normalize_memory_record_snapshot,
+)
+from app.core.memory.organization import (
+    MemoryOrganizationPinPolicyResult,
+    MemoryOrganizationPinPolicyStatus,
+    evaluate_organization_merge_pins,
 )
 from app.core.memory.results import (
     MemoryMutationResult,
@@ -66,6 +73,8 @@ __all__ = [
     "MemoryMutationResult",
     "MemoryMutationStatus",
     "MemoryNotFoundError",
+    "MemoryOrganizationPinPolicyResult",
+    "MemoryOrganizationPinPolicyStatus",
     "MemoryRecallItem",
     "MemoryRecallResult",
     "MemoryRecallStatus",
@@ -88,6 +97,7 @@ __all__ = [
     "build_memory_record_snapshot",
     "build_memory_vector_item_id",
     "chat_history_recall_service",
+    "evaluate_organization_merge_pins",
     "memory_service",
     "normalize_change_evidence",
     "normalize_memory_content",
@@ -95,8 +105,10 @@ __all__ = [
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_record_snapshot",
+    "pin_memory",
     "retry_embedding_migration",
     "retry_job",
     "submit_memory_cleanup_retry",
     "submit_memory_reindex",
+    "unpin_memory",
 ]

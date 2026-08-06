@@ -14,6 +14,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_FIELD_REQUIRED,
     ERR_MEMORY_JOB_NON_TARGET_FIELDS_FORBIDDEN,
     ERR_MEMORY_JOB_OPERATION_INVALID,
+    ERR_MEMORY_JOB_PAYLOAD_INVALID,
     ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN,
     ERR_MEMORY_JOB_TARGET_BUSY,
     ERR_MEMORY_MIGRATION_CANNOT_CANCEL_AFTER_SWITCHING,
@@ -170,6 +171,8 @@ class MemoryJobManager:
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="payload"))
             if "uid" in payload:
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN))
+            if "pinned" in payload:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             try:
                 operation = LongTermMemoryMutationOperation(operation)
             except (TypeError, ValueError) as exc:

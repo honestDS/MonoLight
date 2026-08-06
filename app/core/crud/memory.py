@@ -514,6 +514,67 @@ class CRUDLongTermMemoryRecord:
         result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid), LongTermMemoryRecord.id.in_(memory_ids)))
         return list(result.scalars().all())
 
+    async def touch_last_recalled_at(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_ids: Iterable[int],
+        commit: bool = True,
+    ) -> int:
+        memory_ids = tuple(memory_ids)
+        if not memory_ids:
+            return 0
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id.in_(memory_ids),
+            )
+            .values(last_recalled_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return result.rowcount or 0
+
+    async def set_pinned(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        pinned: bool,
+        commit: bool = True,
+    ) -> LongTermMemoryRecord | None:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+            )
+            .values(
+                pinned=pinned,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        refreshed = await db.execute(
+            select(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        return refreshed.scalars().first()
+
     async def get_by_key(self, db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord | None:
         result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.memory_key == memory_key).execution_options(populate_existing=True))
         return result.scalars().first()

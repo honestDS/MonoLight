@@ -1401,6 +1401,149 @@ async def test_recall_filters_metadata_and_database_state_while_preserving_fusio
     assert result.items[0].fusion_score == 0.9
     assert result.items[1].fusion_score == 0.1
 
+    recalled_second = await _get_record(memory_database, uid=uid, memory_id=valid_second.id)
+    recalled_first = await _get_record(memory_database, uid=uid, memory_id=valid_first.id)
+    not_recalled = await _get_record(memory_database, uid=uid, memory_id=deleted.id)
+    cross_uid_record = await _get_record(memory_database, uid="other-recall-user", memory_id=cross_uid.id)
+    assert recalled_second is not None and recalled_second.last_recalled_at is not None
+    assert recalled_first is not None and recalled_first.last_recalled_at is not None
+    assert not_recalled is not None and not_recalled.last_recalled_at is None
+    assert cross_uid_record is not None and cross_uid_record.last_recalled_at is None
+
+
+@pytest.mark.asyncio
+async def test_touch_last_recalled_at_updates_only_the_requested_uid_and_preserves_updated_at(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    async with memory_database() as db:
+        first = await _create_record(db, uid="touch-owner", memory_key="first", content="first")
+        other = await _create_record(db, uid="touch-other", memory_key="other", content="other")
+        await db.commit()
+        first_updated_at = first.updated_at
+        other_updated_at = other.updated_at
+
+        updated_count = await memory_record_crud.touch_last_recalled_at(
+            db,
+            uid="touch-owner",
+            memory_ids={first.id, other.id},
+            commit=True,
+        )
+
+    assert updated_count == 1
+    touched = await _get_record(memory_database, uid="touch-owner", memory_id=first.id)
+    untouched = await _get_record(memory_database, uid="touch-other", memory_id=other.id)
+    assert touched is not None
+    assert touched.last_recalled_at is not None
+    assert touched.updated_at == first_updated_at
+    assert untouched is not None
+    assert untouched.last_recalled_at is None
+    assert untouched.updated_at == other_updated_at
+
+
+@pytest.mark.asyncio
+async def test_recall_touch_failure_returns_the_original_ok_result(
+    memory_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "recall-touch-failure-user"
+    async with memory_database() as db:
+        record = await _configure_recall_user(db, uid=uid)
+
+    async def fake_loader(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_embed(*_args: Any, **_kwargs: Any) -> list[list[float]]:
+        return [[0.1, 0.2]]
+
+    async def fake_query(*_args: Any, **_kwargs: Any) -> list[_RecallHit]:
+        return [_hit(record.id, uid=uid)]
+
+    async def failed_touch(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("touch unavailable")
+
+    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
+    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
+    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", fake_query)
+    monkeypatch.setattr(memory_service_module.memory_record_crud, "touch_last_recalled_at", failed_touch)
+
+    async with memory_database() as db:
+        result = await memory_service.recall(db, uid=uid, query="touch failure")
+
+    assert result.status == MemoryRecallStatus.OK
+    assert [item.memory_id for item in result.items] == [record.id]
+    assert result.error_key is None
+
+
+@pytest.mark.asyncio
+async def test_pin_and_unpin_are_uid_scoped_idempotent_and_do_not_change_publication_state(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    async with memory_database() as db:
+        owner_record = await _create_record(
+            db,
+            uid="pin-owner",
+            memory_key="owner-key",
+            content="owner content",
+            version=3,
+            pending_mutation_job_id=812,
+        )
+        foreign_record = await _create_record(
+            db,
+            uid="pin-foreign",
+            memory_key="foreign-key",
+            content="foreign content",
+        )
+        inactive_record = await _create_record(
+            db,
+            uid="pin-owner",
+            memory_key="inactive-key",
+            content="inactive content",
+            is_active=False,
+        )
+        deleted_record = await _create_record(
+            db,
+            uid="pin-owner",
+            memory_key="deleted-key",
+            content="deleted content",
+            is_active=False,
+            deleted=True,
+        )
+        await db.commit()
+
+        owner_memory_id = owner_record.id
+        foreign_memory_id = foreign_record.id
+        inactive_memory_id = inactive_record.id
+        deleted_memory_id = deleted_record.id
+
+        pinned = await memory_service.pin(db, "pin-owner", owner_memory_id)
+        pinned_state = pinned.pinned
+        pinned_updated_at = pinned.updated_at
+        pinned_again = await memory_service.pin(db, "pin-owner", owner_memory_id)
+        pinned_again_state = pinned_again.pinned
+        pinned_again_updated_at = pinned_again.updated_at
+        unpinned = await memory_service.unpin(db, "pin-owner", owner_memory_id)
+        unpinned_state = unpinned.pinned
+
+        for foreign_uid, memory_id in (
+            ("pin-foreign", owner_memory_id),
+            ("pin-owner", inactive_memory_id),
+            ("pin-owner", deleted_memory_id),
+        ):
+            with pytest.raises(MemoryNotFoundError):
+                await memory_service.pin(db, foreign_uid, memory_id)
+
+        assert pinned_state is True
+        assert pinned_again_state is True
+        assert pinned_again_updated_at == pinned_updated_at
+        assert unpinned_state is False
+
+    owner_after = await _get_record(memory_database, uid="pin-owner", memory_id=owner_memory_id)
+    foreign_after = await _get_record(memory_database, uid="pin-foreign", memory_id=foreign_memory_id)
+    assert owner_after is not None
+    assert (owner_after.version, owner_after.content, owner_after.pending_mutation_job_id) == (3, "owner content", 812)
+    assert owner_after.pinned is False
+    assert foreign_after is not None and foreign_after.pinned is False
+
 
 @pytest.mark.asyncio
 async def test_recall_applies_top_k_and_total_character_budget_by_truncating_last_item(

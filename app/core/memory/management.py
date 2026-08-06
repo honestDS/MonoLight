@@ -114,6 +114,20 @@ async def get_memory(db: AsyncSession, *, uid: str, memory_id: int) -> dict[str,
     return result
 
 
+async def pin_memory(db: AsyncSession, *, uid: str, memory_id: int) -> dict[str, Any]:
+    normalized_uid = _normalize_uid(uid)
+    normalized_memory_id = _require_positive(memory_id, field="memory_id")
+    record = await memory_service.pin(db, normalized_uid, normalized_memory_id)
+    return _record_view(record) or {}
+
+
+async def unpin_memory(db: AsyncSession, *, uid: str, memory_id: int) -> dict[str, Any]:
+    normalized_uid = _normalize_uid(uid)
+    normalized_memory_id = _require_positive(memory_id, field="memory_id")
+    record = await memory_service.unpin(db, normalized_uid, normalized_memory_id)
+    return _record_view(record) or {}
+
+
 async def list_memory_history(
     db: AsyncSession,
     *,
@@ -598,6 +612,8 @@ __all__ = [
     "list_jobs",
     "list_memory_history",
     "list_memories",
+    "pin_memory",
     "retry_embedding_migration",
     "retry_job",
+    "unpin_memory",
 ]

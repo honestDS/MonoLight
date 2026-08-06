@@ -275,6 +275,8 @@ def normalize_memory_publication_payload(payload: dict[str, Any]) -> dict[str, A
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     if "uid" in payload:
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN)
+    if "pinned" in payload:
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
     missing_fields = [field for field in (*_PUBLICATION_PAYLOAD_INPUT_FIELDS, "content_hash") if field not in payload]
     if missing_fields:
