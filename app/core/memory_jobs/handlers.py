@@ -101,6 +101,7 @@ _PUBLICATION_PAYLOAD_FIELDS = frozenset(
         "source_session_id",
         "source_profile_id",
         "source_message_id",
+        "content_token_count",
         "content_hash",
     }
 )
@@ -351,7 +352,7 @@ def _validate_record_state(
     if operation == LongTermMemoryMutationOperation.CREATE:
         if record.version != 0 or record.is_active or record.deleted_at is not None:
             raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-        if record.memory_key is not None or record.content != "" or record.content_hash is not None or record.indexed_version != 0 or record.index_status != LongTermMemoryRecordIndexStatus.PENDING:
+        if record.memory_key is not None or record.content != "" or record.content_token_count != 0 or record.content_hash is not None or record.indexed_version != 0 or record.index_status != LongTermMemoryRecordIndexStatus.PENDING:
             raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
         return
     if operation == LongTermMemoryMutationOperation.UPDATE:
@@ -688,6 +689,7 @@ async def _publish_version(
                     "memory_key": payload["memory_key"],
                     "memory_type": payload["memory_type"],
                     "content": payload["content"],
+                    "content_token_count": payload["content_token_count"],
                     "content_hash": payload["content_hash"],
                     "source": payload["source"],
                     "source_id": payload["source_id"],
@@ -718,6 +720,7 @@ async def _publish_version(
                 memory_key=payload["memory_key"],
                 memory_type=payload["memory_type"],
                 content=payload["content"],
+                content_token_count=payload["content_token_count"],
                 content_hash=payload["content_hash"],
                 source=payload["source"],
                 source_id=payload["source_id"],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_OVER_LIMIT
+from app.core.constants import ERR_MEMORY_OVER_LIMIT, MEMORY_CONTENT_MAX_TOKENS
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_record_crud,
@@ -20,6 +21,7 @@ from app.core.crud.memory import (
 from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     MemoryConflictError,
+    MemoryContentTooLongError,
     MemoryMutationStatus,
     MemoryNotFoundError,
     MemoryRecallStatus,
@@ -35,6 +37,7 @@ from app.core.memory import (
 )
 from app.core.memory import service as memory_service_module
 from app.core.memory_jobs.manager import memory_job_manager
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingDeltaAction,
@@ -149,6 +152,7 @@ async def _create_record(
         uid=uid,
         memory_key=memory_key,
         content=content,
+        content_token_count=estimate_tokens(normalize_memory_content(content)),
         content_hash=build_memory_content_hash(content),
         memory_type=memory_type,
         version=version,
@@ -190,6 +194,7 @@ async def _create_revision(
         memory_key=memory_key,
         memory_type=LongTermMemoryType.FACT,
         content=content,
+        content_token_count=estimate_tokens(normalize_memory_content(content)),
         content_hash=build_memory_content_hash(content),
         source=source,
         source_id=source_id,
@@ -250,8 +255,7 @@ def _create_kwargs(**overrides: Any) -> dict[str, Any]:
 
 
 def test_validate_active_store_rejects_over_limit_capacity_configuration() -> None:
-    store = LongTermMemoryStore.model_construct(
-        uid="over-limit-user",
+    store = SimpleNamespace(
         active_embedding_channel_id=1,
         active_embedding_model_id="memory-model",
         active_embedding_dimensions=2,
@@ -319,6 +323,7 @@ async def test_create_normalizes_publication_but_preserves_nonempty_identifiers(
     assert job.payload == {
         "memory_key": "key name",
         "content": "A B C",
+        "content_token_count": estimate_tokens("A B C"),
         "content_hash": build_memory_content_hash("A B C"),
         "memory_type": "fact",
         "source": "llm_tool",
@@ -551,6 +556,9 @@ async def test_update_enforces_uid_expected_version_and_pending_mutation(
     current = await _get_record(memory_database, uid="update-owner", memory_id=memory_id)
     assert current is not None
     assert current.pending_mutation_job_id == first.job_id
+    update_job = await _get_job(memory_database, uid="update-owner", job_id=first.job_id)
+    assert update_job is not None
+    assert update_job.payload["content_token_count"] == estimate_tokens(update_job.payload["content"])
 
 
 @pytest.mark.asyncio
@@ -955,6 +963,7 @@ async def test_list_history_is_uid_scoped_and_restore_builds_job_from_revision_w
     assert job.memory_id == memory_id
     assert job.expected_version == 2
     assert job.payload["content"] == "old content"
+    assert job.payload["content_token_count"] == estimate_tokens(job.payload["content"])
     assert job.payload["memory_key"] == "old-key"
     assert job.payload["restored_from_version"] == 1
     assert job.payload["source"] == "user_api"
@@ -1106,6 +1115,45 @@ async def test_restore_same_dedupe_with_different_revision_conflicts(
     job = await _get_job(memory_database, uid="restore-dedupe-user", job_id=first_result.job_id)
     assert job is not None
     assert job.payload["restored_from_version"] == first_version
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_historical_over_limit_content_before_enqueue(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "restore-over-limit-user"
+    oversized_content = " ".join(["oversized"] * (MEMORY_CONTENT_MAX_TOKENS + 20))
+    async with memory_database() as db:
+        await _create_store(db, uid=uid)
+        record = await _create_record(
+            db,
+            uid=uid,
+            memory_key="deleted-key",
+            content="current content",
+            is_active=False,
+            deleted=True,
+        )
+        revision = await _create_revision(
+            db,
+            uid=uid,
+            memory_id=record.id,
+            version=1,
+            memory_key="oversized-key",
+            content=oversized_content,
+        )
+        await db.commit()
+
+        with pytest.raises(MemoryContentTooLongError):
+            await memory_service.restore(
+                db,
+                uid=uid,
+                dedupe_key="restore-over-limit",
+                memory_id=record.id,
+                revision_version=revision.version,
+                expected_version=1,
+            )
+
+    assert await _get_job(memory_database, uid=uid, job_id=1) is None
 
 
 @pytest.mark.asyncio

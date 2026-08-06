@@ -34,6 +34,7 @@ from app.core.memory_jobs.executor import (
     MemoryJobExecutionResult,
     MemoryJobExecutor,
 )
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingDeltaAction,
@@ -460,6 +461,7 @@ async def _seed_ready_record(
             uid=uid,
             memory_key=memory_key,
             content=content,
+            content_token_count=estimate_tokens(normalize_memory_content(content)),
             content_hash=content_hash,
             memory_type=LongTermMemoryType.FACT,
             version=version,
@@ -480,6 +482,7 @@ async def _seed_ready_record(
             memory_key=memory_key,
             memory_type=LongTermMemoryType.FACT,
             content=content,
+            content_token_count=estimate_tokens(normalize_memory_content(content)),
             content_hash=content_hash,
             source=LongTermMemorySource.USER_API,
             change_evidence="seed",
@@ -589,6 +592,7 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
         )
         assert job.active_mutation_key is not None
         assert job.payload["content"] == "Alice uses a local test store."
+        assert job.payload["content_token_count"] == estimate_tokens(job.payload["content"])
 
         finished = await _run_job(
             consumer,
@@ -604,11 +608,13 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
         assert record.index_status == LongTermMemoryRecordIndexStatus.READY
         assert record.is_active is True
         assert record.pending_mutation_job_id is None
+        assert record.content_token_count == estimate_tokens(record.content)
         assert record.vector_item_id == build_memory_vector_item_id(record.id, 1)
 
         revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=record.id)
         assert [revision.version for revision in revisions] == [1]
         assert revisions[0].content == record.content
+        assert revisions[0].content_token_count == record.content_token_count
 
         collection = vector_backend.collections["memory-collection-v1"]
         assert set(collection["items"]) == {record.vector_item_id}
@@ -686,11 +692,14 @@ async def test_update_keeps_old_ready_version_during_embedding_then_publishes_v2
         assert record.indexed_version == 2
         assert record.index_status == LongTermMemoryRecordIndexStatus.READY
         assert record.content == "new content"
+        assert record.content_token_count == estimate_tokens(record.content)
         assert record.suppress_recall is False
         assert record.vector_item_id == build_memory_vector_item_id(memory_id, 2)
         assert build_memory_vector_item_id(memory_id, 1) not in vector_backend.collections["memory-collection-v1"]["items"]
         assert build_memory_vector_item_id(memory_id, 2) in vector_backend.collections["memory-collection-v1"]["items"]
         assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [2, 1]
+        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
+        assert revisions[0].content_token_count == record.content_token_count
         assert finished.result["version"] == 2
     finally:
         release.set()
@@ -882,6 +891,7 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
         )
         assert delete_job is not None
         assert delete_job.payload["record_snapshot"]["content"] == expected_update
+        assert delete_job.payload["record_snapshot"]["content_token_count"] == estimate_tokens(expected_update)
         assert delete_job.payload["record_snapshot"]["memory_key"] == update_key
         assert delete_job.payload["record_snapshot"]["version"] == 2
         assert delete_job.result["record_snapshot"] == delete_job.payload["record_snapshot"]

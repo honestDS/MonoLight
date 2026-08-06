@@ -141,6 +141,8 @@ def _store_progress_view(store: LongTermMemoryStore | None) -> dict[str, Any]:
         "index_revision": store.index_revision,
         "index_status": _json_value(store.index_status),
         "max_active_records": store.max_active_records,
+        "organize_trigger_records": store.organize_trigger_records,
+        "capacity_status": _json_value(store.capacity_status),
     }
 
 

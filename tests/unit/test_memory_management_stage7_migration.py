@@ -262,7 +262,13 @@ async def test_memory_settings_expose_active_target_progress_capacity_and_cleanu
     assert result["migration"]["failure_count"] == 1
     assert result["delta"] == {"high_watermark": 8, "applied_watermark": 6}
     assert result["index"] == {"revision": 7, "status": LongTermMemoryIndexStatus.READY.value}
-    assert result["capacity"] == {"max_active_records": 9, "active_record_count": 1}
+    assert result["capacity"] == {
+        "max_active_records": 9,
+        "organize_trigger_records": 45,
+        "content_max_tokens": 160,
+        "active_record_count": 1,
+        "status": "normal",
+    }
     assert result["old_collection_cleanup"]["name"] == "stage7-settings-old"
     assert result["old_collection_cleanup"]["status"] == LongTermMemoryOldCollectionCleanupStatus.FAILED.value
     assert result["old_collection_cleanup"]["job_id"] == 77

@@ -14,6 +14,9 @@ from app.core.constants import (
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_RECORD_NOT_FOUND,
     ERR_MEMORY_VERSION_INVALID,
+    MEMORY_CONTENT_MAX_TOKENS,
+    MEMORY_MAX_ACTIVE_RECORDS,
+    MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
 from app.core.crud.memory import (
     memory_embedding_revision_crud,
@@ -51,6 +54,7 @@ from app.core.memory.service import memory_service
 from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.time import get_local_time
 from app.models.memory import (
+    LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingRevisionStatus,
     LongTermMemoryIndexStatus,
     LongTermMemoryMutationJob,
@@ -552,8 +556,11 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         "status": flat.get("index_status"),
     }
     capacity = {
-        "max_active_records": flat.get("max_active_records"),
+        "max_active_records": store.max_active_records if store is not None else MEMORY_MAX_ACTIVE_RECORDS,
+        "organize_trigger_records": MEMORY_ORGANIZE_TRIGGER_RECORDS,
+        "content_max_tokens": MEMORY_CONTENT_MAX_TOKENS,
         "active_record_count": active_count,
+        "status": flat.get("capacity_status") or LongTermMemoryCapacityStatus.NORMAL.value,
     }
     cleanup = {
         "name": flat.get("old_collection_name"),
@@ -572,7 +579,11 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         "capacity": capacity,
         "old_collection_cleanup": cleanup,
         "migration_job": _job_view(migration_job),
-        "store": {**flat, "active_record_count": active_count},
+        "store": {
+            **flat,
+            "content_max_tokens": MEMORY_CONTENT_MAX_TOKENS,
+            "active_record_count": active_count,
+        },
     }
 
 

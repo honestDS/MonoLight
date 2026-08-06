@@ -116,6 +116,28 @@ def _same_operation(left: Any, right: Any) -> bool:
         return False
 
 
+def _is_legacy_publication_payload(
+    operation: LongTermMemoryMutationOperation | str | None,
+    existing_payload: Any,
+    requested_payload: dict[str, Any],
+) -> bool:
+    try:
+        normalized_operation = LongTermMemoryMutationOperation(operation)
+    except (TypeError, ValueError):
+        return False
+    if normalized_operation not in {
+        LongTermMemoryMutationOperation.CREATE,
+        LongTermMemoryMutationOperation.UPDATE,
+        LongTermMemoryMutationOperation.RESTORE,
+    }:
+        return False
+    if not isinstance(existing_payload, dict) or "content_token_count" in existing_payload:
+        return False
+    legacy_payload = dict(requested_payload)
+    legacy_payload.pop("content_token_count", None)
+    return existing_payload == legacy_payload
+
+
 def _is_terminal_mutation_status(value: Any) -> bool:
     try:
         return LongTermMemoryMutationStatus(value) in {
@@ -225,13 +247,16 @@ async def _accept_existing_job(
     if _same_operation(operation, LongTermMemoryMutationOperation.CREATE):
         memory_id = existing.memory_id
     active_key = existing.active_mutation_key or fallback_active_mutation_key
+    submission_payload = payload
+    if _is_legacy_publication_payload(operation, existing.payload, payload):
+        submission_payload = dict(existing.payload or {})
     try:
         return await memory_job_manager.submit(
             db,
             uid=existing.uid,
             operation=operation,
             dedupe_key=existing.dedupe_key,
-            payload=payload,
+            payload=submission_payload,
             active_mutation_key=active_key,
             memory_id=memory_id,
             expected_version=expected_version,
@@ -244,7 +269,7 @@ async def _accept_existing_job(
     except MemoryJobValidationError as exc:
         if _is_terminal_mutation_status(existing.status) and (
             _same_operation(operation, existing.operation)
-            and payload == (existing.payload or {})
+            and submission_payload == (existing.payload or {})
             and memory_id == existing.memory_id
             and expected_version == existing.expected_version
             and source_session_id == existing.source_session_id

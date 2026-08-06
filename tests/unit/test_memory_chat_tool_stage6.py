@@ -10,7 +10,7 @@ from app.core.dispatch_context import build_dispatch_context
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.core.exceptions import BaseBusinessException
-from app.core.memory import MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
+from app.core.memory import MemoryContentTooLongError, MemoryRecallItem, MemoryRecallResult, MemoryRecallStatus
 from app.core.prompts import LONGTERM_MEMORY_SYSTEM_PROMPT
 from app.core.tools import (
     MANAGE_LONGTERM_MEMORY_TOOL_NAME,
@@ -561,6 +561,32 @@ async def test_executor_mutations_derive_dispatch_context_and_return_submission_
     assert first_context["source"] == LongTermMemorySource.LLM_TOOL
     assert first_context["dedupe_key"] == second_context["dedupe_key"]
     assert first_context["dedupe_key"].startswith("longterm-memory:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update"])
+async def test_executor_mutation_content_too_long_result_is_compact_and_retryable(monkeypatch, operation):
+    executor, _context = _build_executor()
+
+    class TooLongMemoryService:
+        async def create(self, **_kwargs):
+            raise MemoryContentTooLongError(actual_tokens=161)
+
+        async def update(self, **_kwargs):
+            raise MemoryContentTooLongError(actual_tokens=161)
+
+    monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: TooLongMemoryService())
+
+    payload = json.loads(await executor.execute(**_valid_arguments(operation)))
+
+    assert payload == {
+        "operation": operation,
+        "status": "content_too_long",
+        "actual_tokens": 161,
+        "max_tokens": 160,
+        "retryable": True,
+    }
+    assert "error" not in payload
 
 
 @pytest.mark.asyncio

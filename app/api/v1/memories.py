@@ -52,6 +52,7 @@ from app.models.user import User
 from app.providers.database import get_db
 from app.schemas.memory import (
     MemoryCancelResponse,
+    MemoryContentTooLongErrorData,
     MemoryCreateRequest,
     MemoryDeleteRequest,
     MemoryJobResponse,
@@ -61,6 +62,7 @@ from app.schemas.memory import (
     MemoryRestoreRequest,
     MemoryResumeCurrentRequest,
     MemoryRevisionResponse,
+    MemorySettingsResponse,
     MemorySortField,
     MemorySortOrder,
     MemorySubmissionResponse,
@@ -148,7 +150,11 @@ async def get_memory_api(
     return StandardResponse.success(data=result, message=MSG_MEMORY_DETAIL_SUCCESS)
 
 
-@router.post("/create", response_model=StandardResponse[MemoryMutationResponse])
+@router.post(
+    "/create",
+    response_model=StandardResponse[MemoryMutationResponse],
+    responses={400: {"model": StandardResponse[MemoryContentTooLongErrorData]}},
+)
 async def create_memory_api(
     request: MemoryCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -168,7 +174,11 @@ async def create_memory_api(
     return StandardResponse.success(data=_mutation_data(result), message=MSG_MEMORY_CREATED)
 
 
-@router.post("/update", response_model=StandardResponse[MemoryMutationResponse])
+@router.post(
+    "/update",
+    response_model=StandardResponse[MemoryMutationResponse],
+    responses={400: {"model": StandardResponse[MemoryContentTooLongErrorData]}},
+)
 async def update_memory_api(
     request: MemoryUpdateRequest,
     db: AsyncSession = Depends(get_db),
@@ -261,7 +271,7 @@ async def cancel_memory_job_api(
     return StandardResponse.success(data=result, message=MSG_MEMORY_JOB_CANCELLED)
 
 
-@router.get("/settings", response_model=StandardResponse[dict[str, Any]])
+@router.get("/settings", response_model=StandardResponse[MemorySettingsResponse])
 async def get_memory_settings_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -368,7 +378,11 @@ async def list_memory_history_api(
     return StandardResponse.success(data=data, message=MSG_MEMORY_HISTORY_SUCCESS)
 
 
-@router.post("/{memory_id}/restore", response_model=StandardResponse[MemoryMutationResponse])
+@router.post(
+    "/{memory_id}/restore",
+    response_model=StandardResponse[MemoryMutationResponse],
+    responses={400: {"model": StandardResponse[MemoryContentTooLongErrorData]}},
+)
 async def restore_memory_api(
     request: MemoryRestoreRequest,
     memory_id: int = Path(..., ge=1),

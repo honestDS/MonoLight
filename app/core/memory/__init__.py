@@ -31,10 +31,13 @@ from app.core.memory.management import (
     retry_job,
 )
 from app.core.memory.normalization import (
+    MemoryContentPublicationResult,
+    MemoryContentValidationResult,
     build_memory_content_hash,
     build_memory_record_snapshot,
     normalize_change_evidence,
     normalize_memory_content,
+    normalize_memory_content_for_publication,
     normalize_memory_key,
     normalize_memory_publication_payload,
     normalize_memory_record_snapshot,
@@ -55,6 +58,8 @@ from app.core.memory.service import (
 __all__ = [
     "MemoryConflictError",
     "MemoryContentTooLongError",
+    "MemoryContentPublicationResult",
+    "MemoryContentValidationResult",
     "ChatHistoryRecallItem",
     "ChatHistoryRecallResult",
     "ChatHistoryRecallService",
@@ -86,6 +91,7 @@ __all__ = [
     "memory_service",
     "normalize_change_evidence",
     "normalize_memory_content",
+    "normalize_memory_content_for_publication",
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_record_snapshot",

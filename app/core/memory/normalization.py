@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -18,9 +19,11 @@ from app.core.constants import (
     ERR_MEMORY_VERSION_INVALID,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
+    MEMORY_CONTENT_MAX_TOKENS,
     MEMORY_KEY_MAX_CHARS,
 )
-from app.core.memory.errors import MemoryValidationError
+from app.core.memory.errors import MemoryContentTooLongError, MemoryValidationError
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import LongTermMemoryRecord, LongTermMemoryRevision, LongTermMemorySource, LongTermMemoryType
 
 _MEMORY_UID_MAX_CHARS = 100
@@ -29,6 +32,7 @@ _SOURCE_SESSION_ID_MAX_CHARS = 100
 _MEMORY_RECORD_SNAPSHOT_FIELDS = (
     "memory_key",
     "content",
+    "content_token_count",
     "content_hash",
     "memory_type",
     "source",
@@ -40,6 +44,22 @@ _MEMORY_RECORD_SNAPSHOT_FIELDS = (
     "change_evidence",
     "version",
 )
+_LEGACY_MEMORY_RECORD_SNAPSHOT_FIELDS = frozenset(_MEMORY_RECORD_SNAPSHOT_FIELDS) - {"content_token_count"}
+_MISSING = object()
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryContentPublicationResult:
+    content: str
+    content_hash: str
+    content_token_count: int
+
+    @property
+    def normalized_content(self) -> str:
+        return self.content
+
+
+MemoryContentValidationResult = MemoryContentPublicationResult
 
 
 def _normalize_text(value: Any, *, field: str, maximum: int, required: bool = True) -> str | None:
@@ -98,6 +118,27 @@ def normalize_change_evidence(change_evidence: str | None) -> str | None:
 def build_memory_content_hash(content: str) -> str:
     normalized_content = normalize_memory_content(content)
     return hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+
+
+def _normalize_memory_content_result(
+    content: str,
+    *,
+    enforce_token_limit: bool,
+) -> MemoryContentPublicationResult:
+    normalized_content = normalize_memory_content(content)
+    content_token_count = estimate_tokens(normalized_content)
+    content_hash = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+    if enforce_token_limit and content_token_count > MEMORY_CONTENT_MAX_TOKENS:
+        raise MemoryContentTooLongError(content_token_count)
+    return MemoryContentPublicationResult(
+        content=normalized_content,
+        content_hash=content_hash,
+        content_token_count=content_token_count,
+    )
+
+
+def normalize_memory_content_for_publication(content: str) -> MemoryContentPublicationResult:
+    return _normalize_memory_content_result(content, enforce_token_limit=True)
 
 
 def _normalize_uid(uid: str) -> str:
@@ -187,6 +228,7 @@ def _publication_payload(
     source_session_id: str | None,
     source_profile_id: int | None,
     source_message_id: int | None,
+    enforce_content_token_limit: bool = True,
 ) -> dict[str, Any]:
     normalized_source, normalized_source_id, normalized_session_id, normalized_profile_id, normalized_message_id = _validate_source_fields(
         source=source,
@@ -195,14 +237,15 @@ def _publication_payload(
         source_profile_id=source_profile_id,
         source_message_id=source_message_id,
     )
-    normalized_content = normalize_memory_content(content)
+    content_result = normalize_memory_content_for_publication(content) if enforce_content_token_limit else _normalize_memory_content_result(content, enforce_token_limit=False)
     normalized_key = normalize_memory_key(memory_key)
     normalized_type = _normalize_enum(memory_type, LongTermMemoryType, field="memory_type")
     normalized_evidence = normalize_change_evidence(change_evidence)
     return {
         "memory_key": normalized_key,
-        "content": normalized_content,
-        "content_hash": hashlib.sha256(normalized_content.encode("utf-8")).hexdigest(),
+        "content": content_result.content,
+        "content_token_count": content_result.content_token_count,
+        "content_hash": content_result.content_hash,
         "memory_type": normalized_type.value,
         "source": normalized_source.value,
         "source_id": normalized_source_id,
@@ -252,7 +295,18 @@ def normalize_memory_publication_payload(payload: dict[str, Any]) -> dict[str, A
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     if payload["content_hash"] != rebuilt["content_hash"]:
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-    return dict(payload)
+    content_token_count = payload.get("content_token_count", _MISSING)
+    if content_token_count is not _MISSING and (isinstance(content_token_count, bool) or not isinstance(content_token_count, int) or content_token_count < 0 or content_token_count != rebuilt["content_token_count"]):
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    normalized = dict(payload)
+    normalized.update(
+        {
+            "content": rebuilt["content"],
+            "content_hash": rebuilt["content_hash"],
+            "content_token_count": rebuilt["content_token_count"],
+        }
+    )
+    return normalized
 
 
 def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +315,8 @@ def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     if "uid" in snapshot:
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN)
-    if set(snapshot) != set(_MEMORY_RECORD_SNAPSHOT_FIELDS):
+    snapshot_fields = set(snapshot)
+    if snapshot_fields not in (set(_MEMORY_RECORD_SNAPSHOT_FIELDS), _LEGACY_MEMORY_RECORD_SNAPSHOT_FIELDS):
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
     publication = _publication_payload(
@@ -274,8 +329,12 @@ def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
         source_session_id=snapshot["source_session_id"],
         source_profile_id=snapshot["source_profile_id"],
         source_message_id=snapshot["source_message_id"],
+        enforce_content_token_limit=False,
     )
     if snapshot["content_hash"] != publication["content_hash"]:
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    content_token_count = snapshot.get("content_token_count", _MISSING)
+    if content_token_count is not _MISSING and (isinstance(content_token_count, bool) or not isinstance(content_token_count, int) or content_token_count < 0 or content_token_count != publication["content_token_count"]):
         raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
     normalized_source_job_id = _require_positive(snapshot["source_job_id"], field="source_job_id") if snapshot["source_job_id"] is not None else None
@@ -283,6 +342,7 @@ def normalize_memory_record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
     return {
         "memory_key": publication["memory_key"],
         "content": publication["content"],
+        "content_token_count": publication["content_token_count"],
         "content_hash": publication["content_hash"],
         "memory_type": publication["memory_type"],
         "source": publication["source"],
@@ -300,10 +360,12 @@ def build_memory_record_snapshot(record: LongTermMemoryRecord | LongTermMemoryRe
     """Build an independent JSON snapshot from a memory record or revision."""
     if not isinstance(record, (LongTermMemoryRecord, LongTermMemoryRevision)):
         raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "record"})
+    content_result = _normalize_memory_content_result(record.content, enforce_token_limit=False)
     return normalize_memory_record_snapshot(
         {
             "memory_key": record.memory_key,
-            "content": record.content,
+            "content": content_result.content,
+            "content_token_count": content_result.content_token_count,
             "content_hash": record.content_hash,
             "memory_type": record.memory_type,
             "source": record.source,
@@ -319,10 +381,13 @@ def build_memory_record_snapshot(record: LongTermMemoryRecord | LongTermMemoryRe
 
 
 __all__ = [
+    "MemoryContentPublicationResult",
+    "MemoryContentValidationResult",
     "build_memory_content_hash",
     "build_memory_record_snapshot",
     "normalize_change_evidence",
     "normalize_memory_content",
+    "normalize_memory_content_for_publication",
     "normalize_memory_key",
     "normalize_memory_publication_payload",
     "normalize_memory_record_snapshot",

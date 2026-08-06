@@ -16,8 +16,9 @@ from app.core.crud.memory import (
     memory_store_crud,
 )
 from app.core.crud.memory_job import memory_job_crud
-from app.core.memory.normalization import build_memory_content_hash
+from app.core.memory.normalization import build_memory_content_hash, normalize_memory_content
 from app.core.security import get_current_user
+from app.core.utils.tokenizer import estimate_tokens
 from app.handler import register_handlers
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
@@ -93,6 +94,7 @@ async def _create_record(
         "memory_key": memory_key,
         "memory_type": LongTermMemoryType.FACT,
         "content": content,
+        "content_token_count": estimate_tokens(normalize_memory_content(content)),
         "content_hash": build_memory_content_hash(content),
         "version": version,
         "indexed_version": version,
@@ -219,8 +221,15 @@ async def test_memory_crud_api_uses_real_uid_paths_and_standard_responses(api_ap
 
         list_payload = _assert_standard(await client.get("/api/v1/memories/list?size=20"), 200)
         _assert_page(list_payload, total=2)
+        listed = next(item for item in list_payload["data"]["items"] if item["id"] == first_id)
+        assert listed["content_token_count"] == estimate_tokens(normalize_memory_content("first content"))
+        assert listed["pinned"] is False
+        assert listed["last_recalled_at"] is None
         get_payload = _assert_standard(await client.get(f"/api/v1/memories/get?memory_id={first_id}"), 200)
         assert get_payload["data"]["id"] == first_id
+        assert get_payload["data"]["content_token_count"] == estimate_tokens(normalize_memory_content("first content"))
+        assert get_payload["data"]["pinned"] is False
+        assert get_payload["data"]["last_recalled_at"] is None
 
         update_response = await client.post(
             "/api/v1/memories/update",
@@ -263,6 +272,7 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
         memory_key="memory-a",
         memory_type=LongTermMemoryType.FACT,
         content="content-a",
+        content_token_count=estimate_tokens(normalize_memory_content("content-a")),
         content_hash=build_memory_content_hash("content-a"),
         source=LongTermMemorySource.USER_API,
     )
@@ -401,12 +411,14 @@ async def test_memory_history_restore_and_resume_current(api_app: tuple[FastAPI,
             memory_key="memory-a",
             memory_type=LongTermMemoryType.FACT,
             content=content,
+            content_token_count=estimate_tokens(normalize_memory_content(content)),
             content_hash=build_memory_content_hash(content),
             source=LongTermMemorySource.USER_API,
         )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         history = _assert_standard(await client.get(f"/api/v1/memories/{record_id}/history?size=1"), 200)
         _assert_page(history, total=2, size=1)
+        assert history["data"]["items"][0]["content_token_count"] == estimate_tokens(normalize_memory_content("current content"))
         restored = _assert_standard(
             await client.post(
                 f"/api/v1/memories/{record_id}/restore",
@@ -459,6 +471,7 @@ async def test_deleted_memory_history_is_read_only_without_current_record(
         memory_key=record.memory_key,
         memory_type=record.memory_type,
         content=record.content,
+        content_token_count=record.content_token_count,
         content_hash=record.content_hash,
         source=record.source,
         commit=False,
@@ -488,6 +501,100 @@ async def test_deleted_memory_history_is_read_only_without_current_record(
 
 
 @pytest.mark.asyncio
+async def test_memory_api_rejects_overlong_manual_mutations_without_enqueue_or_truncation(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, memory_key="short", content="short content")
+    record_id = int(record.id)
+    oversized_content = "oversized " * 181
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/memories/create",
+            json={
+                "content": oversized_content,
+                "memory_key": "too-long-create",
+                "memory_type": "fact",
+            },
+        )
+        update_response = await client.post(
+            "/api/v1/memories/update",
+            json={
+                "memory_id": record_id,
+                "expected_version": 1,
+                "content": oversized_content,
+                "memory_key": "too-long-update",
+                "memory_type": "fact",
+            },
+        )
+
+    for response in (create_response, update_response):
+        payload = _assert_standard(response, 400)
+        assert set(payload["data"]) == {"status", "actual_tokens", "max_tokens", "retryable"}
+        assert payload["data"]["status"] == "content_too_long"
+        assert payload["data"]["actual_tokens"] > 160
+        assert payload["data"]["max_tokens"] == 160
+        assert payload["data"]["retryable"] is True
+
+    assert len(oversized_content) < 50000
+    assert await memory_job_crud.count(db_session, uid="user-a") == 0
+    persisted = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+    assert persisted is not None
+    assert persisted.content == "short content"
+    assert persisted.version == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_api_rejects_overlong_restore_without_enqueue_or_truncation(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, memory_key="restore-target", content="short content")
+    record_id = int(record.id)
+    oversized_content = "historical oversized " * 181
+    await memory_revision_crud.create(
+        db_session,
+        uid="user-a",
+        memory_id=record_id,
+        version=2,
+        memory_key="historical-oversized",
+        memory_type=LongTermMemoryType.FACT,
+        content=oversized_content,
+        content_token_count=estimate_tokens(normalize_memory_content(oversized_content)),
+        content_hash=build_memory_content_hash(oversized_content),
+        source=LongTermMemorySource.USER_API,
+    )
+    await db_session.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/memories/{record_id}/restore",
+            json={"revision_version": 2, "expected_version": 1},
+        )
+
+    payload = _assert_standard(response, 400)
+    assert set(payload["data"]) == {"status", "actual_tokens", "max_tokens", "retryable"}
+    assert payload["data"]["status"] == "content_too_long"
+    assert payload["data"]["actual_tokens"] > 160
+    assert payload["data"]["max_tokens"] == 160
+    assert payload["data"]["retryable"] is True
+    assert await memory_job_crud.count(db_session, uid="user-a") == 0
+    persisted = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+    assert persisted is not None
+    assert persisted.content == "short content"
+    assert persisted.version == 1
+    historical = await memory_revision_crud.get_by_memory_id(db_session, uid="user-a", memory_id=record_id, version=2)
+    assert historical is not None
+    assert historical.content == oversized_content
+    assert historical.content_token_count > 160
+
+
+@pytest.mark.asyncio
 async def test_memory_settings_and_reindex_api_with_state_guard(api_app: tuple[FastAPI, SimpleNamespace], db_session: AsyncSession) -> None:
     app, _current_user = api_app
     await _create_store(db_session)
@@ -495,11 +602,40 @@ async def test_memory_settings_and_reindex_api_with_state_guard(api_app: tuple[F
         settings = _assert_standard(await client.get("/api/v1/memories/settings"), 200)
         assert settings["data"]["configured"] is True
         assert settings["data"]["active"]["revision"] == 1
+        assert settings["data"]["capacity"] == {
+            "max_active_records": 50,
+            "organize_trigger_records": 45,
+            "content_max_tokens": 160,
+            "active_record_count": 0,
+            "status": "normal",
+        }
+        assert settings["data"]["store"]["content_max_tokens"] == 160
+        assert settings["data"]["store"]["active_record_count"] == 0
         reindex = _assert_standard(await client.post("/api/v1/memories/reindex", json={"dedupe_key": "reindex-a"}), 200)
         assert reindex["data"]["created"] is True
         assert reindex["data"]["job"]["operation"] == "reindex"
         blocked = await client.post("/api/v1/memories/reindex", json={"dedupe_key": "reindex-b"})
         _assert_standard(blocked, 409)
+
+
+@pytest.mark.asyncio
+async def test_memory_settings_returns_fixed_capacity_without_store(api_app: tuple[FastAPI, SimpleNamespace]) -> None:
+    app, _current_user = api_app
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        settings = _assert_standard(await client.get("/api/v1/memories/settings"), 200)
+
+    assert settings["data"]["configured"] is False
+    assert settings["data"]["capacity"] == {
+        "max_active_records": 50,
+        "organize_trigger_records": 45,
+        "content_max_tokens": 160,
+        "active_record_count": 0,
+        "status": "normal",
+    }
+    assert settings["data"]["store"] == {
+        "content_max_tokens": 160,
+        "active_record_count": 0,
+    }
 
 
 @pytest.mark.asyncio

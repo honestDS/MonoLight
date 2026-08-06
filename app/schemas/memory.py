@@ -10,6 +10,7 @@ from app.core.constants import (
 )
 from app.core.memory.results import MemoryMutationStatus
 from app.models.memory import (
+    LongTermMemoryCapacityStatus,
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
     LongTermMemoryRecordIndexStatus,
@@ -71,6 +72,7 @@ class MemoryRecordResponse(BaseModel):
     memory_key: str | None = None
     memory_type: LongTermMemoryType
     content: str
+    content_token_count: int
     content_hash: str | None = None
     version: int
     indexed_version: int
@@ -83,6 +85,8 @@ class MemoryRecordResponse(BaseModel):
     source_job_id: int | None = None
     change_evidence: str | None = None
     is_active: bool
+    pinned: bool
+    last_recalled_at: datetime | None = None
     pending_mutation_job_id: int | None = None
     suppress_recall: bool
     suppressed_by_job_id: int | None = None
@@ -102,6 +106,7 @@ class MemoryRevisionResponse(BaseModel):
     memory_key: str
     memory_type: LongTermMemoryType
     content: str
+    content_token_count: int
     content_hash: str | None = None
     source: LongTermMemorySource
     source_id: str | None = None
@@ -162,12 +167,42 @@ class MemoryCancelResponse(BaseModel):
     error: str | None = None
 
 
+class MemoryContentTooLongErrorData(BaseModel):
+    status: Literal["content_too_long"] = "content_too_long"
+    actual_tokens: int
+    max_tokens: int
+    retryable: Literal[True] = True
+
+
+class MemoryCapacitySettings(BaseModel):
+    max_active_records: int
+    organize_trigger_records: int
+    content_max_tokens: int
+    active_record_count: int
+    status: LongTermMemoryCapacityStatus
+
+
+class MemorySettingsResponse(BaseModel):
+    configured: bool
+    active: dict[str, Any]
+    target: dict[str, Any]
+    migration: dict[str, Any]
+    delta: dict[str, Any]
+    index: dict[str, Any]
+    capacity: MemoryCapacitySettings
+    old_collection_cleanup: dict[str, Any]
+    migration_job: MemoryJobResponse | None = None
+    store: dict[str, Any]
+
+
 MemorySortField = Literal["updated_at", "created_at", "version"]
 MemorySortOrder = Literal["asc", "desc"]
 
 
 __all__ = [
+    "MemoryCapacitySettings",
     "MemoryCancelResponse",
+    "MemoryContentTooLongErrorData",
     "MemoryCreateRequest",
     "MemoryDeleteRequest",
     "MemoryJobResponse",
@@ -179,6 +214,7 @@ __all__ = [
     "MemoryRevisionResponse",
     "MemorySortField",
     "MemorySortOrder",
+    "MemorySettingsResponse",
     "MemorySubmissionResponse",
     "MemoryUpdateRequest",
 ]
