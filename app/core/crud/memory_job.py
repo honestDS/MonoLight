@@ -289,11 +289,12 @@ class CRUDLongTermMemoryMutationJob:
         memory_id: int | None,
         job_id: int,
         operation: LongTermMemoryMutationOperation,
+        payload: dict[str, Any] | None,
         updated_at: datetime,
     ) -> None:
-        if memory_id is None:
-            return
         if operation == LongTermMemoryMutationOperation.CREATE:
+            if memory_id is None:
+                return
             await db.execute(
                 delete(LongTermMemoryRecord)
                 .where(
@@ -305,6 +306,27 @@ class CRUDLongTermMemoryMutationJob:
                 )
                 .execution_options(synchronize_session=False)
             )
+            return
+        if operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION:
+            candidate = payload.get("candidate") if isinstance(payload, dict) else None
+            candidate_memory_id = candidate.get("memory_id") if isinstance(candidate, dict) else None
+            if isinstance(candidate_memory_id, bool) or not isinstance(candidate_memory_id, int) or candidate_memory_id < 1:
+                return
+            await db.execute(
+                update(LongTermMemoryRecord)
+                .where(
+                    LongTermMemoryRecord.uid == uid,
+                    LongTermMemoryRecord.id == candidate_memory_id,
+                    LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                )
+                .values(
+                    pending_mutation_job_id=None,
+                    updated_at=updated_at,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return
+        if memory_id is None:
             return
         await db.execute(
             update(LongTermMemoryRecord)
@@ -421,23 +443,38 @@ class CRUDLongTermMemoryMutationJob:
         worker_id: str | None = None,
         commit: bool = True,
     ) -> bool:
-        owner = _resolve_owner(owner, worker_id)
+        unclaimed_replacement = owner is None and worker_id is None
+        if not unclaimed_replacement:
+            owner = _resolve_owner(owner, worker_id)
         now = await get_database_time(db)
-        result = await db.execute(
-            update(LongTermMemoryMutationJob)
-            .where(
-                LongTermMemoryMutationJob.uid == uid,
-                LongTermMemoryMutationJob.id == job_id,
-                LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.RUNNING,
-                LongTermMemoryMutationJob.locked_by == owner,
-                LongTermMemoryMutationJob.lock_until >= now,
-                LongTermMemoryMutationJob.cancel_requested_at.is_(None),
-                LongTermMemoryMutationJob.operation == LongTermMemoryMutationOperation.CREATE,
-                LongTermMemoryMutationJob.memory_id.is_(None),
+        conditions: list[Any] = [
+            LongTermMemoryMutationJob.uid == uid,
+            LongTermMemoryMutationJob.id == job_id,
+            LongTermMemoryMutationJob.cancel_requested_at.is_(None),
+            LongTermMemoryMutationJob.memory_id.is_(None),
+        ]
+        if unclaimed_replacement:
+            conditions.extend(
+                [
+                    LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.PENDING,
+                    LongTermMemoryMutationJob.operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                ]
             )
-            .values(memory_id=memory_id, updated_at=now)
-            .execution_options(synchronize_session=False)
-        )
+        else:
+            conditions.extend(
+                [
+                    LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.RUNNING,
+                    LongTermMemoryMutationJob.locked_by == owner,
+                    LongTermMemoryMutationJob.lock_until >= now,
+                    LongTermMemoryMutationJob.operation.in_(
+                        [
+                            LongTermMemoryMutationOperation.CREATE,
+                            LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                        ]
+                    ),
+                ]
+            )
+        result = await db.execute(update(LongTermMemoryMutationJob).where(*conditions).values(memory_id=memory_id, updated_at=now).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         else:
@@ -529,6 +566,7 @@ class CRUDLongTermMemoryMutationJob:
             select(
                 LongTermMemoryMutationJob.memory_id,
                 LongTermMemoryMutationJob.operation,
+                LongTermMemoryMutationJob.payload,
             ).where(
                 LongTermMemoryMutationJob.uid == uid,
                 LongTermMemoryMutationJob.id == job_id,
@@ -565,6 +603,7 @@ class CRUDLongTermMemoryMutationJob:
                 memory_id=memory_id,
                 job_id=job_id,
                 operation=operation,
+                payload=job_row[2] if job_row is not None else None,
                 updated_at=now,
             )
         if commit:
@@ -693,6 +732,7 @@ class CRUDLongTermMemoryMutationJob:
                     memory_id=job.memory_id,
                     job_id=job.id,
                     operation=job.operation,
+                    payload=job.payload,
                     updated_at=now,
                 )
                 terminal_jobs.append(
@@ -771,6 +811,7 @@ class CRUDLongTermMemoryMutationJob:
                 memory_id=job.memory_id,
                 job_id=job_id,
                 operation=job.operation,
+                payload=job.payload,
                 updated_at=now,
             )
             if commit:
@@ -945,6 +986,7 @@ class CRUDLongTermMemoryMutationJob:
                 memory_id=job.memory_id,
                 job_id=job_id,
                 operation=job.operation,
+                payload=job.payload,
                 updated_at=now,
             )
         if commit:
@@ -995,6 +1037,7 @@ class CRUDLongTermMemoryMutationJob:
                 select(
                     LongTermMemoryMutationJob.memory_id,
                     LongTermMemoryMutationJob.operation,
+                    LongTermMemoryMutationJob.payload,
                 ).where(
                     LongTermMemoryMutationJob.uid == uid,
                     LongTermMemoryMutationJob.id == job_id,
@@ -1007,6 +1050,7 @@ class CRUDLongTermMemoryMutationJob:
                 memory_id=job_row[0] if job_row is not None else None,
                 job_id=job_id,
                 operation=job_row[1] if job_row is not None else None,
+                payload=job_row[2] if job_row is not None else None,
                 updated_at=update_values["updated_at"],
             )
         if commit:

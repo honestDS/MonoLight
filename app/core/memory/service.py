@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.constants import (
     ERR_DENSE_RETRIEVAL_FAILED,
     ERR_MEMORY_CAPACITY_EXCEEDED,
+    ERR_MEMORY_CAPACITY_FULL,
     ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_EMBEDDING_DIMENSION_INVALID,
     ERR_MEMORY_EMBEDDING_VECTOR_INVALID,
@@ -40,6 +41,7 @@ from app.core.crud.memory import (
     memory_revision_crud,
     memory_store_crud,
 )
+from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -156,6 +158,26 @@ def _same_publication(record: LongTermMemoryRecord, payload: dict[str, Any]) -> 
     return all(_enum_value(getattr(record, field, None)) == payload.get(field) for field in _PUBLICATION_FIELDS)
 
 
+def _existing_create_publication(job: LongTermMemoryMutationJob) -> dict[str, Any] | None:
+    if _same_operation(job.operation, LongTermMemoryMutationOperation.CREATE):
+        return job.payload if isinstance(job.payload, dict) else None
+    if _same_operation(job.operation, LongTermMemoryMutationOperation.CREATE_WITH_EVICTION):
+        publication = job.payload.get("publication") if isinstance(job.payload, dict) else None
+        return publication if isinstance(publication, dict) else None
+    return None
+
+
+def _existing_active_mutation_key(job: LongTermMemoryMutationJob) -> str | None:
+    if job.active_mutation_key is not None:
+        return job.active_mutation_key
+    publication = _existing_create_publication(job)
+    if publication is not None and "memory_key" in publication:
+        return build_memory_active_mutation_key(job.uid, memory_key=publication["memory_key"])
+    if job.memory_id is not None:
+        return build_memory_active_mutation_key(job.uid, memory_id=job.memory_id)
+    return None
+
+
 def _validate_page(skip: Any, limit: Any) -> tuple[int, int]:
     skip_value = _require_non_negative(skip, field="skip", error_key=ERR_VALUE_MUST_BE_NON_NEGATIVE)
     limit_value = _require_positive(limit, field="limit")
@@ -247,6 +269,12 @@ async def _accept_existing_job(
         max_attempts = existing.max_attempts
     elif operation is None or payload is None or max_attempts is None:
         raise MemoryValidationError(ERR_MEMORY_FIELD_REQUIRED, params={"field": "mutation_identity"})
+    requested_payload = payload
+    if not use_existing_identity and _same_operation(operation, LongTermMemoryMutationOperation.CREATE) and _same_operation(existing.operation, LongTermMemoryMutationOperation.CREATE_WITH_EVICTION) and _existing_create_publication(existing) == requested_payload:
+        operation = existing.operation
+        payload = dict(existing.payload or {})
+        memory_id = existing.memory_id
+        expected_version = existing.expected_version
     if _same_operation(operation, LongTermMemoryMutationOperation.CREATE):
         memory_id = existing.memory_id
     active_key = existing.active_mutation_key or fallback_active_mutation_key
@@ -273,6 +301,7 @@ async def _accept_existing_job(
         if _is_terminal_mutation_status(existing.status) and (
             _same_operation(operation, existing.operation)
             and submission_payload == (existing.payload or {})
+            and active_key == _existing_active_mutation_key(existing)
             and memory_id == existing.memory_id
             and expected_version == existing.expected_version
             and source_session_id == existing.source_session_id
@@ -472,6 +501,84 @@ class LongTermMemoryService:
             capacity = await load_memory_capacity_snapshot(db, normalized_uid, store.max_active_records)
             if capacity.is_over_limit:
                 raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
+            if capacity.active_count == MEMORY_MAX_ACTIVE_RECORDS:
+                if capacity.pending_create_count > 0:
+                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_PENDING, maximum=store.max_active_records)
+                candidate = await memory_record_crud.get_eviction_candidate(db, uid=normalized_uid)
+                if candidate is None or candidate.id is None or not isinstance(candidate.vector_item_id, str) or not candidate.vector_item_id:
+                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_FULL)
+                replacement_payload = {
+                    "publication": dict(payload),
+                    "candidate": {
+                        "memory_id": candidate.id,
+                        "version": candidate.version,
+                        "vector_item_id": candidate.vector_item_id,
+                        "record_snapshot": build_memory_record_snapshot(candidate),
+                    },
+                    "store": {
+                        "active_embedding_channel_id": store.active_embedding_channel_id,
+                        "active_embedding_model_id": store.active_embedding_model_id,
+                        "active_embedding_dimensions": store.active_embedding_dimensions,
+                        "active_embedding_signature": store.active_embedding_signature,
+                        "active_embedding_revision": store.active_embedding_revision,
+                        "active_collection_name": store.active_collection_name,
+                        "max_active_records": store.max_active_records,
+                        "organize_trigger_records": store.organize_trigger_records,
+                        "active_count": capacity.active_count,
+                        "index_revision": store.index_revision,
+                        "index_status": _enum_value(store.index_status),
+                        "capacity_status": _enum_value(store.capacity_status),
+                    },
+                }
+                submission = await _submit_job(
+                    db,
+                    uid=normalized_uid,
+                    operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                    dedupe_key=normalized_dedupe_key,
+                    payload=replacement_payload,
+                    active_mutation_key=active_key,
+                    source_session_id=normalized_session_id,
+                    source_profile_id=normalized_profile_id,
+                    source_message_id=normalized_message_id,
+                    max_attempts=attempts,
+                )
+                if not submission.created:
+                    await _finish(db, commit=commit)
+                    return _accepted(submission)
+                if submission.job.id is None:
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                replacement_memory_id = await memory_record_crud.get_next_replacement_memory_id(
+                    db,
+                    replacement_job_id=submission.job.id,
+                )
+                if not await memory_job_crud.assign_create_memory_id(
+                    db,
+                    uid=normalized_uid,
+                    job_id=submission.job.id,
+                    memory_id=replacement_memory_id,
+                    commit=False,
+                ):
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                if not await memory_record_crud.reserve_eviction_candidate(
+                    db,
+                    uid=normalized_uid,
+                    memory_id=candidate.id,
+                    version=candidate.version,
+                    vector_item_id=candidate.vector_item_id,
+                    job_id=submission.job.id,
+                    commit=False,
+                ):
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                refreshed_job = await memory_job_manager.get_job(
+                    db,
+                    uid=normalized_uid,
+                    job_id=submission.job.id,
+                )
+                if refreshed_job is None:
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                submission = MemoryJobSubmissionResult(job=refreshed_job, created=True)
+                await _finish(db, commit=commit)
+                return _accepted(submission)
             if capacity.active_count == store.max_active_records:
                 raise MemoryConflictError(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
             if capacity.occupied_count >= store.max_active_records:

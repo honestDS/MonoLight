@@ -40,6 +40,7 @@ from app.providers.database.time import get_database_time
 _TARGET_OPERATIONS = frozenset(
     {
         LongTermMemoryMutationOperation.CREATE,
+        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
         LongTermMemoryMutationOperation.UPDATE,
         LongTermMemoryMutationOperation.RESTORE,
         LongTermMemoryMutationOperation.DELETE_CLEANUP,
@@ -224,7 +225,14 @@ class MemoryJobManager:
                     and expected_version is None
                 ):
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="expected_version"))
-                if operation == LongTermMemoryMutationOperation.CREATE and expected_version is not None:
+                if (
+                    operation
+                    in {
+                        LongTermMemoryMutationOperation.CREATE,
+                        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                    }
+                    and expected_version is not None
+                ):
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_CREATE_VERSION_FORBIDDEN))
             elif operation in _NON_TARGET_OPERATIONS:
                 if active_mutation_key is not None or memory_id is not None or expected_version is not None:
@@ -276,7 +284,15 @@ class MemoryJobManager:
                     await db.refresh(job)
                 return MemoryJobSubmissionResult(job=job, created=False)
 
-            if is_target_operation and memory_id is not None:
+            if (
+                operation
+                in {
+                    LongTermMemoryMutationOperation.UPDATE,
+                    LongTermMemoryMutationOperation.RESTORE,
+                    LongTermMemoryMutationOperation.DELETE_CLEANUP,
+                }
+                and memory_id is not None
+            ):
                 reserved = await memory_record_crud.reserve_pending_mutation(
                     db,
                     uid=uid,
@@ -296,6 +312,136 @@ class MemoryJobManager:
             if commit:
                 await db.rollback()
             raise
+
+    async def _create_eviction_cleanup_job(
+        self,
+        db: AsyncSession,
+        *,
+        replacement_job: LongTermMemoryMutationJob,
+        commit: bool = False,
+    ) -> LongTermMemoryMutationJob:
+        from app.core.memory.errors import MemoryValidationError
+        from app.core.memory.identifiers import build_memory_active_mutation_key
+        from app.core.memory.normalization import normalize_memory_record_snapshot
+
+        try:
+            operation = LongTermMemoryMutationOperation(replacement_job.operation)
+        except (TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if operation != LongTermMemoryMutationOperation.CREATE_WITH_EVICTION or replacement_job.id is None:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_OPERATION_INVALID))
+        if not isinstance(replacement_job.payload, dict):
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        payload = replacement_job.payload
+        publication = payload.get("publication")
+        candidate = payload.get("candidate")
+        if set(payload) != {"publication", "candidate", "store"} or not isinstance(publication, dict) or not isinstance(candidate, dict):
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        candidate_memory_id = candidate.get("memory_id")
+        candidate_version = candidate.get("version")
+        candidate_vector_item_id = candidate.get("vector_item_id")
+        try:
+            candidate_snapshot = normalize_memory_record_snapshot(candidate["record_snapshot"])
+        except (KeyError, TypeError, ValueError, MemoryValidationError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if not _is_integer(candidate_memory_id) or candidate_memory_id < 1 or not _is_integer(candidate_version) or candidate_version < 1 or not isinstance(candidate_vector_item_id, str) or not candidate_vector_item_id or candidate_snapshot["version"] != candidate_version:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        source_fields = (
+            "source",
+            "source_id",
+            "source_session_id",
+            "source_profile_id",
+            "source_message_id",
+        )
+        for field in source_fields:
+            if field not in publication:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        if publication["source_session_id"] != replacement_job.source_session_id or publication["source_profile_id"] != replacement_job.source_profile_id or publication["source_message_id"] != replacement_job.source_message_id:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        cleanup_payload = {
+            "version": candidate_version,
+            "source": publication["source"],
+            "source_id": publication["source_id"],
+            "source_session_id": publication["source_session_id"],
+            "source_profile_id": publication["source_profile_id"],
+            "source_message_id": publication["source_message_id"],
+            "record_snapshot": candidate_snapshot,
+        }
+        cleanup_dedupe_key = f"memory-eviction-cleanup:{replacement_job.id}:{candidate_memory_id}:{candidate_version}"
+        cleanup_active_key = build_memory_active_mutation_key(
+            replacement_job.uid,
+            memory_id=candidate_memory_id,
+        )
+        cleanup_available_at = await get_database_time(db)
+        try:
+            cleanup_job, created = await memory_job_crud.create(
+                db,
+                uid=replacement_job.uid,
+                operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+                dedupe_key=cleanup_dedupe_key,
+                active_mutation_key=cleanup_active_key,
+                memory_id=candidate_memory_id,
+                expected_version=candidate_version,
+                payload=cleanup_payload,
+                source_session_id=publication["source_session_id"],
+                source_profile_id=publication["source_profile_id"],
+                source_message_id=publication["source_message_id"],
+                max_attempts=replacement_job.max_attempts,
+                available_at=cleanup_available_at,
+                commit=False,
+            )
+        except IntegrityError as exc:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY)) from exc
+
+        if not created and (
+            cleanup_job.operation != LongTermMemoryMutationOperation.DELETE_CLEANUP
+            or cleanup_job.active_mutation_key != cleanup_active_key
+            or cleanup_job.memory_id != candidate_memory_id
+            or cleanup_job.expected_version != candidate_version
+            or cleanup_job.payload != cleanup_payload
+            or cleanup_job.source_session_id != publication["source_session_id"]
+            or cleanup_job.source_profile_id != publication["source_profile_id"]
+            or cleanup_job.source_message_id != publication["source_message_id"]
+            or cleanup_job.max_attempts != replacement_job.max_attempts
+        ):
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+        if cleanup_job.id is None:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+
+        transferred = await memory_record_crud.transfer_eviction_candidate_to_cleanup(
+            db,
+            uid=replacement_job.uid,
+            memory_id=candidate_memory_id,
+            version=candidate_version,
+            vector_item_id=candidate_vector_item_id,
+            replacement_job_id=replacement_job.id,
+            cleanup_job_id=cleanup_job.id,
+            commit=False,
+        )
+        if not transferred:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+
+        if commit:
+            await db.commit()
+            await db.refresh(cleanup_job)
+        return cleanup_job
+
+    async def create_eviction_cleanup_job(
+        self,
+        db: AsyncSession,
+        *,
+        replacement_job: LongTermMemoryMutationJob,
+        commit: bool = False,
+    ) -> LongTermMemoryMutationJob:
+        return await self._create_eviction_cleanup_job(
+            db,
+            replacement_job=replacement_job,
+            commit=commit,
+        )
 
     async def get_job(
         self,

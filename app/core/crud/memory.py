@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, update
+from sqlalchemy import case, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -42,6 +42,35 @@ def _recallable_conditions(uid: str) -> list[Any]:
         LongTermMemoryRecord.vector_item_id.is_not(None),
         LongTermMemoryRecord.vector_item_id != "",
     ]
+
+
+def _eviction_candidate_conditions(
+    *,
+    uid: str,
+    memory_id: int | None = None,
+    version: int | None = None,
+    vector_item_id: str | None = None,
+    pending_job_id: int | None = None,
+) -> list[Any]:
+    conditions: list[Any] = [
+        LongTermMemoryRecord.uid == uid,
+        LongTermMemoryRecord.is_active.is_(True),
+        LongTermMemoryRecord.deleted_at.is_(None),
+        LongTermMemoryRecord.suppress_recall.is_(False),
+        LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+        LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
+        LongTermMemoryRecord.vector_item_id.is_not(None),
+        LongTermMemoryRecord.vector_item_id != "",
+        LongTermMemoryRecord.pinned.is_(False),
+        LongTermMemoryRecord.pending_mutation_job_id.is_(None) if pending_job_id is None else LongTermMemoryRecord.pending_mutation_job_id == pending_job_id,
+    ]
+    if memory_id is not None:
+        conditions.append(LongTermMemoryRecord.id == memory_id)
+    if version is not None:
+        conditions.append(LongTermMemoryRecord.version == version)
+    if vector_item_id is not None:
+        conditions.append(LongTermMemoryRecord.vector_item_id == vector_item_id)
+    return conditions
 
 
 def _input_data(obj_in: Any) -> dict[str, Any]:
@@ -479,9 +508,26 @@ class CRUDLongTermMemoryRecord:
         next_id = max((int(value) for value in max_values if value is not None), default=0) + 1
         return max(minimum_id, next_id)
 
+    async def get_next_replacement_memory_id(self, db: AsyncSession, *, replacement_job_id: int) -> int:
+        result = await db.execute(
+            select(
+                select(func.max(LongTermMemoryRecord.id)).scalar_subquery(),
+                select(func.max(LongTermMemoryRevision.memory_id)).scalar_subquery(),
+                select(func.max(LongTermMemoryMutationJob.memory_id)).scalar_subquery(),
+                select(func.max(LongTermMemoryEmbeddingDelta.memory_id)).scalar_subquery(),
+            )
+        )
+        max_values = result.one()
+        current_max = max((int(value) for value in max_values if value is not None), default=0)
+        return current_max + replacement_job_id + 1
+
     async def get_by_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> LongTermMemoryRecord | None:
         result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id).execution_options(populate_existing=True))
         return result.scalars().first()
+
+    async def exists_by_global_id(self, db: AsyncSession, *, memory_id: int) -> bool:
+        result = await db.execute(select(LongTermMemoryRecord.id).where(LongTermMemoryRecord.id == memory_id))
+        return result.scalar_one_or_none() is not None
 
     async def get_by_ids(
         self,
@@ -513,6 +559,21 @@ class CRUDLongTermMemoryRecord:
             return []
         result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid), LongTermMemoryRecord.id.in_(memory_ids)))
         return list(result.scalars().all())
+
+    async def get_eviction_candidate(self, db: AsyncSession, *, uid: str) -> LongTermMemoryRecord | None:
+        result = await db.execute(
+            select(LongTermMemoryRecord)
+            .where(*_eviction_candidate_conditions(uid=uid))
+            .order_by(
+                case((LongTermMemoryRecord.last_recalled_at.is_(None), 0), else_=1).asc(),
+                LongTermMemoryRecord.last_recalled_at.asc(),
+                LongTermMemoryRecord.updated_at.asc(),
+                LongTermMemoryRecord.id.asc(),
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
 
     async def touch_last_recalled_at(
         self,
@@ -765,6 +826,71 @@ class CRUDLongTermMemoryRecord:
             .values(
                 pending_mutation_job_id=job_id,
                 updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def reserve_eviction_candidate(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        version: int,
+        vector_item_id: str,
+        job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                *_eviction_candidate_conditions(
+                    uid=uid,
+                    memory_id=memory_id,
+                    version=version,
+                    vector_item_id=vector_item_id,
+                )
+            )
+            .values(
+                pending_mutation_job_id=job_id,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
+    async def transfer_eviction_candidate_to_cleanup(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        version: int,
+        vector_item_id: str,
+        replacement_job_id: int,
+        cleanup_job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                *_eviction_candidate_conditions(
+                    uid=uid,
+                    memory_id=memory_id,
+                    version=version,
+                    vector_item_id=vector_item_id,
+                    pending_job_id=replacement_job_id,
+                )
+            )
+            .values(
+                pending_mutation_job_id=cleanup_job_id,
+                is_active=False,
+                deleted_at=now,
+                updated_at=now,
             )
             .execution_options(synchronize_session=False)
         )

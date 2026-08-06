@@ -261,7 +261,6 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
     "operation",
     [
         LongTermMemoryMutationOperation.EXTRACT,
-        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
         LongTermMemoryMutationOperation.ORGANIZE,
         LongTermMemoryMutationOperation.ORGANIZE_MERGE,
     ],
@@ -283,6 +282,70 @@ async def test_manager_rejects_non_currently_submittable_operations(
             )
 
     assert str(exc_info.value) == t(ERR_MEMORY_JOB_OPERATION_INVALID)
+
+
+@pytest.mark.asyncio
+async def test_manager_replacement_rules_require_active_key_allow_unassigned_id_and_do_not_reserve_target(
+    memory_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    manager = MemoryJobManager()
+    uid = "replacement-manager-rules"
+    existing_memory_id = await _create_memory_record(
+        memory_job_database,
+        uid=uid,
+        memory_key="existing-candidate",
+    )
+    payload = {"candidate": {"memory_id": existing_memory_id}}
+
+    async with memory_job_database() as db:
+        with pytest.raises(MemoryJobValidationError):
+            await manager.submit(
+                db,
+                uid=uid,
+                operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                dedupe_key="replacement-missing-active-key",
+                payload=payload,
+                memory_id=None,
+            )
+        with pytest.raises(MemoryJobValidationError):
+            await manager.submit(
+                db,
+                uid=uid,
+                operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+                dedupe_key="replacement-expected-version",
+                payload=payload,
+                active_mutation_key="replacement-expected-version-key",
+                expected_version=1,
+            )
+
+        unassigned = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            dedupe_key="replacement-unassigned",
+            payload=payload,
+            active_mutation_key="replacement-unassigned-key",
+            memory_id=None,
+        )
+        allocated = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            dedupe_key="replacement-allocated",
+            payload=payload,
+            active_mutation_key="replacement-allocated-key",
+            memory_id=existing_memory_id,
+        )
+
+    assert unassigned.created
+    assert unassigned.job.memory_id is None
+    assert unassigned.job.expected_version is None
+    assert allocated.created
+    assert allocated.job.memory_id == existing_memory_id
+    async with memory_job_database() as db:
+        existing = await memory_record_crud.get_by_id(db, uid=uid, memory_id=existing_memory_id)
+    assert existing is not None
+    assert existing.pending_mutation_job_id is None
 
 
 @pytest.mark.asyncio
@@ -669,6 +732,140 @@ async def test_recover_expired_create_preserves_reservation_until_max_attempts_a
     assert failed.active_mutation_key is None
     async with memory_job_database() as db:
         assert await memory_job_crud.count_pending_create(db, uid=uid) == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_replacement_clears_candidate_pending_from_payload_not_new_memory_id(
+    memory_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    manager = MemoryJobManager()
+    uid = "replacement-mark-failed-user"
+    candidate_id = await _create_memory_record(
+        memory_job_database,
+        uid=uid,
+        memory_key="replacement-candidate",
+    )
+    replacement_memory_id = candidate_id + 10_000
+    payload = {"candidate": {"memory_id": candidate_id}}
+
+    async with memory_job_database() as db:
+        submission = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            dedupe_key="replacement-mark-failed",
+            payload=payload,
+            active_mutation_key="replacement-mark-failed-key",
+            memory_id=replacement_memory_id,
+            max_attempts=1,
+        )
+        assert submission.job.id is not None
+        assert await memory_record_crud.reserve_pending_mutation(
+            db,
+            uid=uid,
+            memory_id=candidate_id,
+            job_id=submission.job.id,
+            expected_version=1,
+        )
+
+    claimed = await _claim(
+        memory_job_database,
+        uid=uid,
+        job_id=submission.job.id,
+        owner="replacement-failure-owner",
+        enabled_operations=[LongTermMemoryMutationOperation.CREATE_WITH_EVICTION],
+    )
+    assert claimed is not None
+    async with memory_job_database() as db:
+        assert await memory_job_crud.mark_failed(
+            db,
+            uid=uid,
+            job_id=submission.job.id,
+            owner="replacement-failure-owner",
+            error="replacement failure",
+        )
+
+    failed = await _get_job(memory_job_database, uid=uid, job_id=submission.job.id)
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.active_mutation_key is None
+    async with memory_job_database() as db:
+        candidate = await memory_record_crud.get_by_id(db, uid=uid, memory_id=candidate_id)
+        replacement = await memory_record_crud.get_by_id(db, uid=uid, memory_id=replacement_memory_id)
+    assert candidate is not None
+    assert candidate.pending_mutation_job_id is None
+    assert replacement is None
+
+
+@pytest.mark.asyncio
+async def test_recover_expired_replacement_max_attempts_clears_candidate_pending_from_payload(
+    memory_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    manager = MemoryJobManager()
+    uid = "replacement-recovery-user"
+    candidate_id = await _create_memory_record(
+        memory_job_database,
+        uid=uid,
+        memory_key="recovery-candidate",
+    )
+    replacement_memory_id = candidate_id + 20_000
+    payload = {"candidate": {"memory_id": candidate_id}}
+
+    async with memory_job_database() as db:
+        submission = await manager.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            dedupe_key="replacement-recovery",
+            payload=payload,
+            active_mutation_key="replacement-recovery-key",
+            memory_id=replacement_memory_id,
+            max_attempts=1,
+        )
+        assert submission.job.id is not None
+        assert await memory_record_crud.reserve_pending_mutation(
+            db,
+            uid=uid,
+            memory_id=candidate_id,
+            job_id=submission.job.id,
+            expected_version=1,
+        )
+
+    claimed = await _claim(
+        memory_job_database,
+        uid=uid,
+        job_id=submission.job.id,
+        owner="replacement-recovery-owner",
+        enabled_operations=[LongTermMemoryMutationOperation.CREATE_WITH_EVICTION],
+        lease_seconds=1,
+    )
+    assert claimed is not None
+    async with memory_job_database() as db:
+        now = await get_database_time(db)
+        await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == submission.job.id,
+            )
+            .values(lock_until=now - timedelta(seconds=10))
+        )
+        await db.commit()
+        recovery = await memory_job_crud.recover_expired(
+            db,
+            max_attempts_error="replacement max attempts",
+        )
+
+    assert recovery.failed == 1
+    assert recovery.retried == 0
+    failed = await _get_job(memory_job_database, uid=uid, job_id=submission.job.id)
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.error == "replacement max attempts"
+    async with memory_job_database() as db:
+        candidate = await memory_record_crud.get_by_id(db, uid=uid, memory_id=candidate_id)
+        replacement = await memory_record_crud.get_by_id(db, uid=uid, memory_id=replacement_memory_id)
+    assert candidate is not None
+    assert candidate.pending_mutation_job_id is None
+    assert replacement is None
 
 
 @pytest.mark.asyncio
