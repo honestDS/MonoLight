@@ -6,6 +6,7 @@ from app.core.memory.chat_history import (
 )
 from app.core.memory.errors import (
     MemoryConflictError,
+    MemoryContentTooLongError,
     MemoryNotFoundError,
     MemoryValidationError,
 )
@@ -53,6 +54,7 @@ from app.core.memory.service import (
 
 __all__ = [
     "MemoryConflictError",
+    "MemoryContentTooLongError",
     "ChatHistoryRecallItem",
     "ChatHistoryRecallResult",
     "ChatHistoryRecallService",

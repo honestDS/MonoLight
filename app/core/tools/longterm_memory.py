@@ -14,6 +14,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
+from app.core.memory.errors import MemoryContentTooLongError
 from app.core.tools.base import BaseExecutor
 from app.models.memory import LongTermMemorySource
 
@@ -392,6 +393,19 @@ class LongTermMemoryExecutor(BaseExecutor):
             if operation == "recall":
                 return await self._recall(kwargs, memory_config)
             return await self._mutate(operation, kwargs)
+        except MemoryContentTooLongError as exc:
+            data = exc.data
+            return json.dumps(
+                {
+                    "operation": operation,
+                    "status": "content_too_long",
+                    "actual_tokens": data["actual_tokens"],
+                    "max_tokens": data["max_tokens"],
+                    "retryable": True,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         except BaseBusinessException as exc:
             if operation == "recall":
                 return _empty_recall_result()
