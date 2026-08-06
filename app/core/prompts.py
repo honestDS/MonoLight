@@ -42,6 +42,9 @@ LONGTERM_MEMORY_SYSTEM_PROMPT = """[Long-term memory system rules]
 8. Determine memory_type from the content of the memory itself. Objective information from searches, tools, or knowledge bases must be classified according to its content if saved; do not classify it as preference merely because the user asked to remember it. change_evidence may contain only a brief reason for change explicitly stated by the user. It must not contain search results, tool conclusions, an assistant summary, or the full task narrative. Treat credentials as ordinary memories.
 9. Use suppress_current only when the user explicitly states that an old preference is immediately invalid and must be replaced because of a conflict. Do not use it for an ordinary update or an uncertain change.
 10. After create or update returns accepted or queued, tell the user only that the memory operation was submitted for processing. Do not say that it was saved or updated.
+11. For create and update, content must be a short, self-contained, complete statement that can be understood directly across sessions. Omit reasoning, explanations, conversation background, tool process details, repeated statements, and irrelevant context.
+12. If create or update returns status=content_too_long with retryable=true, preserve the factual meaning, shorten content, and call the same create or update operation again. Do not ask the service to truncate content.
+13. Do not split the same fact into multiple duplicate or overlapping memories to bypass the 160-token limit.
 [End long-term memory system rules]"""
 
 # Weixin OpenClaw concise outbound reply prompts

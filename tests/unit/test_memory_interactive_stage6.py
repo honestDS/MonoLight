@@ -1,3 +1,5 @@
+import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +9,8 @@ from app.core.dispatchers import interactive_helpers as interactive_helpers_modu
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.dispatchers.memory_recall_types import build_result
+from app.core.prompts import PROMPT_MAX_TURNS_REACHED
+from app.core.tools import MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
@@ -90,6 +94,7 @@ def _install_dispatcher_stubs(
     precheck,
     *,
     process_tool=None,
+    expose_memory_tool=False,
 ):
     responses = list(response_messages)
     profile = SimpleNamespace(id=1)
@@ -108,6 +113,8 @@ def _install_dispatcher_stubs(
         return channel, {"model_id": "chat-model", "usage": "CHAT", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
 
     async def get_tools(db, current_profile):
+        if expose_memory_tool:
+            return [copy.deepcopy(MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA)], []
         return [], []
 
     async def mark_processed(db, message_id):
@@ -483,3 +490,166 @@ async def test_formal_longterm_memory_mutation_receives_recall_boundary_as_sourc
 
     assert source_message_ids == [10]
     assert response["choices"][0]["message"]["content"] == "mutation complete"
+
+
+@pytest.mark.asyncio
+async def test_formal_non_stream_memory_content_too_long_retries_same_fact_without_recursive_tool_execution(monkeypatch):
+    cfg = _build_cfg(max_turns=4)
+    request_log = []
+    event_log = []
+    execution_calls = []
+    execution_depth = 0
+    max_execution_depth = 0
+    factual_content = "MySQL compatibility is required and PostgreSQL support is optional."
+    long_content = f"{factual_content} Keep this stable database compatibility requirement available across future sessions and do not add unrelated implementation explanation."
+    first_call = InternalToolCall(
+        id="memory-create-too-long",
+        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        arguments={
+            "operation": "create",
+            "content": long_content,
+            "memory_key": "database.compatibility",
+            "memory_type": "fact",
+        },
+    )
+    second_call = InternalToolCall(
+        id="memory-create-retry",
+        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        arguments={
+            "operation": "create",
+            "content": factual_content,
+            "memory_key": "database.compatibility",
+            "memory_type": "fact",
+        },
+    )
+
+    async def precheck(context):
+        return build_result(context, "completed")
+
+    async def process_tool(tool_call, *args, **kwargs):
+        nonlocal execution_depth, max_execution_depth
+        execution_depth += 1
+        max_execution_depth = max(max_execution_depth, execution_depth)
+        execution_calls.append(tool_call)
+        event_log.append(f"tool:{tool_call.id}")
+        try:
+            if tool_call.id == first_call.id:
+                content = '{"operation":"create","status":"content_too_long","actual_tokens":161,"max_tokens":160,"retryable":true}'
+            elif tool_call.id == second_call.id:
+                content = '{"operation":"create","status":"accepted","job_id":91}'
+            else:
+                raise AssertionError(f"unexpected memory tool call: {tool_call.id}")
+            return InternalMessage(role=MessageRole.TOOL, tool_call_id=tool_call.id, content=content)
+        finally:
+            execution_depth -= 1
+
+    _install_dispatcher_stubs(
+        monkeypatch,
+        cfg,
+        [
+            InternalMessage(role=MessageRole.ASSISTANT, content=None, tool_calls=[first_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content=None, tool_calls=[second_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content="memory operation completed"),
+        ],
+        request_log,
+        event_log,
+        precheck,
+        process_tool=process_tool,
+        expose_memory_tool=True,
+    )
+
+    response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
+
+    assert len(request_log) == 3
+    assert all(item["tools"] == [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA] for item in request_log)
+    second_request_messages = request_log[1]["messages"]
+    first_tool_result = next(message for message in second_request_messages if message.tool_call_id == first_call.id)
+    assert json.loads(first_tool_result.content) == {
+        "operation": "create",
+        "status": "content_too_long",
+        "actual_tokens": 161,
+        "max_tokens": 160,
+        "retryable": True,
+    }
+    third_request_messages = request_log[2]["messages"]
+    second_tool_result = next(message for message in third_request_messages if message.tool_call_id == second_call.id)
+    assert json.loads(second_tool_result.content) == {"operation": "create", "status": "accepted", "job_id": 91}
+    assert [tool_call.id for tool_call in execution_calls] == [first_call.id, second_call.id]
+    assert [tool_call.arguments["content"] for tool_call in execution_calls] == [long_content, factual_content]
+    assert len(factual_content) < len(long_content)
+    assert execution_depth == 0
+    assert max_execution_depth == 1
+    assert event_log == [
+        "generate",
+        f"tool:{first_call.id}",
+        "generate",
+        f"tool:{second_call.id}",
+        "generate",
+    ]
+    assert response["choices"][0]["message"]["content"] == "memory operation completed"
+
+
+@pytest.mark.asyncio
+async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_turn_summary(monkeypatch):
+    cfg = _build_cfg(max_turns=3)
+    request_log = []
+    event_log = []
+    execution_calls = []
+    first_call = InternalToolCall(
+        id="memory-create-too-long-1",
+        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        arguments={
+            "operation": "create",
+            "content": "MySQL compatibility is required and PostgreSQL support is optional.",
+            "memory_key": "database.compatibility",
+            "memory_type": "fact",
+        },
+    )
+    second_call = InternalToolCall(
+        id="memory-create-too-long-2",
+        name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
+        arguments={
+            "operation": "create",
+            "content": "MySQL compatibility is required and PostgreSQL support is optional.",
+            "memory_key": "database.compatibility",
+            "memory_type": "fact",
+        },
+    )
+
+    async def precheck(context):
+        return build_result(context, "completed")
+
+    async def process_tool(tool_call, *args, **kwargs):
+        execution_calls.append(tool_call)
+        if tool_call.id not in {first_call.id, second_call.id}:
+            raise AssertionError(f"unexpected memory tool call: {tool_call.id}")
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=tool_call.id,
+            content='{"operation":"create","status":"content_too_long","actual_tokens":161,"max_tokens":160,"retryable":true}',
+        )
+
+    _install_dispatcher_stubs(
+        monkeypatch,
+        cfg,
+        [
+            InternalMessage(role=MessageRole.ASSISTANT, content=None, tool_calls=[first_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content=None, tool_calls=[second_call]),
+            InternalMessage(role=MessageRole.ASSISTANT, content="final summary"),
+        ],
+        request_log,
+        event_log,
+        precheck,
+        process_tool=process_tool,
+        expose_memory_tool=True,
+    )
+
+    response = await _dispatch_non_stream(additional_fetcher=lambda: _empty_batch())
+
+    assert len(request_log) == 3
+    assert all(item["tools"] == [MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA] for item in request_log[:2])
+    assert request_log[-1]["tools"] is None
+    summary_notice = PROMPT_MAX_TURNS_REACHED.format(max_turns=cfg.tool.max_turns)
+    assert any(message.role == MessageRole.USER and summary_notice in (message.content or "") for message in request_log[-1]["messages"])
+    assert [tool_call.id for tool_call in execution_calls] == [first_call.id, second_call.id]
+    assert response["choices"][0]["message"]["content"] == "final summary"

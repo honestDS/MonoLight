@@ -714,6 +714,15 @@ async def test_build_system_prompt_includes_memory_rules_only_when_both_switches
         assert "tool conclusions" in prompt_text
         assert "assistant summary" in prompt_text
         assert "full task narrative" in prompt_text
+        assert "exactly one concrete subject and attribute" in prompt_text
+        assert "short, self-contained, complete statement" in prompt_text
+        assert "understood directly across sessions" in prompt_text
+        assert "omit reasoning, explanations, conversation background, tool process details, repeated statements, and irrelevant context" in prompt_text
+        assert "status=content_too_long with retryable=true" in prompt_text
+        assert "preserve the factual meaning" in prompt_text
+        assert "shorten content" in prompt_text
+        assert "call the same create or update operation again" in prompt_text
+        assert "do not split the same fact into multiple duplicate or overlapping memories to bypass the 160-token limit" in prompt_text
 
 
 @pytest.mark.asyncio
