@@ -26,6 +26,17 @@ from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.memory.errors import MemoryConflictError, MemoryValidationError
 from app.core.memory.normalization import _normalize_uid, _validate_commit
+from app.core.memory.organization_types import (
+    MemoryOrganizationConflict,
+    MemoryOrganizationKeep,
+    MemoryOrganizationMerge,
+    MemoryOrganizationPlan,
+    MemoryOrganizationPlanItem,
+    MemoryOrganizationSnapshotItem,
+    MemoryOrganizationSourceReference,
+    MemoryOrganizationTarget,
+    MemoryOrganizationUpdate,
+)
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelModelItem, ModelUsage, resolve_model_protocol
 from app.models.memory import LongTermMemoryStore
@@ -416,9 +427,18 @@ def evaluate_organization_merge_pins(
 
 
 __all__ = [
+    "MemoryOrganizationConflict",
+    "MemoryOrganizationKeep",
+    "MemoryOrganizationMerge",
     "MemoryOrganizationModelConfig",
     "MemoryOrganizationPinPolicyResult",
     "MemoryOrganizationPinPolicyStatus",
+    "MemoryOrganizationPlan",
+    "MemoryOrganizationPlanItem",
+    "MemoryOrganizationSnapshotItem",
+    "MemoryOrganizationSourceReference",
+    "MemoryOrganizationTarget",
+    "MemoryOrganizationUpdate",
     "calculate_organization_required_output_tokens",
     "evaluate_organization_merge_pins",
     "get_organization_settings",

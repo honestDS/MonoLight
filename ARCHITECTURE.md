@@ -203,6 +203,7 @@ app/core/memory/
 ├── management_helpers.py   # 记忆管理辅助组件
 ├── embedding_config.py     # 记忆嵌入配置服务
 ├── maintenance.py          # 记忆维护服务
+├── organization_types.py   # 记忆整理内部契约
 ├── organization.py         # 记忆整理领域策略
 └── channel_protection.py   # 记忆渠道与模型引用管理
 ```
