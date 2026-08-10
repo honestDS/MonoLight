@@ -27,8 +27,10 @@ from app.core.memory_jobs.executor import (
     SessionFactory,
 )
 from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
+from app.core.memory_jobs.manager import best_effort_submit_auto_organization_after_publication
 from app.models.memory import (
     LongTermMemoryMutationJob,
+    LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
 )
 from app.providers.database import AsyncSessionLocal
@@ -44,6 +46,14 @@ MEMORY_JOB_RECOVERY_RETRY_DELAY_SECONDS = 1
 MEMORY_JOB_SHUTDOWN_RETRY_DELAY_SECONDS = 1
 MEMORY_JOB_RETRY_MIN_SECONDS = 1
 MEMORY_JOB_RETRY_MAX_SECONDS = 300
+_AUTO_ORGANIZATION_TRIGGER_OPERATIONS = frozenset(
+    {
+        LongTermMemoryMutationOperation.CREATE,
+        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+        LongTermMemoryMutationOperation.UPDATE,
+        LongTermMemoryMutationOperation.RESTORE,
+    }
+)
 
 
 def retry_delay_seconds(attempt_count: int) -> int:
@@ -320,10 +330,23 @@ class MemoryJobConsumer:
                     result=None,
                 )
             else:
-                if not execution_result.finalized:
+                if execution_result.finalized:
+                    if claimed_job.operation in _AUTO_ORGANIZATION_TRIGGER_OPERATIONS:
+                        await best_effort_submit_auto_organization_after_publication(
+                            self._session_factory,
+                            claimed_job.uid,
+                            claimed_job.id,
+                        )
+                else:
                     marked = await self._mark_succeeded(claimed_job, worker_id, execution_result.result)
                     if not marked:
                         await self._mark_cancelled(claimed_job, worker_id)
+                    elif claimed_job.operation in _AUTO_ORGANIZATION_TRIGGER_OPERATIONS:
+                        await best_effort_submit_auto_organization_after_publication(
+                            self._session_factory,
+                            claimed_job.uid,
+                            claimed_job.id,
+                        )
         except asyncio.CancelledError:
             await self._release_claim_for_shutdown(claimed_job, worker_id)
             raise

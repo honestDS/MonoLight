@@ -1,5 +1,6 @@
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -17,14 +18,21 @@ from app.core.constants import (
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
     ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN,
     ERR_MEMORY_JOB_TARGET_BUSY,
+    ERR_MEMORY_JOB_UNEXPECTED_FAILURE,
+    ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_MIGRATION_CANNOT_CANCEL_AFTER_SWITCHING,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
+    LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED,
+    MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS,
 )
 from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.crud.memory_job import MemoryJobCancelResult, memory_job_crud
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
+from app.core.log import get_logger
+from app.core.memory_jobs.executor import SessionFactory
 from app.core.memory_jobs.maintenance_lifecycle import (
     finalize_maintenance_terminal_state,
     mark_cancelled_target_cleanup_failure,
@@ -35,8 +43,11 @@ from app.models.memory import (
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
     LongTermMemoryOldCollectionCleanupStatus,
+    LongTermMemoryStore,
 )
 from app.providers.database.time import get_database_time
+
+logger = get_logger(__name__)
 
 _TARGET_OPERATIONS = frozenset(
     {
@@ -155,6 +166,75 @@ def _job_matches_submission_identity(
     if job.max_attempts != max_attempts:
         return False
     return available_at is None or job.available_at == available_at
+
+
+def _validate_existing_organization_job(
+    job: LongTermMemoryMutationJob,
+    *,
+    uid: str,
+    dedupe_key: str,
+    snapshot_digest: str,
+    policy_version: int,
+    active_mutation_key: str,
+) -> None:
+    try:
+        if job.uid != uid or job.dedupe_key != dedupe_key:
+            raise ValueError("organization job identity mismatch")
+        if LongTermMemoryMutationOperation(job.operation) != LongTermMemoryMutationOperation.ORGANIZE:
+            raise ValueError("organization job operation mismatch")
+        if job.memory_id is not None or job.expected_version is not None:
+            raise ValueError("organization job target boundary mismatch")
+        if job.source_session_id is not None or job.source_profile_id is not None or job.source_message_id is not None:
+            raise ValueError("organization job source boundary mismatch")
+
+        status = LongTermMemoryMutationStatus(job.status)
+        if status in {
+            LongTermMemoryMutationStatus.PENDING,
+            LongTermMemoryMutationStatus.RUNNING,
+            LongTermMemoryMutationStatus.RETRY,
+        }:
+            expected_active_mutation_key = active_mutation_key
+        elif status in {
+            LongTermMemoryMutationStatus.SUCCEEDED,
+            LongTermMemoryMutationStatus.FAILED,
+            LongTermMemoryMutationStatus.CANCELLED,
+        }:
+            expected_active_mutation_key = None
+        else:
+            raise ValueError("organization job status mismatch")
+        if job.active_mutation_key != expected_active_mutation_key:
+            raise ValueError("organization job active key mismatch")
+
+        from app.core.memory.organization import restore_organization_execution_payload
+
+        restored = restore_organization_execution_payload(job.payload)
+        if restored.snapshot.digest != snapshot_digest or restored.snapshot.policy_version != policy_version:
+            raise ValueError("organization job snapshot mismatch")
+    except Exception as exc:
+        raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT)) from exc
+
+
+def _organization_interval_elapsed(last_run_at: datetime | None, now: datetime) -> bool:
+    if last_run_at is None:
+        return True
+
+    def as_utc_naive(value: datetime) -> datetime:
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
+        return value
+
+    return as_utc_naive(now) - as_utc_naive(last_run_at) >= timedelta(seconds=MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS)
+
+
+def _safe_auto_organization_error(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, BaseBusinessException):
+        try:
+            return exc.message, exc.render_message()
+        except Exception:
+            pass
+    if isinstance(exc, MemoryJobSubmissionError):
+        return f"MEMORY_JOB_SUBMISSION_{type(exc).__name__}", str(exc)
+    return ERR_MEMORY_JOB_UNEXPECTED_FAILURE, t(ERR_MEMORY_JOB_UNEXPECTED_FAILURE)
 
 
 class MemoryJobManager:
@@ -336,6 +416,69 @@ class MemoryJobManager:
                 await db.rollback()
             raise
 
+    async def _submit_organization_locked(
+        self,
+        db: AsyncSession,
+        *,
+        store: LongTermMemoryStore,
+        uid: str,
+        trigger: str,
+        caller_dedupe_key: str | None,
+    ) -> MemoryJobSubmissionResult:
+        from app.core.memory.identifiers import build_memory_organization_active_mutation_key
+        from app.core.memory.organization import (
+            build_organization_dedupe_key,
+            build_organization_job_payload,
+            build_organization_snapshot,
+            load_organization_model_config_for_store,
+        )
+
+        records = await memory_record_crud.list_recallable_for_organization(db, uid=uid)
+        snapshot = build_organization_snapshot(
+            records,
+            active_embedding_revision=store.active_embedding_revision,
+            index_revision=store.index_revision,
+            policy_version=store.organization_policy_version,
+        )
+        final_dedupe_key = build_organization_dedupe_key(
+            uid,
+            snapshot_digest=snapshot.digest,
+            policy_version=store.organization_policy_version,
+            caller_dedupe_key=caller_dedupe_key,
+        )
+        active_mutation_key = build_memory_organization_active_mutation_key(uid)
+        existing_job = await memory_job_crud.get_by_dedupe_key(
+            db,
+            uid=uid,
+            dedupe_key=final_dedupe_key,
+        )
+        if existing_job is not None:
+            _validate_existing_organization_job(
+                existing_job,
+                uid=uid,
+                dedupe_key=final_dedupe_key,
+                snapshot_digest=snapshot.digest,
+                policy_version=store.organization_policy_version,
+                active_mutation_key=active_mutation_key,
+            )
+            return MemoryJobSubmissionResult(job=existing_job, created=False)
+
+        organization_model = await load_organization_model_config_for_store(
+            db,
+            store=store,
+            snapshot_count=snapshot.count,
+        )
+        payload = build_organization_job_payload(snapshot, organization_model, trigger=trigger)
+        return await self.submit(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.ORGANIZE,
+            dedupe_key=final_dedupe_key,
+            payload=payload,
+            active_mutation_key=active_mutation_key,
+            commit=False,
+        )
+
     async def submit_organization(
         self,
         db: AsyncSession,
@@ -345,15 +488,8 @@ class MemoryJobManager:
         commit: bool = True,
     ) -> MemoryJobSubmissionResult:
         from app.core.memory.errors import MemoryConflictError
-        from app.core.memory.identifiers import build_memory_organization_active_mutation_key
         from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
-        from app.core.memory.organization import (
-            build_organization_dedupe_key,
-            build_organization_job_payload,
-            build_organization_snapshot,
-            load_organization_model_config_for_store,
-            validate_organization_submission_store,
-        )
+        from app.core.memory.organization import validate_organization_submission_store
 
         normalized_commit = _validate_commit(commit)
         try:
@@ -363,35 +499,99 @@ class MemoryJobManager:
             if store is None:
                 raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
             validate_organization_submission_store(store)
-
-            records = await memory_record_crud.list_recallable_for_organization(db, uid=normalized_uid)
-            snapshot = build_organization_snapshot(
-                records,
-                active_embedding_revision=store.active_embedding_revision,
-                index_revision=store.index_revision,
-                policy_version=store.organization_policy_version,
-            )
-            organization_model = await load_organization_model_config_for_store(
+            submission = await self._submit_organization_locked(
                 db,
                 store=store,
-                snapshot_count=snapshot.count,
-            )
-            payload = build_organization_job_payload(snapshot, organization_model)
-            final_dedupe_key = build_organization_dedupe_key(
-                normalized_uid,
-                snapshot_digest=snapshot.digest,
-                policy_version=store.organization_policy_version,
+                uid=normalized_uid,
+                trigger="manual",
                 caller_dedupe_key=normalized_dedupe_key,
             )
-            submission = await self.submit(
+            if normalized_commit:
+                await db.commit()
+                await db.refresh(submission.job)
+            else:
+                await db.flush()
+            return submission
+        except Exception:
+            if normalized_commit:
+                await db.rollback()
+            raise
+
+    async def submit_auto_organization(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        commit: bool = True,
+    ) -> MemoryJobSubmissionResult | None:
+        from app.core.memory.errors import MemoryConflictError
+        from app.core.memory.identifiers import build_memory_organization_active_mutation_key
+        from app.core.memory.normalization import _normalize_uid, _validate_commit
+        from app.core.memory.organization import validate_organization_submission_store
+
+        normalized_commit = _validate_commit(commit)
+
+        async def skip() -> None:
+            if normalized_commit:
+                await db.commit()
+            else:
+                await db.flush()
+
+        try:
+            normalized_uid = _normalize_uid(uid)
+            store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
+            if store is None:
+                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+            if store.auto_organize_enabled is not True:
+                await skip()
+                return None
+            try:
+                validate_organization_submission_store(store)
+            except MemoryConflictError as exc:
+                if exc.message == ERR_MEMORY_MAINTENANCE_STATE_CONFLICT:
+                    await skip()
+                    return None
+                raise
+
+            active_count = await memory_record_crud.count_active(db, uid=normalized_uid)
+            if active_count < store.organize_trigger_records:
+                await skip()
+                return None
+
+            now = await get_database_time(db)
+            if not _organization_interval_elapsed(store.organization_last_run_at, now):
+                await skip()
+                return None
+
+            active_job = await memory_job_crud.get_by_active_mutation_key(
                 db,
                 uid=normalized_uid,
-                operation=LongTermMemoryMutationOperation.ORGANIZE,
-                dedupe_key=final_dedupe_key,
-                payload=payload,
                 active_mutation_key=build_memory_organization_active_mutation_key(normalized_uid),
+            )
+            if active_job is not None:
+                await skip()
+                return None
+
+            submission = await self._submit_organization_locked(
+                db,
+                store=store,
+                uid=normalized_uid,
+                trigger="auto",
+                caller_dedupe_key=None,
+            )
+            job_id = submission.job.id
+            if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+            updated_store = await memory_store_crud.update_by_uid(
+                db,
+                uid=normalized_uid,
+                organization_last_job_id=job_id,
+                organization_last_run_at=now,
+                organization_error=None,
                 commit=False,
             )
+            if updated_store is None:
+                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
             if normalized_commit:
                 await db.commit()
                 await db.refresh(submission.job)
@@ -664,6 +864,55 @@ class MemoryJobManager:
         )
 
 
+async def best_effort_submit_auto_organization_after_publication(
+    session_factory: SessionFactory,
+    uid: str,
+    source_job_id: int,
+) -> None:
+    try:
+        async with session_factory() as db:
+            await memory_job_manager.submit_auto_organization(db, uid=uid)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error_key, error_text = _safe_auto_organization_error(exc)
+        logger.bind(
+            uid=uid,
+            source_job_id=source_job_id,
+            exception_type=type(exc).__name__,
+            error_key=error_key,
+            error_text=error_text,
+        ).warning(t(LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED))
+        try:
+            async with session_factory() as db:
+                store = await memory_store_crud.lock_for_mutation(
+                    db,
+                    uid=uid,
+                    commit=False,
+                )
+                if store is None:
+                    return
+                updated_store = await memory_store_crud.update_by_uid(
+                    db,
+                    uid=uid,
+                    organization_error=error_text,
+                    commit=False,
+                )
+                if updated_store is None:
+                    return
+                await db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as update_exc:
+            logger.bind(
+                uid=uid,
+                source_job_id=source_job_id,
+                exception_type=type(update_exc).__name__,
+                error_key=error_key,
+                error_text=error_text,
+            ).error(t("LOG_MEMORY_JOB_DATABASE_OPERATION_FAILED"))
+
+
 memory_job_manager = MemoryJobManager()
 
 
@@ -674,5 +923,6 @@ __all__ = [
     "MemoryJobSubmissionResult",
     "MemoryJobTargetBusyError",
     "MemoryJobValidationError",
+    "best_effort_submit_auto_organization_after_publication",
     "memory_job_manager",
 ]

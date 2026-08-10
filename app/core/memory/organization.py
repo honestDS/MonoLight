@@ -695,6 +695,7 @@ def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
 
 
 _ORGANIZATION_PAYLOAD_FIELDS = frozenset({"trigger", "snapshot", "organization_model"})
+_ORGANIZATION_TRIGGERS = frozenset({"manual", "auto"})
 _ORGANIZATION_SNAPSHOT_FIELDS = frozenset(
     {
         "digest",
@@ -915,7 +916,8 @@ def _restore_organization_model_config(
 def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationExecutionPayload:
     if not isinstance(payload, dict) or set(payload) != _ORGANIZATION_PAYLOAD_FIELDS:
         _raise_organization_payload_invalid()
-    if payload.get("trigger") != "manual":
+    trigger = payload.get("trigger")
+    if not isinstance(trigger, str) or trigger not in _ORGANIZATION_TRIGGERS:
         _raise_organization_payload_invalid()
 
     snapshot = _restore_organization_snapshot(payload.get("snapshot"))
@@ -924,7 +926,7 @@ def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationEx
         snapshot=snapshot,
     )
     return MemoryOrganizationExecutionPayload(
-        trigger="manual",
+        trigger=trigger,
         snapshot=snapshot,
         organization_model=organization_model,
     )
@@ -1124,9 +1126,12 @@ def build_organization_dedupe_key(
 def build_organization_job_payload(
     snapshot: MemoryOrganizationSnapshot,
     organization_model: MemoryOrganizationModelConfig,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
+    if not isinstance(trigger, str) or trigger not in _ORGANIZATION_TRIGGERS:
+        _raise_organization_payload_invalid()
     payload = {
-        "trigger": "manual",
+        "trigger": trigger,
         "snapshot": snapshot.to_job_snapshot(),
         "organization_model": organization_model.to_job_snapshot(),
     }
