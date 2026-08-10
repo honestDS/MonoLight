@@ -177,7 +177,7 @@ def _request_for_handler(
 
 
 def _response(
-    content: str = '{"items":[{"action":"keep"}]}',
+    content: str = '{"items":[{"action":"keep","source":{"memory_id":1,"expected_version":2}}]}',
 ) -> InternalResponse:
     return InternalResponse(
         message=InternalMessage(
@@ -383,7 +383,13 @@ async def test_handle_memory_organization_allows_exact_local_budget_and_calls_mo
 
     assert called
     assert result.result["model_called"] is True
-    assert result.result["model_output"] == '{"items":[{"action":"keep"}]}'
+    assert result.result["status"] == "succeeded"
+    assert result.result["keep_count"] == 1
+    assert result.result["update_count"] == 0
+    assert result.result["merge_count"] == 0
+    assert result.result["conflict_count"] == 0
+    assert result.result["validation_errors"] == []
+    assert "model_output" not in result.result
 
 
 @pytest.mark.asyncio
@@ -429,7 +435,14 @@ async def test_handle_memory_organization_skips_model_for_empty_snapshot(
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job(payload=_payload(snapshot))))
 
     assert result.result["model_called"] is False
-    assert result.result["model_output"] == '{"items":[]}'
+    assert result.result["finish_reason"] == "empty_snapshot"
+    assert result.result["keep_count"] == 0
+    assert result.result["update_count"] == 0
+    assert result.result["merge_count"] == 0
+    assert result.result["conflict_count"] == 0
+    assert result.result["plan_summary"] == {"items": [], "final_record_count": 0}
+    assert result.result["validation_errors"] == []
+    assert "model_output" not in result.result
 
 
 @pytest.mark.asyncio
@@ -489,10 +502,16 @@ async def test_handle_memory_organization_success_result_excludes_frozen_provide
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job()))
 
-    assert result.result["model_output"] == '{"items":[{"action":"keep"}]}'
+    assert result.result["status"] == "succeeded"
     assert result.result["finish_reason"] == "stop"
     assert result.result["usage"] == {"prompt_tokens": 12, "completion_tokens": 9, "total_tokens": 21}
     assert result.result["budget"] == request.budget.to_dict()
+    assert result.result["keep_count"] == 1
+    assert result.result["update_count"] == 0
+    assert result.result["merge_count"] == 0
+    assert result.result["conflict_count"] == 0
+    assert result.result["validation_errors"] == []
+    assert "model_output" not in result.result
     assert not set(result.result) & {
         "api_key",
         "base_url",
