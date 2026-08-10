@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlparse
@@ -14,6 +17,7 @@ from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_FIELD_TYPE_INVALID,
+    ERR_MEMORY_JOB_PAYLOAD_INVALID,
     ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
@@ -21,12 +25,14 @@ from app.core.constants import (
     ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     MEMORY_CONTENT_MAX_TOKENS,
+    MEMORY_ORGANIZE_CONTEXT_SAFETY_MARGIN_TOKENS,
     MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS,
     MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS,
     MEMORY_ORGANIZE_POLICY_VERSION,
 )
 from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_record_crud, memory_store_crud
+from app.core.exceptions import LLMException
 from app.core.memory.errors import MemoryConflictError, MemoryValidationError
 from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
 from app.core.memory.organization_types import (
@@ -40,14 +46,25 @@ from app.core.memory.organization_types import (
     MemoryOrganizationTarget,
     MemoryOrganizationUpdate,
 )
+from app.core.prompts import MEMORY_ORGANIZATION_SYSTEM_PROMPT
+from app.core.utils.context_budget import measure_context_request_usage
 from app.core.utils.http_proxy import get_channel_http_proxy
-from app.models.channel import ChannelModelItem, ModelUsage, resolve_model_protocol
+from app.core.utils.model_request_headers import normalize_model_custom_headers
+from app.models.channel import (
+    MODEL_PROTOCOLS_BY_USAGE,
+    ChannelModelItem,
+    ModelProtocol,
+    ModelUsage,
+    resolve_model_protocol,
+)
 from app.models.memory import (
     LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
     LongTermMemoryRecord,
     LongTermMemoryStore,
 )
+from app.models.message import InternalMessage, InternalResponse, MessageRole
+from app.providers.llm.client import LLMClient
 
 
 class MemoryOrganizationPinPolicyStatus(StrEnum):
@@ -151,12 +168,423 @@ class MemoryOrganizationModelConfig:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryOrganizationExecutionPayload:
+    trigger: str
+    snapshot: MemoryOrganizationSnapshot
+    organization_model: MemoryOrganizationModelConfig
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryOrganizationExecutionBudget:
+    required_input_tokens: int
+    available_input_tokens: int
+    context_window_tokens: int
+    max_output_tokens: int
+    safety_margin_tokens: int
+    system_tokens: int
+    non_system_tokens: int
+    message_tokens: int
+    tools_tokens: int
+
+    @property
+    def exceeds_hard_window(self) -> bool:
+        return self.required_input_tokens > self.available_input_tokens
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "required_input_tokens": self.required_input_tokens,
+            "available_input_tokens": self.available_input_tokens,
+            "context_window_tokens": self.context_window_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "safety_margin_tokens": self.safety_margin_tokens,
+            "system_tokens": self.system_tokens,
+            "non_system_tokens": self.non_system_tokens,
+            "message_tokens": self.message_tokens,
+            "tools_tokens": self.tools_tokens,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryOrganizationExecutionRequest:
+    trigger: str
+    snapshot: MemoryOrganizationSnapshot
+    organization_model: MemoryOrganizationModelConfig
+    messages: tuple[InternalMessage, ...]
+    budget: MemoryOrganizationExecutionBudget
+
+
+class MemoryOrganizationContextExceededError(MemoryValidationError):
+    def __init__(self, budget: MemoryOrganizationExecutionBudget) -> None:
+        super().__init__(
+            message=ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
+            params={
+                "required_tokens": budget.required_input_tokens,
+                "available_tokens": budget.available_input_tokens,
+            },
+            data={
+                "status": "organization_context_exceeded",
+                "required_tokens": budget.required_input_tokens,
+                "available_tokens": budget.available_input_tokens,
+                "budget": budget.to_dict(),
+            },
+        )
+        self.budget = budget
+
+
 def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
     if isinstance(snapshot_count, bool) or not isinstance(snapshot_count, int):
         raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, field="snapshot_count")
     if snapshot_count < 0:
         raise MemoryValidationError(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="snapshot_count")
     return snapshot_count * (MEMORY_CONTENT_MAX_TOKENS + MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS)
+
+
+_ORGANIZATION_PAYLOAD_FIELDS = frozenset({"trigger", "snapshot", "organization_model"})
+_ORGANIZATION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "digest",
+        "count",
+        "active_embedding_revision",
+        "index_revision",
+        "policy_version",
+        "items",
+    }
+)
+_ORGANIZATION_MODEL_FIELDS = frozenset(
+    {
+        "channel_id",
+        "channel_name",
+        "model_id",
+        "usage",
+        "protocol",
+        "base_url",
+        "api_key",
+        "http_proxy",
+        "custom_headers",
+        "temperature",
+        "top_p",
+        "timeout",
+        "context_window_k",
+        "context_window_tokens",
+        "max_tokens",
+        "snapshot_count",
+        "required_output_tokens",
+        "policy_version",
+    }
+)
+_CONTEXT_LENGTH_ERROR_TERMS = (
+    "context length exceeded",
+    "maximum context length",
+    "max context length",
+    "context window",
+    "context limit exceeded",
+    "too many tokens",
+    "prompt too long",
+    "prompt is too long",
+    "input too long",
+    "input is too long",
+    "input length exceeded",
+    "token limit exceeded",
+)
+
+
+def _raise_organization_payload_invalid() -> None:
+    raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+
+
+def _strict_non_negative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _strict_positive_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _strict_text(value: Any, *, allow_blank: bool = False) -> bool:
+    return isinstance(value, str) and (allow_blank or bool(value.strip()))
+
+
+def _strict_number(value: Any, *, minimum: float, maximum: float | None = None) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < minimum or (maximum is not None and normalized > maximum):
+        return None
+    return normalized
+
+
+def _restore_organization_snapshot(value: Any) -> MemoryOrganizationSnapshot:
+    if not isinstance(value, dict) or set(value) != _ORGANIZATION_SNAPSHOT_FIELDS:
+        _raise_organization_payload_invalid()
+
+    digest = value.get("digest")
+    count = value.get("count")
+    active_embedding_revision = value.get("active_embedding_revision")
+    index_revision = value.get("index_revision")
+    policy_version = value.get("policy_version")
+    raw_items = value.get("items")
+    if not _strict_text(digest) or not _strict_non_negative_integer(count) or not _strict_positive_integer(active_embedding_revision) or not _strict_non_negative_integer(index_revision) or not _strict_positive_integer(policy_version) or not isinstance(raw_items, list):
+        _raise_organization_payload_invalid()
+
+    items: list[MemoryOrganizationSnapshotItem] = []
+    seen_memory_ids: set[int] = set()
+    for raw_item in raw_items:
+        try:
+            item = MemoryOrganizationSnapshotItem.model_validate(raw_item)
+        except Exception as exc:
+            raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+        if item.memory_id in seen_memory_ids:
+            _raise_organization_payload_invalid()
+        seen_memory_ids.add(item.memory_id)
+        items.append(item)
+
+    if count != len(items):
+        _raise_organization_payload_invalid()
+    if [item.memory_id for item in items] != sorted(item.memory_id for item in items):
+        _raise_organization_payload_invalid()
+
+    expected_digest = build_organization_snapshot_digest(
+        items,
+        active_embedding_revision=active_embedding_revision,
+        index_revision=index_revision,
+        policy_version=policy_version,
+    )
+    if digest != expected_digest:
+        _raise_organization_payload_invalid()
+    return MemoryOrganizationSnapshot(
+        digest=digest,
+        count=count,
+        active_embedding_revision=active_embedding_revision,
+        index_revision=index_revision,
+        policy_version=policy_version,
+        items=tuple(items),
+    )
+
+
+def _restore_organization_model_config(
+    value: Any,
+    *,
+    snapshot: MemoryOrganizationSnapshot,
+) -> MemoryOrganizationModelConfig:
+    if not isinstance(value, dict) or set(value) != _ORGANIZATION_MODEL_FIELDS:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+
+    channel_id = value.get("channel_id")
+    channel_name = value.get("channel_name")
+    model_id = value.get("model_id")
+    usage = value.get("usage")
+    raw_protocol = value.get("protocol")
+    base_url = value.get("base_url")
+    api_key = value.get("api_key")
+    raw_http_proxy = value.get("http_proxy")
+    raw_custom_headers = value.get("custom_headers")
+    temperature = _strict_number(value.get("temperature"), minimum=0, maximum=2)
+    raw_top_p = value.get("top_p")
+    top_p = None if raw_top_p is None else _strict_number(raw_top_p, minimum=0, maximum=1)
+    timeout = _strict_number(value.get("timeout"), minimum=0.000001)
+    context_window_k = value.get("context_window_k")
+    context_window_tokens = value.get("context_window_tokens")
+    max_tokens = value.get("max_tokens")
+    snapshot_count = value.get("snapshot_count")
+    required_output_tokens = value.get("required_output_tokens")
+    policy_version = value.get("policy_version")
+
+    if (
+        not _strict_positive_integer(channel_id)
+        or not _strict_text(channel_name)
+        or not _strict_text(model_id)
+        or usage != ModelUsage.CHAT.value
+        or not isinstance(raw_protocol, str)
+        or not _strict_text(base_url)
+        or not _is_valid_organization_base_url(base_url)
+        or not _strict_text(api_key)
+        or temperature is None
+        or (raw_top_p is not None and top_p is None)
+        or timeout is None
+        or not _strict_positive_integer(context_window_k)
+        or not _strict_positive_integer(context_window_tokens)
+        or context_window_tokens != context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+        or not _strict_positive_integer(max_tokens)
+        or not _strict_non_negative_integer(snapshot_count)
+        or snapshot_count != snapshot.count
+        or not _strict_non_negative_integer(required_output_tokens)
+        or required_output_tokens != calculate_organization_required_output_tokens(snapshot.count)
+        or not _strict_positive_integer(policy_version)
+        or policy_version != snapshot.policy_version
+        or max_tokens < required_output_tokens
+    ):
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+
+    try:
+        protocol_enum = ModelProtocol(raw_protocol.upper())
+        if protocol_enum not in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]:
+            raise ValueError("organization protocol is not a chat protocol")
+        protocol = resolve_model_protocol({"protocol": protocol_enum.value})
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID) from exc
+    if protocol != raw_protocol:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+
+    if not isinstance(raw_custom_headers, dict):
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+    try:
+        custom_headers = normalize_model_custom_headers(raw_custom_headers)
+        http_proxy = get_channel_http_proxy({"http_proxy": raw_http_proxy})
+    except (TypeError, ValueError) as exc:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID) from exc
+    if custom_headers != raw_custom_headers or http_proxy != raw_http_proxy:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+
+    return MemoryOrganizationModelConfig(
+        channel_id=channel_id,
+        channel_name=channel_name,
+        model_id=model_id,
+        usage=usage,
+        protocol=protocol,
+        context_window_k=context_window_k,
+        context_window_tokens=context_window_tokens,
+        max_tokens=max_tokens,
+        snapshot_count=snapshot_count,
+        required_output_tokens=required_output_tokens,
+        policy_version=policy_version,
+        base_url=base_url,
+        api_key=api_key,
+        http_proxy=http_proxy,
+        custom_headers=custom_headers,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout,
+    )
+
+
+def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationExecutionPayload:
+    if not isinstance(payload, dict) or set(payload) != _ORGANIZATION_PAYLOAD_FIELDS:
+        _raise_organization_payload_invalid()
+    if payload.get("trigger") != "manual":
+        _raise_organization_payload_invalid()
+
+    snapshot = _restore_organization_snapshot(payload.get("snapshot"))
+    organization_model = _restore_organization_model_config(
+        payload.get("organization_model"),
+        snapshot=snapshot,
+    )
+    return MemoryOrganizationExecutionPayload(
+        trigger="manual",
+        snapshot=snapshot,
+        organization_model=organization_model,
+    )
+
+
+def build_organization_execution_request(payload: Any) -> MemoryOrganizationExecutionRequest:
+    restored = restore_organization_execution_payload(payload)
+    messages = (
+        InternalMessage(role=MessageRole.SYSTEM, content=MEMORY_ORGANIZATION_SYSTEM_PROMPT),
+        InternalMessage(
+            role=MessageRole.USER,
+            content=json.dumps(
+                [item.model_dump(mode="json") for item in restored.snapshot.items],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    usage = measure_context_request_usage(
+        messages=list(messages),
+        context_window_k=restored.organization_model.context_window_k,
+        max_tokens=restored.organization_model.required_output_tokens,
+        tools=None,
+        safety_margin_tokens=MEMORY_ORGANIZE_CONTEXT_SAFETY_MARGIN_TOKENS,
+    )
+    budget = MemoryOrganizationExecutionBudget(
+        required_input_tokens=usage.required_input_tokens,
+        available_input_tokens=(usage.budget.context_window_tokens - usage.budget.output_tokens - usage.budget.safety_margin_tokens),
+        context_window_tokens=usage.budget.context_window_tokens,
+        max_output_tokens=usage.budget.output_tokens,
+        safety_margin_tokens=usage.budget.safety_margin_tokens,
+        system_tokens=usage.system_tokens,
+        non_system_tokens=usage.non_system_tokens,
+        message_tokens=usage.message_tokens,
+        tools_tokens=usage.budget.tools_tokens,
+    )
+    return MemoryOrganizationExecutionRequest(
+        trigger=restored.trigger,
+        snapshot=restored.snapshot,
+        organization_model=restored.organization_model,
+        messages=messages,
+        budget=budget,
+    )
+
+
+async def call_organization_model(request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+    if request.budget.exceeds_hard_window:
+        raise MemoryOrganizationContextExceededError(request.budget)
+    if request.snapshot.count == 0:
+        raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    model = request.organization_model
+    return await LLMClient.generate(
+        api_key=model.api_key,
+        base_url=model.base_url,
+        model_id=model.model_id,
+        messages=list(request.messages),
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=request.budget.max_output_tokens,
+        tools=None,
+        protocol=model.protocol,
+        timeout=model.timeout,
+        request_context_tokens=request.budget.required_input_tokens,
+        http_proxy=model.http_proxy,
+        custom_headers=dict(model.custom_headers),
+    )
+
+
+def is_external_context_length_error(exc: BaseException) -> bool:
+    visited: set[int] = set()
+
+    def visit(value: Any) -> bool:
+        if value is None or id(value) in visited:
+            return False
+        visited.add(id(value))
+        if isinstance(value, str):
+            normalized = value.lower().replace("_", " ").replace("-", " ")
+            if any(term in normalized for term in _CONTEXT_LENGTH_ERROR_TERMS):
+                return True
+            return False
+        if isinstance(value, Mapping):
+            return any(visit(key) or visit(item) for key, item in value.items())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(visit(item) for item in value)
+        if isinstance(value, BaseException):
+            if not isinstance(value, LLMException) and not isinstance(exc, LLMException):
+                return visit(str(value))
+            if visit(str(value)):
+                return True
+            for attribute in (
+                "message",
+                "kwargs",
+                "cause",
+                "data",
+                "code",
+                "type",
+                "detail",
+                "__cause__",
+                "__context__",
+            ):
+                if visit(getattr(value, attribute, None)):
+                    return True
+            return False
+        for attribute in ("detail", "code", "type", "message"):
+            if visit(getattr(value, attribute, None)):
+                return True
+        return visit(str(value)) if not isinstance(value, (int, float, bool)) else False
+
+    if not isinstance(exc, LLMException):
+        return False
+    return visit(exc)
+
+
+execute_organization_model = call_organization_model
 
 
 def build_organization_snapshot_items(
@@ -601,6 +1029,10 @@ def evaluate_organization_merge_pins(
 
 __all__ = [
     "MemoryOrganizationConflict",
+    "MemoryOrganizationContextExceededError",
+    "MemoryOrganizationExecutionBudget",
+    "MemoryOrganizationExecutionPayload",
+    "MemoryOrganizationExecutionRequest",
     "MemoryOrganizationKeep",
     "MemoryOrganizationMerge",
     "MemoryOrganizationModelConfig",
@@ -613,16 +1045,21 @@ __all__ = [
     "MemoryOrganizationSourceReference",
     "MemoryOrganizationTarget",
     "MemoryOrganizationUpdate",
+    "build_organization_execution_request",
     "calculate_organization_required_output_tokens",
     "build_organization_dedupe_key",
     "build_organization_job_payload",
     "build_organization_snapshot",
     "build_organization_snapshot_digest",
     "build_organization_snapshot_items",
+    "call_organization_model",
+    "execute_organization_model",
     "evaluate_organization_merge_pins",
     "get_organization_settings",
     "load_organization_model_config",
     "load_organization_model_config_for_store",
+    "is_external_context_length_error",
+    "restore_organization_execution_payload",
     "update_organization_settings",
     "validate_organization_submission_store",
 ]

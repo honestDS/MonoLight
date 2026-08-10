@@ -127,6 +127,7 @@ MESSAGES = {
     "ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED": "Memory organization needs {required_tokens} tokens, but only {available_tokens} are available",
     "ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED": "Memory organization model is not configured",
     "ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID": "Memory organization model configuration is invalid",
+    "ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED": "Memory organization model call failed",
     "ERR_MEMORY_ORGANIZATION_PLAN_INVALID": "Memory organization plan is invalid",
     "ERR_MEMORY_CAPACITY_EXCEEDED": "Long-term memory reached the active record limit of {maximum}",
     "ERR_MEMORY_MUTATION_PENDING": "The memory already has an unfinished mutation job",

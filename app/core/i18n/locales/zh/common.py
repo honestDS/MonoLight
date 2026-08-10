@@ -127,6 +127,7 @@ MESSAGES = {
     "ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED": "记忆整理需要 {required_tokens} 个 Token，但仅有 {available_tokens} 个可用",
     "ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED": "记忆整理模型未配置",
     "ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID": "记忆整理模型配置无效",
+    "ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED": "记忆整理模型调用失败",
     "ERR_MEMORY_ORGANIZATION_PLAN_INVALID": "记忆整理计划无效",
     "ERR_MEMORY_CAPACITY_EXCEEDED": "长期记忆已达到活动记录容量上限 {maximum}",
     "ERR_MEMORY_MUTATION_PENDING": "记忆已有未完成的变更作业",

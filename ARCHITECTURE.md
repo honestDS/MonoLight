@@ -178,6 +178,7 @@ app/core/memory_jobs/
 ├── consumer.py             # 作业消费与租约协调
 ├── executor.py             # 作业执行器
 ├── handlers.py             # 记忆作业处理器
+├── organization_handler.py # 记忆整理模型调用作业处理器
 ├── maintenance_handlers.py # 记忆维护作业处理器
 ├── maintenance_lifecycle.py # 维护作业生命周期组件
 ├── maintenance_state.py    # 维护作业状态数据

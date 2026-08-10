@@ -71,6 +71,7 @@ from app.core.memory_jobs.executor import (
 )
 from app.core.memory_jobs.maintenance_handlers import create_memory_maintenance_job_handlers
 from app.core.memory_jobs.manager import memory_job_manager
+from app.core.memory_jobs.organization_handler import create_memory_organization_job_handlers
 from app.models.memory import (
     LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDeltaAction,
@@ -1686,6 +1687,7 @@ async def _handle_restore(context: MemoryJobExecutionContext) -> MemoryJobExecut
 def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Handler]:
     handlers = {
         **create_memory_maintenance_job_handlers(),
+        **create_memory_organization_job_handlers(),
         LongTermMemoryMutationOperation.CREATE: _handle_create,
         LongTermMemoryMutationOperation.CREATE_WITH_EVICTION: _handle_create_with_eviction,
         LongTermMemoryMutationOperation.UPDATE: _handle_update,
