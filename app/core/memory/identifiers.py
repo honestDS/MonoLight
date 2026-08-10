@@ -62,8 +62,15 @@ def build_memory_active_mutation_key(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def build_memory_organization_active_mutation_key(uid: str) -> str:
+    normalized_uid = _normalize_uid(uid)
+    canonical = canonical_json_dumps({"scope": "memory_organization", "uid": normalized_uid})
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 __all__ = [
     "build_memory_active_mutation_key",
     "build_memory_collection_name",
+    "build_memory_organization_active_mutation_key",
     "build_memory_vector_item_id",
 ]

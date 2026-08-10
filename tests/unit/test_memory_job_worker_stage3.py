@@ -261,7 +261,6 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
     "operation",
     [
         LongTermMemoryMutationOperation.EXTRACT,
-        LongTermMemoryMutationOperation.ORGANIZE,
         LongTermMemoryMutationOperation.ORGANIZE_MERGE,
     ],
 )

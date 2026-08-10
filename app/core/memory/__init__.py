@@ -14,6 +14,7 @@ from app.core.memory.errors import (
 from app.core.memory.identifiers import (
     build_memory_active_mutation_key,
     build_memory_collection_name,
+    build_memory_organization_active_mutation_key,
     build_memory_vector_item_id,
 )
 from app.core.memory.maintenance import submit_memory_cleanup_retry, submit_memory_reindex
@@ -54,6 +55,7 @@ from app.core.memory.organization import (
     MemoryOrganizationPinPolicyStatus,
     MemoryOrganizationPlan,
     MemoryOrganizationPlanItem,
+    MemoryOrganizationSnapshot,
     MemoryOrganizationSnapshotItem,
     MemoryOrganizationSourceReference,
     MemoryOrganizationTarget,
@@ -97,6 +99,7 @@ __all__ = [
     "MemoryOrganizationPinPolicyStatus",
     "MemoryOrganizationPlan",
     "MemoryOrganizationPlanItem",
+    "MemoryOrganizationSnapshot",
     "MemoryOrganizationSnapshotItem",
     "MemoryOrganizationSourceReference",
     "MemoryOrganizationTarget",
@@ -121,6 +124,7 @@ __all__ = [
     "build_memory_collection_name",
     "build_memory_content_hash",
     "build_memory_record_snapshot",
+    "build_memory_organization_active_mutation_key",
     "build_memory_vector_item_id",
     "calculate_organization_required_output_tokens",
     "chat_history_recall_service",

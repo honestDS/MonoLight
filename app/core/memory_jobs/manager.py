@@ -18,6 +18,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_PAYLOAD_UID_FORBIDDEN,
     ERR_MEMORY_JOB_TARGET_BUSY,
     ERR_MEMORY_MIGRATION_CANNOT_CANCEL_AFTER_SWITCHING,
+    ERR_MEMORY_NOT_CONFIGURED,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
@@ -52,7 +53,8 @@ _NON_TARGET_OPERATIONS = frozenset(
         LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
     }
 )
-_SUBMITTABLE_OPERATIONS = _TARGET_OPERATIONS | _NON_TARGET_OPERATIONS
+_ORGANIZE_OPERATIONS = frozenset({LongTermMemoryMutationOperation.ORGANIZE})
+_SUBMITTABLE_OPERATIONS = _TARGET_OPERATIONS | _NON_TARGET_OPERATIONS | _ORGANIZE_OPERATIONS
 _ACTIVE_MUTATION_KEY_CONSTRAINT = "uq_long_term_memory_mutation_job_active_key"
 
 
@@ -131,7 +133,16 @@ def _job_matches_submission_identity(
         return False
     if existing_operation != operation:
         return False
-    if job.active_mutation_key != active_mutation_key:
+    if job.active_mutation_key != active_mutation_key and not (
+        operation == LongTermMemoryMutationOperation.ORGANIZE
+        and job.active_mutation_key is None
+        and job.status
+        in {
+            LongTermMemoryMutationStatus.SUCCEEDED,
+            LongTermMemoryMutationStatus.FAILED,
+            LongTermMemoryMutationStatus.CANCELLED,
+        }
+    ):
         return False
     if job.memory_id != memory_id or job.expected_version != expected_version:
         return False
@@ -234,6 +245,18 @@ class MemoryJobManager:
                     and expected_version is not None
                 ):
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_CREATE_VERSION_FORBIDDEN))
+            elif operation in _ORGANIZE_OPERATIONS:
+                if active_mutation_key is None:
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="active_mutation_key"))
+                _require_non_empty_string(active_mutation_key, field="active_mutation_key")
+                from app.core.memory.identifiers import build_memory_organization_active_mutation_key
+
+                if active_mutation_key != build_memory_organization_active_mutation_key(uid):
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="active_mutation_key"))
+                if memory_id is not None or expected_version is not None:
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_NON_TARGET_FIELDS_FORBIDDEN))
+                if source_session_id is not None or source_profile_id is not None or source_message_id is not None:
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_NON_TARGET_FIELDS_FORBIDDEN))
             elif operation in _NON_TARGET_OPERATIONS:
                 if active_mutation_key is not None or memory_id is not None or expected_version is not None:
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_NON_TARGET_FIELDS_FORBIDDEN))
@@ -310,6 +333,73 @@ class MemoryJobManager:
             return MemoryJobSubmissionResult(job=job, created=True)
         except Exception:
             if commit:
+                await db.rollback()
+            raise
+
+    async def submit_organization(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        dedupe_key: str | None = None,
+        commit: bool = True,
+    ) -> MemoryJobSubmissionResult:
+        from app.core.memory.errors import MemoryConflictError
+        from app.core.memory.identifiers import build_memory_organization_active_mutation_key
+        from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
+        from app.core.memory.organization import (
+            build_organization_dedupe_key,
+            build_organization_job_payload,
+            build_organization_snapshot,
+            load_organization_model_config_for_store,
+            validate_organization_submission_store,
+        )
+
+        normalized_commit = _validate_commit(commit)
+        try:
+            normalized_uid = _normalize_uid(uid)
+            normalized_dedupe_key = _normalize_dedupe_key(dedupe_key) if dedupe_key is not None else None
+            store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
+            if store is None:
+                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+            validate_organization_submission_store(store)
+
+            records = await memory_record_crud.list_recallable_for_organization(db, uid=normalized_uid)
+            snapshot = build_organization_snapshot(
+                records,
+                active_embedding_revision=store.active_embedding_revision,
+                index_revision=store.index_revision,
+                policy_version=store.organization_policy_version,
+            )
+            organization_model = await load_organization_model_config_for_store(
+                db,
+                store=store,
+                snapshot_count=snapshot.count,
+            )
+            payload = build_organization_job_payload(snapshot, organization_model)
+            final_dedupe_key = build_organization_dedupe_key(
+                normalized_uid,
+                snapshot_digest=snapshot.digest,
+                policy_version=store.organization_policy_version,
+                caller_dedupe_key=normalized_dedupe_key,
+            )
+            submission = await self.submit(
+                db,
+                uid=normalized_uid,
+                operation=LongTermMemoryMutationOperation.ORGANIZE,
+                dedupe_key=final_dedupe_key,
+                payload=payload,
+                active_mutation_key=build_memory_organization_active_mutation_key(normalized_uid),
+                commit=False,
+            )
+            if normalized_commit:
+                await db.commit()
+                await db.refresh(submission.job)
+            else:
+                await db.flush()
+            return submission
+        except Exception:
+            if normalized_commit:
                 await db.rollback()
             raise
 

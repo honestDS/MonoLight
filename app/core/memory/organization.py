@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -9,9 +10,11 @@ from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_FIELD_TYPE_INVALID,
+    ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
@@ -25,7 +28,7 @@ from app.core.constants import (
 from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.memory.errors import MemoryConflictError, MemoryValidationError
-from app.core.memory.normalization import _normalize_uid, _validate_commit
+from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
 from app.core.memory.organization_types import (
     MemoryOrganizationConflict,
     MemoryOrganizationKeep,
@@ -39,7 +42,12 @@ from app.core.memory.organization_types import (
 )
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.models.channel import ChannelModelItem, ModelUsage, resolve_model_protocol
-from app.models.memory import LongTermMemoryStore
+from app.models.memory import (
+    LongTermMemoryIndexStatus,
+    LongTermMemoryMigrationStatus,
+    LongTermMemoryRecord,
+    LongTermMemoryStore,
+)
 
 
 class MemoryOrganizationPinPolicyStatus(StrEnum):
@@ -54,6 +62,26 @@ class MemoryOrganizationPinPolicyResult:
     primary_memory_id: int | None
     pinned_memory_ids: tuple[int, ...]
     tombstone_memory_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryOrganizationSnapshot:
+    digest: str
+    count: int
+    active_embedding_revision: int
+    index_revision: int
+    policy_version: int
+    items: tuple[MemoryOrganizationSnapshotItem, ...]
+
+    def to_job_snapshot(self) -> dict[str, Any]:
+        return {
+            "digest": self.digest,
+            "count": self.count,
+            "active_embedding_revision": self.active_embedding_revision,
+            "index_revision": self.index_revision,
+            "policy_version": self.policy_version,
+            "items": [item.model_dump(mode="json") for item in self.items],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +157,136 @@ def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
     if snapshot_count < 0:
         raise MemoryValidationError(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="snapshot_count")
     return snapshot_count * (MEMORY_CONTENT_MAX_TOKENS + MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS)
+
+
+def build_organization_snapshot_items(
+    records: Iterable[LongTermMemoryRecord],
+) -> tuple[MemoryOrganizationSnapshotItem, ...]:
+    return tuple(
+        MemoryOrganizationSnapshotItem.model_validate(
+            {
+                "memory_id": record.id,
+                "expected_version": record.version,
+                "memory_key": record.memory_key,
+                "memory_type": record.memory_type,
+                "content": record.content,
+                "content_token_count": record.content_token_count,
+                "pinned": record.pinned,
+            }
+        )
+        for record in sorted(records, key=lambda item: item.id or 0)
+    )
+
+
+def build_organization_snapshot_digest(
+    items: Iterable[MemoryOrganizationSnapshotItem],
+    *,
+    active_embedding_revision: int,
+    index_revision: int,
+    policy_version: int,
+) -> str:
+    ordered_items = tuple(sorted(items, key=lambda item: item.memory_id))
+    digest_payload = {
+        "active_embedding_revision": active_embedding_revision,
+        "index_revision": index_revision,
+        "items": [item.model_dump(mode="json") for item in ordered_items],
+        "policy_version": policy_version,
+    }
+    return hashlib.sha256(canonical_json_dumps(digest_payload).encode("utf-8")).hexdigest()
+
+
+def build_organization_snapshot(
+    records: Iterable[LongTermMemoryRecord],
+    *,
+    active_embedding_revision: int,
+    index_revision: int,
+    policy_version: int,
+) -> MemoryOrganizationSnapshot:
+    items = build_organization_snapshot_items(records)
+    digest = build_organization_snapshot_digest(
+        items,
+        active_embedding_revision=active_embedding_revision,
+        index_revision=index_revision,
+        policy_version=policy_version,
+    )
+    return MemoryOrganizationSnapshot(
+        digest=digest,
+        count=len(items),
+        active_embedding_revision=active_embedding_revision,
+        index_revision=index_revision,
+        policy_version=policy_version,
+        items=items,
+    )
+
+
+def build_organization_dedupe_key(
+    uid: str,
+    *,
+    snapshot_digest: str,
+    policy_version: int,
+    caller_dedupe_key: str | None = None,
+) -> str:
+    normalized_uid = _normalize_uid(uid)
+    normalized_caller_key = _normalize_dedupe_key(caller_dedupe_key) if caller_dedupe_key is not None else None
+    payload = {
+        "caller_dedupe_key": normalized_caller_key,
+        "policy_version": policy_version,
+        "scope": "memory_organization",
+        "snapshot_digest": snapshot_digest,
+        "uid": normalized_uid,
+    }
+    digest = hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+    return f"memory_organization:{digest}"
+
+
+def build_organization_job_payload(
+    snapshot: MemoryOrganizationSnapshot,
+    organization_model: MemoryOrganizationModelConfig,
+) -> dict[str, Any]:
+    payload = {
+        "trigger": "manual",
+        "snapshot": snapshot.to_job_snapshot(),
+        "organization_model": organization_model.to_job_snapshot(),
+    }
+    canonical_json_dumps(payload)
+    return payload
+
+
+def validate_organization_submission_store(store: LongTermMemoryStore) -> None:
+    required = (
+        store.active_embedding_channel_id,
+        store.active_embedding_model_id,
+        store.active_embedding_dimensions,
+        store.active_embedding_signature,
+        store.active_collection_name,
+    )
+    if (
+        isinstance(store.active_embedding_revision, bool)
+        or not isinstance(store.active_embedding_revision, int)
+        or store.active_embedding_revision < 1
+        or any(value is None or (isinstance(value, str) and not value.strip()) for value in required)
+        or isinstance(store.active_embedding_channel_id, bool)
+        or not isinstance(store.active_embedding_channel_id, int)
+        or store.active_embedding_channel_id < 1
+        or isinstance(store.active_embedding_dimensions, bool)
+        or not isinstance(store.active_embedding_dimensions, int)
+        or store.active_embedding_dimensions < 1
+    ):
+        raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+
+    try:
+        index_status = LongTermMemoryIndexStatus(store.index_status)
+        migration_status = LongTermMemoryMigrationStatus(store.migration_status) if store.migration_status is not None else None
+    except (TypeError, ValueError) as exc:
+        raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT) from exc
+    if index_status != LongTermMemoryIndexStatus.READY or migration_status in {
+        LongTermMemoryMigrationStatus.PREPARING,
+        LongTermMemoryMigrationStatus.BUILDING,
+        LongTermMemoryMigrationStatus.CATCHING_UP,
+        LongTermMemoryMigrationStatus.VALIDATING,
+        LongTermMemoryMigrationStatus.SWITCHING,
+    }:
+        raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
 
 
 def _raise_organization_config_invalid() -> None:
@@ -267,6 +425,21 @@ async def load_organization_model_config(
     store = await memory_store_crud.get_snapshot_by_uid(db, uid=normalized_uid)
     if store is None:
         raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
+    return await _load_organization_model_config_for_selection(
+        db,
+        store=store,
+        channel_id=store.organization_channel_id,
+        model_id=store.organization_model_id,
+        snapshot_count=snapshot_count,
+    )
+
+
+async def load_organization_model_config_for_store(
+    db: AsyncSession,
+    *,
+    store: LongTermMemoryStore,
+    snapshot_count: int,
+) -> MemoryOrganizationModelConfig:
     return await _load_organization_model_config_for_selection(
         db,
         store=store,
@@ -435,13 +608,21 @@ __all__ = [
     "MemoryOrganizationPinPolicyStatus",
     "MemoryOrganizationPlan",
     "MemoryOrganizationPlanItem",
+    "MemoryOrganizationSnapshot",
     "MemoryOrganizationSnapshotItem",
     "MemoryOrganizationSourceReference",
     "MemoryOrganizationTarget",
     "MemoryOrganizationUpdate",
     "calculate_organization_required_output_tokens",
+    "build_organization_dedupe_key",
+    "build_organization_job_payload",
+    "build_organization_snapshot",
+    "build_organization_snapshot_digest",
+    "build_organization_snapshot_items",
     "evaluate_organization_merge_pins",
     "get_organization_settings",
     "load_organization_model_config",
+    "load_organization_model_config_for_store",
     "update_organization_settings",
+    "validate_organization_submission_store",
 ]

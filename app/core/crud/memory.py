@@ -560,6 +560,15 @@ class CRUDLongTermMemoryRecord:
         result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid), LongTermMemoryRecord.id.in_(memory_ids)))
         return list(result.scalars().all())
 
+    async def list_recallable_for_organization(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+    ) -> list[LongTermMemoryRecord]:
+        result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid)).order_by(LongTermMemoryRecord.id.asc()).execution_options(populate_existing=True))
+        return list(result.scalars().all())
+
     async def get_eviction_candidate(self, db: AsyncSession, *, uid: str) -> LongTermMemoryRecord | None:
         result = await db.execute(
             select(LongTermMemoryRecord)
