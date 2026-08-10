@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.memory import memory_reference_crud
+from app.models.channel import ModelUsage
 from app.models.memory import (
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
@@ -17,6 +18,7 @@ class LongTermMemoryChannelModelReference:
     uid: str
     channel_id: int
     model_id: str | None
+    usage: str
 
 
 def _value(value: object) -> object:
@@ -112,18 +114,34 @@ def _payload_pairs(payload: object) -> list[tuple[int, str | None]]:
     return list(pairs)
 
 
+def _organization_payload_pairs(payload: object) -> list[tuple[int, str | None]]:
+    if not isinstance(payload, dict):
+        return []
+
+    pairs: set[tuple[int, str | None]] = set()
+    for key in ("organization_model", "model_config"):
+        model_config = payload.get(key)
+        if not isinstance(model_config, dict):
+            continue
+        channel_id = _as_channel_id(model_config.get("channel_id"))
+        if channel_id is not None:
+            pairs.add((channel_id, _as_model_id(model_config.get("model_id"))))
+    return list(pairs)
+
+
 def _add_reference(
-    references: set[tuple[str, int, str | None]],
+    references: set[tuple[str, int, str | None, str]],
     *,
     uid: str,
     raw_channel_id: object,
     raw_model_id: object,
     channel_id: int | None,
+    usage: str,
 ) -> None:
     current_channel_id = _as_channel_id(raw_channel_id)
     if current_channel_id is None or (channel_id is not None and current_channel_id != channel_id):
         return
-    references.add((uid, current_channel_id, _as_model_id(raw_model_id)))
+    references.add((uid, current_channel_id, _as_model_id(raw_model_id), usage))
 
 
 def _group_by_uid(items: list[Any]) -> dict[str, list[Any]]:
@@ -142,13 +160,18 @@ async def list_memory_channel_references(
     stores_by_uid = {store.uid: store for store in stores}
     revisions_by_uid = _group_by_uid(await memory_reference_crud.list_all_embedding_revisions_for_admin(db))
     jobs_by_uid = _group_by_uid(await memory_reference_crud.list_all_memory_jobs_for_admin(db))
-    references: set[tuple[str, int, str | None]] = set()
+    references: set[tuple[str, int, str | None, str]] = set()
     cleanup_statuses = {"pending", "running", "failed"}
-    retryable_job_statuses = {
+    embedding_migration_statuses = {
         LongTermMemoryMutationStatus.PENDING.value,
         LongTermMemoryMutationStatus.RUNNING.value,
         LongTermMemoryMutationStatus.RETRY.value,
         LongTermMemoryMutationStatus.FAILED.value,
+    }
+    organization_job_statuses = {
+        LongTermMemoryMutationStatus.PENDING.value,
+        LongTermMemoryMutationStatus.RUNNING.value,
+        LongTermMemoryMutationStatus.RETRY.value,
     }
 
     for uid in sorted(stores_by_uid.keys() | revisions_by_uid.keys() | jobs_by_uid.keys()):
@@ -157,7 +180,7 @@ async def list_memory_channel_references(
         jobs = jobs_by_uid.get(uid, [])
         if store is None:
             for job in jobs:
-                if _value(job.operation) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION.value and _value(job.status) in retryable_job_statuses:
+                if _value(job.operation) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION.value and _value(job.status) in embedding_migration_statuses:
                     for current_channel_id, model_id in _payload_pairs(job.payload):
                         _add_reference(
                             references,
@@ -165,6 +188,17 @@ async def list_memory_channel_references(
                             raw_channel_id=current_channel_id,
                             raw_model_id=model_id,
                             channel_id=channel_id,
+                            usage=ModelUsage.EMBEDDING.value,
+                        )
+                if _value(job.operation) == LongTermMemoryMutationOperation.ORGANIZE.value and _value(job.status) in organization_job_statuses:
+                    for current_channel_id, model_id in _organization_payload_pairs(job.payload):
+                        _add_reference(
+                            references,
+                            uid=uid,
+                            raw_channel_id=current_channel_id,
+                            raw_model_id=model_id,
+                            channel_id=channel_id,
+                            usage=ModelUsage.CHAT.value,
                         )
             continue
 
@@ -174,6 +208,7 @@ async def list_memory_channel_references(
             raw_channel_id=store.active_embedding_channel_id,
             raw_model_id=store.active_embedding_model_id,
             channel_id=channel_id,
+            usage=ModelUsage.EMBEDDING.value,
         )
         _add_reference(
             references,
@@ -181,10 +216,19 @@ async def list_memory_channel_references(
             raw_channel_id=store.target_embedding_channel_id,
             raw_model_id=store.target_embedding_model_id,
             channel_id=channel_id,
+            usage=ModelUsage.EMBEDDING.value,
+        )
+        _add_reference(
+            references,
+            uid=uid,
+            raw_channel_id=store.organization_channel_id,
+            raw_model_id=store.organization_model_id,
+            channel_id=channel_id,
+            usage=ModelUsage.CHAT.value,
         )
 
         for job in jobs:
-            if _value(job.operation) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION.value and _value(job.status) in retryable_job_statuses:
+            if _value(job.operation) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION.value and _value(job.status) in embedding_migration_statuses:
                 for current_channel_id, model_id in _payload_pairs(job.payload):
                     _add_reference(
                         references,
@@ -192,6 +236,17 @@ async def list_memory_channel_references(
                         raw_channel_id=current_channel_id,
                         raw_model_id=model_id,
                         channel_id=channel_id,
+                        usage=ModelUsage.EMBEDDING.value,
+                    )
+            if _value(job.operation) == LongTermMemoryMutationOperation.ORGANIZE.value and _value(job.status) in organization_job_statuses:
+                for current_channel_id, model_id in _organization_payload_pairs(job.payload):
+                    _add_reference(
+                        references,
+                        uid=uid,
+                        raw_channel_id=current_channel_id,
+                        raw_model_id=model_id,
+                        channel_id=channel_id,
+                        usage=ModelUsage.CHAT.value,
                     )
 
         if _value(store.old_collection_cleanup_status) not in cleanup_statuses:
@@ -207,6 +262,7 @@ async def list_memory_channel_references(
                         raw_channel_id=current_channel_id,
                         raw_model_id=model_id,
                         channel_id=channel_id,
+                        usage=ModelUsage.EMBEDDING.value,
                     )
 
         exact_revisions = [revision for revision in revisions if store.old_collection_name and store.old_collection_name in {revision.from_collection, revision.to_collection}]
@@ -223,6 +279,7 @@ async def list_memory_channel_references(
                 raw_channel_id=revision.from_channel_id,
                 raw_model_id=revision.from_model_id,
                 channel_id=channel_id,
+                usage=ModelUsage.EMBEDDING.value,
             )
             _add_reference(
                 references,
@@ -230,6 +287,7 @@ async def list_memory_channel_references(
                 raw_channel_id=revision.to_channel_id,
                 raw_model_id=revision.to_model_id,
                 channel_id=channel_id,
+                usage=ModelUsage.EMBEDDING.value,
             )
 
-    return [LongTermMemoryChannelModelReference(uid=uid, channel_id=current_channel_id, model_id=model_id) for uid, current_channel_id, model_id in references]
+    return [LongTermMemoryChannelModelReference(uid=uid, channel_id=current_channel_id, model_id=model_id, usage=usage) for uid, current_channel_id, model_id, usage in references]

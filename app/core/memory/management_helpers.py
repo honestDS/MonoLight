@@ -142,6 +142,13 @@ def _store_progress_view(store: LongTermMemoryStore | None) -> dict[str, Any]:
         "index_status": _json_value(store.index_status),
         "max_active_records": store.max_active_records,
         "organize_trigger_records": store.organize_trigger_records,
+        "auto_organize_enabled": store.auto_organize_enabled,
+        "organization_channel_id": store.organization_channel_id,
+        "organization_model_id": store.organization_model_id,
+        "organization_policy_version": store.organization_policy_version,
+        "organization_last_job_id": store.organization_last_job_id,
+        "organization_last_run_at": store.organization_last_run_at,
+        "organization_error": store.organization_error,
         "capacity_status": _json_value(store.capacity_status),
     }
 

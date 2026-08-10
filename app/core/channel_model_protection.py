@@ -25,17 +25,34 @@ def _model_key(item: dict[str, Any]) -> tuple[object, object] | None:
         return None
     model_id = item.get("model_id")
     usage = _value(item.get("usage"))
-    if not isinstance(model_id, str) or not model_id or usage is None:
+    if not isinstance(model_id, str) or not model_id or not isinstance(usage, str) or not usage:
         return None
     return model_id, usage
 
 
-def _identity(item: dict[str, Any]) -> tuple[object, object, object]:
-    return (
-        _value(item.get("usage")),
-        _value(item.get("protocol")),
-        item.get("embedding_dimensions"),
-    )
+def _identity(item: dict[str, Any]) -> tuple[object, ...]:
+    model_id, usage = _model_key(item) or (None, None)
+    identity = (model_id, usage, _value(item.get("protocol")))
+    if usage == ModelUsage.EMBEDDING.value:
+        return (*identity, item.get("embedding_dimensions"))
+    return identity
+
+
+def _find_model_identity_update_conflict(
+    referenced_model_keys: set[tuple[str, str]],
+    old_model_ids: list[dict[str, Any]],
+    new_model_ids: list[dict[str, Any]],
+) -> str | None:
+    old_models = {key: item for item in old_model_ids if (key := _model_key(item)) is not None}
+    new_models = {key: item for item in new_model_ids if (key := _model_key(item)) is not None}
+
+    for model_id, usage in sorted(referenced_model_keys):
+        model_key = (model_id, usage)
+        old_model = old_models.get(model_key)
+        new_model = new_models.get(model_key)
+        if old_model is None or new_model is None or _identity(old_model) != _identity(new_model):
+            return model_id
+    return None
 
 
 def find_model_identity_update_conflict(
@@ -43,16 +60,11 @@ def find_model_identity_update_conflict(
     old_model_ids: list[dict[str, Any]],
     new_model_ids: list[dict[str, Any]],
 ) -> str | None:
-    old_models = {key: item for item in old_model_ids if (key := _model_key(item)) is not None and key[1] == ModelUsage.EMBEDDING.value}
-    new_models = {key: item for item in new_model_ids if (key := _model_key(item)) is not None and key[1] == ModelUsage.EMBEDDING.value}
-
-    for model_id in sorted(referenced_model_ids):
-        model_key = (model_id, ModelUsage.EMBEDDING.value)
-        old_model = old_models.get(model_key)
-        new_model = new_models.get(model_key)
-        if old_model is None or new_model is None or _identity(old_model) != _identity(new_model):
-            return model_id
-    return None
+    return _find_model_identity_update_conflict(
+        {(model_id, ModelUsage.EMBEDDING.value) for model_id in referenced_model_ids},
+        old_model_ids,
+        new_model_ids,
+    )
 
 
 async def assert_channel_model_identity_update_allowed(
@@ -62,8 +74,8 @@ async def assert_channel_model_identity_update_allowed(
     new_model_ids: list[dict[str, Any]],
 ) -> None:
     memory_references = await list_memory_channel_references(db, channel_id=channel_id)
-    memory_model_ids = {reference.model_id for reference in memory_references if reference.model_id is not None}
-    conflict_model_id = find_model_identity_update_conflict(memory_model_ids, old_model_ids, new_model_ids)
+    memory_model_keys = {(reference.model_id, reference.usage) for reference in memory_references if reference.model_id is not None}
+    conflict_model_id = _find_model_identity_update_conflict(memory_model_keys, old_model_ids, new_model_ids)
     if conflict_model_id is not None:
         raise ParameterException(ERR_MEMORY_MODEL_IDENTITY_IN_USE, model_id=conflict_model_id)
 

@@ -46,9 +46,14 @@ from app.core.memory.normalization import (
     normalize_memory_record_snapshot,
 )
 from app.core.memory.organization import (
+    MemoryOrganizationModelConfig,
     MemoryOrganizationPinPolicyResult,
     MemoryOrganizationPinPolicyStatus,
+    calculate_organization_required_output_tokens,
     evaluate_organization_merge_pins,
+    get_organization_settings,
+    load_organization_model_config,
+    update_organization_settings,
 )
 from app.core.memory.results import (
     MemoryMutationResult,
@@ -75,6 +80,7 @@ __all__ = [
     "MemoryMutationResult",
     "MemoryMutationStatus",
     "MemoryNotFoundError",
+    "MemoryOrganizationModelConfig",
     "MemoryOrganizationPinPolicyResult",
     "MemoryOrganizationPinPolicyStatus",
     "MemoryRecallItem",
@@ -98,8 +104,11 @@ __all__ = [
     "build_memory_content_hash",
     "build_memory_record_snapshot",
     "build_memory_vector_item_id",
+    "calculate_organization_required_output_tokens",
     "chat_history_recall_service",
     "evaluate_organization_merge_pins",
+    "get_organization_settings",
+    "load_organization_model_config",
     "memory_service",
     "load_memory_capacity_snapshot",
     "normalize_change_evidence",
@@ -114,4 +123,5 @@ __all__ = [
     "submit_memory_cleanup_retry",
     "submit_memory_reindex",
     "unpin_memory",
+    "update_organization_settings",
 ]

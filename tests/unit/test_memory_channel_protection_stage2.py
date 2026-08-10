@@ -40,6 +40,11 @@ MEMORY_TABLES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONOLIGH_ENCRYPTION_KEY", "00" * 32)
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -121,6 +126,35 @@ async def _create_embedding_migration_job(
         dedupe_key=dedupe_key,
         status=status,
         payload=payload,
+        commit=False,
+    )
+    assert created
+    return job
+
+
+async def _create_organization_job(
+    db: AsyncSession,
+    *,
+    uid: str,
+    dedupe_key: str,
+    status: LongTermMemoryMutationStatus,
+    channel_id: int,
+    model_id: str,
+) -> LongTermMemoryMutationJob:
+    job, created = await memory_job_crud.create(
+        db,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.ORGANIZE,
+        dedupe_key=dedupe_key,
+        status=status,
+        payload={
+            "model_config": {
+                "channel_id": channel_id,
+                "model_id": model_id,
+                "protocol": "openai",
+                "max_tokens": 2048,
+            }
+        },
         commit=False,
     )
     assert created
@@ -629,3 +663,256 @@ async def test_list_memory_channel_references_uses_three_queries_for_any_uid_cou
 
     assert len(second_references) == 11
     assert second_query_count[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_organization_store_reference_uses_chat_usage_and_blocks_channel_delete(
+    db_session: AsyncSession,
+) -> None:
+    channel = await _create_channel(
+        db_session,
+        name="organization-store-channel",
+        model_ids=[_chat_model("organization-chat")],
+    )
+    await _create_store(
+        db_session,
+        uid="organization-store-user",
+        organization_channel_id=channel.id,
+        organization_model_id="organization-chat",
+    )
+
+    references = await list_memory_channel_references(db_session, channel_id=channel.id)
+    assert {(reference.channel_id, reference.model_id, reference.usage) for reference in references} == {(channel.id, "organization-chat", "CHAT")}
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.delete_channel(channel.id, db=db_session, admin={})
+
+    assert exc_info.value.message == ERR_MEMORY_CHANNEL_IN_USE
+    assert await channel_crud.get(db_session, channel.id) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["delete", "model_id", "usage", "protocol"])
+async def test_referenced_chat_model_identity_changes_are_rejected(
+    db_session: AsyncSession,
+    change: str,
+) -> None:
+    await _create_store(
+        db_session,
+        uid="organization-identity-user",
+        organization_channel_id=116,
+        organization_model_id="protected-chat",
+    )
+    old_model = _chat_model("protected-chat")
+    changed_model = dict(old_model)
+    if change == "delete":
+        new_models = []
+    else:
+        if change == "model_id":
+            changed_model["model_id"] = "renamed-chat"
+        elif change == "usage":
+            changed_model["usage"] = "EMBEDDING"
+            changed_model["protocol"] = "OPENAI_EMBEDDING"
+            changed_model["embedding_dimensions"] = 1536
+        else:
+            changed_model["protocol"] = "CHANGED_PROTOCOL"
+        new_models = [changed_model]
+
+    with pytest.raises(ParameterException) as exc_info:
+        await assert_channel_model_identity_update_allowed(
+            db_session,
+            channel_id=116,
+            old_model_ids=[old_model],
+            new_model_ids=new_models,
+        )
+
+    assert exc_info.value.message == ERR_MEMORY_MODEL_IDENTITY_IN_USE
+    assert exc_info.value.kwargs == {"model_id": "protected-chat"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"is_enabled": False},
+        {"description": "updated description"},
+        {"temperature": 1.2},
+        {"top_p": 0.4},
+        {"context_window_k": 64},
+        {"max_tokens": 4096},
+        {"advanced_settings": {"custom_headers": {"x-test": "two"}}},
+    ],
+)
+async def test_non_identity_changes_to_referenced_chat_model_are_allowed(
+    db_session: AsyncSession,
+    change: dict,
+) -> None:
+    await _create_store(
+        db_session,
+        uid="organization-mutable-user",
+        organization_channel_id=117,
+        organization_model_id="mutable-chat",
+    )
+    old_model = _chat_model("mutable-chat")
+    new_model = {**old_model, **change}
+
+    await assert_channel_model_identity_update_allowed(
+        db_session,
+        channel_id=117,
+        old_model_ids=[old_model],
+        new_model_ids=[new_model],
+    )
+
+
+@pytest.mark.asyncio
+async def test_unrelated_embedding_model_identity_change_on_chat_referenced_channel_is_allowed(
+    db_session: AsyncSession,
+) -> None:
+    await _create_store(
+        db_session,
+        uid="organization-unrelated-user",
+        organization_channel_id=118,
+        organization_model_id="used-chat",
+    )
+    old_models = [
+        _chat_model("used-chat"),
+        _embedding_model("unrelated-embedding"),
+    ]
+    new_models = [
+        _chat_model("used-chat"),
+        _embedding_model(
+            "renamed-embedding",
+            protocol="OPENAI_EMBEDDING",
+            embedding_dimensions=3072,
+        ),
+    ]
+
+    await assert_channel_model_identity_update_allowed(
+        db_session,
+        channel_id=118,
+        old_model_ids=old_models,
+        new_model_ids=new_models,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        LongTermMemoryMutationStatus.PENDING,
+        LongTermMemoryMutationStatus.RUNNING,
+        LongTermMemoryMutationStatus.RETRY,
+        LongTermMemoryMutationStatus.SUCCEEDED,
+        LongTermMemoryMutationStatus.FAILED,
+        LongTermMemoryMutationStatus.CANCELLED,
+    ],
+)
+async def test_organization_job_model_snapshot_protection_depends_on_active_status(
+    db_session: AsyncSession,
+    status: LongTermMemoryMutationStatus,
+) -> None:
+    await _create_organization_job(
+        db_session,
+        uid="organization-job-user",
+        dedupe_key=f"organization-{status.value}",
+        status=status,
+        channel_id=119,
+        model_id="job-chat",
+    )
+
+    references = await _references(db_session, 119)
+    if status in {
+        LongTermMemoryMutationStatus.PENDING,
+        LongTermMemoryMutationStatus.RUNNING,
+        LongTermMemoryMutationStatus.RETRY,
+    }:
+        detailed_references = await list_memory_channel_references(db_session, channel_id=119)
+        assert {(reference.channel_id, reference.model_id, reference.usage) for reference in detailed_references} == {(119, "job-chat", "CHAT")}
+        assert references == {("organization-job-user", 119, "job-chat")}
+        with pytest.raises(ParameterException) as exc_info:
+            await assert_channel_not_referenced(db_session, channel_id=119)
+        assert exc_info.value.message == ERR_MEMORY_CHANNEL_IN_USE
+    else:
+        assert references == set()
+        await assert_channel_not_referenced(db_session, channel_id=119)
+
+
+@pytest.mark.asyncio
+async def test_organization_job_snapshot_keeps_old_reference_after_store_selection_changes(
+    db_session: AsyncSession,
+) -> None:
+    await _create_store(
+        db_session,
+        uid="organization-snapshot-user",
+        organization_channel_id=120,
+        organization_model_id="old-chat",
+    )
+    await _create_organization_job(
+        db_session,
+        uid="organization-snapshot-user",
+        dedupe_key="organization-old-snapshot",
+        status=LongTermMemoryMutationStatus.PENDING,
+        channel_id=120,
+        model_id="old-chat",
+    )
+
+    await memory_store_crud.update_by_uid(
+        db_session,
+        uid="organization-snapshot-user",
+        auto_organize_enabled=False,
+        organization_channel_id=None,
+        organization_model_id=None,
+        commit=False,
+    )
+    assert await _references(db_session, 120) == {("organization-snapshot-user", 120, "old-chat")}
+
+    await memory_store_crud.update_by_uid(
+        db_session,
+        uid="organization-snapshot-user",
+        auto_organize_enabled=True,
+        organization_channel_id=121,
+        organization_model_id="new-chat",
+        commit=False,
+    )
+    assert await _references(db_session, 120) == {("organization-snapshot-user", 120, "old-chat")}
+    assert await _references(db_session, 121) == {("organization-snapshot-user", 121, "new-chat")}
+
+    for channel_id in (120, 121):
+        with pytest.raises(ParameterException) as exc_info:
+            await assert_channel_not_referenced(db_session, channel_id=channel_id)
+        assert exc_info.value.message == ERR_MEMORY_CHANNEL_IN_USE
+
+
+@pytest.mark.asyncio
+async def test_organization_referenced_channel_allows_connection_field_maintenance(
+    db_session: AsyncSession,
+) -> None:
+    channel = await _create_channel(
+        db_session,
+        name="organization-connection-channel",
+        model_ids=[_chat_model("connection-chat")],
+    )
+    await _create_store(
+        db_session,
+        uid="organization-connection-user",
+        organization_channel_id=channel.id,
+        organization_model_id="connection-chat",
+    )
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(
+            base_url="https://changed.example/v1",
+            api_key="changed-api-key",
+            http_proxy="http://changed-proxy.example:8081",
+        ),
+        db=db_session,
+        admin={},
+    )
+
+    assert response.code == 200
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.base_url == "https://changed.example/v1"
+    assert updated.get_decrypted_api_key() == "changed-api-key"
+    assert updated.http_proxy == "http://changed-proxy.example:8081"

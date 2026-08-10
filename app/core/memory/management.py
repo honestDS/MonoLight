@@ -50,6 +50,7 @@ from app.core.memory.management_helpers import (
     _validated_migration_payload,
 )
 from app.core.memory.normalization import _normalize_uid, _require_positive, normalize_memory_publication_payload
+from app.core.memory.organization import get_organization_settings
 from app.core.memory.service import memory_service
 from app.core.memory_jobs.manager import memory_job_manager
 from app.core.utils.time import get_local_time
@@ -576,6 +577,11 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         "active_record_count": active_count,
         "status": flat.get("capacity_status") or LongTermMemoryCapacityStatus.NORMAL.value,
     }
+    organization = await get_organization_settings(
+        db,
+        uid=normalized_uid,
+        snapshot_count=active_count,
+    )
     cleanup = {
         "name": flat.get("old_collection_name"),
         "status": flat.get("old_collection_cleanup_status"),
@@ -591,6 +597,7 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         "delta": delta,
         "index": index,
         "capacity": capacity,
+        "organization": organization,
         "old_collection_cleanup": cleanup,
         "migration_job": _job_view(migration_job),
         "store": {
