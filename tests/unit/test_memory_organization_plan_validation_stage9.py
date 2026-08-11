@@ -455,6 +455,11 @@ async def test_handler_success_result_saves_summary_counts_without_model_output_
     monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
     monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
 
+    async def noop_persist_checkpoint(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(organization_handler, "_persist_organization_plan_checkpoint", noop_persist_checkpoint)
+
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(job))
 
     assert result.result["status"] == "succeeded"

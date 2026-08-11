@@ -508,6 +508,44 @@ class CRUDLongTermMemoryMutationJob:
             await db.flush()
         return (result.rowcount or 0) == 1
 
+    async def update_running_payload(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        job_id: int,
+        payload: dict[str, Any],
+        owner: str | None = None,
+        worker_id: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        if not isinstance(uid, str) or not uid:
+            raise ValueError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="uid"))
+        if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+            raise ValueError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="job_id"))
+        if not isinstance(payload, dict):
+            raise TypeError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="payload"))
+        owner = _resolve_owner(owner, worker_id)
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == job_id,
+                LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.RUNNING,
+                LongTermMemoryMutationJob.locked_by == owner,
+                LongTermMemoryMutationJob.lock_until >= now,
+                LongTermMemoryMutationJob.cancel_requested_at.is_(None),
+            )
+            .values(payload=payload, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return (result.rowcount or 0) == 1
+
     async def assign_create_memory_id(
         self,
         db: AsyncSession,

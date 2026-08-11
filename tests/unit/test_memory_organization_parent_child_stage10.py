@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
+from dataclasses import replace
+from datetime import timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
@@ -19,6 +24,7 @@ from app.core.memory import (
 from app.core.memory.organization import (
     MemoryOrganizationExecutionBudget,
     MemoryOrganizationExecutionRequest,
+    MemoryOrganizationPlanCheckpoint,
     MemoryOrganizationSnapshot,
     MemoryOrganizationValidatedItem,
     MemoryOrganizationValidatedPlan,
@@ -26,7 +32,8 @@ from app.core.memory.organization import (
     MemoryOrganizationValidatedTarget,
 )
 from app.core.memory_jobs import organization_handler
-from app.core.memory_jobs.executor import MemoryJobExecutionContext
+from app.core.memory_jobs.consumer import MemoryJobConsumer
+from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobRetryableError
 from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobValidationError
 from app.models.memory import (
     LongTermMemoryMutationJob,
@@ -177,6 +184,49 @@ async def _claimed_parent(
     return claimed
 
 
+async def _created_parent(
+    db: AsyncSession,
+    *,
+    uid: str,
+    payload: dict[str, object] | None = None,
+    max_attempts: int = 4,
+) -> LongTermMemoryMutationJob:
+    db.add(LongTermMemoryStore(uid=uid))
+    await db.flush()
+    parent, created = await memory_job_crud.create(
+        db,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.ORGANIZE,
+        dedupe_key=f"parent-{uid}",
+        active_mutation_key=build_memory_organization_active_mutation_key(uid),
+        payload={} if payload is None else payload,
+        available_at=await get_database_time(db),
+        max_attempts=max_attempts,
+        commit=False,
+    )
+    assert created
+    assert parent.id is not None
+    await db.commit()
+    return parent
+
+
+async def _wait_for_job_status(
+    db_session: AsyncSession,
+    *,
+    uid: str,
+    job_id: int,
+    status: LongTermMemoryMutationStatus,
+) -> LongTermMemoryMutationJob:
+    deadline = asyncio.get_running_loop().time() + 2
+    while True:
+        job = await memory_job_crud.get_by_id(db_session, uid=uid, job_id=job_id)
+        if job is not None and job.status == status:
+            return job
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"job {job_id} did not reach {status.value}")
+        await asyncio.sleep(0.01)
+
+
 async def _create_recallable_records(
     db: AsyncSession,
     *,
@@ -214,6 +264,267 @@ def _install_handler_plan(
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
     monkeypatch.setattr(organization_handler, "validate_organization_model_output", lambda _output, _snapshot: plan)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_status", [LongTermMemoryMutationStatus.PENDING, LongTermMemoryMutationStatus.RETRY])
+async def test_pending_and_retry_organization_can_be_cancelled_and_clear_active_key(
+    db_session: AsyncSession,
+    initial_status: LongTermMemoryMutationStatus,
+) -> None:
+    uid = f"organization-cancel-{initial_status.value}-user"
+    parent = await _created_parent(db_session, uid=uid)
+
+    if initial_status == LongTermMemoryMutationStatus.RETRY:
+        claimed = await memory_job_crud.try_claim(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            owner="organization-retry-worker",
+            lease_seconds=300,
+            commit=False,
+        )
+        assert claimed is not None
+        assert await memory_job_crud.release_for_retry(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            owner="organization-retry-worker",
+            delay_seconds=0,
+            commit=False,
+        )
+        await db_session.commit()
+
+    cancellation = await MemoryJobManager().request_cancel(db_session, uid=uid, job_id=parent.id)
+
+    assert cancellation.accepted is True
+    assert cancellation.changed is True
+    assert cancellation.job is not None
+    assert cancellation.job.status == LongTermMemoryMutationStatus.CANCELLED
+    refreshed = await memory_job_crud.get_by_id(db_session, uid=uid, job_id=parent.id)
+    assert refreshed is not None
+    assert refreshed.active_mutation_key is None
+    assert (
+        await memory_job_crud.get_by_active_mutation_key(
+            db_session,
+            uid=uid,
+            active_mutation_key=build_memory_organization_active_mutation_key(uid),
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_running_organization_cancelled_during_model_call_stops_after_return_without_children(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "organization-running-cancel-user"
+    parent = await _created_parent(db_session, uid=uid)
+    request = _request()
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+    model_calls = 0
+
+    async def fake_call(_request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+        nonlocal model_calls
+        model_calls += 1
+        model_started.set()
+        await release_model.wait()
+        return _response()
+
+    def fail_if_plan_is_validated(_output: str | None, _snapshot: MemoryOrganizationSnapshot) -> MemoryOrganizationValidatedPlan:
+        raise AssertionError("cancelled organization must stop before plan validation")
+
+    monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
+    monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
+    monkeypatch.setattr(organization_handler, "validate_organization_model_output", fail_if_plan_is_validated)
+
+    def session_factory() -> Any:
+        return async_sessionmaker(db_session.bind, expire_on_commit=False)()  # type: ignore[arg-type]
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(
+            {LongTermMemoryMutationOperation.ORGANIZE: organization_handler.handle_memory_organization},
+            session_factory=session_factory,
+        ),
+        session_factory,
+        poll_interval_seconds=0.01,
+        lease_seconds=30,
+        renew_interval_seconds=10,
+        recovery_interval_seconds=1_000_000,
+        max_concurrency=1,
+        recovery_retry_delay_seconds=1,
+        shutdown_retry_delay_seconds=0.01,
+    )
+    try:
+        assert await consumer.run_once() == 1
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        async with session_factory() as db:
+            cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=parent.id)
+        assert cancellation.accepted is True
+        assert cancellation.changed is True
+        release_model.set()
+
+        cancelled = await _wait_for_job_status(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            status=LongTermMemoryMutationStatus.CANCELLED,
+        )
+        assert model_calls == 1
+        assert cancelled.active_mutation_key is None
+        children = await memory_job_crud.list_children_by_parent_job_id(
+            db_session,
+            uid=uid,
+            parent_job_id=parent.id,
+        )
+        assert children == []
+    finally:
+        release_model.set()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_retry_reuses_validated_plan_checkpoint_and_frozen_snapshot(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "organization-plan-checkpoint-retry-user"
+    parent = await _created_parent(db_session, uid=uid)
+    await _create_recallable_records(db_session, uid=uid, versions={1: 11})
+    request = _request(snapshot_count=1)
+    plan = MemoryOrganizationValidatedPlan(
+        items=(_update(1, 11, content="checkpoint-content", memory_key="checkpoint-key"),),
+        final_record_count=1,
+    )
+    model_calls = 0
+
+    async def fake_call(_request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+        nonlocal model_calls
+        model_calls += 1
+        if model_calls > 1:
+            raise AssertionError("organization retry must reuse plan_checkpoint without calling the model")
+        return _response()
+
+    def build_request(payload: object) -> MemoryOrganizationExecutionRequest:
+        if not isinstance(payload, dict) or "plan_checkpoint" not in payload:
+            return request
+        raw_checkpoint = payload["plan_checkpoint"]
+        assert isinstance(raw_checkpoint, dict)
+        checkpoint = MemoryOrganizationPlanCheckpoint(
+            model_output=raw_checkpoint["model_output"],
+            usage=raw_checkpoint["usage"],
+            finish_reason=raw_checkpoint["finish_reason"],
+        )
+        return replace(request, plan_checkpoint=checkpoint)
+
+    monkeypatch.setattr(organization_handler, "build_organization_execution_request", build_request)
+    monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
+    monkeypatch.setattr(organization_handler, "validate_organization_model_output", lambda _output, _snapshot: plan)
+    original_submit = organization_handler._submit_organization_plan
+
+    async def fail_after_checkpoint(*_args: object, **_kwargs: object) -> object:
+        raise MemoryJobRetryableError("retry after validated plan checkpoint")
+
+    monkeypatch.setattr(organization_handler, "_submit_organization_plan", fail_after_checkpoint)
+
+    def session_factory() -> Any:
+        return async_sessionmaker(db_session.bind, expire_on_commit=False)()  # type: ignore[arg-type]
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(
+            {LongTermMemoryMutationOperation.ORGANIZE: organization_handler.handle_memory_organization},
+            session_factory=session_factory,
+        ),
+        session_factory,
+        poll_interval_seconds=0.01,
+        lease_seconds=30,
+        renew_interval_seconds=10,
+        recovery_interval_seconds=1_000_000,
+        max_concurrency=1,
+        recovery_retry_delay_seconds=1,
+        shutdown_retry_delay_seconds=0.01,
+    )
+    try:
+        assert await consumer.run_once() == 1
+        retried = await _wait_for_job_status(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            status=LongTermMemoryMutationStatus.RETRY,
+        )
+        assert retried.payload["plan_checkpoint"] == {
+            "model_output": _response().message.content,
+            "usage": _response().usage,
+            "finish_reason": _response().finish_reason,
+        }
+
+        changed = await memory_record_crud.update_if_version(
+            db_session,
+            uid=uid,
+            memory_id=1,
+            expected_version=11,
+            indexed_version=12,
+            commit=False,
+        )
+        assert changed is not None
+        await db_session.commit()
+        await _create_recallable_records(db_session, uid=uid, versions={2: 22})
+
+        await db_session.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == parent.id,
+            )
+            .values(available_at=await get_database_time(db_session))
+        )
+        await db_session.commit()
+        claimed = await memory_job_crud.try_claim(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            owner="organization-expired-lease-worker",
+            lease_seconds=300,
+            commit=False,
+        )
+        assert claimed is not None
+        expired_at = await get_database_time(db_session) - timedelta(seconds=1)
+        await db_session.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == parent.id,
+            )
+            .values(lock_until=expired_at)
+        )
+        recovery = await memory_job_crud.recover_expired(db_session, delay_seconds=0, commit=False)
+        assert recovery.retried == 1
+        await db_session.commit()
+
+        monkeypatch.setattr(organization_handler, "_submit_organization_plan", original_submit)
+        assert await consumer.run_once() == 1
+        succeeded = await _wait_for_job_status(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert model_calls == 1
+        assert succeeded.result is not None
+        assert succeeded.result["snapshot_digest"] == request.snapshot.digest
+        assert succeeded.result["plan_summary"] == plan.plan_summary
+        assert succeeded.result["stale_count"] == 1
+        assert succeeded.result["child_job_ids"] == []
+        children = await memory_job_crud.list_children_by_parent_job_id(
+            db_session,
+            uid=uid,
+            parent_job_id=parent.id,
+        )
+        assert children == []
+    finally:
+        await consumer.stop()
 
 
 @pytest.mark.asyncio
@@ -398,6 +709,54 @@ async def test_organization_parent_marks_primary_key_collision_stale_and_continu
     )
     assert len(children) == 1
     assert children[0].memory_id == 2
+
+
+@pytest.mark.asyncio
+async def test_organization_parent_marks_version_changed_group_stale_and_submits_other_groups(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "organization-parent-version-stale-user"
+    parent = await _claimed_parent(db_session, uid=uid)
+    await _create_recallable_records(db_session, uid=uid, versions={1: 11, 2: 12})
+    changed = await memory_record_crud.update_if_version(
+        db_session,
+        uid=uid,
+        memory_id=1,
+        expected_version=11,
+        indexed_version=12,
+        commit=False,
+    )
+    assert changed is not None
+    await db_session.commit()
+    request = _request()
+    plan = MemoryOrganizationValidatedPlan(
+        items=(
+            _update(1, 11, content="stale-version-content", memory_key="stale-version-key"),
+            _update(2, 12, content="continued-content", memory_key="continued-key"),
+        ),
+        final_record_count=2,
+    )
+    _install_handler_plan(monkeypatch, request, plan)
+    context = MemoryJobExecutionContext(
+        job=parent,
+        worker_id="organization-worker",
+        session_factory=lambda: async_sessionmaker(db_session.bind, expire_on_commit=False)(),  # type: ignore[arg-type]
+    )
+
+    execution = await organization_handler.handle_memory_organization(context)
+
+    assert execution.finalized is True
+    assert execution.result["stale_count"] == 1
+    assert [group["status"] for group in execution.result["group_results"]] == ["stale", "submitted"]
+    children = await memory_job_crud.list_children_by_parent_job_id(
+        db_session,
+        uid=uid,
+        parent_job_id=parent.id,
+    )
+    assert len(children) == 1
+    assert children[0].memory_id == 2
+    assert children[0].expected_version == 12
 
 
 def test_organization_merge_child_payload_and_dedupe_are_stable_and_safe() -> None:

@@ -2079,6 +2079,23 @@ async def _publish_organization_merge(
                     commit=False,
                 )
 
+            capacity = await load_memory_capacity_snapshot(
+                db,
+                snapshot.uid,
+                store.max_active_records,
+            )
+            capacity_status = LongTermMemoryCapacityStatus.OVER_LIMIT if capacity.is_over_limit else LongTermMemoryCapacityStatus.NORMAL
+            if (
+                await memory_store_crud.update_by_uid(
+                    db,
+                    uid=snapshot.uid,
+                    capacity_status=capacity_status,
+                    commit=False,
+                )
+                is None
+            ):
+                raise _deterministic(ERR_MEMORY_JOB_PUBLICATION_FAILED)
+
             result = {
                 "operation": LongTermMemoryMutationOperation.ORGANIZE_MERGE.value,
                 "parent_job_id": snapshot.parent_job_id,

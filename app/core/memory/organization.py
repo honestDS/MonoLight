@@ -179,10 +179,18 @@ class MemoryOrganizationModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryOrganizationPlanCheckpoint:
+    model_output: str
+    usage: dict[str, Any]
+    finish_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryOrganizationExecutionPayload:
     trigger: str
     snapshot: MemoryOrganizationSnapshot
     organization_model: MemoryOrganizationModelConfig
+    plan_checkpoint: MemoryOrganizationPlanCheckpoint | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +230,7 @@ class MemoryOrganizationExecutionRequest:
     organization_model: MemoryOrganizationModelConfig
     messages: tuple[InternalMessage, ...]
     budget: MemoryOrganizationExecutionBudget
+    plan_checkpoint: MemoryOrganizationPlanCheckpoint | None = None
 
 
 class MemoryOrganizationContextExceededError(MemoryValidationError):
@@ -695,6 +704,7 @@ def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
 
 
 _ORGANIZATION_PAYLOAD_FIELDS = frozenset({"trigger", "snapshot", "organization_model"})
+_ORGANIZATION_PLAN_CHECKPOINT_FIELDS = frozenset({"model_output", "usage", "finish_reason"})
 _ORGANIZATION_TRIGGERS = frozenset({"manual", "auto"})
 _ORGANIZATION_SNAPSHOT_FIELDS = frozenset(
     {
@@ -817,6 +827,21 @@ def _restore_organization_snapshot(value: Any) -> MemoryOrganizationSnapshot:
     )
 
 
+def _restore_organization_plan_checkpoint(value: Any) -> MemoryOrganizationPlanCheckpoint:
+    if not isinstance(value, dict) or set(value) != _ORGANIZATION_PLAN_CHECKPOINT_FIELDS:
+        _raise_organization_payload_invalid()
+    model_output = value.get("model_output")
+    usage = value.get("usage")
+    finish_reason = value.get("finish_reason")
+    if not isinstance(model_output, str) or not isinstance(usage, dict) or (finish_reason is not None and not isinstance(finish_reason, str)):
+        _raise_organization_payload_invalid()
+    return MemoryOrganizationPlanCheckpoint(
+        model_output=model_output,
+        usage=dict(usage),
+        finish_reason=finish_reason,
+    )
+
+
 def _restore_organization_model_config(
     value: Any,
     *,
@@ -914,7 +939,10 @@ def _restore_organization_model_config(
 
 
 def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationExecutionPayload:
-    if not isinstance(payload, dict) or set(payload) != _ORGANIZATION_PAYLOAD_FIELDS:
+    if not isinstance(payload, dict) or set(payload) not in {
+        _ORGANIZATION_PAYLOAD_FIELDS,
+        _ORGANIZATION_PAYLOAD_FIELDS | {"plan_checkpoint"},
+    }:
         _raise_organization_payload_invalid()
     trigger = payload.get("trigger")
     if not isinstance(trigger, str) or trigger not in _ORGANIZATION_TRIGGERS:
@@ -925,10 +953,12 @@ def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationEx
         payload.get("organization_model"),
         snapshot=snapshot,
     )
+    plan_checkpoint = _restore_organization_plan_checkpoint(payload.get("plan_checkpoint")) if "plan_checkpoint" in payload else None
     return MemoryOrganizationExecutionPayload(
         trigger=trigger,
         snapshot=snapshot,
         organization_model=organization_model,
+        plan_checkpoint=plan_checkpoint,
     )
 
 
@@ -969,6 +999,7 @@ def build_organization_execution_request(payload: Any) -> MemoryOrganizationExec
         organization_model=restored.organization_model,
         messages=messages,
         budget=budget,
+        plan_checkpoint=restored.plan_checkpoint,
     )
 
 
@@ -1575,6 +1606,7 @@ __all__ = [
     "MemoryOrganizationKeep",
     "MemoryOrganizationMerge",
     "MemoryOrganizationModelConfig",
+    "MemoryOrganizationPlanCheckpoint",
     "MemoryOrganizationPlanCounts",
     "MemoryOrganizationPlanInvalidError",
     "MemoryOrganizationPinPolicyResult",

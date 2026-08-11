@@ -344,6 +344,50 @@ def test_restore_organization_execution_payload_keeps_frozen_content_token_count
     assert restored.snapshot.items[0].content_token_count == frozen_count
 
 
+def test_restore_organization_execution_payload_accepts_strict_plan_checkpoint() -> None:
+    checkpoint = {
+        "model_output": _response().message.content,
+        "usage": _response().usage,
+        "finish_reason": _response().finish_reason,
+    }
+    payload = _payload()
+    payload["plan_checkpoint"] = checkpoint
+
+    restored = restore_organization_execution_payload(payload)
+
+    assert restored.plan_checkpoint is not None
+    assert restored.plan_checkpoint.model_output == checkpoint["model_output"]
+    assert restored.plan_checkpoint.usage == checkpoint["usage"]
+    assert restored.plan_checkpoint.finish_reason == checkpoint["finish_reason"]
+
+
+@pytest.mark.parametrize("field", ["model_output", "usage", "finish_reason"])
+def test_restore_organization_execution_payload_rejects_incomplete_plan_checkpoint(field: str) -> None:
+    payload = _payload()
+    payload["plan_checkpoint"] = {
+        "model_output": _response().message.content,
+        "usage": _response().usage,
+        "finish_reason": _response().finish_reason,
+    }
+    payload["plan_checkpoint"].pop(field)
+
+    with pytest.raises(MemoryValidationError):
+        restore_organization_execution_payload(payload)
+
+
+def test_restore_organization_execution_payload_rejects_extra_plan_checkpoint_fields() -> None:
+    payload = _payload()
+    payload["plan_checkpoint"] = {
+        "model_output": _response().message.content,
+        "usage": _response().usage,
+        "finish_reason": _response().finish_reason,
+        "provider_metadata": {"secret": "must not persist"},
+    }
+
+    with pytest.raises(MemoryValidationError):
+        restore_organization_execution_payload(payload)
+
+
 @pytest.mark.parametrize(
     ("exception", "expected"),
     [
@@ -410,6 +454,11 @@ async def test_handle_memory_organization_allows_exact_local_budget_and_calls_mo
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
     monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
+
+    async def noop_persist_checkpoint(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(organization_handler, "_persist_organization_plan_checkpoint", noop_persist_checkpoint)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job()))
 
@@ -537,6 +586,11 @@ async def test_handle_memory_organization_success_result_excludes_frozen_provide
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", successful_call)
     monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
+
+    async def noop_persist_checkpoint(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(organization_handler, "_persist_organization_plan_checkpoint", noop_persist_checkpoint)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job()))
 

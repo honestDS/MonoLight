@@ -18,6 +18,7 @@ from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_JOB_DELETE_CLEANUP_FAILED,
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
+    MEMORY_CONTENT_MAX_TOKENS,
 )
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
@@ -55,6 +56,7 @@ from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobTargetBusyEr
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelProtocol, ModelUsage
 from app.models.memory import (
+    LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingDeltaAction,
     LongTermMemoryEmbeddingRevision,
@@ -256,6 +258,7 @@ async def _configure_store(
     uid: str,
     migration_job_id: int | None = None,
     migration_status: LongTermMemoryMigrationStatus | None = None,
+    capacity_status: LongTermMemoryCapacityStatus = LongTermMemoryCapacityStatus.NORMAL,
 ) -> None:
     async with session_factory() as db:
         await memory_store_crud.create(
@@ -274,6 +277,7 @@ async def _configure_store(
             migration_delta_applied_watermark=0,
             index_revision=INDEX_REVISION,
             index_status=LongTermMemoryIndexStatus.READY,
+            capacity_status=capacity_status,
         )
 
 
@@ -405,12 +409,14 @@ async def _prepare_merge(
     target_memory_key: str,
     max_attempts: int = 3,
     migration_job_id: int | None = None,
+    initial_capacity_status: LongTermMemoryCapacityStatus = LongTermMemoryCapacityStatus.NORMAL,
 ) -> tuple[int, int, tuple[int, ...]]:
     await _configure_store(
         session_factory,
         uid=uid,
         migration_job_id=migration_job_id,
         migration_status=(LongTermMemoryMigrationStatus.BUILDING if migration_job_id is not None else None),
+        capacity_status=initial_capacity_status,
     )
     backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
     async with session_factory() as db:
@@ -464,8 +470,10 @@ async def _prepare_merge(
             commit=False,
         )
         assert claimed_parent is not None
+        source_records = records if action == "merge" else [record for record in records if record.id == primary_memory_id]
+        assert len(source_records) == len(records) if action == "merge" else len(source_records) == 1
         item = _validated_item(
-            records,
+            source_records,
             action=action,
             primary_memory_id=primary_memory_id,
             target_content=target_content,
@@ -622,6 +630,133 @@ async def _get_all_deltas(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("initial_status", [LongTermMemoryMutationStatus.PENDING, LongTermMemoryMutationStatus.RETRY])
+async def test_pending_and_retry_organization_merge_cancel_releases_all_source_pending_references(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    initial_status: LongTermMemoryMutationStatus,
+) -> None:
+    uid = f"organization-merge-cancel-{initial_status.value}-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2, 3),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="cancelled merge content",
+        target_memory_key="cancelled-merge-key",
+    )
+
+    if initial_status == LongTermMemoryMutationStatus.RETRY:
+        async with memory_session_factory() as db:
+            claimed = await memory_job_crud.try_claim(
+                db,
+                uid=uid,
+                job_id=child_id,
+                owner="organization-merge-retry-worker",
+                lease_seconds=30,
+                commit=False,
+            )
+            assert claimed is not None
+            assert await memory_job_crud.release_for_retry(
+                db,
+                uid=uid,
+                job_id=child_id,
+                owner="organization-merge-retry-worker",
+                delay_seconds=0,
+                commit=False,
+            )
+            await db.commit()
+
+    async with memory_session_factory() as db:
+        cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=child_id)
+    assert cancellation.accepted is True
+    assert cancellation.changed is True
+    cancelled = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+    assert cancelled is not None
+    assert cancelled.status == LongTermMemoryMutationStatus.CANCELLED
+    assert cancelled.active_mutation_key is None
+    for memory_id in source_ids:
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+        assert record is not None
+        assert record.is_active is True
+        assert record.pending_mutation_job_id is None
+    async with memory_session_factory() as db:
+        recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+    assert [record.id for record in recallable] == list(source_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_phase", ["embedding", "vector_write"])
+async def test_running_organization_merge_cancelled_after_external_call_cleans_orphan_and_preserves_old_recallable_records(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    cancel_phase: str,
+) -> None:
+    uid = f"organization-merge-running-cancel-{cancel_phase}-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2, 3),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="running cancellation content",
+        target_memory_key="running-cancellation-key",
+    )
+    started = asyncio.Event()
+    release_external_call = asyncio.Event()
+
+    async def block_external_call(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        await release_external_call.wait()
+
+    if cancel_phase == "embedding":
+        vector_backend.embedding_hook = block_external_call
+    else:
+        vector_backend.upsert_hook = block_external_call
+
+    consumer = _consumer(memory_session_factory)
+    new_vector_id = build_memory_vector_item_id(1, 2)
+    try:
+        assert await consumer.run_once() == 1
+        await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT_SECONDS)
+        async with memory_session_factory() as db:
+            cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=child_id)
+        assert cancellation.accepted is True
+        assert cancellation.changed is True
+        release_external_call.set()
+
+        cancelled = await _wait_for_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=child_id,
+            status=LongTermMemoryMutationStatus.CANCELLED,
+        )
+        assert cancelled.active_mutation_key is None
+        collection = vector_backend.collections[COLLECTION_NAME]
+        assert new_vector_id not in collection["items"]
+        assert all(build_memory_vector_item_id(memory_id, 1) in collection["items"] for memory_id in source_ids)
+        for memory_id in source_ids:
+            record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+            assert record is not None
+            assert record.is_active is True
+            assert record.pending_mutation_job_id is None
+            assert record.version == 1
+            assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [1]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+            assert [record.id for record in recallable] == list(source_ids)
+            assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
+    finally:
+        release_external_call.set()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
 async def test_organization_merge_update_publishes_version_and_replaces_vector(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
@@ -701,6 +836,135 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
         async with memory_session_factory() as db:
             assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
             assert await memory_record_crud.count_active(db, uid=uid) == 1
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_recomputes_over_limit_to_normal_when_active_count_returns_within_limit(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-merge-capacity-normal-worker"
+    source_ids = tuple(range(1, 52))
+    _parent_id, child_id, _source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=source_ids,
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="capacity normal merge content",
+        target_memory_key="capacity-normal-merge-key",
+        initial_capacity_status=LongTermMemoryCapacityStatus.OVER_LIMIT,
+    )
+    consumer = _consumer(memory_session_factory)
+    try:
+        await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        async with memory_session_factory() as db:
+            store = await memory_store_crud.get_by_uid(db, uid=uid)
+            active_count = await memory_record_crud.count_active(db, uid=uid)
+        assert store is not None
+        assert active_count == 1
+        assert store.capacity_status == LongTermMemoryCapacityStatus.NORMAL
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_update_keeps_over_limit_when_active_count_still_exceeds_limit(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-update-capacity-count-over-limit-worker"
+    source_ids = tuple(range(1, 52))
+    _parent_id, child_id, _source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=source_ids,
+        primary_memory_id=1,
+        action="update",
+        pinned_ids=frozenset({1}),
+        target_content="capacity count over limit content",
+        target_memory_key="capacity-count-over-limit-key",
+        initial_capacity_status=LongTermMemoryCapacityStatus.OVER_LIMIT,
+    )
+    consumer = _consumer(memory_session_factory)
+    try:
+        await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        async with memory_session_factory() as db:
+            store = await memory_store_crud.get_by_uid(db, uid=uid)
+            active_count = await memory_record_crud.count_active(db, uid=uid)
+        assert store is not None
+        assert active_count == 51
+        assert store.capacity_status == LongTermMemoryCapacityStatus.OVER_LIMIT
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_update_keeps_over_limit_when_untargeted_active_content_is_oversized(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-update-capacity-oversized-worker"
+    _parent_id, child_id, _source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2),
+        primary_memory_id=1,
+        action="update",
+        pinned_ids=frozenset({1}),
+        target_content="capacity oversized content",
+        target_memory_key="capacity-oversized-key",
+        initial_capacity_status=LongTermMemoryCapacityStatus.OVER_LIMIT,
+    )
+    async with memory_session_factory() as db:
+        oversized = await memory_record_crud.update_if_version(
+            db,
+            uid=uid,
+            memory_id=2,
+            expected_version=1,
+            indexed_version=2,
+            content_token_count=MEMORY_CONTENT_MAX_TOKENS + 1,
+            commit=False,
+        )
+        assert oversized is not None
+        await db.commit()
+    consumer = _consumer(memory_session_factory)
+    try:
+        await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        async with memory_session_factory() as db:
+            store = await memory_store_crud.get_by_uid(db, uid=uid)
+            oversized_count = await memory_record_crud.count_active_oversized(
+                db,
+                uid=uid,
+                max_tokens=MEMORY_CONTENT_MAX_TOKENS,
+            )
+        assert store is not None
+        assert oversized_count == 1
+        assert store.capacity_status == LongTermMemoryCapacityStatus.OVER_LIMIT
     finally:
         await consumer.stop()
 
@@ -824,6 +1088,15 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert merge.uid == uid
         assert merge.operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE
         assert merge.parent_job_id == parent_id
+
+        async with memory_session_factory() as db:
+            cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=child_id)
+        assert cancellation.accepted is False
+        assert cancellation.changed is False
+        published_merge = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+        assert published_merge is not None
+        assert published_merge.status == LongTermMemoryMutationStatus.SUCCEEDED
+        assert published_merge.result == finished.result
 
         for cleanup_job in cleanup_jobs:
             assert cleanup_job.id is not None
