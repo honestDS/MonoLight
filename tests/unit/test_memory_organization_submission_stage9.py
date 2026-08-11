@@ -30,9 +30,12 @@ from app.core.memory import (
 )
 from app.core.memory.normalization import build_memory_content_hash
 from app.core.memory.organization import (
+    MemoryOrganizationPlanInvalidError,
     MemoryOrganizationSnapshotItem,
     build_organization_dedupe_key,
+    build_organization_execution_request,
     build_organization_snapshot_digest,
+    validate_organization_model_output,
 )
 from app.core.memory_jobs.manager import (
     MemoryJobManager,
@@ -388,24 +391,113 @@ async def test_snapshot_filters_ready_records_sorts_and_isolates_uid(
 
 
 @pytest.mark.asyncio
-async def test_organization_snapshot_does_not_truncate_old_data_over_fifty_records(
+@pytest.mark.parametrize("record_count", [0, 1, 45, 50, 51])
+async def test_organization_submission_preserves_complete_snapshot_at_record_count_boundaries(
     db_session: AsyncSession,
+    record_count: int,
 ) -> None:
-    _, store = await _create_ready_setup(db_session, uid="over-fifty-user", max_tokens=20_000)
-    for index in range(51):
-        await _create_record(
-            db_session,
-            uid=store.uid,
-            memory_key=f"memory-{index:02d}",
-            content=f"content {index}",
+    _, store = await _create_ready_setup(db_session, uid=f"snapshot-boundary-{record_count}", max_tokens=20_000)
+    records: list[LongTermMemoryRecord] = []
+    for index in range(record_count):
+        records.append(
+            await _create_record(
+                db_session,
+                uid=store.uid,
+                memory_key=f"memory-{index:02d}",
+                content=f"content {index}",
+                memory_type=(LongTermMemoryType.PREFERENCE if index % 2 else LongTermMemoryType.FACT),
+                version=index + 1,
+                pinned=index % 2 == 1,
+            )
         )
 
     submission = await MemoryJobManager().submit_organization(db_session, uid=store.uid)
 
     snapshot = submission.job.payload["snapshot"]
-    assert snapshot["count"] == 51
-    assert len(snapshot["items"]) == 51
-    assert [item["memory_key"] for item in snapshot["items"]] == [f"memory-{index:02d}" for index in range(51)]
+    expected_items = [
+        {
+            "memory_id": record.id,
+            "expected_version": record.version,
+            "memory_key": record.memory_key,
+            "memory_type": record.memory_type.value,
+            "content": record.content,
+            "content_token_count": record.content_token_count,
+            "pinned": record.pinned,
+        }
+        for record in sorted(records, key=lambda item: item.id or 0)
+    ]
+    assert snapshot["count"] == record_count
+    assert len(snapshot["items"]) == record_count
+    assert [item["memory_id"] for item in snapshot["items"]] == sorted(record.id for record in records)
+    assert snapshot["items"] == expected_items
+
+
+@pytest.mark.asyncio
+async def test_organization_snapshot_and_model_output_are_uid_isolated(
+    db_session: AsyncSession,
+) -> None:
+    target_uid = "organization-isolation-target"
+    other_uid = "organization-isolation-other"
+    _, store = await _create_ready_setup(db_session, uid=target_uid)
+    target_record = await _create_record(
+        db_session,
+        uid=target_uid,
+        memory_key="target-memory",
+        content="target uid content",
+        version=3,
+        pinned=True,
+    )
+    other_record = await _create_record(
+        db_session,
+        uid=other_uid,
+        memory_key="other-memory",
+        content="other uid private content",
+        version=7,
+    )
+    assert target_record.id is not None
+    assert other_record.id is not None
+
+    submission = await MemoryJobManager().submit_organization(db_session, uid=target_uid)
+
+    snapshot_items = submission.job.payload["snapshot"]["items"]
+    assert snapshot_items == [
+        {
+            "memory_id": target_record.id,
+            "expected_version": target_record.version,
+            "memory_key": target_record.memory_key,
+            "memory_type": target_record.memory_type.value,
+            "content": target_record.content,
+            "content_token_count": target_record.content_token_count,
+            "pinned": target_record.pinned,
+        }
+    ]
+    payload_text = json.dumps(submission.job.payload, ensure_ascii=False)
+    assert other_record.content not in payload_text
+
+    request = build_organization_execution_request(submission.job.payload)
+    user_items = json.loads(request.messages[1].content or "")
+    assert user_items == snapshot_items
+    assert other_record.content not in request.messages[1].content
+
+    model_output = json.dumps(
+        {
+            "items": [
+                {
+                    "action": "keep",
+                    "source": {
+                        "memory_id": other_record.id,
+                        "expected_version": other_record.version,
+                    },
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+    with pytest.raises(MemoryOrganizationPlanInvalidError) as exc_info:
+        validate_organization_model_output(model_output, request.snapshot)
+
+    assert "source_unknown_memory_id" in {error["code"] for error in exc_info.value.validation_errors}
+    assert other_record.content not in json.dumps(exc_info.value.data, ensure_ascii=False)
 
 
 def test_snapshot_digest_and_dedupe_key_bind_snapshot_identity() -> None:
