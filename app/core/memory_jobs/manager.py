@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -805,11 +806,21 @@ class MemoryJobManager:
         from app.core.memory.normalization import normalize_memory_record_snapshot
 
         merge_id = merge_job.id
+        organization_parent_id = merge_job.parent_job_id
         try:
             merge_operation = LongTermMemoryMutationOperation(merge_job.operation)
         except (TypeError, ValueError) as exc:
             raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
-        if isinstance(merge_id, bool) or not isinstance(merge_id, int) or merge_id < 1 or merge_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE or merge_job.parent_job_id is None or merge_job.source_session_id is not None or merge_job.source_profile_id is not None or merge_job.source_message_id is not None:
+        if (
+            not _is_integer(merge_id)
+            or merge_id < 1
+            or not _is_integer(organization_parent_id)
+            or organization_parent_id < 1
+            or merge_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE
+            or merge_job.source_session_id is not None
+            or merge_job.source_profile_id is not None
+            or merge_job.source_message_id is not None
+        ):
             raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if not _is_integer(memory_id) or memory_id < 1 or not _is_integer(version) or version < 1:
             raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
@@ -830,6 +841,8 @@ class MemoryJobManager:
             "source_profile_id": None,
             "source_message_id": None,
             "record_snapshot": normalized_snapshot,
+            "organization_parent_job_id": organization_parent_id,
+            "organization_merge_job_id": merge_id,
         }
         cleanup_dedupe_key = f"memory-organize-cleanup:{merge_id}:{memory_id}:{version}"
         cleanup_active_key = build_memory_active_mutation_key(merge_job.uid, memory_id=memory_id)
@@ -876,6 +889,121 @@ class MemoryJobManager:
             await db.commit()
             await db.refresh(cleanup_job)
         return cleanup_job
+
+    async def retry_delete_cleanup_job(
+        self,
+        db: AsyncSession,
+        *,
+        failed_job: LongTermMemoryMutationJob,
+        commit: bool = False,
+    ) -> MemoryJobSubmissionResult:
+        from app.core.memory.identifiers import build_memory_active_mutation_key
+
+        try:
+            operation = LongTermMemoryMutationOperation(failed_job.operation)
+            status = LongTermMemoryMutationStatus(failed_job.status)
+        except (TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if operation != LongTermMemoryMutationOperation.DELETE_CLEANUP or status != LongTermMemoryMutationStatus.FAILED:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_OPERATION_INVALID))
+        if (
+            not isinstance(failed_job.uid, str)
+            or not failed_job.uid.strip()
+            or not _is_integer(failed_job.id)
+            or failed_job.id < 1
+            or not _is_integer(failed_job.memory_id)
+            or failed_job.memory_id < 1
+            or not _is_integer(failed_job.expected_version)
+            or failed_job.expected_version < 0
+            or not _is_integer(failed_job.max_attempts)
+            or failed_job.max_attempts < 1
+            or not isinstance(failed_job.payload, dict)
+        ):
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        payload = dict(failed_job.payload)
+        if payload.get("source") == LongTermMemorySource.AUTO_ORGANIZE.value:
+            merge_id = failed_job.parent_job_id
+            if not _is_integer(merge_id) or merge_id < 1:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+            merge_job = await memory_job_crud.get_by_id(
+                db,
+                uid=failed_job.uid,
+                job_id=merge_id,
+            )
+            if merge_job is None or merge_job.uid != failed_job.uid:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+            try:
+                merge_operation = LongTermMemoryMutationOperation(merge_job.operation)
+            except (TypeError, ValueError) as exc:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+            if merge_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE or not isinstance(merge_job.payload, dict):
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+            organization_parent_id = merge_job.payload.get("parent_job_id")
+            if not _is_integer(organization_parent_id) or organization_parent_id < 1 or merge_job.parent_job_id != organization_parent_id:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+            payload_merge_id = payload.get("organization_merge_job_id", merge_id)
+            payload_parent_id = payload.get("organization_parent_job_id", organization_parent_id)
+            if not _is_integer(payload_merge_id) or payload_merge_id < 1 or payload_merge_id != merge_id or not _is_integer(payload_parent_id) or payload_parent_id < 1 or payload_parent_id != organization_parent_id:
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+            payload["organization_parent_job_id"] = organization_parent_id
+            payload["organization_merge_job_id"] = merge_id
+        elif "organization_parent_job_id" in payload or "organization_merge_job_id" in payload:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        record = await memory_record_crud.get_by_id(
+            db,
+            uid=failed_job.uid,
+            memory_id=failed_job.memory_id,
+        )
+        vector_item_id = getattr(record, "vector_item_id", None)
+        cleanup_dedupe_key = f"memory-delete-cleanup-retry:{failed_job.id}:{uuid4().hex}"
+        cleanup_active_key = build_memory_active_mutation_key(
+            failed_job.uid,
+            memory_id=failed_job.memory_id,
+        )
+        cleanup_available_at = await get_database_time(db)
+        try:
+            cleanup_job, created = await memory_job_crud.create(
+                db,
+                uid=failed_job.uid,
+                parent_job_id=failed_job.parent_job_id,
+                operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+                dedupe_key=cleanup_dedupe_key,
+                active_mutation_key=cleanup_active_key,
+                status=LongTermMemoryMutationStatus.PENDING,
+                memory_id=failed_job.memory_id,
+                expected_version=failed_job.expected_version,
+                payload=payload,
+                source_session_id=failed_job.source_session_id,
+                source_profile_id=failed_job.source_profile_id,
+                source_message_id=failed_job.source_message_id,
+                max_attempts=failed_job.max_attempts,
+                available_at=cleanup_available_at,
+                commit=False,
+            )
+        except IntegrityError as exc:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY)) from exc
+        if not created or cleanup_job.id is None:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+
+        reserved = await memory_record_crud.reserve_existing_tombstone_for_cleanup(
+            db,
+            uid=failed_job.uid,
+            memory_id=failed_job.memory_id,
+            version=failed_job.expected_version,
+            cleanup_job_id=cleanup_job.id,
+            vector_item_id=vector_item_id,
+            commit=False,
+        )
+        if not reserved:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+
+        if commit:
+            await db.commit()
+            await db.refresh(cleanup_job)
+        return MemoryJobSubmissionResult(job=cleanup_job, created=True)
 
     async def create_organization_merge_child(
         self,

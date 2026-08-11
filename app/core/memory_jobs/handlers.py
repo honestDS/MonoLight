@@ -124,6 +124,12 @@ _DELETE_CLEANUP_PAYLOAD_FIELDS = frozenset(
         "source_message_id",
     }
 )
+_ORGANIZATION_CLEANUP_PAYLOAD_FIELDS = frozenset(
+    {
+        "organization_parent_job_id",
+        "organization_merge_job_id",
+    }
+)
 _REPLACEMENT_PAYLOAD_FIELDS = frozenset({"publication", "candidate", "store"})
 _REPLACEMENT_CANDIDATE_FIELDS = frozenset({"memory_id", "version", "vector_item_id", "record_snapshot"})
 _REPLACEMENT_STORE_FIELDS = frozenset(
@@ -208,6 +214,7 @@ class _MemoryDeleteCleanupSnapshot:
     vector_item_id: str | None
     record_snapshot: dict[str, Any]
     organization_parent_job_id: int | None
+    organization_merge_job_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +377,14 @@ def _normalize_publication_for_job(
 
 def _validate_delete_payload(job: LongTermMemoryMutationJob, expected_version: int) -> dict[str, Any]:
     payload = _payload(job)
-    if set(payload) != _DELETE_CLEANUP_PAYLOAD_FIELDS:
+    if payload.get("source") == LongTermMemorySource.AUTO_ORGANIZE.value:
+        allowed_fields = {
+            _DELETE_CLEANUP_PAYLOAD_FIELDS,
+            _DELETE_CLEANUP_PAYLOAD_FIELDS | _ORGANIZATION_CLEANUP_PAYLOAD_FIELDS,
+        }
+    else:
+        allowed_fields = {_DELETE_CLEANUP_PAYLOAD_FIELDS}
+    if set(payload) not in allowed_fields:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     if payload["version"] != expected_version:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
@@ -394,6 +408,9 @@ def _validate_delete_payload(job: LongTermMemoryMutationJob, expected_version: i
     for value in (payload["source_profile_id"], payload["source_message_id"]):
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
             raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    if set(payload) == _DELETE_CLEANUP_PAYLOAD_FIELDS | _ORGANIZATION_CLEANUP_PAYLOAD_FIELDS:
+        _require_positive_int(payload["organization_parent_job_id"], message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
+        _require_positive_int(payload["organization_merge_job_id"], message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
     _validate_payload_source_fields(payload, job)
     return payload
 
@@ -553,6 +570,57 @@ async def _validate_organization_merge_parent(
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
     if parent_payload.snapshot.digest != payload["snapshot_digest"] or parent_payload.snapshot.active_embedding_revision != payload["active_embedding_revision"] or parent_payload.snapshot.index_revision != payload["index_revision"] or parent_payload.snapshot.policy_version != payload["policy_version"]:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+
+
+async def _validate_organization_cleanup_source(
+    db: Any,
+    *,
+    job: LongTermMemoryMutationJob,
+    payload: dict[str, Any],
+    memory_id: int,
+    expected_version: int,
+) -> tuple[int, int, dict[str, Any]]:
+    merge_job_id = _require_positive_int(job.parent_job_id, message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    merge_job = await memory_job_crud.get_by_id(
+        db,
+        uid=job.uid,
+        job_id=merge_job_id,
+    )
+    if merge_job is None or merge_job.uid != job.uid:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    if _operation(merge_job.operation) != LongTermMemoryMutationOperation.ORGANIZE_MERGE:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    try:
+        merge_status = LongTermMemoryMutationStatus(merge_job.status)
+    except (TypeError, ValueError) as exc:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+    if merge_status != LongTermMemoryMutationStatus.SUCCEEDED:
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+
+    merge_payload, merge_sources, _ = _validate_organization_merge_payload(
+        merge_job,
+        allow_terminal_active_key=True,
+    )
+    organization_parent_job_id = _require_positive_int(
+        merge_payload["parent_job_id"],
+        message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID,
+    )
+    payload_merge_job_id = payload.get("organization_merge_job_id", merge_job_id)
+    payload_parent_job_id = payload.get("organization_parent_job_id", organization_parent_job_id)
+    if _require_positive_int(payload_merge_job_id, message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID) != merge_job_id or _require_positive_int(payload_parent_job_id, message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID) != organization_parent_job_id:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    await _validate_organization_merge_parent(
+        db,
+        job=merge_job,
+        payload=merge_payload,
+    )
+    merge_source = next(
+        (source for source in merge_sources if source["memory_id"] == memory_id),
+        None,
+    )
+    if merge_source is None or memory_id == merge_payload["primary_memory_id"] or merge_source["expected_version"] != expected_version:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    return organization_parent_job_id, merge_job_id, merge_source
 
 
 def _validate_replacement_candidate_payload(value: Any) -> _MemoryReplacementCandidateSnapshot:
@@ -1318,40 +1386,20 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
                 raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
             _, _, _, _, _, collection_name, _ = _validate_active_store(store)
             organization_parent_job_id: int | None = None
+            organization_merge_job_id: int | None = None
+            merge_source: dict[str, Any] | None = None
             if payload["source"] == LongTermMemorySource.AUTO_ORGANIZE.value:
-                if claim.parent_job_id is None:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                parent_job = await memory_job_crud.get_by_id(
+                (
+                    organization_parent_job_id,
+                    organization_merge_job_id,
+                    merge_source,
+                ) = await _validate_organization_cleanup_source(
                     db,
-                    uid=claim.uid,
-                    job_id=claim.parent_job_id,
+                    job=claim,
+                    payload=payload,
+                    memory_id=memory_id,
+                    expected_version=expected_version,
                 )
-                if parent_job is None:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                try:
-                    parent_operation = LongTermMemoryMutationOperation(parent_job.operation)
-                except (TypeError, ValueError) as exc:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
-                if parent_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                merge_payload, merge_sources, _ = _validate_organization_merge_payload(
-                    parent_job,
-                    allow_terminal_active_key=True,
-                )
-                merge_source = next(
-                    (source for source in merge_sources if source["memory_id"] == memory_id),
-                    None,
-                )
-                if merge_source is None or memory_id == merge_payload["primary_memory_id"] or merge_source["expected_version"] != expected_version:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                await _validate_organization_merge_parent(
-                    db,
-                    job=parent_job,
-                    payload=merge_payload,
-                )
-                if parent_job.uid != claim.uid or parent_job.status != LongTermMemoryMutationStatus.SUCCEEDED:
-                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-                organization_parent_job_id = parent_job.id
             elif claim.parent_job_id is not None:
                 raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
             record = await memory_record_crud.get_by_id(db, uid=claim.uid, memory_id=memory_id)
@@ -1397,6 +1445,7 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
                 vector_item_id=getattr(record, "vector_item_id", None),
                 record_snapshot=current_snapshot,
                 organization_parent_job_id=organization_parent_job_id,
+                organization_merge_job_id=organization_merge_job_id,
             )
         except Exception:
             await db.rollback()
@@ -2375,39 +2424,26 @@ async def _finalize_delete_cleanup(
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
             if payload["record_snapshot"] != snapshot.record_snapshot:
                 raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+            merge_source: dict[str, Any] | None = None
             if snapshot.organization_parent_job_id is None:
                 if payload["source"] == LongTermMemorySource.AUTO_ORGANIZE.value or claim.parent_job_id is not None:
                     raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
             else:
-                if payload["source"] != LongTermMemorySource.AUTO_ORGANIZE.value or claim.parent_job_id != snapshot.organization_parent_job_id:
+                if payload["source"] != LongTermMemorySource.AUTO_ORGANIZE.value:
                     raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                parent_job = await memory_job_crud.get_by_id(
+                (
+                    organization_parent_job_id,
+                    organization_merge_job_id,
+                    merge_source,
+                ) = await _validate_organization_cleanup_source(
                     db,
-                    uid=snapshot.uid,
-                    job_id=snapshot.organization_parent_job_id,
+                    job=claim,
+                    payload=payload,
+                    memory_id=memory_id,
+                    expected_version=expected_version,
                 )
-                if parent_job is None or parent_job.status != LongTermMemoryMutationStatus.SUCCEEDED:
+                if organization_parent_job_id != snapshot.organization_parent_job_id or organization_merge_job_id != snapshot.organization_merge_job_id:
                     raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-                try:
-                    if LongTermMemoryMutationOperation(parent_job.operation) != LongTermMemoryMutationOperation.ORGANIZE_MERGE:
-                        raise ValueError("cleanup parent operation is invalid")
-                except (TypeError, ValueError) as exc:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
-                merge_payload, merge_sources, _ = _validate_organization_merge_payload(
-                    parent_job,
-                    allow_terminal_active_key=True,
-                )
-                merge_source = next(
-                    (source for source in merge_sources if source["memory_id"] == memory_id),
-                    None,
-                )
-                if merge_source is None or memory_id == merge_payload["primary_memory_id"] or merge_source["expected_version"] != expected_version:
-                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-                await _validate_organization_merge_parent(
-                    db,
-                    job=parent_job,
-                    payload=merge_payload,
-                )
             record = await memory_record_crud.get_by_id(db, uid=snapshot.uid, memory_id=memory_id)
             if record is None or record.pending_mutation_job_id != snapshot.job_id or record.version != expected_version or record.is_active or record.deleted_at is None:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
@@ -2454,6 +2490,9 @@ async def _finalize_delete_cleanup(
                 "operation": LongTermMemoryMutationOperation.DELETE_CLEANUP.value,
                 "record_snapshot": snapshot.record_snapshot,
             }
+            if snapshot.organization_parent_job_id is not None:
+                result["organization_parent_job_id"] = snapshot.organization_parent_job_id
+                result["organization_merge_job_id"] = snapshot.organization_merge_job_id
             if not await memory_job_crud.mark_succeeded(
                 db,
                 uid=snapshot.uid,

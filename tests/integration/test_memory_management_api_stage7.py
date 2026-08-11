@@ -16,7 +16,8 @@ from app.core.crud.memory import (
     memory_store_crud,
 )
 from app.core.crud.memory_job import memory_job_crud
-from app.core.memory.normalization import build_memory_content_hash, normalize_memory_content
+from app.core.memory import memory_service
+from app.core.memory.normalization import build_memory_content_hash, build_memory_record_snapshot, normalize_memory_content
 from app.core.security import get_current_user
 from app.core.utils.tokenizer import estimate_tokens
 from app.handler import register_handlers
@@ -416,6 +417,98 @@ async def test_memory_jobs_list_detail_retry_and_cancel(api_app: tuple[FastAPI, 
         retried = _assert_standard(await client.post(f"/api/v1/memories/jobs/{failed_id}/retry"), 200)
         assert retried["data"]["status"] == "accepted"
         assert retried["data"]["job"]["id"] != failed_id
+
+
+@pytest.mark.asyncio
+async def test_memory_api_retries_real_failed_delete_cleanup_and_rejects_cancel(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, memory_key="api-cleanup", content="api cleanup content")
+    assert record.id is not None
+    record_id = int(record.id)
+    record_version = record.version
+    record_snapshot = build_memory_record_snapshot(record)
+
+    deleted = await memory_service.delete(
+        db_session,
+        uid="user-a",
+        dedupe_key="api-cleanup-delete",
+        memory_id=record_id,
+        expected_version=record_version,
+        source=LongTermMemorySource.USER_API,
+        max_attempts=1,
+    )
+    assert deleted.job is not None and deleted.job.id is not None
+    failed_job_id = deleted.job.id
+    claimed = await memory_job_crud.try_claim(
+        db_session,
+        uid="user-a",
+        job_id=failed_job_id,
+        owner="api-cleanup-failed-worker",
+        lease_seconds=30,
+        commit=False,
+    )
+    assert claimed is not None
+    failure_result = {
+        "phase": "delete_cleanup",
+        "memory_id": record_id,
+        "record_snapshot": record_snapshot,
+    }
+    assert await memory_job_crud.mark_failed(
+        db_session,
+        uid="user-a",
+        job_id=failed_job_id,
+        owner="api-cleanup-failed-worker",
+        error="vector delete failed",
+        result=failure_result,
+        commit=False,
+    )
+    await db_session.commit()
+
+    failed = await memory_job_crud.get_by_id(db_session, uid="user-a", job_id=failed_job_id)
+    tombstone = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+    assert failed is not None
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.payload["record_snapshot"] == record_snapshot
+    assert failed.result == failure_result
+    assert tombstone is not None
+    assert tombstone.is_active is False
+    assert tombstone.deleted_at is not None
+    assert await memory_record_crud.list_recallable_by_ids(db_session, uid="user-a", memory_ids=(record_id,)) == []
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        retried = _assert_standard(await client.post(f"/api/v1/memories/jobs/{failed_job_id}/retry"), 200)
+
+        retry_data = retried["data"]
+        assert retry_data["status"] == "accepted"
+        new_job_id = retry_data["job"]["id"]
+        assert new_job_id != failed_job_id
+        assert retry_data["job"]["operation"] == LongTermMemoryMutationOperation.DELETE_CLEANUP.value
+        assert retry_data["job"]["payload"]["record_snapshot"] == record_snapshot
+
+        current_user.uid = "user-b"
+        foreign_retry = await client.post(f"/api/v1/memories/jobs/{new_job_id}/retry")
+        _assert_standard(foreign_retry, 404)
+        current_user.uid = "user-a"
+
+        cancelled = _assert_standard(await client.post(f"/api/v1/memories/jobs/{new_job_id}/cancel"), 200)
+        assert cancelled["data"]["accepted"] is False
+        assert cancelled["data"]["changed"] is False
+
+    retry_job_record = await memory_job_crud.get_by_id(db_session, uid="user-a", job_id=new_job_id)
+    retry_record = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+    assert retry_job_record is not None
+    assert retry_job_record.uid == "user-a"
+    assert retry_job_record.status == LongTermMemoryMutationStatus.PENDING
+    assert retry_job_record.payload["record_snapshot"] == record_snapshot
+    assert retry_job_record.result is None
+    assert retry_record is not None
+    assert retry_record.pending_mutation_job_id == new_job_id
+    assert retry_record.is_active is False
+    assert retry_record.deleted_at is not None
 
 
 @pytest.mark.asyncio

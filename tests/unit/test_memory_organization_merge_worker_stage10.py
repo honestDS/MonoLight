@@ -10,11 +10,15 @@ from unittest.mock import patch
 import chromadb
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
+from app.core.constants import (
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_MEMORY_JOB_DELETE_CLEANUP_FAILED,
+    ERR_MEMORY_JOB_PAYLOAD_INVALID,
+)
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_embedding_revision_crud,
@@ -24,6 +28,7 @@ from app.core.crud.memory import (
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
+from app.core.i18n import t
 from app.core.memory import (
     build_memory_content_hash,
     build_memory_organization_active_mutation_key,
@@ -31,6 +36,7 @@ from app.core.memory import (
     build_memory_vector_item_id,
     normalize_memory_content,
     normalize_memory_key,
+    retry_job,
 )
 from app.core.memory.errors import MemoryConflictError
 from app.core.memory.organization import (
@@ -101,6 +107,7 @@ class _FakeVectorBackend:
         self.embedding_calls: list[tuple[EmbeddingRuntimeConfig, list[str]]] = []
         self.upsert_calls: list[dict[str, Any]] = []
         self.delete_calls: list[tuple[str, list[str]]] = []
+        self.delete_failures_remaining = 0
         self.embedding_hook: Callable[[EmbeddingRuntimeConfig, list[str]], Awaitable[None]] | None = None
         self.upsert_hook: Callable[[str, list[str]], Awaitable[None]] | None = None
 
@@ -167,6 +174,9 @@ class _FakeVectorBackend:
 
     async def delete(self, collection_name: str, item_ids: list[str], **_kwargs: Any) -> int:
         self.delete_calls.append((collection_name, list(item_ids)))
+        if self.delete_failures_remaining > 0:
+            self.delete_failures_remaining -= 1
+            raise RuntimeError("simulated vector delete failure")
         collection = self.collections.get(collection_name)
         if collection is not None:
             for item_id in item_ids:
@@ -567,6 +577,16 @@ async def _get_record(
         return await memory_record_crud.get_by_id(db, uid=uid, memory_id=memory_id)
 
 
+async def _get_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    job_id: int,
+) -> LongTermMemoryMutationJob | None:
+    async with session_factory() as db:
+        return await memory_job_crud.get_by_id(db, uid=uid, job_id=job_id)
+
+
 async def _get_revisions(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -704,6 +724,7 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
     assert all(record is not None for record in before.values())
+    source_snapshots = {memory_id: build_memory_record_snapshot(record) for memory_id, record in before.items() if record is not None}
     consumer = _consumer(memory_session_factory)
     try:
         finished = await _run_child(
@@ -748,12 +769,15 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         ]
         assert [job.memory_id for job in cleanup_jobs] == [2, 3]
         assert all(job.parent_job_id == child_id for job in cleanup_jobs)
+        assert all(job.uid == uid for job in cleanup_jobs)
         assert all(job.payload["source"] == LongTermMemorySource.AUTO_ORGANIZE.value for job in cleanup_jobs)
         assert all(job.status == LongTermMemoryMutationStatus.PENDING for job in cleanup_jobs)
         for cleanup_job in cleanup_jobs:
             source = before[cleanup_job.memory_id]
             assert source is not None
-            assert cleanup_job.payload["record_snapshot"] == build_memory_record_snapshot(source)
+            assert cleanup_job.payload["organization_parent_job_id"] == parent_id
+            assert cleanup_job.payload["organization_merge_job_id"] == child_id
+            assert cleanup_job.payload["record_snapshot"] == source_snapshots[cleanup_job.memory_id]
             async with memory_session_factory() as db:
                 cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=cleanup_job.id)
             assert cancellation.accepted is False
@@ -789,6 +813,187 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert finished.result["tombstoned_memory_ids"] == [2, 3]
         assert "organized three record content" not in json.dumps(finished.result)
         assert finished.result["parent_job_id"] == parent_id
+
+        parent = await _get_job(memory_session_factory, uid=uid, job_id=parent_id)
+        merge = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+        assert parent is not None
+        assert parent.uid == uid
+        assert parent.operation == LongTermMemoryMutationOperation.ORGANIZE
+        assert parent.result == {"child_job_ids": [child_id]}
+        assert merge is not None
+        assert merge.uid == uid
+        assert merge.operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE
+        assert merge.parent_job_id == parent_id
+
+        for cleanup_job in cleanup_jobs:
+            assert cleanup_job.id is not None
+            cleanup_finished = await _run_child(
+                consumer,
+                memory_session_factory,
+                uid=uid,
+                child_id=cleanup_job.id,
+                status=LongTermMemoryMutationStatus.SUCCEEDED,
+            )
+            assert cleanup_finished.result is not None
+            assert cleanup_finished.result["memory_id"] == cleanup_job.memory_id
+            assert cleanup_finished.result["record_snapshot"] == source_snapshots[cleanup_job.memory_id]
+            assert cleanup_finished.result["operation"] == LongTermMemoryMutationOperation.DELETE_CLEANUP.value
+            assert cleanup_finished.result["organization_parent_job_id"] == parent_id
+            assert cleanup_finished.result["organization_merge_job_id"] == child_id
+
+            assert await _get_record(memory_session_factory, uid=uid, memory_id=cleanup_job.memory_id) is None
+            revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=cleanup_job.memory_id)
+            assert [revision.version for revision in revisions] == [1]
+            assert build_memory_record_snapshot(revisions[0]) == source_snapshots[cleanup_job.memory_id]
+            source_vector_id = build_memory_vector_item_id(cleanup_job.memory_id, 1)
+            assert source_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+            assert (COLLECTION_NAME, [source_vector_id]) in vector_backend.delete_calls
+
+            persisted_cleanup = await _get_job(memory_session_factory, uid=uid, job_id=cleanup_job.id)
+            assert persisted_cleanup is not None
+            assert persisted_cleanup.payload == cleanup_job.payload
+            assert persisted_cleanup.result == cleanup_finished.result
+
+        parent_after = await _get_job(memory_session_factory, uid=uid, job_id=parent_id)
+        merge_after = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+        assert parent_after is not None
+        assert parent_after.operation == LongTermMemoryMutationOperation.ORGANIZE
+        assert parent_after.result == {"child_job_ids": [child_id]}
+        assert merge_after is not None
+        assert merge_after.operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE
+        assert merge_after.result == finished.result
+
+        assert await _get_job(memory_session_factory, uid=f"{uid}-other", job_id=child_id) is None
+        async with memory_session_factory() as db:
+            assert await memory_record_crud.list_recallable_by_ids(db, uid=f"{uid}-other", memory_ids=source_ids) == []
+            next_memory_id = await memory_record_crud.get_next_memory_id(db)
+        assert next_memory_id not in source_ids
+        assert next_memory_id > max(source_ids)
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_cleanup_failure_retries_with_tombstone_and_preserves_history(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-merge-cleanup-retry-worker"
+    parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="cleanup retry organization content",
+        target_memory_key="cleanup-retry-organization-key",
+        max_attempts=1,
+    )
+    before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
+    source_snapshots = {memory_id: build_memory_record_snapshot(record) for memory_id, record in before.items() if record is not None}
+    consumer = _consumer(memory_session_factory)
+    try:
+        await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        cleanup_jobs = await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id)
+        assert len(cleanup_jobs) == 1
+        failed_cleanup = cleanup_jobs[0]
+        assert failed_cleanup.id is not None
+        legacy_payload = dict(failed_cleanup.payload)
+        legacy_payload.pop("organization_parent_job_id")
+        legacy_payload.pop("organization_merge_job_id")
+        async with memory_session_factory() as db:
+            updated = await db.execute(
+                update(LongTermMemoryMutationJob)
+                .where(
+                    LongTermMemoryMutationJob.uid == uid,
+                    LongTermMemoryMutationJob.id == failed_cleanup.id,
+                )
+                .values(payload=legacy_payload)
+            )
+            assert updated.rowcount == 1
+            await db.commit()
+        legacy_cleanup = await _get_job(memory_session_factory, uid=uid, job_id=failed_cleanup.id)
+        assert legacy_cleanup is not None
+        assert "organization_parent_job_id" not in legacy_cleanup.payload
+        assert "organization_merge_job_id" not in legacy_cleanup.payload
+        assert legacy_cleanup.payload["record_snapshot"] == source_snapshots[failed_cleanup.memory_id]
+        vector_backend.delete_failures_remaining = 1
+
+        failed = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=failed_cleanup.id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+        assert failed.result is None
+        assert failed.error == t(ERR_MEMORY_JOB_DELETE_CLEANUP_FAILED)
+        assert failed.error != t(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+        tombstone = await _get_record(memory_session_factory, uid=uid, memory_id=failed_cleanup.memory_id)
+        assert tombstone is not None
+        assert tombstone.is_active is False
+        assert tombstone.deleted_at is not None
+        async with memory_session_factory() as db:
+            assert await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=(failed_cleanup.memory_id,)) == []
+            failed_persisted = await memory_job_crud.get_by_id(db, uid=uid, job_id=failed_cleanup.id)
+        assert failed_persisted is not None
+        assert failed_persisted.uid == uid
+        assert failed_persisted.parent_job_id == child_id
+        assert "organization_parent_job_id" not in failed_persisted.payload
+        assert "organization_merge_job_id" not in failed_persisted.payload
+        assert failed_persisted.payload["record_snapshot"] == source_snapshots[failed_cleanup.memory_id]
+
+        async with memory_session_factory() as db:
+            retried = await retry_job(db, uid=uid, job_id=failed_cleanup.id)
+        retry_job_view = retried["job"]
+        assert retried["status"] == "accepted"
+        assert retry_job_view["id"] != failed_cleanup.id
+        retry_id = retry_job_view["id"]
+
+        retried_cleanup = await _get_job(memory_session_factory, uid=uid, job_id=retry_id)
+        assert retried_cleanup is not None
+        assert retried_cleanup.uid == uid
+        assert retried_cleanup.parent_job_id == child_id
+        assert retried_cleanup.operation == LongTermMemoryMutationOperation.DELETE_CLEANUP
+        assert retried_cleanup.status == LongTermMemoryMutationStatus.PENDING
+        assert retried_cleanup.payload["organization_parent_job_id"] == parent_id
+        assert retried_cleanup.payload["organization_merge_job_id"] == child_id
+        assert retried_cleanup.payload["record_snapshot"] == source_snapshots[failed_cleanup.memory_id]
+        reoccupied = await _get_record(memory_session_factory, uid=uid, memory_id=failed_cleanup.memory_id)
+        assert reoccupied is not None
+        assert reoccupied.is_active is False
+        assert reoccupied.deleted_at is not None
+        assert reoccupied.pending_mutation_job_id == retry_id
+        async with memory_session_factory() as db:
+            assert await memory_record_crud.list_recallable_by_ids(db, uid=f"{uid}-other", memory_ids=source_ids) == []
+
+        vector_backend.delete_failures_remaining = 0
+        succeeded = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=retry_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert succeeded.result is not None
+        assert succeeded.result["record_snapshot"] == source_snapshots[failed_cleanup.memory_id]
+        assert succeeded.result["organization_parent_job_id"] == parent_id
+        assert succeeded.result["organization_merge_job_id"] == child_id
+        assert await _get_record(memory_session_factory, uid=uid, memory_id=failed_cleanup.memory_id) is None
+        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=failed_cleanup.memory_id)
+        assert [revision.version for revision in revisions] == [1]
+        assert build_memory_record_snapshot(revisions[0]) == source_snapshots[failed_cleanup.memory_id]
+        source_vector_id = build_memory_vector_item_id(failed_cleanup.memory_id, 1)
+        assert source_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+        assert await _get_job(memory_session_factory, uid=f"{uid}-other", job_id=retry_id) is None
     finally:
         await consumer.stop()
 

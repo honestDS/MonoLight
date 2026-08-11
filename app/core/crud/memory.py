@@ -1133,6 +1133,39 @@ class CRUDLongTermMemoryRecord:
         await _finish(db, commit=commit)
         return (result.rowcount or 0) == 1
 
+    async def reserve_existing_tombstone_for_cleanup(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        version: int,
+        cleanup_job_id: int,
+        vector_item_id: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        conditions = [
+            LongTermMemoryRecord.uid == uid,
+            LongTermMemoryRecord.id == memory_id,
+            LongTermMemoryRecord.version == version,
+            LongTermMemoryRecord.is_active.is_(False),
+            LongTermMemoryRecord.deleted_at.is_not(None),
+            LongTermMemoryRecord.pending_mutation_job_id.is_(None),
+        ]
+        if vector_item_id is not None:
+            conditions.append(LongTermMemoryRecord.vector_item_id == vector_item_id)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(*conditions)
+            .values(
+                pending_mutation_job_id=cleanup_job_id,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
     async def resume_suppressed_current(
         self,
         db: AsyncSession,

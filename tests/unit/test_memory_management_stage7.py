@@ -37,6 +37,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.memory import (
         MemoryConflictError,
         MemoryNotFoundError,
+        build_memory_content_hash,
         get_memory,
         list_jobs,
         list_memories,
@@ -111,6 +112,7 @@ async def _fail_claimed_job(
     *,
     owner: str,
     error: str,
+    result: dict[str, Any] | None = None,
 ) -> None:
     assert claimed.id is not None
     async with session_factory() as db:
@@ -120,6 +122,7 @@ async def _fail_claimed_job(
             job_id=claimed.id,
             owner=owner,
             error=error,
+            result=result,
             commit=False,
         )
         assert changed
@@ -409,20 +412,137 @@ async def test_failed_publication_retry_requeues_and_enforces_version_and_uid(
 
 
 @pytest.mark.asyncio
-async def test_delete_cleanup_is_not_an_ordinary_retry_target(memory_session_factory) -> None:
-    job = await _create_raw_job(
+async def test_delete_cleanup_retry_only_requeues_failed_real_tombstone(memory_session_factory) -> None:
+    uid = "stage7-cleanup-owner"
+    await configure_store(memory_session_factory, uid=uid)
+    record = await create_recallable_record(
         memory_session_factory,
-        uid="stage7-cleanup-owner",
-        operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
-        dedupe_key="stage7-cleanup-failed",
-        status=LongTermMemoryMutationStatus.FAILED,
-        memory_id=1,
-        expected_version=1,
-        payload={"version": 1},
+        uid=uid,
+        memory_key="cleanup-retry",
+        content="cleanup retry content",
+        content_hash=build_memory_content_hash("cleanup retry content"),
     )
-    assert job.id is not None
-    async with memory_session_factory() as db:
-        with pytest.raises(MemoryConflictError) as exc_info:
-            await retry_job(db, uid="stage7-cleanup-owner", job_id=job.id)
 
+    async with memory_session_factory() as db:
+        deleted = await memory_service.delete(
+            db,
+            uid=uid,
+            dedupe_key="stage7-cleanup-delete",
+            memory_id=record.id,
+            expected_version=record.version,
+            source=LongTermMemorySource.USER_API,
+            max_attempts=1,
+        )
+    assert deleted.job is not None and deleted.job.id is not None
+    failed_job_id = deleted.job.id
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+        job_id=failed_job_id,
+        owner="stage7-cleanup-failed-worker",
+    )
+    assert claimed is not None
+    failure_result = {
+        "phase": "delete_cleanup",
+        "memory_id": record.id,
+        "record_snapshot": claimed.payload["record_snapshot"],
+    }
+    await _fail_claimed_job(
+        memory_session_factory,
+        claimed,
+        owner="stage7-cleanup-failed-worker",
+        error="vector delete failed",
+        result=failure_result,
+    )
+
+    async with memory_session_factory() as db:
+        failed = await memory_job_crud.get_by_id(db, uid=uid, job_id=failed_job_id)
+        tombstone = await memory_record_crud.get_by_id(db, uid=uid, memory_id=record.id)
+    assert failed is not None
+    assert failed.status == LongTermMemoryMutationStatus.FAILED
+    assert failed.payload["record_snapshot"] == claimed.payload["record_snapshot"]
+    assert failed.result == failure_result
+    assert tombstone is not None
+    assert tombstone.is_active is False
+    assert tombstone.deleted_at is not None
+
+    async with memory_session_factory() as db:
+        retried = await retry_job(db, uid=uid, job_id=failed_job_id)
+
+    retry_view = retried["job"]
+    assert retried["status"] == "accepted"
+    assert retry_view["id"] != failed_job_id
+    assert retry_view["operation"] == LongTermMemoryMutationOperation.DELETE_CLEANUP.value
+    assert retry_view["payload"]["record_snapshot"] == failed.payload["record_snapshot"]
+    async with memory_session_factory() as db:
+        retry_job_record = await memory_job_crud.get_by_id(db, uid=uid, job_id=retry_view["id"])
+        retry_tombstone = await memory_record_crud.get_by_id(db, uid=uid, memory_id=record.id)
+    assert retry_job_record is not None
+    assert retry_job_record.uid == uid
+    assert retry_job_record.status == LongTermMemoryMutationStatus.PENDING
+    assert retry_tombstone is not None
+    assert retry_tombstone.pending_mutation_job_id == retry_view["id"]
+
+    async with memory_session_factory() as db:
+        with pytest.raises(MemoryNotFoundError):
+            await retry_job(db, uid="stage7-cleanup-other", job_id=failed_job_id)
+
+    pending_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="cleanup-pending",
+        content="cleanup pending content",
+        content_hash=build_memory_content_hash("cleanup pending content"),
+    )
+    async with memory_session_factory() as db:
+        pending = await memory_service.delete(
+            db,
+            uid=uid,
+            dedupe_key="stage7-cleanup-pending",
+            memory_id=pending_record.id,
+            expected_version=pending_record.version,
+            max_attempts=1,
+        )
+        assert pending.job is not None and pending.job.id is not None
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await retry_job(db, uid=uid, job_id=pending.job.id)
+    assert exc_info.value.message == ERR_MEMORY_JOB_TARGET_STATE_CONFLICT
+
+    cancelled_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="cleanup-cancelled",
+        content="cleanup cancelled content",
+        content_hash=build_memory_content_hash("cleanup cancelled content"),
+    )
+    async with memory_session_factory() as db:
+        cancelled = await memory_service.delete(
+            db,
+            uid=uid,
+            dedupe_key="stage7-cleanup-cancelled",
+            memory_id=cancelled_record.id,
+            expected_version=cancelled_record.version,
+            max_attempts=1,
+        )
+        assert cancelled.job is not None and cancelled.job.id is not None
+        claimed_cancelled = await memory_job_crud.try_claim(
+            db,
+            uid=uid,
+            job_id=cancelled.job.id,
+            owner="stage7-cleanup-cancelled-worker",
+            lease_seconds=30,
+            commit=False,
+        )
+        assert claimed_cancelled is not None
+        assert await memory_job_crud.mark_cancelled(
+            db,
+            uid=uid,
+            job_id=cancelled.job.id,
+            owner="stage7-cleanup-cancelled-worker",
+            commit=False,
+        )
+        await db.commit()
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await retry_job(db, uid=uid, job_id=cancelled.job.id)
     assert exc_info.value.message == ERR_MEMORY_JOB_TARGET_STATE_CONFLICT
