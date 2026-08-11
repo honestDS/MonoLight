@@ -78,6 +78,7 @@ from app.models.memory import (
     LongTermMemoryIndexStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
+    LongTermMemoryMutationStatus,
     LongTermMemoryRecordIndexStatus,
     LongTermMemorySource,
 )
@@ -158,6 +159,21 @@ _MEMORY_RECORD_SNAPSHOT_FIELDS = frozenset(
         "version",
     }
 )
+_ORGANIZATION_MERGE_PAYLOAD_FIELDS = frozenset(
+    {
+        "parent_job_id",
+        "snapshot_digest",
+        "active_embedding_revision",
+        "index_revision",
+        "policy_version",
+        "action",
+        "sources",
+        "primary_memory_id",
+        "target",
+    }
+)
+_ORGANIZATION_MERGE_SOURCE_FIELDS = frozenset({"memory_id", "expected_version", "pinned"})
+_ORGANIZATION_MERGE_TARGET_FIELDS = frozenset({"content", "memory_key", "memory_type", "content_token_count", "content_hash"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +207,40 @@ class _MemoryDeleteCleanupSnapshot:
     active_collection_name: str
     vector_item_id: str | None
     record_snapshot: dict[str, Any]
+    organization_parent_job_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryOrganizationSourceSnapshot:
+    memory_id: int
+    expected_version: int
+    pinned: bool
+    vector_item_id: str
+    record_snapshot: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryOrganizationMergeSnapshot:
+    uid: str
+    job_id: int
+    owner: str
+    parent_job_id: int
+    payload: dict[str, Any]
+    action: str
+    primary_memory_id: int
+    expected_version: int
+    target: dict[str, Any]
+    sources: tuple[_MemoryOrganizationSourceSnapshot, ...]
+    runtime_config: EmbeddingRuntimeConfig
+    active_embedding_channel_id: int
+    active_embedding_model_id: str
+    active_embedding_dimensions: int
+    active_embedding_signature: str
+    active_embedding_revision: int
+    active_collection_name: str
+    index_revision: int
+    previous_vector_item_id: str
+    updated_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +396,163 @@ def _validate_delete_payload(job: LongTermMemoryMutationJob, expected_version: i
             raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     _validate_payload_source_fields(payload, job)
     return payload
+
+
+def _validate_organization_merge_payload(
+    job: LongTermMemoryMutationJob,
+    *,
+    allow_terminal_active_key: bool = False,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], dict[str, Any]]:
+    payload = _payload(job)
+    if set(payload) != _ORGANIZATION_MERGE_PAYLOAD_FIELDS:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    try:
+        parent_job_id = payload["parent_job_id"]
+        snapshot_digest = payload["snapshot_digest"]
+        active_embedding_revision = payload["active_embedding_revision"]
+        index_revision = payload["index_revision"]
+        policy_version = payload["policy_version"]
+        action = payload["action"]
+        primary_memory_id = payload["primary_memory_id"]
+        raw_sources = payload["sources"]
+        raw_target = payload["target"]
+        if (
+            not isinstance(parent_job_id, int)
+            or isinstance(parent_job_id, bool)
+            or parent_job_id < 1
+            or job.parent_job_id != parent_job_id
+            or not isinstance(snapshot_digest, str)
+            or len(snapshot_digest) != 64
+            or any(character not in "0123456789abcdef" for character in snapshot_digest)
+            or not isinstance(active_embedding_revision, int)
+            or isinstance(active_embedding_revision, bool)
+            or active_embedding_revision < 1
+            or not isinstance(index_revision, int)
+            or isinstance(index_revision, bool)
+            or index_revision < 0
+            or not isinstance(policy_version, int)
+            or isinstance(policy_version, bool)
+            or policy_version < 1
+            or action not in {"update", "merge"}
+            or not isinstance(raw_sources, list)
+            or not isinstance(primary_memory_id, int)
+            or isinstance(primary_memory_id, bool)
+            or primary_memory_id < 1
+            or not isinstance(raw_target, dict)
+            or set(raw_target) != _ORGANIZATION_MERGE_TARGET_FIELDS
+        ):
+            raise ValueError("organization merge payload identity is invalid")
+
+        source_by_id: dict[int, dict[str, Any]] = {}
+        for raw_source in raw_sources:
+            if set(raw_source) != _ORGANIZATION_MERGE_SOURCE_FIELDS:
+                raise ValueError("organization merge source fields are invalid")
+            memory_id = raw_source["memory_id"]
+            expected_version = raw_source["expected_version"]
+            pinned = raw_source["pinned"]
+            if not isinstance(memory_id, int) or isinstance(memory_id, bool) or memory_id < 1 or not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 1 or not isinstance(pinned, bool) or memory_id in source_by_id:
+                raise ValueError("organization merge source identity is invalid")
+            source_by_id[memory_id] = {
+                "memory_id": memory_id,
+                "expected_version": expected_version,
+                "pinned": pinned,
+            }
+        ordered_sources = tuple(source_by_id[memory_id] for memory_id in sorted(source_by_id))
+        if list(raw_sources) != list(ordered_sources):
+            raise ValueError("organization merge sources are not sorted")
+        if action == "update" and (len(ordered_sources) != 1 or primary_memory_id != ordered_sources[0]["memory_id"]):
+            raise ValueError("organization update source is invalid")
+        if action == "merge" and (len(ordered_sources) < 2 or primary_memory_id not in source_by_id):
+            raise ValueError("organization merge source group is invalid")
+        if sum(source["pinned"] for source in ordered_sources) > 1:
+            raise ValueError("organization merge has multiple pinned sources")
+        if any(source["pinned"] for source in ordered_sources) and not source_by_id[primary_memory_id]["pinned"]:
+            raise ValueError("organization merge pinned source is not primary")
+
+        raw_target_with_source = {
+            "content": raw_target["content"],
+            "memory_key": raw_target["memory_key"],
+            "memory_type": raw_target["memory_type"],
+            "change_evidence": None,
+            "source": LongTermMemorySource.AUTO_ORGANIZE.value,
+            "source_id": None,
+            "source_session_id": None,
+            "source_profile_id": None,
+            "source_message_id": None,
+            "content_token_count": raw_target["content_token_count"],
+            "content_hash": raw_target["content_hash"],
+        }
+        normalized_target_with_source = normalize_memory_publication_payload(raw_target_with_source)
+        normalized_target = {field: normalized_target_with_source[field] for field in _ORGANIZATION_MERGE_TARGET_FIELDS}
+        if raw_target != normalized_target:
+            raise ValueError("organization merge target is not normalized")
+        if (
+            not isinstance(job.memory_id, int)
+            or isinstance(job.memory_id, bool)
+            or job.memory_id != primary_memory_id
+            or not isinstance(job.expected_version, int)
+            or isinstance(job.expected_version, bool)
+            or job.expected_version != source_by_id[primary_memory_id]["expected_version"]
+            or job.source_session_id is not None
+            or job.source_profile_id is not None
+            or job.source_message_id is not None
+        ):
+            raise ValueError("organization merge job target identity is invalid")
+        expected_active_key = build_memory_active_mutation_key(job.uid, memory_id=primary_memory_id)
+        terminal_active_key = (
+            allow_terminal_active_key
+            and job.active_mutation_key is None
+            and LongTermMemoryMutationStatus(job.status)
+            in {
+                LongTermMemoryMutationStatus.SUCCEEDED,
+                LongTermMemoryMutationStatus.FAILED,
+                LongTermMemoryMutationStatus.CANCELLED,
+            }
+        )
+        if job.active_mutation_key != expected_active_key and not terminal_active_key:
+            raise ValueError("organization merge active mutation key is invalid")
+    except (MemoryValidationError, KeyError, TypeError, ValueError) as exc:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+
+    normalized_payload = {
+        **payload,
+        "sources": [dict(source) for source in ordered_sources],
+        "target": dict(normalized_target),
+    }
+    return normalized_payload, ordered_sources, normalized_target
+
+
+async def _validate_organization_merge_parent(
+    db: Any,
+    *,
+    job: LongTermMemoryMutationJob,
+    payload: dict[str, Any],
+) -> None:
+    parent_job = await memory_job_crud.get_by_id(
+        db,
+        uid=job.uid,
+        job_id=payload["parent_job_id"],
+    )
+    if (
+        parent_job is None
+        or parent_job.uid != job.uid
+        or parent_job.parent_job_id is not None
+        or parent_job.memory_id is not None
+        or parent_job.expected_version is not None
+        or parent_job.source_session_id is not None
+        or parent_job.source_profile_id is not None
+        or parent_job.source_message_id is not None
+        or _operation(parent_job.operation) != LongTermMemoryMutationOperation.ORGANIZE
+    ):
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+    try:
+        from app.core.memory.organization import restore_organization_execution_payload
+
+        parent_payload = restore_organization_execution_payload(parent_job.payload)
+    except Exception as exc:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+    if parent_payload.snapshot.digest != payload["snapshot_digest"] or parent_payload.snapshot.active_embedding_revision != payload["active_embedding_revision"] or parent_payload.snapshot.index_revision != payload["index_revision"] or parent_payload.snapshot.policy_version != payload["policy_version"]:
+        raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
 
 def _validate_replacement_candidate_payload(value: Any) -> _MemoryReplacementCandidateSnapshot:
@@ -620,6 +827,89 @@ def _store_matches_snapshot(store: Any, snapshot: _MemoryPublicationSnapshot) ->
     )
     if values != expected:
         raise _retryable(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+
+
+def _validate_organization_store_snapshot(store: Any, payload: dict[str, Any]) -> tuple[int, str, int, str, int, str]:
+    (
+        active_channel_id,
+        active_model_id,
+        active_dimensions,
+        active_signature,
+        active_revision,
+        active_collection_name,
+        _,
+    ) = _validate_active_store(store)
+    try:
+        index_status = LongTermMemoryIndexStatus(store.index_status)
+    except (TypeError, ValueError) as exc:
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+    if index_status != LongTermMemoryIndexStatus.READY:
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+    if active_revision != payload["active_embedding_revision"] or store.index_revision != payload["index_revision"]:
+        raise _retryable(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+    return (
+        active_channel_id,
+        active_model_id,
+        active_dimensions,
+        active_signature,
+        active_revision,
+        active_collection_name,
+    )
+
+
+def _validate_organization_source_record(
+    record: Any,
+    *,
+    uid: str,
+    job_id: int,
+    source: dict[str, Any],
+    expected_snapshot: dict[str, Any] | None = None,
+) -> _MemoryOrganizationSourceSnapshot:
+    memory_id = source["memory_id"]
+    expected_version = source["expected_version"]
+    pinned = source["pinned"]
+    if (
+        record is None
+        or record.uid != uid
+        or record.id != memory_id
+        or record.is_active is not True
+        or record.deleted_at is not None
+        or _enum_value(record.index_status) != LongTermMemoryRecordIndexStatus.READY.value
+        or record.indexed_version != expected_version
+        or record.version != expected_version
+        or not isinstance(record.vector_item_id, str)
+        or not record.vector_item_id.strip()
+        or record.suppress_recall is not False
+        or record.pending_mutation_job_id != job_id
+        or record.pinned is not pinned
+    ):
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+    try:
+        record_snapshot = build_memory_record_snapshot(record)
+    except (MemoryValidationError, TypeError, ValueError) as exc:
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+    if record_snapshot["version"] != expected_version or (expected_snapshot is not None and record_snapshot != expected_snapshot):
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+    return _MemoryOrganizationSourceSnapshot(
+        memory_id=memory_id,
+        expected_version=expected_version,
+        pinned=pinned,
+        vector_item_id=record.vector_item_id,
+        record_snapshot=dict(record_snapshot),
+    )
+
+
+async def _load_organization_runtime_config(
+    db: Any,
+    *,
+    channel_id: int,
+    model_id: str,
+    dimensions: int,
+) -> EmbeddingRuntimeConfig:
+    runtime_config = await load_embedding_runtime_config(db, channel_id, model_id)
+    if runtime_config.channel_id != channel_id or runtime_config.model_id != model_id or (runtime_config.embedding_dimensions is not None and runtime_config.embedding_dimensions != dimensions):
+        raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
+    return runtime_config
 
 
 def _validate_active_key(
@@ -918,6 +1208,86 @@ async def _prepare_replacement(context: MemoryJobExecutionContext) -> _MemoryRep
             raise
 
 
+async def _prepare_organization_merge(context: MemoryJobExecutionContext) -> _MemoryOrganizationMergeSnapshot:
+    checkpoint_job = await context.checkpoint()
+    job_id = _require_job_id(checkpoint_job)
+    async with context.session_factory() as db:
+        try:
+            claim = _validate_claim(
+                context,
+                await memory_job_crud.get_active_claim(
+                    db,
+                    uid=context.job.uid,
+                    job_id=job_id,
+                    owner=context.worker_id,
+                ),
+                LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+            )
+            payload, source_payloads, target = _validate_organization_merge_payload(claim)
+            await _validate_organization_merge_parent(db, job=claim, payload=payload)
+            store = await memory_store_crud.lock_for_mutation(db, uid=claim.uid, commit=False)
+            if store is None:
+                raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
+            (
+                active_channel_id,
+                active_model_id,
+                active_dimensions,
+                active_signature,
+                active_revision,
+                active_collection_name,
+            ) = _validate_organization_store_snapshot(store, payload)
+            records = await memory_record_crud.get_organization_group(
+                db,
+                uid=claim.uid,
+                memory_ids=[source["memory_id"] for source in source_payloads],
+            )
+            if [record.id for record in records] != [source["memory_id"] for source in source_payloads]:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            source_snapshots = tuple(
+                _validate_organization_source_record(
+                    record,
+                    uid=claim.uid,
+                    job_id=job_id,
+                    source=source,
+                )
+                for record, source in zip(records, source_payloads, strict=True)
+            )
+            runtime_config = await _load_organization_runtime_config(
+                db,
+                channel_id=active_channel_id,
+                model_id=active_model_id,
+                dimensions=active_dimensions,
+            )
+            primary_source = next(source for source in source_snapshots if source.memory_id == payload["primary_memory_id"])
+            updated_at_text = datetime.now(UTC).isoformat()
+            await db.commit()
+            return _MemoryOrganizationMergeSnapshot(
+                uid=claim.uid,
+                job_id=job_id,
+                owner=context.worker_id,
+                parent_job_id=payload["parent_job_id"],
+                payload=payload,
+                action=payload["action"],
+                primary_memory_id=payload["primary_memory_id"],
+                expected_version=primary_source.expected_version,
+                target=target,
+                sources=source_snapshots,
+                runtime_config=runtime_config,
+                active_embedding_channel_id=active_channel_id,
+                active_embedding_model_id=active_model_id,
+                active_embedding_dimensions=active_dimensions,
+                active_embedding_signature=active_signature,
+                active_embedding_revision=active_revision,
+                active_collection_name=active_collection_name,
+                index_revision=payload["index_revision"],
+                previous_vector_item_id=primary_source.vector_item_id,
+                updated_at=updated_at_text,
+            )
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _MemoryDeleteCleanupSnapshot:
     checkpoint_job = await context.checkpoint()
     job_id = _require_job_id(checkpoint_job)
@@ -947,12 +1317,74 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
             if store is None:
                 raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
             _, _, _, _, _, collection_name, _ = _validate_active_store(store)
+            organization_parent_job_id: int | None = None
+            if payload["source"] == LongTermMemorySource.AUTO_ORGANIZE.value:
+                if claim.parent_job_id is None:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                parent_job = await memory_job_crud.get_by_id(
+                    db,
+                    uid=claim.uid,
+                    job_id=claim.parent_job_id,
+                )
+                if parent_job is None:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                try:
+                    parent_operation = LongTermMemoryMutationOperation(parent_job.operation)
+                except (TypeError, ValueError) as exc:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+                if parent_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                merge_payload, merge_sources, _ = _validate_organization_merge_payload(
+                    parent_job,
+                    allow_terminal_active_key=True,
+                )
+                merge_source = next(
+                    (source for source in merge_sources if source["memory_id"] == memory_id),
+                    None,
+                )
+                if merge_source is None or memory_id == merge_payload["primary_memory_id"] or merge_source["expected_version"] != expected_version:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                await _validate_organization_merge_parent(
+                    db,
+                    job=parent_job,
+                    payload=merge_payload,
+                )
+                if parent_job.uid != claim.uid or parent_job.status != LongTermMemoryMutationStatus.SUCCEEDED:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                organization_parent_job_id = parent_job.id
+            elif claim.parent_job_id is not None:
+                raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
             record = await memory_record_crud.get_by_id(db, uid=claim.uid, memory_id=memory_id)
             if record is None or record.pending_mutation_job_id != job_id or record.version != expected_version or record.is_active or record.deleted_at is None:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-            current_snapshot = build_memory_record_snapshot(record)
-            if current_snapshot != payload["record_snapshot"]:
-                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            if organization_parent_job_id is None:
+                current_snapshot = build_memory_record_snapshot(record)
+                if current_snapshot != payload["record_snapshot"]:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            else:
+                if record.memory_key is not None or record.content_hash is not None:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                if record.pinned is not merge_source["pinned"]:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                expected_snapshot = payload["record_snapshot"]
+                if any(
+                    (getattr(record, field) if field not in {"memory_type", "source"} else _enum_value(getattr(record, field))) != expected_snapshot[field]
+                    for field in (
+                        "content",
+                        "content_token_count",
+                        "memory_type",
+                        "source",
+                        "source_id",
+                        "source_session_id",
+                        "source_profile_id",
+                        "source_message_id",
+                        "source_job_id",
+                        "change_evidence",
+                        "version",
+                    )
+                ):
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                current_snapshot = dict(expected_snapshot)
             await db.commit()
             return _MemoryDeleteCleanupSnapshot(
                 uid=claim.uid,
@@ -964,13 +1396,16 @@ async def _prepare_delete_cleanup(context: MemoryJobExecutionContext) -> _Memory
                 active_collection_name=collection_name,
                 vector_item_id=getattr(record, "vector_item_id", None),
                 record_snapshot=current_snapshot,
+                organization_parent_job_id=organization_parent_job_id,
             )
         except Exception:
             await db.rollback()
             raise
 
 
-def _collection_metadata(snapshot: _MemoryPublicationSnapshot | _MemoryReplacementSnapshot) -> dict[str, Any]:
+def _collection_metadata(
+    snapshot: _MemoryPublicationSnapshot | _MemoryReplacementSnapshot | _MemoryOrganizationMergeSnapshot,
+) -> dict[str, Any]:
     return {
         "memory_type": "long_term_memory",
         "uid_sha256": hashlib.sha256(snapshot.uid.encode("utf-8")).hexdigest(),
@@ -1379,6 +1814,259 @@ async def _publish_replacement(
             raise
 
 
+async def _publish_organization_merge(
+    context: MemoryJobExecutionContext,
+    snapshot: _MemoryOrganizationMergeSnapshot,
+    vector_item_id: str,
+) -> MemoryJobExecutionResult:
+    await context.checkpoint()
+    async with context.session_factory() as db:
+        try:
+            claim = _validate_claim(
+                context,
+                await memory_job_crud.get_active_claim(
+                    db,
+                    uid=snapshot.uid,
+                    job_id=snapshot.job_id,
+                    owner=snapshot.owner,
+                ),
+                LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+            )
+            if claim.cancel_requested_at is not None:
+                raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
+            payload, source_payloads, target = _validate_organization_merge_payload(claim)
+            if payload != snapshot.payload:
+                raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+            await _validate_organization_merge_parent(db, job=claim, payload=payload)
+            store = await memory_store_crud.lock_for_mutation(db, uid=snapshot.uid, commit=False)
+            if store is None:
+                raise _deterministic(ERR_MEMORY_NOT_CONFIGURED)
+            (
+                active_channel_id,
+                active_model_id,
+                active_dimensions,
+                active_signature,
+                active_revision,
+                active_collection_name,
+            ) = _validate_organization_store_snapshot(store, payload)
+            if (
+                active_channel_id != snapshot.active_embedding_channel_id
+                or active_model_id != snapshot.active_embedding_model_id
+                or active_dimensions != snapshot.active_embedding_dimensions
+                or active_signature != snapshot.active_embedding_signature
+                or active_revision != snapshot.active_embedding_revision
+                or active_collection_name != snapshot.active_collection_name
+                or store.index_revision != snapshot.index_revision
+            ):
+                raise _retryable(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+            records = await memory_record_crud.get_organization_group(
+                db,
+                uid=snapshot.uid,
+                memory_ids=[source["memory_id"] for source in source_payloads],
+            )
+            if [record.id for record in records] != [source.memory_id for source in snapshot.sources]:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            current_sources = tuple(
+                _validate_organization_source_record(
+                    record,
+                    uid=snapshot.uid,
+                    job_id=snapshot.job_id,
+                    source=source,
+                    expected_snapshot=expected.record_snapshot,
+                )
+                for record, source, expected in zip(records, source_payloads, snapshot.sources, strict=True)
+            )
+            if current_sources != snapshot.sources:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+
+            source_ids = {source.memory_id for source in snapshot.sources}
+            key_record = await memory_record_crud.get_by_key(
+                db,
+                uid=snapshot.uid,
+                memory_key=target["memory_key"],
+            )
+            hash_record = await memory_record_crud.get_by_content_hash(
+                db,
+                uid=snapshot.uid,
+                content_hash=target["content_hash"],
+            )
+            if (key_record is not None and key_record.id not in source_ids) or (hash_record is not None and hash_record.id not in source_ids):
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            if await memory_job_manager.has_unfinished_target_identity(
+                db,
+                uid=snapshot.uid,
+                memory_key=target["memory_key"],
+                content_hash=target["content_hash"],
+                exclude_job_id=snapshot.job_id,
+            ):
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+
+            source_states = tuple((source.memory_id, source.expected_version, source.pinned, source.vector_item_id) for source in snapshot.sources)
+            if not await memory_record_crud.clear_organization_group_unique_fields(
+                db,
+                uid=snapshot.uid,
+                source_states=source_states,
+                job_id=snapshot.job_id,
+                commit=False,
+            ):
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+
+            primary_version = snapshot.expected_version + 1
+            publication = await memory_record_crud.publish_pending_version(
+                db,
+                uid=snapshot.uid,
+                memory_id=snapshot.primary_memory_id,
+                job_id=snapshot.job_id,
+                expected_version=snapshot.expected_version,
+                values={
+                    "memory_key": target["memory_key"],
+                    "memory_type": target["memory_type"],
+                    "content": target["content"],
+                    "content_token_count": target["content_token_count"],
+                    "content_hash": target["content_hash"],
+                    "source": LongTermMemorySource.AUTO_ORGANIZE,
+                    "source_id": None,
+                    "source_session_id": None,
+                    "source_profile_id": None,
+                    "source_message_id": None,
+                    "source_job_id": snapshot.job_id,
+                    "change_evidence": None,
+                    "is_active": True,
+                    "deleted_at": None,
+                    "suppress_recall": False,
+                    "suppressed_by_job_id": None,
+                    "index_status": LongTermMemoryRecordIndexStatus.READY,
+                    "vector_item_id": vector_item_id,
+                },
+                commit=False,
+            )
+            if publication is None:
+                raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            published_at = getattr(publication, "indexed_at", None)
+            if not isinstance(published_at, datetime):
+                raise _retryable(ERR_MEMORY_JOB_PUBLICATION_FAILED)
+            await memory_revision_crud.create(
+                db,
+                uid=snapshot.uid,
+                memory_id=snapshot.primary_memory_id,
+                version=primary_version,
+                memory_key=target["memory_key"],
+                memory_type=target["memory_type"],
+                content=target["content"],
+                content_token_count=target["content_token_count"],
+                content_hash=target["content_hash"],
+                source=LongTermMemorySource.AUTO_ORGANIZE,
+                source_id=None,
+                source_session_id=None,
+                source_profile_id=None,
+                source_message_id=None,
+                source_job_id=snapshot.job_id,
+                change_evidence=None,
+                published_at=published_at,
+                commit=False,
+            )
+
+            cleanup_job_ids: list[int] = []
+            tombstoned_memory_ids: list[int] = []
+            for source in snapshot.sources:
+                if source.memory_id == snapshot.primary_memory_id:
+                    continue
+                cleanup_job = await memory_job_manager.create_organization_cleanup_job(
+                    db,
+                    merge_job=claim,
+                    memory_id=source.memory_id,
+                    version=source.expected_version,
+                    vector_item_id=source.vector_item_id,
+                    record_snapshot=source.record_snapshot,
+                    commit=False,
+                )
+                cleanup_job_id = _require_positive_int(cleanup_job.id, message_key=ERR_MEMORY_JOB_PUBLICATION_FAILED)
+                if not await memory_record_crud.transfer_organization_source_to_cleanup(
+                    db,
+                    uid=snapshot.uid,
+                    memory_id=source.memory_id,
+                    version=source.expected_version,
+                    pinned=source.pinned,
+                    vector_item_id=source.vector_item_id,
+                    merge_job_id=snapshot.job_id,
+                    cleanup_job_id=cleanup_job_id,
+                    commit=False,
+                ):
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                cleanup_job_ids.append(cleanup_job_id)
+                tombstoned_memory_ids.append(source.memory_id)
+
+            await append_memory_embedding_delta(
+                db,
+                store=store,
+                action=LongTermMemoryEmbeddingDeltaAction.UPSERT,
+                memory_id=snapshot.primary_memory_id,
+                memory_version=primary_version,
+                source_mutation_job_id=snapshot.job_id,
+                snapshot={
+                    "version": primary_version,
+                    "vector_item_id": vector_item_id,
+                    "is_active": True,
+                    "suppress_recall": False,
+                    "index_status": LongTermMemoryRecordIndexStatus.READY.value,
+                },
+                commit=False,
+            )
+            for source in snapshot.sources:
+                if source.memory_id == snapshot.primary_memory_id:
+                    continue
+                await append_memory_embedding_delta(
+                    db,
+                    store=store,
+                    action=LongTermMemoryEmbeddingDeltaAction.DELETE,
+                    memory_id=source.memory_id,
+                    memory_version=source.expected_version,
+                    source_mutation_job_id=snapshot.job_id,
+                    snapshot={
+                        "version": source.expected_version,
+                        "vector_item_id": source.vector_item_id,
+                        "is_active": False,
+                    },
+                    commit=False,
+                )
+
+            result = {
+                "operation": LongTermMemoryMutationOperation.ORGANIZE_MERGE.value,
+                "parent_job_id": snapshot.parent_job_id,
+                "action": snapshot.action,
+                "primary_memory_id": snapshot.primary_memory_id,
+                "source_memory_ids": [source.memory_id for source in snapshot.sources],
+                "version": primary_version,
+                "vector_item_id": vector_item_id,
+                "tombstoned_memory_ids": tombstoned_memory_ids,
+                "cleanup_job_ids": cleanup_job_ids,
+            }
+            if not await memory_job_crud.mark_succeeded(
+                db,
+                uid=snapshot.uid,
+                job_id=snapshot.job_id,
+                owner=snapshot.owner,
+                result=result,
+                commit=False,
+            ):
+                current = await memory_job_crud.get_active_claim(
+                    db,
+                    uid=snapshot.uid,
+                    job_id=snapshot.job_id,
+                    owner=snapshot.owner,
+                )
+                if current is None:
+                    raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+                if current.cancel_requested_at is not None:
+                    raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
+                raise _retryable(ERR_MEMORY_JOB_PUBLICATION_FAILED)
+            await db.commit()
+            return MemoryJobExecutionResult(result=result, finalized=True)
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def _execute_publication(
     context: MemoryJobExecutionContext,
     operation: LongTermMemoryMutationOperation,
@@ -1559,6 +2247,108 @@ async def _execute_replacement(context: MemoryJobExecutionContext) -> MemoryJobE
             )
 
 
+async def _execute_organization_merge(context: MemoryJobExecutionContext) -> MemoryJobExecutionResult:
+    snapshot: _MemoryOrganizationMergeSnapshot | None = None
+    item_id: str | None = None
+    item_written = False
+    published = False
+    phase = "preparation"
+    try:
+        snapshot = await _prepare_organization_merge(context)
+        await context.checkpoint()
+        phase = "collection"
+        await async_get_or_create_collection(
+            snapshot.active_collection_name,
+            metadata=_collection_metadata(snapshot),
+            distance="cosine",
+        )
+        phase = "embedding"
+        try:
+            embeddings = await embed_texts_with_config(
+                snapshot.runtime_config,
+                [snapshot.target["content"]],
+                batch_size=1,
+                dimensions=snapshot.active_embedding_dimensions,
+            )
+        except MemoryJobExecutionError:
+            raise
+        except Exception as exc:
+            raise _retryable(ERR_MEMORY_JOB_EMBEDDING_FAILED) from exc
+        vector = _validate_embedding_result(embeddings, snapshot.active_embedding_dimensions)
+
+        await context.checkpoint()
+        next_version = snapshot.expected_version + 1
+        item_id = build_memory_vector_item_id(snapshot.primary_memory_id, next_version)
+        metadata = {
+            "memory_id": snapshot.primary_memory_id,
+            "uid": snapshot.uid,
+            "memory_key": snapshot.target["memory_key"],
+            "memory_type": snapshot.target["memory_type"],
+            "version": next_version,
+            "source": LongTermMemorySource.AUTO_ORGANIZE.value,
+            "embedding_revision": snapshot.active_embedding_revision,
+            "updated_at": snapshot.updated_at,
+        }
+        phase = "vector_write"
+        item_written = True
+        try:
+            await async_upsert_collection_items(
+                snapshot.active_collection_name,
+                [item_id],
+                [snapshot.target["content"]],
+                [vector],
+                [metadata],
+                batch_size=1,
+            )
+        except MemoryJobExecutionError:
+            raise
+        except Exception as exc:
+            raise _retryable(ERR_MEMORY_JOB_VECTOR_WRITE_FAILED) from exc
+
+        await context.checkpoint()
+        phase = "publication"
+        execution_result = await _publish_organization_merge(context, snapshot, item_id)
+        published = True
+        if snapshot.previous_vector_item_id and snapshot.previous_vector_item_id != item_id:
+            await _shield_best_effort_delete_item(
+                snapshot.uid,
+                snapshot.job_id,
+                snapshot.active_collection_name,
+                snapshot.previous_vector_item_id,
+                ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+            )
+        return execution_result
+    except MemoryJobExecutionError:
+        raise
+    except (MemoryValidationError, MemoryConflictError, MemoryNotFoundError) as exc:
+        if isinstance(exc, MemoryValidationError) or phase == "preparation":
+            raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+    except Exception as exc:
+        message_key = {
+            "preparation": ERR_MEMORY_JOB_PREPARATION_FAILED,
+            "collection": ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+            "embedding": ERR_MEMORY_JOB_EMBEDDING_FAILED,
+            "vector_write": ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+            "publication": ERR_MEMORY_JOB_PUBLICATION_FAILED,
+        }.get(phase, ERR_MEMORY_JOB_PUBLICATION_FAILED)
+        logger.bind(
+            uid=context.job.uid,
+            job_id=context.job.id,
+            exception_type=type(exc).__name__,
+        ).warning(t(message_key))
+        raise _retryable(message_key) from exc
+    finally:
+        if item_written and not published and snapshot is not None and item_id is not None:
+            await _shield_best_effort_delete_item(
+                snapshot.uid,
+                snapshot.job_id,
+                snapshot.active_collection_name,
+                item_id,
+                ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+            )
+
+
 async def _finalize_delete_cleanup(
     context: MemoryJobExecutionContext,
     snapshot: _MemoryDeleteCleanupSnapshot,
@@ -1585,11 +2375,69 @@ async def _finalize_delete_cleanup(
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
             if payload["record_snapshot"] != snapshot.record_snapshot:
                 raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+            if snapshot.organization_parent_job_id is None:
+                if payload["source"] == LongTermMemorySource.AUTO_ORGANIZE.value or claim.parent_job_id is not None:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+            else:
+                if payload["source"] != LongTermMemorySource.AUTO_ORGANIZE.value or claim.parent_job_id != snapshot.organization_parent_job_id:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                parent_job = await memory_job_crud.get_by_id(
+                    db,
+                    uid=snapshot.uid,
+                    job_id=snapshot.organization_parent_job_id,
+                )
+                if parent_job is None or parent_job.status != LongTermMemoryMutationStatus.SUCCEEDED:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                try:
+                    if LongTermMemoryMutationOperation(parent_job.operation) != LongTermMemoryMutationOperation.ORGANIZE_MERGE:
+                        raise ValueError("cleanup parent operation is invalid")
+                except (TypeError, ValueError) as exc:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
+                merge_payload, merge_sources, _ = _validate_organization_merge_payload(
+                    parent_job,
+                    allow_terminal_active_key=True,
+                )
+                merge_source = next(
+                    (source for source in merge_sources if source["memory_id"] == memory_id),
+                    None,
+                )
+                if merge_source is None or memory_id == merge_payload["primary_memory_id"] or merge_source["expected_version"] != expected_version:
+                    raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                await _validate_organization_merge_parent(
+                    db,
+                    job=parent_job,
+                    payload=merge_payload,
+                )
             record = await memory_record_crud.get_by_id(db, uid=snapshot.uid, memory_id=memory_id)
             if record is None or record.pending_mutation_job_id != snapshot.job_id or record.version != expected_version or record.is_active or record.deleted_at is None:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-            if build_memory_record_snapshot(record) != snapshot.record_snapshot:
+            if getattr(record, "vector_item_id", None) != snapshot.vector_item_id:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            if snapshot.organization_parent_job_id is None:
+                if build_memory_record_snapshot(record) != snapshot.record_snapshot:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            else:
+                if record.memory_key is not None or record.content_hash is not None:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                if record.pinned is not merge_source["pinned"]:
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                if any(
+                    (getattr(record, field) if field not in {"memory_type", "source"} else _enum_value(getattr(record, field))) != snapshot.record_snapshot[field]
+                    for field in (
+                        "content",
+                        "content_token_count",
+                        "memory_type",
+                        "source",
+                        "source_id",
+                        "source_session_id",
+                        "source_profile_id",
+                        "source_message_id",
+                        "source_job_id",
+                        "change_evidence",
+                        "version",
+                    )
+                ):
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
             if not await memory_record_crud.delete_tombstone_after_cleanup(
                 db,
                 uid=snapshot.uid,
@@ -1684,6 +2532,10 @@ async def _handle_restore(context: MemoryJobExecutionContext) -> MemoryJobExecut
     return await _execute_publication(context, LongTermMemoryMutationOperation.RESTORE)
 
 
+async def _handle_organization_merge(context: MemoryJobExecutionContext) -> MemoryJobExecutionResult:
+    return await _execute_organization_merge(context)
+
+
 def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Handler]:
     handlers = {
         **create_memory_maintenance_job_handlers(),
@@ -1693,6 +2545,7 @@ def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Han
         LongTermMemoryMutationOperation.UPDATE: _handle_update,
         LongTermMemoryMutationOperation.RESTORE: _handle_restore,
         LongTermMemoryMutationOperation.DELETE_CLEANUP: _handle_delete_cleanup,
+        LongTermMemoryMutationOperation.ORGANIZE_MERGE: _handle_organization_merge,
     }
     return MappingProxyType(handlers)
 

@@ -626,11 +626,11 @@ async def test_default_stage4_executor_operations_and_factory_are_shared(
             LongTermMemoryMutationOperation.REINDEX,
             LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
             LongTermMemoryMutationOperation.ORGANIZE,
+            LongTermMemoryMutationOperation.ORGANIZE_MERGE,
         }
     )
     assert executor.enabled_operations == expected
     assert LongTermMemoryMutationOperation.EXTRACT not in executor.enabled_operations
-    assert LongTermMemoryMutationOperation.ORGANIZE_MERGE not in executor.enabled_operations
 
     consumer = create_memory_job_consumer(session_factory=memory_session_factory)
     assert consumer._session_factory is memory_session_factory

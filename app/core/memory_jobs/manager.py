@@ -44,6 +44,7 @@ from app.models.memory import (
     LongTermMemoryMutationStatus,
     LongTermMemoryOldCollectionCleanupStatus,
     LongTermMemoryRecordIndexStatus,
+    LongTermMemorySource,
     LongTermMemoryStore,
 )
 from app.providers.database.time import get_database_time
@@ -770,6 +771,112 @@ class MemoryJobManager:
             commit=commit,
         )
 
+    async def has_unfinished_target_identity(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_key: str,
+        content_hash: str,
+        exclude_job_id: int | None = None,
+    ) -> bool:
+        unfinished_jobs = await memory_job_crud.list_unfinished_by_uid(db, uid=uid)
+        for job in unfinished_jobs:
+            if exclude_job_id is not None and job.id == exclude_job_id:
+                continue
+            identity = _organization_job_target_identity(job)
+            if identity is not None and (identity[0] == memory_key or identity[1] == content_hash):
+                return True
+        return False
+
+    async def create_organization_cleanup_job(
+        self,
+        db: AsyncSession,
+        *,
+        merge_job: LongTermMemoryMutationJob,
+        memory_id: int,
+        version: int,
+        vector_item_id: str,
+        record_snapshot: dict[str, Any],
+        commit: bool = False,
+    ) -> LongTermMemoryMutationJob:
+        from app.core.memory.errors import MemoryValidationError
+        from app.core.memory.identifiers import build_memory_active_mutation_key
+        from app.core.memory.normalization import normalize_memory_record_snapshot
+
+        merge_id = merge_job.id
+        try:
+            merge_operation = LongTermMemoryMutationOperation(merge_job.operation)
+        except (TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if isinstance(merge_id, bool) or not isinstance(merge_id, int) or merge_id < 1 or merge_operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE or merge_job.parent_job_id is None or merge_job.source_session_id is not None or merge_job.source_profile_id is not None or merge_job.source_message_id is not None:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        if not _is_integer(memory_id) or memory_id < 1 or not _is_integer(version) or version < 1:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        if not isinstance(vector_item_id, str) or not vector_item_id.strip():
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        try:
+            normalized_snapshot = normalize_memory_record_snapshot(record_snapshot)
+        except (MemoryValidationError, KeyError, TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if normalized_snapshot["version"] != version:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        cleanup_payload = {
+            "version": version,
+            "source": LongTermMemorySource.AUTO_ORGANIZE.value,
+            "source_id": None,
+            "source_session_id": None,
+            "source_profile_id": None,
+            "source_message_id": None,
+            "record_snapshot": normalized_snapshot,
+        }
+        cleanup_dedupe_key = f"memory-organize-cleanup:{merge_id}:{memory_id}:{version}"
+        cleanup_active_key = build_memory_active_mutation_key(merge_job.uid, memory_id=memory_id)
+        cleanup_available_at = await get_database_time(db)
+        try:
+            cleanup_job, created = await memory_job_crud.create(
+                db,
+                uid=merge_job.uid,
+                parent_job_id=merge_id,
+                operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+                dedupe_key=cleanup_dedupe_key,
+                active_mutation_key=cleanup_active_key,
+                memory_id=memory_id,
+                expected_version=version,
+                payload=cleanup_payload,
+                source_session_id=None,
+                source_profile_id=None,
+                source_message_id=None,
+                max_attempts=merge_job.max_attempts,
+                available_at=cleanup_available_at,
+                commit=False,
+            )
+        except IntegrityError as exc:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY)) from exc
+
+        if not created and (
+            cleanup_job.uid != merge_job.uid
+            or cleanup_job.parent_job_id != merge_id
+            or cleanup_job.operation != LongTermMemoryMutationOperation.DELETE_CLEANUP
+            or cleanup_job.dedupe_key != cleanup_dedupe_key
+            or cleanup_job.active_mutation_key != cleanup_active_key
+            or cleanup_job.memory_id != memory_id
+            or cleanup_job.expected_version != version
+            or cleanup_job.payload != cleanup_payload
+            or cleanup_job.source_session_id is not None
+            or cleanup_job.source_profile_id is not None
+            or cleanup_job.source_message_id is not None
+            or cleanup_job.max_attempts != merge_job.max_attempts
+        ):
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+        if cleanup_job.id is None:
+            raise MemoryJobTargetBusyError(t(ERR_MEMORY_JOB_TARGET_BUSY))
+        if commit:
+            await db.commit()
+            await db.refresh(cleanup_job)
+        return cleanup_job
+
     async def create_organization_merge_child(
         self,
         db: AsyncSession,
@@ -974,6 +1081,7 @@ class MemoryJobManager:
                         if identity[0] == target_key or identity[1] == target_hash:
                             raise _OrganizationMergeStale()
 
+                    available_at = await get_database_time(db)
                     try:
                         child_job, created = await memory_job_crud.create(
                             db,
@@ -989,6 +1097,7 @@ class MemoryJobManager:
                             source_profile_id=None,
                             source_message_id=None,
                             max_attempts=parent_job.max_attempts,
+                            available_at=available_at,
                             commit=False,
                         )
                     except IntegrityError as exc:

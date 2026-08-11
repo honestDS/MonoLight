@@ -974,6 +974,103 @@ class CRUDLongTermMemoryRecord:
         await _finish(db, commit=commit)
         return (result.rowcount or 0) == 1
 
+    async def clear_organization_group_unique_fields(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        source_states: Iterable[tuple[int, int, bool, str]],
+        job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        raw_states = list(source_states)
+        normalized_states: dict[int, tuple[int, bool, str]] = {}
+        for memory_id, version, pinned, vector_item_id in raw_states:
+            if memory_id not in normalized_states:
+                normalized_states[memory_id] = (version, pinned, vector_item_id)
+        ordered_states = sorted(normalized_states.items())
+        if not ordered_states or len(ordered_states) != len(raw_states):
+            return False
+
+        state_conditions = [
+            and_(
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.version == version,
+                LongTermMemoryRecord.pinned.is_(pinned),
+                LongTermMemoryRecord.vector_item_id == vector_item_id,
+            )
+            for memory_id, (version, pinned, vector_item_id) in ordered_states
+        ]
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+                LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
+                LongTermMemoryRecord.vector_item_id.is_not(None),
+                LongTermMemoryRecord.vector_item_id != "",
+                LongTermMemoryRecord.suppress_recall.is_(False),
+                LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                LongTermMemoryRecord.memory_key.is_not(None),
+                LongTermMemoryRecord.content_hash.is_not(None),
+                or_(*state_conditions),
+            )
+            .values(
+                memory_key=None,
+                content_hash=None,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == len(ordered_states)
+
+    async def transfer_organization_source_to_cleanup(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_id: int,
+        version: int,
+        pinned: bool,
+        vector_item_id: str,
+        merge_job_id: int,
+        cleanup_job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+                LongTermMemoryRecord.indexed_version == version,
+                LongTermMemoryRecord.version == version,
+                LongTermMemoryRecord.vector_item_id == vector_item_id,
+                LongTermMemoryRecord.vector_item_id.is_not(None),
+                LongTermMemoryRecord.vector_item_id != "",
+                LongTermMemoryRecord.pinned.is_(pinned),
+                LongTermMemoryRecord.suppress_recall.is_(False),
+                LongTermMemoryRecord.pending_mutation_job_id == merge_job_id,
+                LongTermMemoryRecord.memory_key.is_(None),
+                LongTermMemoryRecord.content_hash.is_(None),
+            )
+            .values(
+                is_active=False,
+                deleted_at=now,
+                pending_mutation_job_id=cleanup_job_id,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
+
     async def suppress_for_pending_mutation(
         self,
         db: AsyncSession,
