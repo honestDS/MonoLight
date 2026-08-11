@@ -32,6 +32,7 @@ from app.core.memory.organization import (
 from app.core.memory_jobs import organization_handler
 from app.core.memory_jobs.executor import (
     MemoryJobDeterministicError,
+    MemoryJobExecutionResult,
     MemoryJobRetryableError,
 )
 from app.core.prompts import MEMORY_ORGANIZATION_SYSTEM_PROMPT
@@ -145,6 +146,36 @@ class _FakeOrganizationContext:
     async def checkpoint(self) -> LongTermMemoryMutationJob:
         self.checkpoint_count += 1
         return self.job
+
+
+async def _fake_submit_organization_plan(
+    _context: _FakeOrganizationContext,
+    _request: MemoryOrganizationExecutionRequest,
+    plan: Any,
+    result: dict[str, Any],
+) -> MemoryJobExecutionResult:
+    group_results = []
+    for group_index, item in enumerate(plan.items):
+        status = "skipped" if item.action == "keep" else "conflict" if item.action == "conflict" else "submitted"
+        group_result = {
+            "group_index": group_index,
+            "action": item.action,
+            "source_memory_ids": [source.memory_id for source in item.sources],
+            "status": status,
+        }
+        if item.action in {"update", "merge"}:
+            group_result["primary_memory_id"] = item.primary_memory_id or item.sources[0].memory_id
+        group_results.append(group_result)
+    return MemoryJobExecutionResult(
+        result={
+            **result,
+            "completion_scope": "plan_submitted",
+            "child_job_ids": [],
+            "stale_count": 0,
+            "skipped_count": plan.keep_count,
+            "group_results": group_results,
+        }
+    )
 
 
 def _request_for_handler(
@@ -378,6 +409,7 @@ async def test_handle_memory_organization_allows_exact_local_budget_and_calls_mo
 
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
+    monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job()))
 
@@ -388,6 +420,8 @@ async def test_handle_memory_organization_allows_exact_local_budget_and_calls_mo
     assert result.result["update_count"] == 0
     assert result.result["merge_count"] == 0
     assert result.result["conflict_count"] == 0
+    assert result.result["completion_scope"] == "plan_submitted"
+    assert result.result["group_results"][0]["status"] == "skipped"
     assert result.result["validation_errors"] == []
     assert "model_output" not in result.result
 
@@ -431,6 +465,7 @@ async def test_handle_memory_organization_skips_model_for_empty_snapshot(
 
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", fail_if_called)
+    monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job(payload=_payload(snapshot))))
 
@@ -440,6 +475,8 @@ async def test_handle_memory_organization_skips_model_for_empty_snapshot(
     assert result.result["update_count"] == 0
     assert result.result["merge_count"] == 0
     assert result.result["conflict_count"] == 0
+    assert result.result["completion_scope"] == "plan_submitted"
+    assert result.result["group_results"] == []
     assert result.result["plan_summary"] == {"items": [], "final_record_count": 0}
     assert result.result["validation_errors"] == []
     assert "model_output" not in result.result
@@ -499,6 +536,7 @@ async def test_handle_memory_organization_success_result_excludes_frozen_provide
 
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", successful_call)
+    monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job()))
 
@@ -510,6 +548,7 @@ async def test_handle_memory_organization_success_result_excludes_frozen_provide
     assert result.result["update_count"] == 0
     assert result.result["merge_count"] == 0
     assert result.result["conflict_count"] == 0
+    assert result.result["completion_scope"] == "plan_submitted"
     assert result.result["validation_errors"] == []
     assert "model_output" not in result.result
     assert not set(result.result) & {

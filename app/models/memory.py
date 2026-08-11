@@ -391,6 +391,7 @@ class LongTermMemoryMutationJob(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: str = Field(index=True, max_length=100)
+    parent_job_id: int | None = Field(default=None, index=True)
     operation: LongTermMemoryMutationOperation = Field(index=True, max_length=30)
     dedupe_key: str = Field(index=True, max_length=255)
     active_mutation_key: str | None = Field(default=None, index=True, max_length=255)

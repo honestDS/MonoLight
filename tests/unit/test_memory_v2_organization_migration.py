@@ -14,6 +14,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 
 from scripts import migration_20260803_add_longterm_memory as legacy_migration
 from scripts import migration_20260805_add_memory_v2_organization as organization_migration
+from scripts import migration_20260811_add_memory_job_parent as parent_migration
 
 
 class _ImportSafePersistentClient:
@@ -279,6 +280,8 @@ async def test_memory_v2_organization_migration_is_idempotent_and_preserves_lega
         await organization_migration.migrate(session)
         await session.commit()
         await organization_migration.migrate(session)
+        await session.commit()
+        await parent_migration.migrate(session)
         await session.commit()
         connection = await session.connection()
         schema = await connection.run_sync(_schema_snapshot)

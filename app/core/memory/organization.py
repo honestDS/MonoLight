@@ -1139,6 +1139,86 @@ def build_organization_job_payload(
     return payload
 
 
+def build_organization_merge_child_payload(
+    item: MemoryOrganizationValidatedItem,
+    *,
+    parent_job_id: int,
+    group_index: int,
+    snapshot_digest: str,
+    active_embedding_revision: int,
+    index_revision: int,
+    policy_version: int,
+) -> dict[str, Any]:
+    if not isinstance(item, MemoryOrganizationValidatedItem):
+        raise ValueError("item must be a validated organization item")
+    if item.action not in {"update", "merge"} or item.target is None:
+        raise ValueError("organization merge child requires update or merge target")
+    if isinstance(parent_job_id, bool) or not isinstance(parent_job_id, int) or parent_job_id < 1:
+        raise ValueError("parent_job_id must be positive")
+    if isinstance(group_index, bool) or not isinstance(group_index, int) or group_index < 0:
+        raise ValueError("group_index must be non-negative")
+
+    if item.action == "update":
+        if len(item.sources) != 1 or item.primary_memory_id is not None:
+            raise ValueError("update organization item must have one source")
+        primary_memory_id = item.sources[0].memory_id
+    else:
+        if item.primary_memory_id is None or item.primary_memory_id not in {source.memory_id for source in item.sources}:
+            raise ValueError("merge primary memory must belong to sources")
+        primary_memory_id = item.primary_memory_id
+
+    payload = {
+        "parent_job_id": parent_job_id,
+        "snapshot_digest": snapshot_digest,
+        "active_embedding_revision": active_embedding_revision,
+        "index_revision": index_revision,
+        "policy_version": policy_version,
+        "action": item.action,
+        "sources": [
+            {
+                "memory_id": source.memory_id,
+                "expected_version": source.expected_version,
+                "pinned": source.pinned,
+            }
+            for source in item.sources
+        ],
+        "primary_memory_id": primary_memory_id,
+        "target": {
+            "content": item.target.content,
+            "memory_key": item.target.memory_key,
+            "memory_type": item.target.memory_type.value,
+            "content_token_count": item.target.content_token_count,
+            "content_hash": item.target.content_hash,
+        },
+    }
+    canonical_json_dumps(payload)
+    return payload
+
+
+def build_organization_merge_child_dedupe_key(
+    *,
+    parent_job_id: int,
+    group_index: int,
+    payload: Mapping[str, Any],
+) -> str:
+    if isinstance(parent_job_id, bool) or not isinstance(parent_job_id, int) or parent_job_id < 1:
+        raise ValueError("parent_job_id must be positive")
+    if isinstance(group_index, bool) or not isinstance(group_index, int) or group_index < 0:
+        raise ValueError("group_index must be non-negative")
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a dictionary")
+    canonical = canonical_json_dumps(
+        {
+            "group_index": group_index,
+            "parent_job_id": parent_job_id,
+            "payload": payload,
+            "scope": "memory_organization_merge_child",
+        }
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"memory_organization_merge:{digest}"
+
+
 def validate_organization_submission_store(store: LongTermMemoryStore) -> None:
     required = (
         store.active_embedding_channel_id,
@@ -1514,6 +1594,8 @@ __all__ = [
     "calculate_organization_required_output_tokens",
     "build_organization_dedupe_key",
     "build_organization_job_payload",
+    "build_organization_merge_child_dedupe_key",
+    "build_organization_merge_child_payload",
     "build_organization_snapshot",
     "build_organization_snapshot_digest",
     "build_organization_snapshot_items",

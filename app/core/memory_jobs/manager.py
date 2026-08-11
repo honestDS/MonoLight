@@ -144,6 +144,8 @@ def _job_matches_submission_identity(
         return False
     if existing_operation != operation:
         return False
+    if job.parent_job_id is not None:
+        return False
     if job.active_mutation_key != active_mutation_key and not (
         operation == LongTermMemoryMutationOperation.ORGANIZE
         and job.active_mutation_key is None
@@ -180,6 +182,8 @@ def _validate_existing_organization_job(
     try:
         if job.uid != uid or job.dedupe_key != dedupe_key:
             raise ValueError("organization job identity mismatch")
+        if job.parent_job_id is not None:
+            raise ValueError("organization job parent boundary mismatch")
         if LongTermMemoryMutationOperation(job.operation) != LongTermMemoryMutationOperation.ORGANIZE:
             raise ValueError("organization job operation mismatch")
         if job.memory_id is not None or job.expected_version is not None:
@@ -732,6 +736,124 @@ class MemoryJobManager:
             replacement_job=replacement_job,
             commit=commit,
         )
+
+    async def create_organization_merge_child(
+        self,
+        db: AsyncSession,
+        *,
+        parent_job: LongTermMemoryMutationJob,
+        item: Any,
+        group_index: int,
+        snapshot_digest: str,
+        active_embedding_revision: int,
+        index_revision: int,
+        policy_version: int,
+        commit: bool = False,
+    ) -> LongTermMemoryMutationJob | None:
+        from app.core.memory.errors import MemoryValidationError
+        from app.core.memory.identifiers import (
+            build_memory_active_mutation_key,
+            build_memory_organization_active_mutation_key,
+        )
+        from app.core.memory.organization import (
+            build_organization_merge_child_dedupe_key,
+            build_organization_merge_child_payload,
+        )
+
+        parent_id = parent_job.id
+        if isinstance(parent_id, bool) or not isinstance(parent_id, int) or parent_id < 1:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="parent_job_id"))
+        if not isinstance(parent_job.uid, str) or not parent_job.uid.strip():
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="uid"))
+        try:
+            parent_operation = LongTermMemoryMutationOperation(parent_job.operation)
+            parent_status = LongTermMemoryMutationStatus(parent_job.status)
+        except (TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+        if (
+            parent_operation != LongTermMemoryMutationOperation.ORGANIZE
+            or parent_status != LongTermMemoryMutationStatus.RUNNING
+            or parent_job.parent_job_id is not None
+            or parent_job.cancel_requested_at is not None
+            or parent_job.memory_id is not None
+            or parent_job.expected_version is not None
+            or parent_job.source_session_id is not None
+            or parent_job.source_profile_id is not None
+            or parent_job.source_message_id is not None
+            or parent_job.active_mutation_key != build_memory_organization_active_mutation_key(parent_job.uid)
+        ):
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        if not _is_integer(parent_job.max_attempts) or parent_job.max_attempts < 1:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+
+        try:
+            payload = build_organization_merge_child_payload(
+                item,
+                parent_job_id=parent_id,
+                group_index=group_index,
+                snapshot_digest=snapshot_digest,
+                active_embedding_revision=active_embedding_revision,
+                index_revision=index_revision,
+                policy_version=policy_version,
+            )
+            primary_memory_id = payload["primary_memory_id"]
+            expected_version = next(source["expected_version"] for source in payload["sources"] if source["memory_id"] == primary_memory_id)
+            active_mutation_key = build_memory_active_mutation_key(
+                parent_job.uid,
+                memory_id=primary_memory_id,
+            )
+            dedupe_key = build_organization_merge_child_dedupe_key(
+                parent_job_id=parent_id,
+                group_index=group_index,
+                payload=payload,
+            )
+        except (KeyError, MemoryValidationError, StopIteration, TypeError, ValueError) as exc:
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+
+        try:
+            child_job, created = await memory_job_crud.create(
+                db,
+                uid=parent_job.uid,
+                parent_job_id=parent_id,
+                operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+                dedupe_key=dedupe_key,
+                active_mutation_key=active_mutation_key,
+                memory_id=primary_memory_id,
+                expected_version=expected_version,
+                payload=payload,
+                source_session_id=None,
+                source_profile_id=None,
+                source_message_id=None,
+                max_attempts=parent_job.max_attempts,
+                commit=False,
+            )
+        except IntegrityError as exc:
+            if _is_active_mutation_key_integrity_error(exc):
+                if commit:
+                    await db.commit()
+                return None
+            raise
+
+        if not created and (
+            child_job.uid != parent_job.uid
+            or child_job.parent_job_id != parent_id
+            or child_job.operation != LongTermMemoryMutationOperation.ORGANIZE_MERGE
+            or child_job.dedupe_key != dedupe_key
+            or child_job.active_mutation_key != active_mutation_key
+            or child_job.memory_id != primary_memory_id
+            or child_job.expected_version != expected_version
+            or child_job.payload != payload
+            or child_job.source_session_id is not None
+            or child_job.source_profile_id is not None
+            or child_job.source_message_id is not None
+            or child_job.max_attempts != parent_job.max_attempts
+        ):
+            raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT))
+
+        if commit:
+            await db.commit()
+            await db.refresh(child_job)
+        return child_job
 
     async def get_job(
         self,

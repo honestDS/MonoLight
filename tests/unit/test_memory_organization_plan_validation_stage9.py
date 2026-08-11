@@ -23,7 +23,7 @@ from app.core.memory.organization import (
     validate_organization_model_output,
 )
 from app.core.memory_jobs import organization_handler
-from app.core.memory_jobs.executor import MemoryJobDeterministicError
+from app.core.memory_jobs.executor import MemoryJobDeterministicError, MemoryJobExecutionResult
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation, LongTermMemoryType
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 
@@ -332,6 +332,36 @@ class _FakeOrganizationContext:
         return self.job
 
 
+async def _fake_submit_organization_plan(
+    _context: _FakeOrganizationContext,
+    _request: MemoryOrganizationExecutionRequest,
+    plan: Any,
+    result: dict[str, Any],
+) -> MemoryJobExecutionResult:
+    group_results = []
+    for group_index, item in enumerate(plan.items):
+        status = "skipped" if item.action == "keep" else "conflict" if item.action == "conflict" else "submitted"
+        group_result = {
+            "group_index": group_index,
+            "action": item.action,
+            "source_memory_ids": [source.memory_id for source in item.sources],
+            "status": status,
+        }
+        if item.action in {"update", "merge"}:
+            group_result["primary_memory_id"] = item.primary_memory_id or item.sources[0].memory_id
+        group_results.append(group_result)
+    return MemoryJobExecutionResult(
+        result={
+            **result,
+            "completion_scope": "plan_submitted",
+            "child_job_ids": [],
+            "stale_count": 0,
+            "skipped_count": plan.keep_count,
+            "group_results": group_results,
+        }
+    )
+
+
 def _handler_job() -> LongTermMemoryMutationJob:
     uid = "organization-plan-validation-user"
     return LongTermMemoryMutationJob(
@@ -423,6 +453,7 @@ async def test_handler_success_result_saves_summary_counts_without_model_output_
 
     monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
     monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
+    monkeypatch.setattr(organization_handler, "_submit_organization_plan", _fake_submit_organization_plan)
 
     result = await organization_handler.handle_memory_organization(_FakeOrganizationContext(job))
 
@@ -431,6 +462,8 @@ async def test_handler_success_result_saves_summary_counts_without_model_output_
     assert result.result["update_count"] == 0
     assert result.result["merge_count"] == 0
     assert result.result["conflict_count"] == 0
+    assert result.result["completion_scope"] == "plan_submitted"
+    assert result.result["group_results"][0]["status"] == "skipped"
     assert result.result["plan_summary"]["items"][0]["source"] == {"memory_id": 1, "expected_version": 11}
     assert result.result["validation_errors"] == []
     assert "model_output" not in result.result

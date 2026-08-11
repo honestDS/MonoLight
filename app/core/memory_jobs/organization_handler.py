@@ -6,18 +6,23 @@ from types import MappingProxyType
 from typing import Any
 
 from app.core.constants import (
+    ERR_MEMORY_JOB_CANCELLATION_REQUESTED,
+    ERR_MEMORY_JOB_LEASE_UNAVAILABLE,
     ERR_MEMORY_JOB_OPERATION_INVALID,
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
+    ERR_MEMORY_JOB_PUBLICATION_FAILED,
     ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
     ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED,
     ERR_MEMORY_ORGANIZATION_PLAN_INVALID,
 )
+from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
 from app.core.memory.identifiers import build_memory_organization_active_mutation_key
 from app.core.memory.organization import (
     MemoryOrganizationContextExceededError,
     MemoryOrganizationExecutionRequest,
     MemoryOrganizationPlanInvalidError,
+    MemoryOrganizationValidatedPlan,
     build_organization_execution_request,
     call_organization_model,
     is_external_context_length_error,
@@ -25,12 +30,15 @@ from app.core.memory.organization import (
 )
 from app.core.memory_jobs.executor import (
     Handler,
+    MemoryJobCancelledError,
     MemoryJobDeterministicError,
     MemoryJobExecutionContext,
     MemoryJobExecutionError,
     MemoryJobExecutionResult,
+    MemoryJobLeaseLostError,
     MemoryJobRetryableError,
 )
+from app.core.memory_jobs.manager import memory_job_manager
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation
 
 
@@ -88,35 +96,36 @@ def _validate_organization_job(job: LongTermMemoryMutationJob) -> None:
         expected_active_key = build_memory_organization_active_mutation_key(job.uid)
     except Exception as exc:
         raise _deterministic(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
-    if job.active_mutation_key != expected_active_key or job.memory_id is not None or job.expected_version is not None or job.source_session_id is not None or job.source_profile_id is not None or job.source_message_id is not None:
+    if job.active_mutation_key != expected_active_key or job.parent_job_id is not None or job.memory_id is not None or job.expected_version is not None or job.source_session_id is not None or job.source_profile_id is not None or job.source_message_id is not None:
         raise _deterministic(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
 
-def _empty_model_result(request: MemoryOrganizationExecutionRequest) -> MemoryJobExecutionResult:
-    return MemoryJobExecutionResult(
-        result={
-            "status": "succeeded",
-            "operation": LongTermMemoryMutationOperation.ORGANIZE.value,
-            "snapshot_digest": request.snapshot.digest,
-            "snapshot_count": request.snapshot.count,
-            "model_called": False,
-            "finish_reason": "empty_snapshot",
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            },
-            "budget": request.budget.to_dict(),
-            "keep_count": 0,
-            "update_count": 0,
-            "merge_count": 0,
-            "conflict_count": 0,
-            "plan_summary": {"items": [], "final_record_count": 0},
-            "validation_errors": [],
-            "validation_error_count": 0,
-            "validation_errors_truncated": False,
-        }
-    )
+def _organization_success_result(
+    request: MemoryOrganizationExecutionRequest,
+    *,
+    model_called: bool,
+    finish_reason: Any,
+    usage: Any,
+    plan: MemoryOrganizationValidatedPlan,
+) -> dict[str, Any]:
+    return {
+        "status": "succeeded",
+        "operation": LongTermMemoryMutationOperation.ORGANIZE.value,
+        "snapshot_digest": request.snapshot.digest,
+        "snapshot_count": request.snapshot.count,
+        "model_called": model_called,
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "budget": request.budget.to_dict(),
+        "keep_count": plan.keep_count,
+        "update_count": plan.update_count,
+        "merge_count": plan.merge_count,
+        "conflict_count": plan.conflict_count,
+        "plan_summary": plan.plan_summary,
+        "validation_errors": [],
+        "validation_error_count": 0,
+        "validation_errors_truncated": False,
+    }
 
 
 def _response_metadata(response: Any) -> tuple[Any, Any]:
@@ -146,6 +155,125 @@ def _organization_plan_invalid_result(
     }
 
 
+def _organization_group_result(
+    item: Any,
+    *,
+    group_index: int,
+    status: str,
+    child_job_id: int | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "group_index": group_index,
+        "action": item.action,
+        "source_memory_ids": [source.memory_id for source in item.sources],
+        "status": status,
+    }
+    if item.action in {"update", "merge"}:
+        result["primary_memory_id"] = item.primary_memory_id or item.sources[0].memory_id
+    if child_job_id is not None:
+        result["child_job_id"] = child_job_id
+    return result
+
+
+async def _submit_organization_plan(
+    context: MemoryJobExecutionContext,
+    request: MemoryOrganizationExecutionRequest,
+    validated_plan: MemoryOrganizationValidatedPlan,
+    result: dict[str, Any],
+) -> MemoryJobExecutionResult:
+    await context.checkpoint()
+    async with context.session_factory() as db:
+        try:
+            parent_job_id = context.job.id
+            if parent_job_id is None:
+                raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+            parent_job = await memory_job_crud.get_active_claim(
+                db,
+                uid=context.job.uid,
+                job_id=parent_job_id,
+                owner=context.worker_id,
+            )
+            if parent_job is None:
+                raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+            if parent_job.cancel_requested_at is not None:
+                raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
+            _validate_organization_job(parent_job)
+
+            child_job_ids: list[int] = []
+            group_results: list[dict[str, Any]] = []
+            stale_count = 0
+            skipped_count = 0
+            for group_index, item in enumerate(validated_plan.items):
+                if item.action == "keep":
+                    skipped_count += 1
+                    group_results.append(_organization_group_result(item, group_index=group_index, status="skipped"))
+                    continue
+                if item.action == "conflict":
+                    group_results.append(_organization_group_result(item, group_index=group_index, status="conflict"))
+                    continue
+
+                child_job = await memory_job_manager.create_organization_merge_child(
+                    db,
+                    parent_job=parent_job,
+                    item=item,
+                    group_index=group_index,
+                    snapshot_digest=request.snapshot.digest,
+                    active_embedding_revision=request.snapshot.active_embedding_revision,
+                    index_revision=request.snapshot.index_revision,
+                    policy_version=request.snapshot.policy_version,
+                    commit=False,
+                )
+                if child_job is None:
+                    stale_count += 1
+                    group_results.append(_organization_group_result(item, group_index=group_index, status="stale"))
+                    continue
+                if child_job.id is None:
+                    raise MemoryJobRetryableError(t(ERR_MEMORY_JOB_PUBLICATION_FAILED))
+                child_job_ids.append(child_job.id)
+                group_results.append(
+                    _organization_group_result(
+                        item,
+                        group_index=group_index,
+                        status="submitted",
+                        child_job_id=child_job.id,
+                    )
+                )
+
+            final_result = {
+                **result,
+                "completion_scope": "plan_submitted",
+                "child_job_ids": child_job_ids,
+                "stale_count": stale_count,
+                "skipped_count": skipped_count,
+                "group_results": group_results,
+            }
+            marked = await memory_job_crud.mark_succeeded(
+                db,
+                uid=parent_job.uid,
+                job_id=parent_job.id,
+                owner=context.worker_id,
+                result=final_result,
+                commit=False,
+            )
+            if not marked:
+                current = await memory_job_crud.get_active_claim(
+                    db,
+                    uid=parent_job.uid,
+                    job_id=parent_job.id,
+                    owner=context.worker_id,
+                )
+                if current is None:
+                    raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+                if current.cancel_requested_at is not None:
+                    raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
+                raise MemoryJobRetryableError(t(ERR_MEMORY_JOB_PUBLICATION_FAILED))
+            await db.commit()
+            return MemoryJobExecutionResult(result=final_result, finalized=True)
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def handle_memory_organization(context: MemoryJobExecutionContext) -> MemoryJobExecutionResult:
     claimed_job = await context.checkpoint()
     _validate_organization_job(claimed_job)
@@ -159,8 +287,23 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
     if request.budget.exceeds_hard_window:
         raise _organization_context_exceeded(request)
     if request.snapshot.count == 0:
-        await context.checkpoint()
-        return _empty_model_result(request)
+        empty_plan = MemoryOrganizationValidatedPlan(items=(), final_record_count=0)
+        return await _submit_organization_plan(
+            context,
+            request,
+            empty_plan,
+            _organization_success_result(
+                request,
+                model_called=False,
+                finish_reason="empty_snapshot",
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                plan=empty_plan,
+            ),
+        )
 
     await context.checkpoint()
     try:
@@ -187,25 +330,17 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
         usage, finish_reason = _response_metadata(response)
     except Exception as exc:
         raise MemoryJobRetryableError(t(ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED)) from exc
-    return MemoryJobExecutionResult(
-        result={
-            "status": "succeeded",
-            "operation": LongTermMemoryMutationOperation.ORGANIZE.value,
-            "snapshot_digest": request.snapshot.digest,
-            "snapshot_count": request.snapshot.count,
-            "model_called": True,
-            "finish_reason": finish_reason,
-            "usage": usage,
-            "budget": request.budget.to_dict(),
-            "keep_count": validated_plan.keep_count,
-            "update_count": validated_plan.update_count,
-            "merge_count": validated_plan.merge_count,
-            "conflict_count": validated_plan.conflict_count,
-            "plan_summary": validated_plan.plan_summary,
-            "validation_errors": [],
-            "validation_error_count": 0,
-            "validation_errors_truncated": False,
-        }
+    return await _submit_organization_plan(
+        context,
+        request,
+        validated_plan,
+        _organization_success_result(
+            request,
+            model_called=True,
+            finish_reason=finish_reason,
+            usage=usage,
+            plan=validated_plan,
+        ),
     )
 
 

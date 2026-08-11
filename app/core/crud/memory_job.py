@@ -156,6 +156,30 @@ class CRUDLongTermMemoryMutationJob:
         )
         return list(result.scalars().all())
 
+    async def list_children_by_parent_job_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        parent_job_id: int,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[LongTermMemoryMutationJob]:
+        result = await db.execute(
+            select(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.parent_job_id == parent_job_id,
+            )
+            .order_by(
+                LongTermMemoryMutationJob.created_at.asc(),
+                LongTermMemoryMutationJob.id.asc(),
+            )
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def get_page(
         self,
         db: AsyncSession,
