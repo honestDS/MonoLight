@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 from app.core.constants import (
+    ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
@@ -67,6 +68,22 @@ class MemoryMaintenanceRequest(_MemoryRequest):
     max_attempts: StrictInt = Field(default=3, ge=1)
 
 
+class MemorySettingsUpdateRequest(_MemoryRequest):
+    auto_organize_enabled: StrictBool
+    organization_channel_id: StrictInt | None = Field(default=None, gt=0)
+    organization_model_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_organization_selection(self) -> "MemorySettingsUpdateRequest":
+        if (self.organization_channel_id is None) != (self.organization_model_id is None):
+            raise ValueError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
+        return self
+
+
+class MemoryOrganizeRequest(_MemoryRequest):
+    dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
+
+
 class MemoryRecordResponse(BaseModel):
     id: int
     memory_key: str | None = None
@@ -128,7 +145,18 @@ class MemoryJobResponse(BaseModel):
     active_mutation_key: str | None = None
     status: LongTermMemoryMutationStatus
     memory_id: int | None = None
+    parent_job_id: int | None = None
     expected_version: int | None = None
+    snapshot_count: int | None = None
+    keep_count: int | None = None
+    update_count: int | None = None
+    merge_count: int | None = None
+    conflict_count: int | None = None
+    stale_count: int | None = None
+    skipped_count: int | None = None
+    child_job_ids: list[int] | None = None
+    token_budget: dict[str, Any] | None = None
+    context_error: dict[str, Any] | None = None
     payload: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
@@ -149,6 +177,57 @@ class MemoryJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
 
 
+class MemoryRecordDetailResponse(MemoryRecordResponse):
+    pending_job: MemoryJobResponse | None = None
+
+
+class MemoryOrganizationModelResponse(BaseModel):
+    channel_id: int
+    channel_name: str
+    model_id: str
+    usage: str
+    protocol: str
+    temperature: float
+    top_p: float | None = None
+    timeout: float
+    context_window_k: int
+    context_window_tokens: int
+    max_tokens: int
+    snapshot_count: int
+    required_output_tokens: int
+    policy_version: int
+
+
+class MemoryOrganizationSettingsResponse(BaseModel):
+    auto_organize_enabled: bool
+    channel_id: int | None = None
+    model_id: str | None = None
+    policy_version: int
+    last_job_id: int | None = None
+    last_run_at: datetime | None = None
+    error: str | None = None
+    snapshot_count: int
+    required_output_tokens: int
+    model: MemoryOrganizationModelResponse | None = None
+    validation_error: str | None = None
+    current_job_id: int | None = None
+    current_job: MemoryJobResponse | None = None
+    recent_job_id: int | None = None
+    recent_job: MemoryJobResponse | None = None
+
+
+class MemoryBlockingStateResponse(BaseModel):
+    blocked: bool
+    reason: str | None = None
+    job_id: int | None = None
+    operation: LongTermMemoryMutationOperation | None = None
+
+
+class MemoryBlockingResponse(BaseModel):
+    organize: MemoryBlockingStateResponse
+    maintenance: MemoryBlockingStateResponse
+
+
 class MemoryMutationResponse(BaseModel):
     status: MemoryMutationStatus
     job: MemoryJobResponse | None = None
@@ -156,6 +235,12 @@ class MemoryMutationResponse(BaseModel):
 
 
 class MemorySubmissionResponse(BaseModel):
+    job: MemoryJobResponse
+    created: bool
+
+
+class MemoryOrganizeResponse(BaseModel):
+    job_id: int
     job: MemoryJobResponse
     created: bool
 
@@ -190,6 +275,8 @@ class MemorySettingsResponse(BaseModel):
     delta: dict[str, Any]
     index: dict[str, Any]
     capacity: MemoryCapacitySettings
+    organization: MemoryOrganizationSettingsResponse
+    blocking: MemoryBlockingResponse
     old_collection_cleanup: dict[str, Any]
     migration_job: MemoryJobResponse | None = None
     store: dict[str, Any]
@@ -207,14 +294,22 @@ __all__ = [
     "MemoryDeleteRequest",
     "MemoryJobResponse",
     "MemoryMaintenanceRequest",
+    "MemoryBlockingResponse",
+    "MemoryBlockingStateResponse",
     "MemoryMutationResponse",
+    "MemoryOrganizeRequest",
+    "MemoryOrganizeResponse",
+    "MemoryOrganizationModelResponse",
+    "MemoryOrganizationSettingsResponse",
     "MemoryRecordResponse",
+    "MemoryRecordDetailResponse",
     "MemoryRestoreRequest",
     "MemoryResumeCurrentRequest",
     "MemoryRevisionResponse",
     "MemorySortField",
     "MemorySortOrder",
     "MemorySettingsResponse",
+    "MemorySettingsUpdateRequest",
     "MemorySubmissionResponse",
     "MemoryUpdateRequest",
 ]

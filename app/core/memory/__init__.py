@@ -32,7 +32,9 @@ from app.core.memory.management import (
     pin_memory,
     retry_embedding_migration,
     retry_job,
+    submit_memory_organization,
     unpin_memory,
+    update_memory_settings,
 )
 from app.core.memory.normalization import (
     MemoryContentPublicationResult,
@@ -178,8 +180,10 @@ __all__ = [
     "retry_job",
     "restore_organization_execution_payload",
     "submit_memory_cleanup_retry",
+    "submit_memory_organization",
     "submit_memory_reindex",
     "unpin_memory",
+    "update_memory_settings",
     "update_organization_settings",
     "validate_organization_model_output",
 ]

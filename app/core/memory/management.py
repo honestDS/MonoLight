@@ -50,7 +50,7 @@ from app.core.memory.management_helpers import (
     _validated_migration_payload,
 )
 from app.core.memory.normalization import _normalize_uid, _require_positive, normalize_memory_publication_payload
-from app.core.memory.organization import get_organization_settings
+from app.core.memory.organization import get_organization_settings, update_organization_settings
 from app.core.memory.service import memory_service
 from app.core.memory_jobs.manager import MemoryJobSubmissionError, memory_job_manager
 from app.core.utils.time import get_local_time
@@ -127,6 +127,53 @@ async def unpin_memory(db: AsyncSession, *, uid: str, memory_id: int) -> dict[st
     normalized_memory_id = _require_positive(memory_id, field="memory_id")
     record = await memory_service.unpin(db, normalized_uid, normalized_memory_id)
     return _record_view(record) or {}
+
+
+async def update_memory_settings(
+    db: AsyncSession,
+    *,
+    uid: str,
+    auto_organize_enabled: bool,
+    organization_channel_id: int | None,
+    organization_model_id: str | None,
+) -> dict[str, Any]:
+    normalized_uid = _normalize_uid(uid)
+    try:
+        await update_organization_settings(
+            db,
+            uid=normalized_uid,
+            auto_organize_enabled=auto_organize_enabled,
+            organization_channel_id=organization_channel_id,
+            organization_model_id=organization_model_id,
+        )
+        return await get_memory_settings(db, uid=normalized_uid)
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def submit_memory_organization(
+    db: AsyncSession,
+    *,
+    uid: str,
+    dedupe_key: str | None = None,
+) -> dict[str, Any]:
+    normalized_uid = _normalize_uid(uid)
+    try:
+        submission = await memory_job_manager.submit_organization(
+            db,
+            uid=normalized_uid,
+            dedupe_key=dedupe_key,
+        )
+        if submission.job.id is None:
+            raise MemoryConflictError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+        return {
+            "job_id": submission.job.id,
+            **_submission_view(submission),
+        }
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def list_memory_history(
@@ -214,7 +261,14 @@ async def _retry_publication_job(
     uid: str,
     job: LongTermMemoryMutationJob,
 ) -> dict[str, Any]:
-    payload = normalize_memory_publication_payload(dict(job.payload or {}))
+    stored_payload = dict(job.payload or {})
+    if job.operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION:
+        publication = stored_payload.get("publication")
+        if not isinstance(publication, dict):
+            raise MemoryConflictError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
+        payload = normalize_memory_publication_payload(dict(publication))
+    else:
+        payload = normalize_memory_publication_payload(stored_payload)
     dedupe_key = _new_dedupe_key(job)
     common = {
         "uid": uid,
@@ -231,7 +285,10 @@ async def _retry_publication_job(
         "max_attempts": job.max_attempts,
         "commit": False,
     }
-    if job.operation == LongTermMemoryMutationOperation.CREATE:
+    if job.operation in {
+        LongTermMemoryMutationOperation.CREATE,
+        LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+    }:
         result = await memory_service.create(db, **common)
     elif job.operation == LongTermMemoryMutationOperation.UPDATE:
         if job.memory_id is None or job.expected_version is None:
@@ -279,6 +336,28 @@ async def _retry_publication_job(
     return _mutation_view(result)
 
 
+async def _retry_organization_with_new_snapshot(
+    db: AsyncSession,
+    *,
+    uid: str,
+    job: LongTermMemoryMutationJob,
+) -> dict[str, Any]:
+    try:
+        submission = await memory_job_manager.submit_organization(
+            db,
+            uid=uid,
+            dedupe_key=_new_dedupe_key(job, prefix="memory-organization-retry"),
+            commit=False,
+        )
+    except MemoryJobSubmissionError as exc:
+        raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+    return {
+        "status": "accepted",
+        "retry_scope": "new_snapshot",
+        **_submission_view(submission),
+    }
+
+
 async def retry_job(db: AsyncSession, *, uid: str, job_id: int) -> dict[str, Any]:
     normalized_uid = _normalize_uid(uid)
     normalized_job_id = _require_positive(job_id, field="job_id")
@@ -319,10 +398,16 @@ async def retry_job(db: AsyncSession, *, uid: str, job_id: int) -> dict[str, Any
             result = _submission_view(submission)
         elif operation in {
             LongTermMemoryMutationOperation.CREATE,
+            LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
             LongTermMemoryMutationOperation.UPDATE,
             LongTermMemoryMutationOperation.RESTORE,
         }:
             result = await _retry_publication_job(db, uid=normalized_uid, job=job)
+        elif operation in {
+            LongTermMemoryMutationOperation.ORGANIZE,
+            LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        }:
+            result = await _retry_organization_with_new_snapshot(db, uid=normalized_uid, job=job)
         else:
             raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
         await db.commit()
@@ -530,6 +615,28 @@ async def cancel_embedding_migration(db: AsyncSession, *, uid: str, migration_id
         raise
 
 
+def _job_operation(job: LongTermMemoryMutationJob) -> LongTermMemoryMutationOperation | None:
+    try:
+        return LongTermMemoryMutationOperation(job.operation)
+    except (TypeError, ValueError):
+        return None
+
+
+def _blocking_state(
+    reason: str | None,
+    *,
+    job: LongTermMemoryMutationJob | None = None,
+    operation: LongTermMemoryMutationOperation | None = None,
+) -> dict[str, Any]:
+    resolved_operation = operation or (_job_operation(job) if job is not None else None)
+    return {
+        "blocked": reason is not None,
+        "reason": reason,
+        "job_id": job.id if job is not None else None,
+        "operation": _json_value(resolved_operation),
+    }
+
+
 async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
     normalized_uid = _normalize_uid(uid)
     store = await memory_store_crud.get_snapshot_by_uid(db, uid=normalized_uid)
@@ -592,6 +699,82 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         uid=normalized_uid,
         snapshot_count=active_count,
     )
+    unfinished_jobs = await memory_job_crud.list_unfinished_by_uid(db, uid=normalized_uid)
+    active_organization_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.ORGANIZE]
+    active_reindex_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.REINDEX]
+    active_migration_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION]
+    recent_organization_jobs = await memory_job_crud.get_page(
+        db,
+        uid=normalized_uid,
+        operation=LongTermMemoryMutationOperation.ORGANIZE,
+        skip=0,
+        limit=1,
+    )
+    current_organization_job = active_organization_jobs[0] if active_organization_jobs else None
+    recent_organization_job = current_organization_job or (recent_organization_jobs[0] if recent_organization_jobs else None)
+    organization.update(
+        {
+            "current_job_id": current_organization_job.id if current_organization_job is not None else None,
+            "current_job": _job_view(current_organization_job),
+            "recent_job_id": recent_organization_job.id if recent_organization_job is not None else None,
+            "recent_job": _job_view(recent_organization_job),
+        }
+    )
+
+    jobs_by_id = {job.id: job for job in unfinished_jobs if isinstance(job.id, int) and not isinstance(job.id, bool)}
+
+    async def load_related_job(job_id: Any) -> LongTermMemoryMutationJob | None:
+        if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+            return None
+        if job_id in jobs_by_id:
+            return jobs_by_id[job_id]
+        return await memory_job_crud.get_by_id(db, uid=normalized_uid, job_id=job_id)
+
+    migration_job_reference = active_migration_jobs[0] if active_migration_jobs else None
+    if migration_job_reference is None and store is not None and _migration_status(store) in _ACTIVE_MIGRATION_STATUSES:
+        migration_job_reference = await load_related_job(store.migration_job_id)
+    cleanup_job_reference = None
+    if store is not None and store.old_collection_cleanup_status in _BLOCKING_CLEANUP_STATUSES:
+        cleanup_job_reference = await load_related_job(store.old_collection_cleanup_job_id)
+    reindex_job_reference = active_reindex_jobs[0] if active_reindex_jobs else None
+
+    active_store_ready = False
+    if store is not None:
+        try:
+            _validate_management_active_store(store)
+            active_store_ready = True
+        except MemoryConflictError:
+            active_store_ready = False
+
+    maintenance_blocking = _blocking_state(None)
+    if not active_store_ready:
+        maintenance_blocking = _blocking_state("active_store_not_configured")
+    elif reindex_job_reference is not None or (store is not None and store.index_status == LongTermMemoryIndexStatus.REINDEXING):
+        maintenance_blocking = _blocking_state("reindex_active", job=reindex_job_reference, operation=LongTermMemoryMutationOperation.REINDEX)
+    elif migration_job_reference is not None or (_migration_status(store) in _ACTIVE_MIGRATION_STATUSES if store is not None else False):
+        maintenance_blocking = _blocking_state(
+            "embedding_migration_active",
+            job=migration_job_reference,
+            operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+        )
+    elif cleanup_job_reference is not None or (store is not None and store.old_collection_cleanup_status in _BLOCKING_CLEANUP_STATUSES):
+        maintenance_blocking = _blocking_state(
+            "old_collection_cleanup_active",
+            job=cleanup_job_reference,
+        )
+
+    organize_blocking = _blocking_state(None)
+    if not active_store_ready:
+        organize_blocking = _blocking_state("active_store_not_configured")
+    elif current_organization_job is not None:
+        organize_blocking = _blocking_state("organization_active", job=current_organization_job)
+    elif maintenance_blocking["blocked"]:
+        organize_blocking = maintenance_blocking
+    elif organization.get("channel_id") is None or organization.get("model_id") is None:
+        organize_blocking = _blocking_state("organization_model_not_configured")
+    elif organization.get("validation_error") is not None:
+        organize_blocking = _blocking_state("organization_model_invalid")
+
     cleanup = {
         "name": flat.get("old_collection_name"),
         "status": flat.get("old_collection_cleanup_status"),
@@ -608,6 +791,10 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         "index": index,
         "capacity": capacity,
         "organization": organization,
+        "blocking": {
+            "organize": organize_blocking,
+            "maintenance": maintenance_blocking,
+        },
         "old_collection_cleanup": cleanup,
         "migration_job": _job_view(migration_job),
         "store": {
@@ -630,6 +817,8 @@ __all__ = [
     "list_memory_history",
     "list_memories",
     "pin_memory",
+    "submit_memory_organization",
+    "update_memory_settings",
     "retry_embedding_migration",
     "retry_job",
     "unpin_memory",

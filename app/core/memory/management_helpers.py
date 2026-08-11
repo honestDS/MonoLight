@@ -18,6 +18,7 @@ from app.models.memory import (
     LongTermMemoryEmbeddingRevision,
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
+    LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
     LongTermMemoryOldCollectionCleanupStatus,
     LongTermMemoryRecord,
@@ -70,8 +71,150 @@ def _record_view(record: LongTermMemoryRecord | None) -> dict[str, Any] | None:
     return _model_view(record) if record is not None else None
 
 
+_PUBLIC_ORGANIZATION_MODEL_FIELDS = frozenset(
+    {
+        "channel_id",
+        "channel_name",
+        "model_id",
+        "usage",
+        "protocol",
+        "temperature",
+        "top_p",
+        "timeout",
+        "context_window_k",
+        "context_window_tokens",
+        "max_tokens",
+        "snapshot_count",
+        "required_output_tokens",
+        "policy_version",
+    }
+)
+_ORGANIZATION_SENSITIVE_FIELDS = frozenset({"base_url", "api_key", "http_proxy", "custom_headers"})
+
+
+def _public_job_value(value: Any, *, redact_organization: bool) -> Any:
+    value = _json_value(value)
+    if isinstance(value, dict):
+        public: dict[str, Any] = {}
+        for key, item in value.items():
+            if redact_organization and key in _ORGANIZATION_SENSITIVE_FIELDS:
+                continue
+            if redact_organization and key == "organization_model":
+                if isinstance(item, dict):
+                    public[key] = {field: item[field] for field in _PUBLIC_ORGANIZATION_MODEL_FIELDS if field in item}
+                else:
+                    public[key] = {}
+                continue
+            public[key] = _public_job_value(item, redact_organization=redact_organization)
+        return public
+    if isinstance(value, list):
+        return [_public_job_value(item, redact_organization=redact_organization) for item in value]
+    return value
+
+
+def _summary_value(primary: Any, fallback: Any, *keys: str) -> Any:
+    for source in (primary, fallback):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source and source[key] is not None:
+                return source[key]
+    return None
+
+
+def _summary_integer(value: Any, *, positive: bool = False) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < (1 if positive else 0):
+        return None
+    return value
+
+
+def _summary_child_job_ids(value: Any) -> list[int] | None:
+    if not isinstance(value, list):
+        return None
+    child_job_ids: list[int] = []
+    for child_job_id in value:
+        normalized = _summary_integer(child_job_id, positive=True)
+        if normalized is None:
+            return None
+        child_job_ids.append(normalized)
+    return child_job_ids
+
+
 def _job_view(job: LongTermMemoryMutationJob | None) -> dict[str, Any] | None:
-    return _model_view(job) if job is not None else None
+    if job is None:
+        return None
+
+    try:
+        operation = LongTermMemoryMutationOperation(job.operation)
+    except (TypeError, ValueError):
+        operation = None
+    redact_organization = operation in {
+        LongTermMemoryMutationOperation.ORGANIZE,
+        LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+    }
+    payload = _public_job_value(job.payload, redact_organization=redact_organization)
+    result = _public_job_value(job.result, redact_organization=redact_organization)
+    view = _model_view(job) or {}
+    view["payload"] = payload
+    view["result"] = result
+
+    snapshot_count = _summary_integer(_summary_value(result, payload, "snapshot_count"))
+    if snapshot_count is None and isinstance(payload, dict):
+        snapshot = payload.get("snapshot")
+        if isinstance(snapshot, dict):
+            snapshot_count = _summary_integer(snapshot.get("count"))
+
+    parent_job_id = _summary_integer(_summary_value(result, payload, "parent_job_id"), positive=True)
+    if parent_job_id is None:
+        parent_job_id = _summary_integer(job.parent_job_id, positive=True)
+
+    token_budget = _summary_value(result, payload, "token_budget", "budget")
+    if not isinstance(token_budget, dict):
+        token_budget = None
+    context_error = _summary_value(result, payload, "context_error")
+    if not isinstance(context_error, dict):
+        context_error = None
+
+    summary: dict[str, Any] = {
+        "parent_job_id": parent_job_id,
+        "snapshot_count": snapshot_count,
+        "keep_count": _summary_integer(_summary_value(result, payload, "keep_count")),
+        "update_count": _summary_integer(_summary_value(result, payload, "update_count")),
+        "merge_count": _summary_integer(_summary_value(result, payload, "merge_count")),
+        "conflict_count": _summary_integer(_summary_value(result, payload, "conflict_count")),
+        "stale_count": _summary_integer(_summary_value(result, payload, "stale_count")),
+        "skipped_count": _summary_integer(_summary_value(result, payload, "skipped_count")),
+        "child_job_ids": _summary_child_job_ids(_summary_value(result, payload, "child_job_ids")),
+        "token_budget": token_budget,
+        "context_error": context_error,
+    }
+    if summary["token_budget"] is None and isinstance(payload, dict):
+        organization_model = payload.get("organization_model")
+        if isinstance(organization_model, dict):
+            summary["token_budget"] = {
+                key: organization_model[key]
+                for key in (
+                    "context_window_tokens",
+                    "max_tokens",
+                    "required_output_tokens",
+                )
+                if key in organization_model
+            }
+    if summary["context_error"] is None and isinstance(result, dict) and result.get("status") == "organization_context_exceeded":
+        summary["context_error"] = {
+            key: result[key]
+            for key in (
+                "status",
+                "required_tokens",
+                "available_tokens",
+                "external_context_error",
+            )
+            if key in result
+        }
+    view.update(summary)
+    return view
 
 
 def _revision_view(revision: LongTermMemoryEmbeddingRevision | None) -> dict[str, Any] | None:

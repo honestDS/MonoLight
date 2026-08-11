@@ -1517,13 +1517,14 @@ async def update_organization_settings(
         store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
         if store is None:
             raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+        active_count = await memory_record_crud.count_active(db, uid=normalized_uid)
         if organization_channel_id is not None and organization_model_id is not None:
             await _load_organization_model_config_for_selection(
                 db,
                 store=store,
                 channel_id=organization_channel_id,
                 model_id=organization_model_id,
-                snapshot_count=0,
+                snapshot_count=active_count,
             )
         elif auto_organize_enabled:
             raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
@@ -1540,7 +1541,6 @@ async def update_organization_settings(
             raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
         if normalized_commit:
             await db.commit()
-        active_count = await memory_record_crud.count_active(db, uid=normalized_uid)
         return await get_organization_settings(db, uid=normalized_uid, snapshot_count=active_count)
     except Exception:
         await db.rollback()

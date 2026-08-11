@@ -1,5 +1,7 @@
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -9,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.api.v1.memories import router
+from app.core.crud.channel import channel_crud
 from app.core.crud.memory import (
     memory_embedding_revision_crud,
     memory_record_crud,
@@ -21,6 +24,7 @@ from app.core.memory.normalization import build_memory_content_hash, build_memor
 from app.core.security import get_current_user
 from app.core.utils.tokenizer import estimate_tokens
 from app.handler import register_handlers
+from app.models.channel import ChannelCreate, ModelChannel
 from app.models.memory import (
     LongTermMemoryEmbeddingDelta,
     LongTermMemoryEmbeddingRevision,
@@ -40,6 +44,7 @@ from app.models.memory import (
 from app.providers.database import get_db
 
 API_TABLES = [
+    ModelChannel.__table__,
     LongTermMemoryStore.__table__,
     LongTermMemoryEmbeddingRevision.__table__,
     LongTermMemoryEmbeddingDelta.__table__,
@@ -47,6 +52,16 @@ API_TABLES = [
     LongTermMemoryRevision.__table__,
     LongTermMemoryMutationJob.__table__,
 ]
+
+ORGANIZATION_API_KEY = "stage11-organization-api-key"
+ORGANIZATION_BASE_URL = "https://stage11-llm.example/v1"
+ORGANIZATION_HTTP_PROXY = "http://stage11-proxy.example:8080"
+ORGANIZATION_HEADER_VALUE = "stage11-secret-header"
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONOLIGH_ENCRYPTION_KEY", "00" * 32)
 
 
 def _assert_standard(response: httpx.Response, code: int) -> dict:
@@ -80,6 +95,92 @@ async def _create_store(db: AsyncSession, uid: str = "user-a", **overrides: obje
     }
     values.update(overrides)
     return await memory_store_crud.create(db, uid=uid, **values)
+
+
+def _chat_model(model_id: str = "stage11-chat-model", **overrides: object) -> dict:
+    model = {
+        "model_id": model_id,
+        "usage": "CHAT",
+        "protocol": "OPENAI",
+        "context_window_k": 64,
+        "max_tokens": 20_000,
+        "temperature": 0.25,
+        "top_p": 0.8,
+        "is_enabled": True,
+        "description": "stage 11 organization model",
+        "advanced_settings": {"custom_headers": {"x-stage11-secret": ORGANIZATION_HEADER_VALUE}},
+    }
+    model.update(overrides)
+    return model
+
+
+async def _create_chat_channel(
+    db: AsyncSession,
+    *,
+    name: str | None = None,
+    model_id: str = "stage11-chat-model",
+    api_key: str = ORGANIZATION_API_KEY,
+    base_url: str = ORGANIZATION_BASE_URL,
+    http_proxy: str = ORGANIZATION_HTTP_PROXY,
+    model_ids: list[dict] | None = None,
+) -> ModelChannel:
+    return await channel_crud.create_with_plain_api_key(
+        db,
+        obj_in=ChannelCreate(
+            name=name or f"stage11-chat-channel-{uuid4().hex[:8]}",
+            api_key=api_key,
+            base_url=base_url,
+            http_proxy=http_proxy,
+            is_active=True,
+            model_ids=model_ids or [_chat_model(model_id=model_id)],
+        ),
+    )
+
+
+def _organization_job_payload(*, snapshot_count: int = 2, channel_id: int = 1, model_id: str = "stage11-chat-model") -> dict:
+    return {
+        "trigger": "manual",
+        "snapshot": {"count": snapshot_count},
+        "organization_model": {
+            "channel_id": channel_id,
+            "channel_name": "stage11-secret-channel",
+            "model_id": model_id,
+            "usage": "CHAT",
+            "protocol": "openai",
+            "base_url": ORGANIZATION_BASE_URL,
+            "api_key": ORGANIZATION_API_KEY,
+            "http_proxy": ORGANIZATION_HTTP_PROXY,
+            "custom_headers": {"x-stage11-secret": ORGANIZATION_HEADER_VALUE},
+            "temperature": 0.25,
+            "top_p": 0.8,
+            "timeout": 600.0,
+            "context_window_k": 64,
+            "context_window_tokens": 64_000,
+            "max_tokens": 20_000,
+            "snapshot_count": snapshot_count,
+            "required_output_tokens": snapshot_count * 256,
+            "policy_version": 1,
+        },
+    }
+
+
+def _assert_no_organization_secrets(value: object) -> None:
+    forbidden_keys = {"api_key", "base_url", "http_proxy", "custom_headers"}
+    forbidden_values = {
+        ORGANIZATION_API_KEY,
+        ORGANIZATION_BASE_URL,
+        ORGANIZATION_HTTP_PROXY,
+        ORGANIZATION_HEADER_VALUE,
+    }
+    if isinstance(value, dict):
+        assert not forbidden_keys.intersection(value)
+        for item in value.values():
+            _assert_no_organization_secrets(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_no_organization_secrets(item)
+    elif isinstance(value, str):
+        assert value not in forbidden_values
 
 
 async def _create_record(
@@ -852,3 +953,486 @@ async def test_memory_collection_cleanup_retry_and_state_guard(api_app: tuple[Fa
             json={"dedupe_key": "cleanup-retry-2"},
         )
         _assert_standard(blocked, 409)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_settings_api_exposes_organization_state_without_secrets(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    channel = await _create_chat_channel(db_session)
+    await _create_store(
+        db_session,
+        organization_channel_id=None,
+        organization_model_id=None,
+    )
+    record = await _create_record(
+        db_session,
+        memory_key="stage11-settings-memory",
+        content="settings organization content",
+        vector_item_id="stage11-settings-vector",
+    )
+    assert record.id is not None and channel.id is not None
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        updated = _assert_standard(
+            await client.post(
+                "/api/v1/memories/settings",
+                json={
+                    "auto_organize_enabled": True,
+                    "organization_channel_id": channel.id,
+                    "organization_model_id": "stage11-chat-model",
+                },
+            ),
+            200,
+        )
+        updated_data = updated["data"]
+        assert updated_data["capacity"] == {
+            "max_active_records": 50,
+            "organize_trigger_records": 45,
+            "content_max_tokens": 160,
+            "active_record_count": 1,
+            "status": "normal",
+        }
+        assert updated_data["organization"]["auto_organize_enabled"] is True
+        assert updated_data["organization"]["model"]["channel_id"] == channel.id
+        assert updated_data["organization"]["model"]["model_id"] == "stage11-chat-model"
+        assert updated_data["organization"]["model"]["usage"] == "CHAT"
+        assert updated_data["organization"]["current_job_id"] is None
+        assert updated_data["organization"]["recent_job_id"] is None
+        assert set(updated_data["blocking"]) == {"organize", "maintenance"}
+        _assert_no_organization_secrets(updated_data)
+
+        organize = _assert_standard(
+            await client.post("/api/v1/memories/organize", json={"dedupe_key": "stage11-settings-organize"}),
+            200,
+        )
+        organize_job_id = organize["data"]["job_id"]
+        settings = _assert_standard(await client.get("/api/v1/memories/settings"), 200)
+        settings_data = settings["data"]
+        settings_update = _assert_standard(
+            await client.post(
+                "/api/v1/memories/settings",
+                json={
+                    "auto_organize_enabled": True,
+                    "organization_channel_id": channel.id,
+                    "organization_model_id": "stage11-chat-model",
+                },
+            ),
+            200,
+        )
+
+    for payload in (settings_data, settings_update["data"], organize["data"]):
+        _assert_no_organization_secrets(payload)
+    for data in (settings_data, settings_update["data"]):
+        assert data["capacity"]["max_active_records"] == 50
+        assert data["capacity"]["organize_trigger_records"] == 45
+        assert data["capacity"]["content_max_tokens"] == 160
+        assert data["capacity"]["active_record_count"] == 1
+        assert data["organization"]["current_job_id"] == organize_job_id
+        assert data["organization"]["recent_job_id"] == organize_job_id
+        assert data["organization"]["current_job"]["id"] == organize_job_id
+        assert data["organization"]["recent_job"]["id"] == organize_job_id
+        assert data["blocking"]["organize"]["blocked"] is True
+        assert data["blocking"]["organize"]["reason"] == "organization_active"
+        assert data["blocking"]["organize"]["job_id"] == organize_job_id
+        assert data["blocking"]["maintenance"]["blocked"] is False
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_settings_api_forbids_internal_fields_and_limit_updates(
+    api_app: tuple[FastAPI, SimpleNamespace],
+) -> None:
+    app, _current_user = api_app
+    base_payload = {
+        "auto_organize_enabled": False,
+        "organization_channel_id": None,
+        "organization_model_id": None,
+    }
+    forbidden_fields = {
+        "uid": "user-b",
+        "records": [],
+        "session_id": "session-secret",
+        "collection": "client-collection",
+        "max_active_records": 999,
+        "organize_trigger_records": 1,
+        "content_max_tokens": 9999,
+    }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for field, value in forbidden_fields.items():
+            payload = {**base_payload, field: value}
+            response = await client.post("/api/v1/memories/settings", json=payload)
+            _assert_standard(response, 422)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_organize_api_is_uid_scoped_idempotent_and_secret_free(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    channel = await _create_chat_channel(db_session)
+    await _create_store(
+        db_session,
+        organization_channel_id=channel.id,
+        organization_model_id="stage11-chat-model",
+    )
+    record = await _create_record(
+        db_session,
+        memory_key="stage11-organize-memory",
+        content="organization source content",
+        vector_item_id="stage11-organize-vector",
+    )
+    other_record = await _create_record(
+        db_session,
+        uid="user-b",
+        memory_key="stage11-other-user-memory",
+        content="other user content",
+        vector_item_id="stage11-other-user-vector",
+    )
+    assert record.id is not None and other_record.id is not None
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        first = _assert_standard(
+            await client.post("/api/v1/memories/organize", json={"dedupe_key": "stage11-organize"}),
+            200,
+        )
+        first_data = first["data"]
+        assert first_data["job_id"] == first_data["job"]["id"]
+        assert first_data["job"]["operation"] == "organize"
+        assert first_data["created"] is True
+        assert first_data["job"]["payload"]["snapshot"]["count"] == 1
+        assert [item["memory_id"] for item in first_data["job"]["payload"]["snapshot"]["items"]] == [record.id]
+        _assert_no_organization_secrets(first_data)
+
+        duplicate = _assert_standard(
+            await client.post("/api/v1/memories/organize", json={"dedupe_key": "stage11-organize"}),
+            200,
+        )
+        assert duplicate["data"]["created"] is False
+        assert duplicate["data"]["job_id"] == first_data["job_id"]
+        _assert_no_organization_secrets(duplicate["data"])
+
+        forbidden_fields = {
+            "uid": "user-b",
+            "records": [],
+            "session_id": "session-secret",
+            "collection": "client-collection",
+            "max_attempts": 99,
+        }
+        for field, value in forbidden_fields.items():
+            response = await client.post(
+                "/api/v1/memories/organize",
+                json={"dedupe_key": f"stage11-invalid-{field}", field: value},
+            )
+            _assert_standard(response, 422)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_pin_and_unpin_api_persists_and_enforces_uid_scope(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, memory_key="stage11-pin-memory")
+    assert record.id is not None
+    record_id = int(record.id)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        pinned = _assert_standard(await client.post(f"/api/v1/memories/{record_id}/pin"), 200)
+        assert pinned["data"]["id"] == record_id
+        assert pinned["data"]["pinned"] is True
+        persisted = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+        assert persisted is not None and persisted.pinned is True
+
+        unpinned = _assert_standard(await client.post(f"/api/v1/memories/{record_id}/unpin"), 200)
+        assert unpinned["data"]["pinned"] is False
+        persisted = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
+        assert persisted is not None and persisted.pinned is False
+
+        current_user.uid = "user-b"
+        _assert_standard(await client.post(f"/api/v1/memories/{record_id}/pin"), 404)
+        _assert_standard(await client.post(f"/api/v1/memories/{record_id}/unpin"), 404)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_job_summaries_are_top_level_and_secret_free(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    parent = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-parent",
+        operation=LongTermMemoryMutationOperation.ORGANIZE,
+        status=LongTermMemoryMutationStatus.SUCCEEDED,
+        payload=_organization_job_payload(),
+        result={
+            "status": "succeeded",
+            "snapshot_count": 2,
+            "keep_count": 1,
+            "update_count": 1,
+            "merge_count": 0,
+            "conflict_count": 0,
+            "stale_count": 0,
+            "skipped_count": 1,
+            "child_job_ids": [],
+            "budget": {"required_input_tokens": 300, "available_input_tokens": 500},
+            "context_error": None,
+        },
+    )
+    assert parent.id is not None
+    child = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-child",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        parent_job_id=parent.id,
+        payload={
+            **_organization_job_payload(snapshot_count=2),
+            "parent_job_id": parent.id,
+        },
+        result={
+            "snapshot_count": 2,
+            "keep_count": 0,
+            "update_count": 0,
+            "merge_count": 1,
+            "conflict_count": 0,
+            "stale_count": 1,
+            "skipped_count": 0,
+            "child_job_ids": [parent.id + 1],
+            "budget": {"required_input_tokens": 301, "available_input_tokens": 499},
+            "context_error": {"status": "organization_context_exceeded"},
+        },
+    )
+    assert child.id is not None
+    await memory_job_crud.update_status(
+        db_session,
+        uid="user-a",
+        job_id=parent.id,
+        status=LongTermMemoryMutationStatus.SUCCEEDED,
+        result={
+            "status": "succeeded",
+            "snapshot_count": 2,
+            "keep_count": 1,
+            "update_count": 1,
+            "merge_count": 0,
+            "conflict_count": 0,
+            "stale_count": 0,
+            "skipped_count": 1,
+            "child_job_ids": [child.id],
+            "budget": {"required_input_tokens": 300, "available_input_tokens": 500},
+            "context_error": None,
+        },
+    )
+
+    expected_fields = {
+        "parent_job_id",
+        "snapshot_count",
+        "keep_count",
+        "update_count",
+        "merge_count",
+        "conflict_count",
+        "stale_count",
+        "skipped_count",
+        "child_job_ids",
+        "token_budget",
+        "context_error",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        parent_detail = _assert_standard(await client.get(f"/api/v1/memories/jobs/{parent.id}"), 200)["data"]
+        child_list = _assert_standard(await client.get("/api/v1/memories/jobs?operation=organize_merge"), 200)
+        _assert_page(child_list, total=1)
+        child_detail = child_list["data"]["items"][0]
+
+    assert expected_fields.issubset(parent_detail)
+    assert parent_detail["parent_job_id"] is None
+    assert parent_detail["snapshot_count"] == 2
+    assert parent_detail["child_job_ids"] == [child.id]
+    assert parent_detail["token_budget"] == {"required_input_tokens": 300, "available_input_tokens": 500}
+    assert expected_fields.issubset(child_detail)
+    assert child_detail["parent_job_id"] == parent.id
+    assert child_detail["merge_count"] == 1
+    assert child_detail["stale_count"] == 1
+    assert child_detail["context_error"] == {"status": "organization_context_exceeded"}
+    _assert_no_organization_secrets(parent_detail)
+    _assert_no_organization_secrets(child_detail)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_retry_and_cancel_boundaries_are_exposed_by_api(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    channel = await _create_chat_channel(db_session)
+    await _create_store(
+        db_session,
+        organization_channel_id=channel.id,
+        organization_model_id="stage11-chat-model",
+    )
+    record = await _create_record(
+        db_session,
+        memory_key="stage11-retry-memory",
+        content="current complete snapshot",
+        vector_item_id="stage11-retry-vector",
+    )
+    failed_merge = await _create_job(
+        db_session,
+        dedupe_key="stage11-failed-merge",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        parent_job_id=999,
+        payload={"parent_job_id": 999, "sources": []},
+    )
+    assert failed_merge.id is not None and record.id is not None
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        retried = _assert_standard(await client.post(f"/api/v1/memories/jobs/{failed_merge.id}/retry"), 200)
+        retry_data = retried["data"]
+        assert retry_data["status"] == "accepted"
+        assert retry_data["retry_scope"] == "new_snapshot"
+        assert retry_data["job"]["operation"] == "organize"
+        assert retry_data["job"]["payload"]["snapshot"]["count"] == 1
+        assert retry_data["job"]["payload"]["snapshot"]["items"][0]["memory_id"] == record.id
+        _assert_no_organization_secrets(retry_data)
+
+        eviction_candidate = await _create_record(
+            db_session,
+            memory_key="stage11-old-eviction-candidate",
+            content="old eviction candidate",
+            vector_item_id="stage11-old-eviction-vector",
+        )
+        failed_eviction = await _create_job(
+            db_session,
+            dedupe_key="stage11-failed-eviction",
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            status=LongTermMemoryMutationStatus.FAILED,
+            payload={
+                "publication": _publication_payload(
+                    key="stage11-retried-create",
+                    content="retried create content",
+                ),
+                "candidate": {
+                    "memory_id": eviction_candidate.id,
+                    "version": eviction_candidate.version,
+                    "vector_item_id": eviction_candidate.vector_item_id,
+                    "record_snapshot": build_memory_record_snapshot(eviction_candidate),
+                },
+                "store": {"active_count": 2, "max_active_records": 50},
+            },
+        )
+        assert failed_eviction.id is not None and eviction_candidate.id is not None
+        retried_eviction = _assert_standard(await client.post(f"/api/v1/memories/jobs/{failed_eviction.id}/retry"), 200)
+        retried_eviction_data = retried_eviction["data"]
+        assert retried_eviction_data["status"] == "accepted"
+        assert retried_eviction_data["job"]["id"] != failed_eviction.id
+        assert retried_eviction_data["job"]["operation"] == LongTermMemoryMutationOperation.CREATE.value
+        retried_candidate = await memory_record_crud.get_by_id(
+            db_session,
+            uid="user-a",
+            memory_id=eviction_candidate.id,
+        )
+        assert retried_candidate is not None
+        assert retried_candidate.is_active is True
+        assert retried_candidate.deleted_at is None
+        assert retried_candidate.pending_mutation_job_id is None
+
+        candidate = await _create_record(
+            db_session,
+            memory_key="stage11-eviction-candidate",
+            content="eviction candidate",
+            vector_item_id="stage11-eviction-vector",
+        )
+        eviction_job = await _create_job(
+            db_session,
+            dedupe_key="stage11-pending-eviction",
+            operation=LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
+            status=LongTermMemoryMutationStatus.PENDING,
+            payload={"candidate": {"memory_id": candidate.id}},
+        )
+        assert candidate.id is not None and eviction_job.id is not None
+        candidate.pending_mutation_job_id = eviction_job.id
+        db_session.add(candidate)
+        await db_session.commit()
+
+        cancelled_eviction = _assert_standard(await client.post(f"/api/v1/memories/jobs/{eviction_job.id}/cancel"), 200)
+        assert cancelled_eviction["data"]["accepted"] is True
+        assert cancelled_eviction["data"]["changed"] is True
+        released_candidate = await memory_record_crud.get_by_id(
+            db_session,
+            uid="user-a",
+            memory_id=candidate.id,
+        )
+        assert released_candidate is not None and released_candidate.pending_mutation_job_id is None
+
+        cleanup_job = await _create_job(
+            db_session,
+            dedupe_key="stage11-pending-cleanup",
+            operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+            status=LongTermMemoryMutationStatus.PENDING,
+            memory_id=candidate.id,
+            expected_version=candidate.version,
+            payload={},
+        )
+        assert cleanup_job.id is not None
+        cancelled_cleanup = _assert_standard(await client.post(f"/api/v1/memories/jobs/{cleanup_job.id}/cancel"), 200)
+        assert cancelled_cleanup["data"]["accepted"] is False
+        assert cancelled_cleanup["data"]["changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_auto_organize_source_is_exposed_in_list_get_and_history(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    await _create_store(db_session)
+    content = "auto organize published content"
+    recalled_at = datetime.now(UTC)
+    record = await _create_record(
+        db_session,
+        memory_key="stage11-auto-organize-memory",
+        content=content,
+        source=LongTermMemorySource.AUTO_ORGANIZE,
+        source_job_id=321,
+        pinned=True,
+        last_recalled_at=recalled_at,
+    )
+    assert record.id is not None
+    await memory_revision_crud.create(
+        db_session,
+        uid="user-a",
+        memory_id=record.id,
+        version=record.version,
+        memory_key=record.memory_key,
+        memory_type=record.memory_type,
+        content=content,
+        content_token_count=estimate_tokens(normalize_memory_content(content)),
+        content_hash=build_memory_content_hash(content),
+        source=LongTermMemorySource.AUTO_ORGANIZE,
+        source_job_id=321,
+    )
+
+    expected_tokens = estimate_tokens(normalize_memory_content(content))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        listed = _assert_standard(await client.get("/api/v1/memories/list?size=20"), 200)
+        _assert_page(listed, total=1)
+        listed_record = listed["data"]["items"][0]
+        detail = _assert_standard(await client.get(f"/api/v1/memories/get?memory_id={record.id}"), 200)["data"]
+        history = _assert_standard(await client.get(f"/api/v1/memories/{record.id}/history"), 200)
+        history_record = history["data"]["items"][0]
+
+    assert listed_record["source"] == LongTermMemorySource.AUTO_ORGANIZE.value
+    assert listed_record["content_token_count"] == expected_tokens
+    assert listed_record["pinned"] is True
+    assert listed_record["last_recalled_at"] is not None
+    assert detail["source"] == LongTermMemorySource.AUTO_ORGANIZE.value
+    assert detail["content_token_count"] == expected_tokens
+    assert detail["pinned"] is True
+    assert detail["last_recalled_at"] is not None
+    assert history_record["source"] == LongTermMemorySource.AUTO_ORGANIZE.value
+    assert history_record["content_token_count"] == expected_tokens

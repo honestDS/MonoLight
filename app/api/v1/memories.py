@@ -23,10 +23,14 @@ from app.core.constants import (
     MSG_MEMORY_MIGRATION_DETAIL_SUCCESS,
     MSG_MEMORY_MIGRATION_LIST_SUCCESS,
     MSG_MEMORY_MIGRATION_RETRIED,
+    MSG_MEMORY_ORGANIZE_SUBMITTED,
+    MSG_MEMORY_PINNED,
     MSG_MEMORY_REINDEX_SUBMITTED,
     MSG_MEMORY_RESTORED,
     MSG_MEMORY_RESUMED,
     MSG_MEMORY_SETTINGS_SUCCESS,
+    MSG_MEMORY_SETTINGS_UPDATED,
+    MSG_MEMORY_UNPINNED,
     MSG_MEMORY_UPDATED,
 )
 from app.core.memory import (
@@ -41,10 +45,14 @@ from app.core.memory import (
     list_memories,
     list_memory_history,
     memory_service,
+    pin_memory,
     retry_embedding_migration,
     retry_job,
     submit_memory_cleanup_retry,
+    submit_memory_organization,
     submit_memory_reindex,
+    unpin_memory,
+    update_memory_settings,
 )
 from app.core.security import get_current_user
 from app.models.memory import LongTermMemoryMutationOperation, LongTermMemoryMutationStatus, LongTermMemorySource, LongTermMemoryType
@@ -58,11 +66,15 @@ from app.schemas.memory import (
     MemoryJobResponse,
     MemoryMaintenanceRequest,
     MemoryMutationResponse,
+    MemoryOrganizeRequest,
+    MemoryOrganizeResponse,
+    MemoryRecordDetailResponse,
     MemoryRecordResponse,
     MemoryRestoreRequest,
     MemoryResumeCurrentRequest,
     MemoryRevisionResponse,
     MemorySettingsResponse,
+    MemorySettingsUpdateRequest,
     MemorySortField,
     MemorySortOrder,
     MemorySubmissionResponse,
@@ -140,7 +152,7 @@ async def list_memories_api(
     return StandardResponse.success(data=_page_data(result), message=MSG_MEMORY_LIST_SUCCESS)
 
 
-@router.get("/get", response_model=StandardResponse[dict[str, Any]])
+@router.get("/get", response_model=StandardResponse[MemoryRecordDetailResponse])
 async def get_memory_api(
     memory_id: int = Query(..., ge=1),
     db: AsyncSession = Depends(get_db),
@@ -280,6 +292,36 @@ async def get_memory_settings_api(
     return StandardResponse.success(data=result, message=MSG_MEMORY_SETTINGS_SUCCESS)
 
 
+@router.post("/settings", response_model=StandardResponse[MemorySettingsResponse])
+async def update_memory_settings_api(
+    request: MemorySettingsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await update_memory_settings(
+        db,
+        uid=current_user.uid,
+        auto_organize_enabled=request.auto_organize_enabled,
+        organization_channel_id=request.organization_channel_id,
+        organization_model_id=request.organization_model_id,
+    )
+    return StandardResponse.success(data=result, message=MSG_MEMORY_SETTINGS_UPDATED)
+
+
+@router.post("/organize", response_model=StandardResponse[MemoryOrganizeResponse])
+async def organize_memories_api(
+    request: MemoryOrganizeRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await submit_memory_organization(
+        db,
+        uid=current_user.uid,
+        dedupe_key=request.dedupe_key if request is not None else None,
+    )
+    return StandardResponse.success(data=result, message=MSG_MEMORY_ORGANIZE_SUBMITTED)
+
+
 @router.post("/reindex", response_model=StandardResponse[MemorySubmissionResponse])
 async def reindex_memories_api(
     request: MemoryMaintenanceRequest | None = None,
@@ -416,6 +458,26 @@ async def resume_current_memory_api(
         expected_version=request.expected_version,
     )
     return StandardResponse.success(data=_mutation_data(result), message=MSG_MEMORY_RESUMED)
+
+
+@router.post("/{memory_id}/pin", response_model=StandardResponse[MemoryRecordResponse])
+async def pin_memory_api(
+    memory_id: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await pin_memory(db, uid=current_user.uid, memory_id=memory_id)
+    return StandardResponse.success(data=result, message=MSG_MEMORY_PINNED)
+
+
+@router.post("/{memory_id}/unpin", response_model=StandardResponse[MemoryRecordResponse])
+async def unpin_memory_api(
+    memory_id: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await unpin_memory(db, uid=current_user.uid, memory_id=memory_id)
+    return StandardResponse.success(data=result, message=MSG_MEMORY_UNPINNED)
 
 
 __all__ = ["router"]
