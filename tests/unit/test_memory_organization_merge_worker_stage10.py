@@ -18,10 +18,10 @@ from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_JOB_DELETE_CLEANUP_FAILED,
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
+    ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     MEMORY_CONTENT_MAX_TOKENS,
 )
 from app.core.crud.memory import (
-    memory_embedding_delta_crud,
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_revision_crud,
@@ -58,7 +58,6 @@ from app.models.channel import ModelProtocol, ModelUsage
 from app.models.memory import (
     LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDelta,
-    LongTermMemoryEmbeddingDeltaAction,
     LongTermMemoryEmbeddingRevision,
     LongTermMemoryEmbeddingRevisionStatus,
     LongTermMemoryIndexStatus,
@@ -603,20 +602,6 @@ async def _get_revisions(
 ) -> list[LongTermMemoryRevision]:
     async with session_factory() as db:
         return await memory_revision_crud.list_by_memory_id(db, uid=uid, memory_id=memory_id)
-
-
-async def _get_deltas(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    uid: str,
-    migration_job_id: int,
-) -> list[Any]:
-    async with session_factory() as db:
-        return await memory_embedding_delta_crud.list_by_migration_job(
-            db,
-            uid=uid,
-            migration_job_id=migration_job_id,
-        )
 
 
 async def _get_all_deltas(
@@ -1351,13 +1336,91 @@ async def test_organization_merge_active_embedding_change_after_vector_write_fai
 
 
 @pytest.mark.asyncio
-async def test_organization_merge_migration_deltas_are_sequential_and_linked_to_merge_job(
+async def test_organization_merge_active_migration_after_vector_write_fails_before_publish(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
 ) -> None:
-    uid = "organization-merge-delta-success-worker"
+    uid = "organization-merge-active-migration-after-vector-write-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2, 3),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="migration during publish content",
+        target_memory_key="migration-during-publish-key",
+    )
+    before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
+    new_vector_id = build_memory_vector_item_id(1, 2)
+    changed = False
+
+    async def start_migration(_collection_name: str, item_ids: list[str]) -> None:
+        nonlocal changed
+        if changed or item_ids != [new_vector_id]:
+            return
+        changed = True
+        async with memory_session_factory() as db:
+            updated = await memory_store_crud.update_by_uid(
+                db,
+                uid=uid,
+                migration_job_id=9104,
+                migration_status=LongTermMemoryMigrationStatus.BUILDING,
+                commit=False,
+            )
+            assert updated is not None
+            await db.commit()
+
+    vector_backend.upsert_hook = start_migration
+    consumer = _consumer(memory_session_factory)
+    try:
+        failed = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+        assert failed.attempt_count == 1
+        assert failed.error == t(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+        assert failed.active_mutation_key is None
+        assert changed is True
+        assert any(new_vector_id in call["ids"] for call in vector_backend.upsert_calls)
+        assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+        collection = vector_backend.collections[COLLECTION_NAME]
+        assert new_vector_id not in collection["items"]
+        assert all(build_memory_vector_item_id(memory_id, 1) in collection["items"] for memory_id in source_ids)
+        for memory_id in source_ids:
+            record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+            assert record is not None and before[memory_id] is not None
+            assert record.is_active is True
+            assert record.pending_mutation_job_id is None
+            assert record.index_status == LongTermMemoryRecordIndexStatus.READY
+            assert (record.content, record.memory_key, record.content_hash, record.vector_item_id) == (
+                before[memory_id].content,
+                before[memory_id].memory_key,
+                before[memory_id].content_hash,
+                before[memory_id].vector_item_id,
+            )
+            assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [1]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+            assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
+        assert [record.id for record in recallable] == list(source_ids)
+        assert await _get_all_deltas(memory_session_factory, uid=uid) == []
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_active_migration_before_execution_fails_and_releases_sources(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-merge-active-migration-before-execution-worker"
     migration_job_id = 9101
-    _parent_id, child_id, _source_ids = await _prepare_merge(
+    _parent_id, child_id, source_ids = await _prepare_merge(
         memory_session_factory,
         vector_backend,
         uid=uid,
@@ -1367,35 +1430,50 @@ async def test_organization_merge_migration_deltas_are_sequential_and_linked_to_
         pinned_ids=frozenset({1}),
         target_content="migration delta organization content",
         target_memory_key="migration-delta-organization-key",
-        migration_job_id=migration_job_id,
     )
+    async with memory_session_factory() as db:
+        updated = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            migration_job_id=migration_job_id,
+            migration_status=LongTermMemoryMigrationStatus.BUILDING,
+            commit=False,
+        )
+        assert updated is not None
+        await db.commit()
+
+    new_vector_id = build_memory_vector_item_id(1, 2)
     consumer = _consumer(memory_session_factory)
     try:
-        await _run_child(
+        failed = await _run_child(
             consumer,
             memory_session_factory,
             uid=uid,
             child_id=child_id,
-            status=LongTermMemoryMutationStatus.SUCCEEDED,
+            status=LongTermMemoryMutationStatus.FAILED,
         )
-        deltas = await _get_deltas(memory_session_factory, uid=uid, migration_job_id=migration_job_id)
-        assert [delta.sequence for delta in deltas] == [1, 2, 3]
-        assert [delta.action for delta in deltas] == [
-            LongTermMemoryEmbeddingDeltaAction.UPSERT,
-            LongTermMemoryEmbeddingDeltaAction.DELETE,
-            LongTermMemoryEmbeddingDeltaAction.DELETE,
-        ]
-        assert [delta.memory_id for delta in deltas] == [1, 2, 3]
-        assert [delta.memory_version for delta in deltas] == [2, 1, 1]
-        assert all(delta.source_mutation_job_id == child_id for delta in deltas)
+        assert failed.attempt_count == 1
+        assert failed.error == t(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+        assert failed.active_mutation_key is None
+        assert vector_backend.upsert_calls == []
+        assert new_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+        assert await _get_all_deltas(memory_session_factory, uid=uid) == []
+        assert await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id) == []
+        for memory_id in source_ids:
+            record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+            assert record is not None
+            assert record.pending_mutation_job_id is None
+            assert record.is_active is True
+            assert record.index_status == LongTermMemoryRecordIndexStatus.READY
+            assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [1]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+        assert [record.id for record in recallable] == list(source_ids)
         async with memory_session_factory() as db:
             store = await memory_store_crud.get_by_uid(db, uid=uid)
         assert store is not None
-        assert store.migration_delta_high_watermark == 3
-
-        cleanup_jobs = await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id)
-        assert len(cleanup_jobs) == 2
-        assert all(job.status == LongTermMemoryMutationStatus.PENDING for job in cleanup_jobs)
+        assert store.migration_job_id == migration_job_id
+        assert store.migration_status == LongTermMemoryMigrationStatus.BUILDING
     finally:
         await consumer.stop()
 
@@ -1407,7 +1485,6 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     uid = "organization-merge-delta-rollback-worker"
-    migration_job_id = 9102
     _parent_id, child_id, _source_ids = await _prepare_merge(
         memory_session_factory,
         vector_backend,
@@ -1419,7 +1496,6 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
         target_content="delta conflict organization content",
         target_memory_key="delta-conflict-organization-key",
         max_attempts=1,
-        migration_job_id=migration_job_id,
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in (1, 2, 3)}
     new_vector_id = build_memory_vector_item_id(1, 2)
@@ -1446,7 +1522,7 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
         assert append_calls == 2
         assert failed.active_mutation_key is None
         assert new_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
-        assert await _get_deltas(memory_session_factory, uid=uid, migration_job_id=migration_job_id) == []
+        assert await _get_all_deltas(memory_session_factory, uid=uid) == []
         assert await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id) == []
         for memory_id in (1, 2, 3):
             record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)

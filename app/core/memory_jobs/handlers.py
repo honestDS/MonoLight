@@ -25,6 +25,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
     ERR_MEMORY_JOB_VECTOR_DIMENSION_INVALID,
     ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+    ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_OVER_LIMIT,
     ERR_MEMORY_RECORD_NOT_FOUND,
@@ -76,6 +77,7 @@ from app.models.memory import (
     LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDeltaAction,
     LongTermMemoryIndexStatus,
+    LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
@@ -909,12 +911,19 @@ def _validate_organization_store_snapshot(store: Any, payload: dict[str, Any]) -
     ) = _validate_active_store(store)
     try:
         index_status = LongTermMemoryIndexStatus(store.index_status)
+        migration_status = LongTermMemoryMigrationStatus(store.migration_status) if store.migration_status is not None else None
     except (TypeError, ValueError) as exc:
-        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
-    if index_status != LongTermMemoryIndexStatus.READY:
-        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+        raise _deterministic(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT) from exc
+    if index_status != LongTermMemoryIndexStatus.READY or migration_status in {
+        LongTermMemoryMigrationStatus.PREPARING,
+        LongTermMemoryMigrationStatus.BUILDING,
+        LongTermMemoryMigrationStatus.CATCHING_UP,
+        LongTermMemoryMigrationStatus.VALIDATING,
+        LongTermMemoryMigrationStatus.SWITCHING,
+    }:
+        raise _deterministic(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
     if active_revision != payload["active_embedding_revision"] or store.index_revision != payload["index_revision"]:
-        raise _retryable(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+        raise _deterministic(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
     return (
         active_channel_id,
         active_model_id,
@@ -1898,15 +1907,9 @@ async def _publish_organization_merge(
                 active_revision,
                 active_collection_name,
             ) = _validate_organization_store_snapshot(store, payload)
-            if (
-                active_channel_id != snapshot.active_embedding_channel_id
-                or active_model_id != snapshot.active_embedding_model_id
-                or active_dimensions != snapshot.active_embedding_dimensions
-                or active_signature != snapshot.active_embedding_signature
-                or active_revision != snapshot.active_embedding_revision
-                or active_collection_name != snapshot.active_collection_name
-                or store.index_revision != snapshot.index_revision
-            ):
+            if active_revision != snapshot.active_embedding_revision or store.index_revision != snapshot.index_revision:
+                raise _deterministic(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+            if active_channel_id != snapshot.active_embedding_channel_id or active_model_id != snapshot.active_embedding_model_id or active_dimensions != snapshot.active_embedding_dimensions or active_signature != snapshot.active_embedding_signature or active_collection_name != snapshot.active_collection_name:
                 raise _retryable(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
             records = await memory_record_crud.get_organization_group(
                 db,

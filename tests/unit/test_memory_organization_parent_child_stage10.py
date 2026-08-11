@@ -36,6 +36,8 @@ from app.core.memory_jobs.consumer import MemoryJobConsumer
 from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobRetryableError
 from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobValidationError
 from app.models.memory import (
+    LongTermMemoryIndexStatus,
+    LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
@@ -156,7 +158,19 @@ async def _claimed_parent(
     owner: str = "organization-worker",
     max_attempts: int = 4,
 ) -> LongTermMemoryMutationJob:
-    db.add(LongTermMemoryStore(uid=uid))
+    db.add(
+        LongTermMemoryStore(
+            uid=uid,
+            active_embedding_channel_id=1,
+            active_embedding_model_id="memory-model-v1",
+            active_embedding_dimensions=3,
+            active_embedding_signature="organization-embedding-signature",
+            active_embedding_revision=3,
+            active_collection_name="organization-merge-collection",
+            index_revision=8,
+            index_status=LongTermMemoryIndexStatus.READY,
+        )
+    )
     await db.flush()
     parent, created = await memory_job_crud.create(
         db,
@@ -191,7 +205,19 @@ async def _created_parent(
     payload: dict[str, object] | None = None,
     max_attempts: int = 4,
 ) -> LongTermMemoryMutationJob:
-    db.add(LongTermMemoryStore(uid=uid))
+    db.add(
+        LongTermMemoryStore(
+            uid=uid,
+            active_embedding_channel_id=1,
+            active_embedding_model_id="memory-model-v1",
+            active_embedding_dimensions=3,
+            active_embedding_signature="organization-embedding-signature",
+            active_embedding_revision=3,
+            active_collection_name="organization-merge-collection",
+            index_revision=8,
+            index_status=LongTermMemoryIndexStatus.READY,
+        )
+    )
     await db.flush()
     parent, created = await memory_job_crud.create(
         db,
@@ -380,6 +406,108 @@ async def test_running_organization_cancelled_during_model_call_stops_after_retu
             parent_job_id=parent.id,
         )
         assert children == []
+    finally:
+        release_model.set()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "maintenance_state",
+    [
+        pytest.param(
+            (LongTermMemoryIndexStatus.REINDEXING, None, None),
+            id="reindexing",
+        ),
+        pytest.param(
+            (LongTermMemoryIndexStatus.READY, LongTermMemoryMigrationStatus.BUILDING, 9103),
+            id="embedding-migration",
+        ),
+    ],
+)
+async def test_organization_parent_rechecks_maintenance_state_before_submitting_children(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    maintenance_state: tuple[LongTermMemoryIndexStatus, LongTermMemoryMigrationStatus | None, int | None],
+) -> None:
+    uid = f"organization-parent-maintenance-{maintenance_state[0].value}-{maintenance_state[1].value if maintenance_state[1] else 'none'}"
+    parent = await _created_parent(db_session, uid=uid)
+    await _create_recallable_records(db_session, uid=uid, versions={1: 11, 2: 12, 3: 13})
+    request = _request(snapshot_count=3)
+    plan = MemoryOrganizationValidatedPlan(
+        items=(
+            _update(1, 11, content="maintenance-update-content", memory_key="maintenance-update-key"),
+            _merge((2, 3), primary_memory_id=2, content="maintenance-merge-content", memory_key="maintenance-merge-key"),
+        ),
+        final_record_count=2,
+    )
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+
+    async def fake_call(_request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+        model_started.set()
+        await release_model.wait()
+        return _response()
+
+    monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
+    monkeypatch.setattr(organization_handler, "call_organization_model", fake_call)
+    monkeypatch.setattr(organization_handler, "validate_organization_model_output", lambda _output, _snapshot: plan)
+
+    def session_factory() -> Any:
+        return async_sessionmaker(db_session.bind, expire_on_commit=False)()  # type: ignore[arg-type]
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(
+            {LongTermMemoryMutationOperation.ORGANIZE: organization_handler.handle_memory_organization},
+            session_factory=session_factory,
+        ),
+        session_factory,
+        poll_interval_seconds=0.01,
+        lease_seconds=30,
+        renew_interval_seconds=10,
+        recovery_interval_seconds=1_000_000,
+        max_concurrency=1,
+        recovery_retry_delay_seconds=1,
+        shutdown_retry_delay_seconds=0.01,
+    )
+    try:
+        assert await consumer.run_once() == 1
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        index_status, migration_status, migration_job_id = maintenance_state
+        async with session_factory() as maintenance_db:
+            changed = await maintenance_db.execute(
+                update(LongTermMemoryStore)
+                .where(LongTermMemoryStore.uid == uid)
+                .values(
+                    index_status=index_status,
+                    migration_status=migration_status,
+                    migration_job_id=migration_job_id,
+                )
+            )
+            assert changed.rowcount == 1
+            await maintenance_db.commit()
+        release_model.set()
+
+        succeeded = await _wait_for_job_status(
+            db_session,
+            uid=uid,
+            job_id=parent.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert succeeded.result is not None
+        assert succeeded.result["stale_count"] == 2
+        assert succeeded.result["child_job_ids"] == []
+        assert [group["status"] for group in succeeded.result["group_results"]] == ["stale", "stale"]
+        children = await memory_job_crud.list_children_by_parent_job_id(
+            db_session,
+            uid=uid,
+            parent_job_id=parent.id,
+        )
+        assert children == []
+        for memory_id in (1, 2, 3):
+            record = await memory_record_crud.get_by_id(db_session, uid=uid, memory_id=memory_id)
+            assert record is not None
+            assert record.pending_mutation_job_id is None
     finally:
         release_model.set()
         await consumer.stop()

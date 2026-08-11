@@ -18,6 +18,7 @@ from app.core.memory.organization import (
 from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobTargetBusyError
 from app.core.utils.time import get_local_time
 from app.models.memory import (
+    LongTermMemoryIndexStatus,
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
@@ -52,7 +53,19 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
 
 
 async def _parent(db: AsyncSession, *, uid: str) -> LongTermMemoryMutationJob:
-    db.add(LongTermMemoryStore(uid=uid))
+    db.add(
+        LongTermMemoryStore(
+            uid=uid,
+            active_embedding_channel_id=1,
+            active_embedding_model_id="memory-model-v1",
+            active_embedding_dimensions=3,
+            active_embedding_signature="organization-embedding-signature",
+            active_embedding_revision=3,
+            active_collection_name="organization-merge-collection",
+            index_revision=8,
+            index_status=LongTermMemoryIndexStatus.READY,
+        )
+    )
     await db.flush()
     parent, created = await memory_job_crud.create(
         db,

@@ -1018,7 +1018,7 @@ class MemoryJobManager:
         policy_version: int,
         commit: bool = False,
     ) -> LongTermMemoryMutationJob | None:
-        from app.core.memory.errors import MemoryValidationError
+        from app.core.memory.errors import MemoryConflictError, MemoryValidationError
         from app.core.memory.identifiers import (
             build_memory_active_mutation_key,
             build_memory_organization_active_mutation_key,
@@ -1026,6 +1026,7 @@ class MemoryJobManager:
         from app.core.memory.organization import (
             build_organization_merge_child_dedupe_key,
             build_organization_merge_child_payload,
+            validate_organization_submission_store,
         )
 
         parent_id = parent_job.id
@@ -1105,14 +1106,18 @@ class MemoryJobManager:
         child_job: LongTermMemoryMutationJob | None = None
         try:
             async with db.begin_nested():
-                if (
-                    await memory_store_crud.lock_for_mutation(
-                        db,
-                        uid=parent_job.uid,
-                        commit=False,
-                    )
-                    is None
-                ):
+                store = await memory_store_crud.lock_for_mutation(
+                    db,
+                    uid=parent_job.uid,
+                    commit=False,
+                )
+                if store is None:
+                    raise _OrganizationMergeStale()
+                try:
+                    validate_organization_submission_store(store)
+                except MemoryConflictError as exc:
+                    raise _OrganizationMergeStale() from exc
+                if store.active_embedding_revision != active_embedding_revision or store.index_revision != index_revision:
                     raise _OrganizationMergeStale()
 
                 records = await memory_record_crud.get_organization_group(

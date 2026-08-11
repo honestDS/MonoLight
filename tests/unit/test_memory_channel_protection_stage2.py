@@ -838,6 +838,56 @@ async def test_organization_job_model_snapshot_protection_depends_on_active_stat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        LongTermMemoryMutationStatus.PENDING,
+        LongTermMemoryMutationStatus.RUNNING,
+        LongTermMemoryMutationStatus.RETRY,
+    ],
+)
+@pytest.mark.parametrize("change", ["delete", "rename", "usage", "protocol"])
+async def test_active_organization_job_snapshot_protects_chat_model_identity_changes(
+    db_session: AsyncSession,
+    status: LongTermMemoryMutationStatus,
+    change: str,
+) -> None:
+    await _create_organization_job(
+        db_session,
+        uid=f"organization-job-identity-{status.value}-{change}",
+        dedupe_key=f"organization-identity-{status.value}-{change}",
+        status=status,
+        channel_id=121,
+        model_id="job-chat",
+    )
+    old_model = _chat_model("job-chat")
+    changed_model = dict(old_model)
+    if change == "delete":
+        new_models = []
+    else:
+        if change == "rename":
+            changed_model["model_id"] = "renamed-job-chat"
+        elif change == "usage":
+            changed_model["usage"] = "EMBEDDING"
+            changed_model["protocol"] = "OPENAI_EMBEDDING"
+            changed_model["embedding_dimensions"] = 1536
+        else:
+            changed_model["protocol"] = "CHANGED_PROTOCOL"
+        new_models = [changed_model]
+
+    with pytest.raises(ParameterException) as exc_info:
+        await assert_channel_model_identity_update_allowed(
+            db_session,
+            channel_id=121,
+            old_model_ids=[old_model],
+            new_model_ids=new_models,
+        )
+
+    assert exc_info.value.message == ERR_MEMORY_MODEL_IDENTITY_IN_USE
+    assert exc_info.value.kwargs == {"model_id": "job-chat"}
+
+
+@pytest.mark.asyncio
 async def test_organization_job_snapshot_keeps_old_reference_after_store_selection_changes(
     db_session: AsyncSession,
 ) -> None:
