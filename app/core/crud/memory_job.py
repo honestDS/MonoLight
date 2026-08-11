@@ -156,6 +156,29 @@ class CRUDLongTermMemoryMutationJob:
         )
         return list(result.scalars().all())
 
+    async def list_unfinished_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+    ) -> list[LongTermMemoryMutationJob]:
+        result = await db.execute(
+            select(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.status.in_(
+                    [
+                        LongTermMemoryMutationStatus.PENDING,
+                        LongTermMemoryMutationStatus.RUNNING,
+                        LongTermMemoryMutationStatus.RETRY,
+                    ]
+                ),
+            )
+            .order_by(LongTermMemoryMutationJob.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def list_children_by_parent_job_id(
         self,
         db: AsyncSession,
@@ -341,6 +364,35 @@ class CRUDLongTermMemoryMutationJob:
                 .where(
                     LongTermMemoryRecord.uid == uid,
                     LongTermMemoryRecord.id == candidate_memory_id,
+                    LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                )
+                .values(
+                    pending_mutation_job_id=None,
+                    updated_at=updated_at,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return
+        if operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE:
+            source_ids: set[int] = set()
+            sources = payload.get("sources") if isinstance(payload, dict) else None
+            if isinstance(sources, list):
+                for source in sources:
+                    if not isinstance(source, dict):
+                        source_ids.clear()
+                        break
+                    memory_id = source.get("memory_id")
+                    if isinstance(memory_id, bool) or not isinstance(memory_id, int) or memory_id < 1:
+                        source_ids.clear()
+                        break
+                    source_ids.add(memory_id)
+            if not source_ids:
+                return
+            await db.execute(
+                update(LongTermMemoryRecord)
+                .where(
+                    LongTermMemoryRecord.uid == uid,
+                    LongTermMemoryRecord.id.in_(source_ids),
                     LongTermMemoryRecord.pending_mutation_job_id == job_id,
                 )
                 .values(

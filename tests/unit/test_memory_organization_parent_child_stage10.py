@@ -8,6 +8,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.crud.memory import memory_record_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     build_memory_active_mutation_key,
@@ -32,6 +33,8 @@ from app.models.memory import (
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
     LongTermMemoryRecord,
+    LongTermMemoryRecordIndexStatus,
+    LongTermMemoryStore,
     LongTermMemoryType,
 )
 from app.models.message import InternalMessage, InternalResponse, MessageRole
@@ -45,7 +48,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         await connection.run_sync(
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
-                tables=[LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__],
+                tables=[LongTermMemoryStore.__table__, LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__],
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -146,6 +149,8 @@ async def _claimed_parent(
     owner: str = "organization-worker",
     max_attempts: int = 4,
 ) -> LongTermMemoryMutationJob:
+    db.add(LongTermMemoryStore(uid=uid))
+    await db.flush()
     parent, created = await memory_job_crud.create(
         db,
         uid=uid,
@@ -172,6 +177,32 @@ async def _claimed_parent(
     return claimed
 
 
+async def _create_recallable_records(
+    db: AsyncSession,
+    *,
+    uid: str,
+    versions: dict[int, int],
+) -> None:
+    for memory_id, version in versions.items():
+        await memory_record_crud.create(
+            db,
+            uid=uid,
+            id=memory_id,
+            memory_key=f"source-{memory_id}",
+            content=f"source content {memory_id}",
+            content_token_count=3,
+            content_hash=f"source-hash-{memory_id}",
+            version=version,
+            indexed_version=version,
+            vector_item_id=f"source-vector-{memory_id}",
+            is_active=True,
+            suppress_recall=False,
+            index_status=LongTermMemoryRecordIndexStatus.READY,
+            commit=False,
+        )
+    await db.commit()
+
+
 def _install_handler_plan(
     monkeypatch: pytest.MonkeyPatch,
     request: MemoryOrganizationExecutionRequest,
@@ -192,6 +223,11 @@ async def test_organization_parent_submits_only_mutation_groups_and_finishes_ato
 ) -> None:
     uid = "organization-parent-child-user"
     parent = await _claimed_parent(db_session, uid=uid)
+    await _create_recallable_records(
+        db_session,
+        uid=uid,
+        versions={1: 11, 2: 12, 3: 13, 4: 14, 5: 15},
+    )
     request = _request()
     plan = MemoryOrganizationValidatedPlan(
         items=(
@@ -315,6 +351,11 @@ async def test_organization_parent_marks_primary_key_collision_stale_and_continu
 ) -> None:
     uid = "organization-parent-stale-user"
     parent = await _claimed_parent(db_session, uid=uid)
+    await _create_recallable_records(
+        db_session,
+        uid=uid,
+        versions={1: 11, 2: 12},
+    )
     blocker, created = await memory_job_crud.create(
         db_session,
         uid=uid,

@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, update
+from sqlalchemy import and_, case, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -547,6 +547,27 @@ class CRUDLongTermMemoryRecord:
         )
         return list(result.scalars().all())
 
+    async def get_organization_group(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        memory_ids: Iterable[int],
+    ) -> list[LongTermMemoryRecord]:
+        normalized_ids = sorted({memory_id for memory_id in memory_ids})
+        if not normalized_ids:
+            return []
+        result = await db.execute(
+            select(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id.in_(normalized_ids),
+            )
+            .order_by(LongTermMemoryRecord.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def list_recallable_by_ids(
         self,
         db: AsyncSession,
@@ -840,6 +861,53 @@ class CRUDLongTermMemoryRecord:
         )
         await _finish(db, commit=commit)
         return (result.rowcount or 0) == 1
+
+    async def reserve_organization_group(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        source_versions: Iterable[tuple[int, int]],
+        job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        expected_by_id: dict[int, int] = {}
+        for memory_id, expected_version in source_versions:
+            if memory_id not in expected_by_id:
+                expected_by_id[memory_id] = expected_version
+        ordered_pairs = sorted(expected_by_id.items())
+        if not ordered_pairs:
+            return False
+
+        pair_conditions = [
+            and_(
+                LongTermMemoryRecord.id == memory_id,
+                LongTermMemoryRecord.version == expected_version,
+            )
+            for memory_id, expected_version in ordered_pairs
+        ]
+        result = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.index_status == LongTermMemoryRecordIndexStatus.READY,
+                LongTermMemoryRecord.indexed_version == LongTermMemoryRecord.version,
+                LongTermMemoryRecord.vector_item_id.is_not(None),
+                LongTermMemoryRecord.vector_item_id != "",
+                LongTermMemoryRecord.suppress_recall.is_(False),
+                LongTermMemoryRecord.pending_mutation_job_id.is_(None),
+                or_(*pair_conditions),
+            )
+            .values(
+                pending_mutation_job_id=job_id,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == len(ordered_pairs)
 
     async def reserve_eviction_candidate(
         self,
