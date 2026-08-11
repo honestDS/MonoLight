@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -826,6 +827,175 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["embedding", "upsert"])
+async def test_organization_merge_update_retries_external_vector_failure_and_publishes_once(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    failure_stage: str,
+) -> None:
+    uid = f"organization-merge-update-{failure_stage}-retry-worker"
+    parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1,),
+        primary_memory_id=1,
+        action="update",
+        pinned_ids=frozenset({1}),
+        target_content="retryable organized update content",
+        target_memory_key="retryable-organized-update-key",
+        max_attempts=2,
+    )
+    before = await _get_record(memory_session_factory, uid=uid, memory_id=1)
+    assert before is not None
+    old_vector_id = build_memory_vector_item_id(1, 1)
+    new_vector_id = build_memory_vector_item_id(1, 2)
+    failures_remaining = 1
+
+    async def fail_once(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal failures_remaining
+        if failures_remaining:
+            failures_remaining -= 1
+            raise RuntimeError("simulated vector failure")
+
+    if failure_stage == "embedding":
+        vector_backend.embedding_hook = fail_once
+    else:
+        vector_backend.upsert_hook = fail_once
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        retried = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.RETRY,
+        )
+        assert retried.attempt_count == 1
+        assert retried.active_mutation_key is not None
+        parent = await _get_job(memory_session_factory, uid=uid, job_id=parent_id)
+        assert parent is not None
+        assert parent.status == LongTermMemoryMutationStatus.SUCCEEDED
+        assert parent.active_mutation_key is None
+        source = await _get_record(memory_session_factory, uid=uid, memory_id=source_ids[0])
+        assert source is not None
+        assert source.pending_mutation_job_id == child_id
+        assert source.version == before.version == 1
+        assert source.memory_key == before.memory_key
+        assert source.content == before.content
+        assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=1)] == [1]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+        assert [record.id for record in recallable] == list(source_ids)
+        collection = vector_backend.collections[COLLECTION_NAME]
+        assert old_vector_id in collection["items"]
+        assert new_vector_id not in collection["items"]
+        if failure_stage == "upsert":
+            assert vector_backend.upsert_calls[0]["ids"] == [new_vector_id]
+            assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+
+        async with memory_session_factory() as db:
+            now = await get_database_time(db)
+            updated = await db.execute(update(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == child_id).values(available_at=now))
+            assert updated.rowcount == 1
+            await db.commit()
+
+        finished = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert finished.attempt_count == 2
+        assert finished.active_mutation_key is None
+        assert finished.result is not None
+        assert finished.result["version"] == 2
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=1)
+        assert record is not None
+        assert record.version == 2
+        assert record.pending_mutation_job_id is None
+        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=1)
+        assert [revision.version for revision in revisions] == [2, 1]
+        collection = vector_backend.collections[COLLECTION_NAME]
+        assert old_vector_id not in collection["items"]
+        assert new_vector_id in collection["items"]
+        assert (COLLECTION_NAME, [old_vector_id]) in vector_backend.delete_calls
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_update_recovers_expired_lease_and_does_not_publish_twice(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-merge-update-lease-recovery-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1,),
+        primary_memory_id=1,
+        action="update",
+        pinned_ids=frozenset({1}),
+        target_content="lease recovered organized update content",
+        target_memory_key="lease-recovered-organized-update-key",
+    )
+    async with memory_session_factory() as db:
+        claimed = await memory_job_crud.try_claim(
+            db,
+            uid=uid,
+            job_id=child_id,
+            owner="expired-organization-merge-owner",
+            lease_seconds=1,
+            commit=False,
+        )
+        assert claimed is not None
+        await db.commit()
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        updated = await db.execute(update(LongTermMemoryMutationJob).where(LongTermMemoryMutationJob.uid == uid, LongTermMemoryMutationJob.id == child_id).values(lock_until=now - timedelta(seconds=10)))
+        assert updated.rowcount == 1
+        recovery = await memory_job_crud.recover_expired(db, delay_seconds=0)
+    assert recovery.retried == 1
+    recovered = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+    assert recovered is not None
+    assert recovered.status == LongTermMemoryMutationStatus.RETRY
+    assert recovered.active_mutation_key is not None
+    source = await _get_record(memory_session_factory, uid=uid, memory_id=source_ids[0])
+    assert source is not None
+    assert source.pending_mutation_job_id == child_id
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        finished = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert finished.attempt_count == 2
+        assert finished.active_mutation_key is None
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=1)
+        assert record is not None
+        assert record.pending_mutation_job_id is None
+        assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=1)] == [2, 1]
+        assert len(vector_backend.upsert_calls) == 1
+        assert len(vector_backend.delete_calls) == 1
+        assert await consumer.run_once() == 0
+        persisted = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
+        assert persisted is not None
+        assert persisted.status == LongTermMemoryMutationStatus.SUCCEEDED
+        assert persisted.attempt_count == 2
+        assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=1)] == [2, 1]
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
 async def test_organization_merge_recomputes_over_limit_to_normal_when_active_count_returns_within_limit(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
@@ -1408,6 +1578,103 @@ async def test_organization_merge_active_migration_after_vector_write_fails_befo
             recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
             assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
         assert [record.id for record in recallable] == list(source_ids)
+        assert await _get_all_deltas(memory_session_factory, uid=uid) == []
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reindex_phase", ["before_execution", "after_vector_write"])
+async def test_organization_merge_reindex_boundary_fails_without_publication(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    reindex_phase: str,
+) -> None:
+    uid = f"organization-merge-reindex-{reindex_phase}-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2, 3),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="reindex boundary organization content",
+        target_memory_key="reindex-boundary-organization-key",
+    )
+    before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
+    old_vector_items = {build_memory_vector_item_id(memory_id, 1): dict(vector_backend.collections[COLLECTION_NAME]["items"][build_memory_vector_item_id(memory_id, 1)]) for memory_id in source_ids}
+    new_vector_id = build_memory_vector_item_id(1, 2)
+    switched = False
+
+    if reindex_phase == "before_execution":
+        async with memory_session_factory() as db:
+            updated = await memory_store_crud.update_by_uid(
+                db,
+                uid=uid,
+                index_status=LongTermMemoryIndexStatus.REINDEXING,
+            )
+            assert updated is not None
+    else:
+
+        async def switch_to_reindexing(_collection_name: str, item_ids: list[str]) -> None:
+            nonlocal switched
+            if switched or item_ids != [new_vector_id]:
+                return
+            switched = True
+            async with memory_session_factory() as db:
+                updated = await memory_store_crud.update_by_uid(
+                    db,
+                    uid=uid,
+                    index_status=LongTermMemoryIndexStatus.REINDEXING,
+                    commit=False,
+                )
+                assert updated is not None
+                await db.commit()
+
+        vector_backend.upsert_hook = switch_to_reindexing
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        failed = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+        assert failed.attempt_count == 1
+        assert failed.error == t(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+        assert failed.active_mutation_key is None
+        if reindex_phase == "before_execution":
+            assert vector_backend.upsert_calls == []
+        else:
+            assert switched is True
+            assert any(call["ids"] == [new_vector_id] for call in vector_backend.upsert_calls)
+            assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+
+        collection = vector_backend.collections[COLLECTION_NAME]
+        assert new_vector_id not in collection["items"]
+        for item_id, item in old_vector_items.items():
+            assert collection["items"][item_id] == item
+        for memory_id in source_ids:
+            record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+            assert record is not None and before[memory_id] is not None
+            assert record.is_active is True
+            assert record.deleted_at is None
+            assert record.pending_mutation_job_id is None
+            assert record.version == before[memory_id].version == 1
+            assert record.memory_key == before[memory_id].memory_key
+            assert record.content == before[memory_id].content
+            assert record.content_hash == before[memory_id].content_hash
+            assert record.vector_item_id == before[memory_id].vector_item_id
+            assert record.index_status == LongTermMemoryRecordIndexStatus.READY
+            assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [1]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+            cleanup_count = await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP)
+        assert [record.id for record in recallable] == list(source_ids)
+        assert cleanup_count == 0
         assert await _get_all_deltas(memory_session_factory, uid=uid) == []
     finally:
         await consumer.stop()
