@@ -3,7 +3,7 @@
 MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（General Autonomous Agent）核心基座。
 
 <p align="center">
-  <img src="./docs/banner.png" alt="MonoLight Banner" width="100%" />
+  <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
 </p>
 
 ## 我们的愿景
