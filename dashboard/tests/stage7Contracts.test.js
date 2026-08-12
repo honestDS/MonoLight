@@ -13,6 +13,7 @@ const readSource = relativePath => readFileSync(resolve(dashboardRoot, relativeP
 
 const apiSource = readSource('src/api/index.js')
 const appSource = readSource('src/App.vue')
+const appScssSource = readSource('src/assets/css/app.scss')
 const constantsSource = readSource('src/constants/index.js')
 const memoriesSource = readSource('src/views/MemoriesView.vue')
 const profilesSource = readSource('src/views/ProfilesView.vue')
@@ -165,6 +166,27 @@ test('route and sidebar menu expose the memories page', () => {
   assert.equal(routeNameMap['/memories'], 'common.menu.memories')
 })
 
+test('app layout adds memory page spacing and keeps the fixed footer above it', () => {
+  const appMainMatch = appScssSource.match(/\.app-main\s*\{([\s\S]*?)\}/)
+  const memoriesAppMainMatch = appScssSource.match(/\.app-main\.app-main--memories\s*\{([\s\S]*?)\}/)
+  const appFooterMatch = appScssSource.match(/\.app-footer\s*\{([\s\S]*?)\}/)
+  assert.ok(appMainMatch, '.app-main source block is missing')
+  assert.ok(memoriesAppMainMatch, '.app-main--memories source block is missing')
+  assert.ok(appFooterMatch, '.app-footer source block is missing')
+
+  const appMainSource = appMainMatch[1]
+  const memoriesAppMainSource = memoriesAppMainMatch[1]
+  const appFooterSource = appFooterMatch[1]
+  assert.match(appSource, /<el-main class="app-main" :class="\{ 'app-main--memories': \$route\.path === '\/memories' \}">/)
+  assert.doesNotMatch(appMainSource, /padding-bottom:\s*80px\s*;/)
+  assert.match(memoriesAppMainSource, /padding-bottom:\s*80px\s*;/)
+  assert.match(appFooterSource, /\bposition:\s*fixed\s*;/)
+
+  const footerZIndex = appFooterSource.match(/\bz-index:\s*(\d+)\s*;/)
+  assert.ok(footerZIndex, '.app-footer z-index declaration is missing')
+  assert.ok(Number(footerZIndex[1]) >= 1000, '.app-footer must stay above the table layers')
+})
+
 test('MemoriesView keeps mutation bodies free of server-owned fields', () => {
   const payloadStart = memoriesSource.indexOf('const payload =')
   const detailsStart = memoriesSource.indexOf('const showDetails', payloadStart)
@@ -246,7 +268,7 @@ test('ProfilesView ordinary saves omit confirmation fields and keep unconfirmed 
 })
 
 const requiredMemoryKeys = [
-  'title', 'actions', 'memories', 'jobs', 'migrations', 'settings', 'active_config', 'target_config',
+  'title', 'actions', 'memories', 'jobs', 'migrations', 'settings', 'expand_settings', 'collapse_settings', 'current_task', 'active_config', 'target_config',
   'channel', 'model', 'dimensions', 'collection', 'revision', 'index_status', 'migration_status',
   'cleanup_status', 'progress', 'capacity', 'no_config', 'reindex', 'cleanup_retry', 'refresh', 'create',
   'view', 'edit', 'delete', 'history', 'resume_current', 'keyword_placeholder', 'all_types',
@@ -317,6 +339,102 @@ test('MemoriesView polls settings and memories while limiting tab-specific polli
   assert.match(refreshSource, /loadMemories\(true\)/)
   assert.match(refreshSource, /if \(activeTab\.value === 'jobs'\) loadJobs\(true\)/)
   assert.match(refreshSource, /if \(activeTab\.value === 'migrations'\) loadMigrations\(true\)/)
+})
+
+test('MemoriesView shows the task summary only for real tasks and keeps it visible when settings expand or collapse', () => {
+  assert.match(memoriesSource, /const settingsExpanded = ref\(false\)/)
+  assert.match(memoriesSource, /settingsExpanded = !settingsExpanded/)
+  const headingStart = memoriesSource.indexOf('<div class="section-heading">')
+  const contentStart = memoriesSource.indexOf('<div class="section-heading-content">', headingStart)
+  const actionsStart = memoriesSource.indexOf('<div class="heading-actions">', headingStart)
+  assert.ok(headingStart >= 0 && contentStart > headingStart && actionsStart > contentStart)
+  const contentSource = memoriesSource.slice(contentStart, actionsStart)
+  const settingsIndex = contentSource.indexOf('<p>{{ $t(\'memories.settings\') }}</p>')
+  const transitionIndex = contentSource.indexOf('<Transition name="memory-task-transition" mode="out-in">')
+  const summaryMatch = contentSource.match(/<div\b(?=[^>]*\bclass="memory-task-summary"(?:\s|>))[^>]*>/)
+  const summaryIndex = summaryMatch?.index ?? -1
+  assert.ok(settingsIndex >= 0 && transitionIndex > settingsIndex)
+  assert.ok(summaryIndex > settingsIndex && summaryIndex < actionsStart - contentStart)
+  const summaryTag = summaryMatch?.[0]
+  assert.ok(summaryTag)
+  assert.match(summaryTag, /v-if="currentMemoryTask"/)
+  assert.doesNotMatch(summaryTag, /v-(?:if|show)="[^"]*settingsExpanded[^"]*"/)
+  assert.doesNotMatch(memoriesSource, /displayMemoryTask/)
+  assert.doesNotMatch(memoriesSource, /临时展示占位，验收后删除/)
+  assert.match(memoriesSource, /<el-collapse-transition>[\s\S]*v-show="settingsExpanded" class="settings-content"[\s\S]*<\/el-collapse-transition>/)
+  assert.match(memoriesSource, /<div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">/)
+  assert.match(memoriesSource, /\.settings-content \{[^}]*display:\s*flow-root;/)
+  assert.match(memoriesSource, /\.runtime-settings-grid \{[^}]*margin-top:\s*0;/)
+  assert.match(memoriesSource, /\.settings-content > \.el-alert \+ \.runtime-settings-grid \{[^}]*margin-top:\s*16px;/)
+  assert.match(memoriesSource, /\$t\('memories\.current_task'\)/)
+  assert.match(memoriesSource, /\$t\('memories\.progress'\)/)
+  assert.match(memoriesSource, /const currentMemoryTask = computed\(\(\) => getCurrentMemoryTask\(settings\)\)/)
+  assert.match(contentSource, /operationLabel\(currentMemoryTask\.operation\)/)
+  assert.match(contentSource, /currentMemoryTask\.id/)
+  assert.match(contentSource, /currentMemoryTask\.total[\s\S]*currentMemoryTask\.completed/)
+  assert.match(contentSource, /currentMemoryTask\.percentage/)
+  assert.match(contentSource, /statusText\(currentMemoryTask\.status\)/)
+  assert.match(memoriesSource, /\.memory-task-summary \{[^}]*white-space: nowrap;[^}]*overflow: hidden;/)
+  assert.match(memoriesSource, /\.section-heading-content \{[^}]*min-width: 0;[^}]*flex: 1;/)
+  assert.match(memoriesSource, /\.memory-task-summary \{[^}]*width: 100%;/)
+  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex:\s*1/)
+  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex-direction:\s*column/)
+  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex-basis:/)
+  assert.match(memoriesSource, /memory-task-transition-(?:enter|leave)-active/)
+  assert.match(memoriesSource, /memory-task-transition-(?:enter|leave)-active[^}]*180ms/)
+  assert.match(memoriesSource, /\.memory-view \.el-collapse-transition-(?:enter|leave)-active[^}]*transition-duration:\s*180ms\s*!important/)
+})
+
+test('MemoriesView removes the memory key list column and right-aligns memory actions', () => {
+  assert.doesNotMatch(memoriesSource, /<el-table-column prop="memory_key"[^>]*>/)
+  assert.match(memoriesSource, /<el-table-column :label="\$t\('memories\.content_preview'\)" min-width="200">/)
+  assert.match(memoriesSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
+
+  const memoriesTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.memories\')"')
+  const jobsTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.jobs\')"')
+  const migrationsTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.migrations\')"')
+  assert.ok(memoriesTabStart >= 0 && jobsTabStart > memoriesTabStart && migrationsTabStart > jobsTabStart)
+
+  const tabSources = [
+    memoriesSource.slice(memoriesTabStart, jobsTabStart),
+    memoriesSource.slice(jobsTabStart, migrationsTabStart),
+    memoriesSource.slice(migrationsTabStart)
+  ]
+  for (const tabSource of tabSources) {
+    assert.match(tabSource, /<el-table-column :label="\$t\('memories\.actions'\)"[^>]*fixed="right"[^>]*header-align="center"[\s\S]*?memory-action-buttons/)
+    assert.doesNotMatch(tabSource, /<el-table-column :label="\$t\('memories\.actions'\)"[^>]*align="right"/)
+    assert.doesNotMatch(tabSource, /<el-table-column :label="\$t\('memories\.actions'\)"[^>]*(?:class-name|label-class-name)=/)
+  }
+  assert.doesNotMatch(memoriesSource, /memory-actions-column|memory-actions-header|class-name=|label-class-name=/)
+  assert.match(memoriesSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
+
+  assert.match(memoriesSource, /<el-table :data="memories"[\s\S]*?class="memory-table memory-data-table"/)
+  assert.match(memoriesSource, /<el-table :data="jobs"[\s\S]*?class="memory-data-table"/)
+  assert.match(memoriesSource, /<el-table :data="migrations"[\s\S]*?class="memory-data-table"/)
+
+  const dataTableStyleMatch = memoriesSource.match(/\.memory-data-table\s*\{([\s\S]*?)\}/)
+  const loadingMaskStyleMatch = memoriesSource.match(/\.memory-data-table\s*>\s*\.el-loading-mask\s*\{([\s\S]*?)\}/)
+  assert.ok(dataTableStyleMatch, '.memory-data-table source block is missing')
+  assert.ok(loadingMaskStyleMatch, '.memory-data-table loading mask source block is missing')
+  assert.match(dataTableStyleMatch[1], /\bposition:\s*relative\s*;/)
+  assert.match(dataTableStyleMatch[1], /\bisolation:\s*isolate\s*;/)
+  const loadingMaskZIndex = loadingMaskStyleMatch[1].match(/\bz-index:\s*(\d+)\s*;/)
+  assert.ok(loadingMaskZIndex, '.memory-data-table loading mask z-index declaration is missing')
+  assert.ok(Number(loadingMaskZIndex[1]) > 2 && Number(loadingMaskZIndex[1]) < 1000, '.memory-data-table loading mask must stay above table layers and below the footer')
+})
+
+test('MemoriesView renders memory jobs as a collapsed tree without manual indentation', () => {
+  const jobsTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.jobs\')"')
+  const migrationsTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.migrations\')"', jobsTabStart)
+  assert.ok(jobsTabStart >= 0 && migrationsTabStart > jobsTabStart)
+
+  const jobsSource = memoriesSource.slice(jobsTabStart, migrationsTabStart)
+  assert.match(jobsSource, /<el-table\s+:data="jobs"[\s\S]*row-key="id"/)
+  assert.match(jobsSource, /:tree-props="\{ children: 'childJobs' \}"/)
+  assert.match(jobsSource, /:default-expand-all="false"/)
+  assert.doesNotMatch(jobsSource, /paddingLeft/)
+  assert.doesNotMatch(jobsSource, /memories\.token_budget/)
+  assert.doesNotMatch(jobsSource, /tokenBudgetText\(row\.token_budget\)/)
 })
 
 test('MemoriesView invalidates settings GETs around settings saves', () => {
@@ -409,4 +527,25 @@ test('MemoriesView only renders available organization counts', () => {
   assert.match(countsSource, /filter\(\(\[, value\]\) => value !== null && value !== undefined\)/)
   assert.match(countsSource, /return counts\.length \? [\s\S]*: '-'/)
   assert.doesNotMatch(countsSource, /\$\{row\.\w+ \?\? 0\}/)
+})
+
+test('MemoriesView renders embedding channel names and keeps organization choices active-only', () => {
+  assert.match(memoriesSource, /channelName\(nestedSetting\('active', 'channel_id', 'active_embedding_channel_id'\)\)/)
+  assert.match(memoriesSource, /channelName\(nestedSetting\('target', 'channel_id', 'target_embedding_channel_id'\)\)/)
+
+  const channelNameStart = memoriesSource.indexOf('const channelName =')
+  const numericSettingStart = memoriesSource.indexOf('const numericSetting =', channelNameStart)
+  assert.ok(channelNameStart >= 0 && numericSettingStart > channelNameStart)
+  const channelNameSource = memoriesSource.slice(channelNameStart, numericSettingStart)
+  assert.match(channelNameSource, /channelId === null \|\| channelId === undefined \|\| channelId === '' \|\| channelId === '-'/)
+  assert.match(channelNameSource, /channels\.value\.find\(item => String\(item\.id\) === String\(channelId\)\)/)
+  assert.match(channelNameSource, /typeof channel\?\.name === 'string'/)
+  assert.match(channelNameSource, /: '-'/)
+  assert.doesNotMatch(channelNameSource, /: String\(channelId\)/)
+  assert.doesNotMatch(channelNameSource, /return String\(channelId\)/)
+
+  assert.match(memoriesSource, /channels\.value = allChannels\n/)
+  assert.match(memoriesSource, /const organizationChannels = computed\(\(\) => channels\.value\.filter\(channel => channel\.is_active !== false\)\)/)
+  assert.match(memoriesSource, /getOrganizationModelsForChannel\(organizationChannels\.value, organizationForm\.channel_id\)/)
+  assert.match(memoriesSource, /<el-option v-for="channel in organizationChannels"[^>]*:label="`\$\{channel\.name\} \(\$\{channel\.id\}\)`"/)
 })

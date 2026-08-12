@@ -279,6 +279,7 @@ class MemorySettingsResponse(BaseModel):
     blocking: MemoryBlockingResponse
     old_collection_cleanup: dict[str, Any]
     migration_job: MemoryJobResponse | None = None
+    current_job: MemoryJobResponse | None = None
     store: dict[str, Any]
 
 

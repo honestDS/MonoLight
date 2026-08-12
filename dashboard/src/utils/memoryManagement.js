@@ -10,6 +10,62 @@ const toFiniteNumber = (value, fallback) => {
 
 const isObject = value => value && typeof value === 'object' && !Array.isArray(value)
 
+const activeMemoryTaskStatuses = new Set([
+  'pending',
+  'queued',
+  'waiting',
+  'retry',
+  'retrying',
+  'running',
+  'processing',
+  'preparing',
+  'building',
+  'catching_up',
+  'validating',
+  'switching',
+  'reindexing',
+  'in_progress',
+  'active'
+])
+
+const firstAvailable = (...values) => values.find(value => value !== null && value !== undefined && value !== '')
+
+const numericProgressValue = (sources, keys) => {
+  for (const source of sources) {
+    if (!isObject(source)) continue
+    for (const key of keys) {
+      const value = toFiniteNumber(source[key], null)
+      if (value !== null) return value
+    }
+  }
+  return null
+}
+
+const taskProgress = (job, completedKeys, totalKeys) => {
+  const sources = [job, job?.progress, job?.payload?.progress]
+  const rawCompleted = numericProgressValue(sources, completedKeys)
+  const completed = rawCompleted === null ? null : Math.max(0, rawCompleted)
+  const total = numericProgressValue(sources, totalKeys)
+  const percentage = total > 0 && completed !== null
+    ? Math.max(0, Math.min(100, Math.round(completed * 100 / total)))
+    : null
+  return { completed, total, percentage }
+}
+
+const taskStatus = job => firstAvailable(job?.status, job?.migration_status, job?.cleanup_status)
+const isActiveMemoryTask = job => activeMemoryTaskStatuses.has(String(taskStatus(job) || '').toLowerCase())
+
+const buildCurrentMemoryTask = (job, operation, completedKeys, totalKeys) => {
+  if (!isObject(job) || !isActiveMemoryTask(job)) return null
+  const progress = taskProgress(job, completedKeys, totalKeys)
+  return {
+    id: firstAvailable(job.id, job.job_id, job.migration_job_id) ?? null,
+    operation: operation || firstAvailable(job.operation) || null,
+    status: taskStatus(job),
+    ...progress
+  }
+}
+
 const normalizeOrganizationId = value => (
   value === null || value === undefined || (typeof value === 'string' && value.trim() === '')
     ? null
@@ -172,29 +228,165 @@ export const buildOrganizationSettingsPayload = (form) => {
 
 export const buildOrganizePayload = dedupeKey => ({ dedupe_key: dedupeKey })
 
+export const getCurrentMemoryTask = (settings) => {
+  const input = isObject(settings) ? settings : {}
+  const migration = isObject(input.migration) ? input.migration : {}
+  const currentJobOperation = firstAvailable(input.current_job?.operation)
+  const currentJob = currentJobOperation === 'embedding_migration'
+    ? {
+        ...migration,
+        ...input.current_job,
+        id: firstAvailable(input.current_job?.id, input.current_job?.job_id, input.current_job?.migration_job_id),
+        operation: currentJobOperation,
+        status: firstAvailable(migration.status, migration.migration_status, input.current_job?.status)
+      }
+    : input.current_job
+  const currentJobTask = buildCurrentMemoryTask(
+    currentJob,
+    currentJobOperation,
+    ['completed', 'completed_count', 'success_count', 'cursor'],
+    ['total', 'total_count', 'snapshot_count', 'snapshot_boundary']
+  )
+  if (currentJobTask) return currentJobTask
+
+  const organizationJob = input.organization?.current_job
+  const organizationTask = buildCurrentMemoryTask(
+    organizationJob,
+    firstAvailable(organizationJob?.operation),
+    ['completed', 'completed_count', 'success_count'],
+    ['total', 'total_count']
+  )
+  if (organizationTask) return organizationTask
+
+  const migrationJob = isObject(input.migration_job) ? input.migration_job : {}
+  const migrationStatus = firstAvailable(migration.status, migration.migration_status, migrationJob.status)
+  const migrationTask = buildCurrentMemoryTask(
+    {
+      ...migrationJob,
+      ...migration,
+      id: firstAvailable(migrationJob.id, migrationJob.job_id, migration.id, migration.job_id),
+      operation: firstAvailable(migrationJob.operation, migration.operation, 'embedding_migration'),
+      status: migrationStatus
+    },
+    'embedding_migration',
+    ['success_count'],
+    ['total_count']
+  )
+  if (migrationTask) return migrationTask
+
+  const maintenance = input.blocking?.maintenance
+  if (isObject(maintenance) && maintenance.operation === 'reindex') {
+    const reindexTask = buildCurrentMemoryTask(
+      {
+        ...maintenance,
+        status: firstAvailable(
+          maintenance.status,
+          input.index?.status,
+          input.index_status,
+          input.store?.index_status
+        )
+      },
+      'reindex',
+      ['success_count'],
+      ['total_count']
+    )
+    if (reindexTask) return reindexTask
+  }
+
+  const cleanup = isObject(input.old_collection_cleanup)
+    ? {
+        ...input.old_collection_cleanup,
+        status: firstAvailable(
+          input.old_collection_cleanup.status,
+          input.old_collection_cleanup.cleanup_status,
+          input.old_collection_cleanup_status,
+          input.store?.old_collection_cleanup_status
+        )
+      }
+    : {
+        job_id: input.store?.old_collection_cleanup_job_id,
+        status: firstAvailable(input.old_collection_cleanup_status, input.store?.old_collection_cleanup_status)
+      }
+  return buildCurrentMemoryTask(cleanup, 'delete_cleanup', [], [])
+}
+
 export const decorateMemoryJobs = (items) => {
   if (!Array.isArray(items)) return []
   const validItems = items.filter(isObject)
   const byId = new Map(validItems.map(item => [item.id, item]))
-  const parentByChild = new Map()
+  const parentCandidatesByChild = new Map()
   validItems.forEach(item => {
     if (!Array.isArray(item.child_job_ids)) return
-    item.child_job_ids.forEach(childId => parentByChild.set(childId, item.id))
+    item.child_job_ids.forEach(childId => {
+      if (!parentCandidatesByChild.has(childId)) parentCandidatesByChild.set(childId, new Set())
+      parentCandidatesByChild.get(childId).add(item.id)
+    })
   })
-  return items.map(item => {
-    if (!isObject(item)) return item
+
+  const parentByChild = new Map()
+  parentCandidatesByChild.forEach((parentIds, childId) => {
+    if (parentIds.size === 1) parentByChild.set(childId, [...parentIds][0])
+  })
+  const parentByJob = new Map()
+  validItems.forEach(item => {
+    const parentId = item.parent_job_id || parentByChild.get(item.id)
+    parentByJob.set(item.id, parentId)
+  })
+
+  const getJobLevel = item => {
     let parentId = item.parent_job_id || parentByChild.get(item.id)
     let level = Number.isInteger(parentId) && parentId > 0 ? 1 : 0
     const seen = new Set()
     while (parentId && byId.has(parentId) && !seen.has(parentId)) {
       seen.add(parentId)
-      const nextParentId = byId.get(parentId).parent_job_id || parentByChild.get(parentId)
+      const nextParentId = parentByJob.get(parentId)
       if (!Number.isInteger(nextParentId) || nextParentId <= 0) break
       level += 1
       parentId = nextParentId
     }
-    return { ...item, jobLevel: level }
+    return level
+  }
+
+  const safeParentByChild = new Map()
+  validItems.forEach(item => {
+    const childId = item.id
+    const parentId = parentByJob.get(childId)
+    if (!Number.isInteger(parentId) || parentId <= 0 || !byId.has(parentId)) return
+
+    const seen = new Set([childId])
+    let currentId = parentId
+    while (Number.isInteger(currentId) && currentId > 0 && byId.has(currentId) && !seen.has(currentId)) {
+      seen.add(currentId)
+      currentId = parentByJob.get(currentId)
+    }
+    if (currentId && seen.has(currentId)) return
+    safeParentByChild.set(childId, parentId)
   })
+
+  const decoratedItems = validItems.map(item => ({
+    ...item,
+    jobLevel: getJobLevel(item),
+    childJobs: []
+  }))
+  const decoratedById = new Map(decoratedItems.map(item => [item.id, item]))
+  const topLevelItems = []
+
+  items.forEach(item => {
+    if (!isObject(item)) {
+      topLevelItems.push(item)
+      return
+    }
+
+    const decoratedItem = decoratedById.get(item.id)
+    const parentId = safeParentByChild.get(item.id)
+    if (parentId !== undefined && decoratedById.has(parentId)) {
+      decoratedById.get(parentId).childJobs.push(decoratedItem)
+    } else {
+      topLevelItems.push(decoratedItem)
+    }
+  })
+
+  return topLevelItems
 }
 
 export const createLatestRequestTracker = () => {

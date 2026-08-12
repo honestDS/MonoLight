@@ -162,7 +162,7 @@ body {
 .app-wrapper { height: 100vh; overflow: hidden; }
 .app-header { background: #fff; border-bottom: 1px solid #ebedf0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
 .app-header .header-right { display: flex; align-items: center; gap: 16px; }
-.app-main { 
+.app-main {
   padding: 24px; 
   overflow-y: auto; 
   background: #f5f7f9;
@@ -170,6 +170,7 @@ body {
   flex-direction: column;
   min-height: calc(100vh - 60px);
 }
+.app-main.app-main--memories { padding-bottom: 80px; }
 
 /* 页脚 */
 .app-footer {
@@ -183,7 +184,7 @@ body {
   color: var(--color-text-secondary);
   border-top: 1px solid var(--color-border-light);
   background: var(--color-primary);
-  z-index: 100;
+  z-index: 1000;
 }
 
 /* 过渡动画 */

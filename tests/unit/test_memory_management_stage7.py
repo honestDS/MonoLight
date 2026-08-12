@@ -39,6 +39,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         MemoryNotFoundError,
         build_memory_content_hash,
         get_memory,
+        get_memory_settings,
         list_jobs,
         list_memories,
         list_memory_history,
@@ -321,6 +322,43 @@ async def test_list_jobs_filters_and_isolates_uid(memory_session_factory) -> Non
 
     assert result["total"] == 1
     assert [item["id"] for item in result["items"]] == [owner_failed.id]
+
+
+@pytest.mark.asyncio
+async def test_memory_settings_exposes_earliest_unfinished_job_and_isolates_uid(memory_session_factory) -> None:
+    owner = "stage7-settings-owner"
+    other = "stage7-settings-other"
+    await configure_store(memory_session_factory, uid=owner)
+    first = await _create_raw_job(
+        memory_session_factory,
+        uid=owner,
+        operation=LongTermMemoryMutationOperation.CREATE,
+        dedupe_key="settings-create",
+        payload={"progress": {"success_count": 2, "total_count": 5}},
+    )
+    await _create_raw_job(
+        memory_session_factory,
+        uid=owner,
+        operation=LongTermMemoryMutationOperation.UPDATE,
+        dedupe_key="settings-update",
+    )
+    foreign = await _create_raw_job(
+        memory_session_factory,
+        uid=other,
+        operation=LongTermMemoryMutationOperation.CREATE,
+        dedupe_key="foreign-create",
+    )
+
+    async with memory_session_factory() as db:
+        result = await get_memory_settings(db, uid=owner)
+
+    current_job = result["current_job"]
+    assert current_job is not None
+    assert current_job["id"] == first.id
+    assert current_job["operation"] == LongTermMemoryMutationOperation.CREATE.value
+    assert current_job["status"] == LongTermMemoryMutationStatus.PENDING.value
+    assert current_job["payload"]["progress"] == {"success_count": 2, "total_count": 5}
+    assert current_job["id"] != foreign.id
 
 
 @pytest.mark.asyncio

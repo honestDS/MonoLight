@@ -7,6 +7,7 @@ import {
   createLatestRequestTracker,
   decorateMemoryJobs,
   estimateMemoryTokens,
+  getCurrentMemoryTask,
   getOrganizationModelsForChannel,
   isMemoryContentTooLong,
   memoryOperationLabelKey,
@@ -347,6 +348,122 @@ test('builds a manual organize payload containing only the dedupe key', () => {
   )
 })
 
+test('finds the active organization task and preserves its operation and progress', () => {
+  const settings = {
+    organization: {
+      current_job: {
+        id: 12,
+        operation: 'organize',
+        status: 'running',
+        completed: 3,
+        total: 5
+      }
+    }
+  }
+  const original = clone(settings)
+
+  assert.deepEqual(getCurrentMemoryTask(settings), {
+    id: 12,
+    operation: 'organize',
+    status: 'running',
+    completed: 3,
+    total: 5,
+    percentage: 60
+  })
+  assert.deepEqual(settings, original)
+})
+
+test('prefers the top-level current job for any operation and reads payload progress', () => {
+  assert.deepEqual(
+    getCurrentMemoryTask({
+      current_job: {
+        id: 13,
+        operation: 'create',
+        status: 'running',
+        payload: { progress: { success_count: 2, total_count: 5 } }
+      },
+      organization: {
+        current_job: { id: 99, operation: 'organize', status: 'running', completed: 1, total: 2 }
+      }
+    }),
+    { id: 13, operation: 'create', status: 'running', completed: 2, total: 5, percentage: 40 }
+  )
+  assert.deepEqual(
+    getCurrentMemoryTask({ current_job: { id: 14, operation: 'organize', status: 'retry' } }),
+    { id: 14, operation: 'organize', status: 'retry', completed: null, total: null, percentage: null }
+  )
+})
+
+test('keeps top-level migration job identity and uses migration stage progress', () => {
+  assert.deepEqual(
+    getCurrentMemoryTask({
+      current_job: {
+        id: 23,
+        operation: 'embedding_migration',
+        status: 'pending'
+      },
+      migration: {
+        status: 'building',
+        success_count: 4,
+        total_count: 10
+      }
+    }),
+    { id: 23, operation: 'embedding_migration', status: 'building', completed: 4, total: 10, percentage: 40 }
+  )
+})
+
+test('merges migration job identity with migration stage progress', () => {
+  assert.deepEqual(
+    getCurrentMemoryTask({
+      migration_job: { id: 21, operation: 'embedding_migration', status: 'running' },
+      migration: { job_id: 21, status: 'building', success_count: 4, total_count: 10 }
+    }),
+    { id: 21, operation: 'embedding_migration', status: 'building', completed: 4, total: 10, percentage: 40 }
+  )
+})
+
+test('identifies reindex from maintenance using index status when maintenance has no status', () => {
+  assert.deepEqual(
+    getCurrentMemoryTask({
+      index: { status: 'reindexing' },
+      blocking: { maintenance: { operation: 'reindex', job_id: 22, payload: { progress: { success_count: 8, total_count: 16 } } } }
+    }),
+    { id: 22, operation: 'reindex', status: 'reindexing', completed: 8, total: 16, percentage: 50 }
+  )
+})
+
+test('returns cleanup tasks without inventing progress and ignores missing or terminal tasks', () => {
+  assert.deepEqual(
+    getCurrentMemoryTask({ old_collection_cleanup: { job_id: 31, status: 'retry' } }),
+    { id: 31, operation: 'delete_cleanup', status: 'retry', completed: null, total: null, percentage: null }
+  )
+  for (const status of ['succeeded', 'failed', 'cancelled']) {
+    assert.equal(getCurrentMemoryTask({ organization: { current_job: { id: 1, operation: 'organize', status } } }), null)
+    assert.equal(getCurrentMemoryTask({ old_collection_cleanup: { job_id: 2, status } }), null)
+  }
+  assert.equal(getCurrentMemoryTask({}), null)
+  assert.equal(getCurrentMemoryTask(null), null)
+})
+
+test('limits task percentages and accepts numeric strings without mutating settings', () => {
+  const settings = {
+    migration: { id: 'migration-1', status: 'running', success_count: '-4', total_count: '2' }
+  }
+  const original = clone(settings)
+
+  assert.deepEqual(getCurrentMemoryTask(settings), {
+    id: 'migration-1',
+    operation: 'embedding_migration',
+    status: 'running',
+    completed: 0,
+    total: 2,
+    percentage: 0
+  })
+  assert.deepEqual(settings, original)
+  assert.equal(getCurrentMemoryTask({ migration: { status: 'running', success_count: 4, total_count: 0 } }).percentage, null)
+  assert.equal(getCurrentMemoryTask({ migration: { status: 'running', success_count: 12, total_count: 10 } }).percentage, 100)
+})
+
 test('returns known operation and source i18n keys and stable unknown fallbacks', () => {
   for (const operation of [
     'create',
@@ -372,21 +489,24 @@ test('returns known operation and source i18n keys and stable unknown fallbacks'
   }
 })
 
-test('decorates multi-level parent and child jobs without mutating input jobs', () => {
+test('builds separate multi-level job trees without mutating input jobs', () => {
   const jobs = [
     { id: 1, operation: 'organize', child_job_ids: [2] },
+    { id: 10, operation: 'organize', child_job_ids: [11] },
     { id: 2, operation: 'organize_merge', child_job_ids: [3] },
+    { id: 11, operation: 'organize_merge', parent_job_id: 10 },
     { id: 3, operation: 'delete_cleanup', parent_job_id: 2 },
-    { id: 4, operation: 'create' }
+    { id: 20, operation: 'create', parent_job_id: 999 }
   ]
   const original = clone(jobs)
 
   const decorated = decorateMemoryJobs(jobs)
 
-  assert.deepEqual(
-    decorated.map(job => [job.id, job.jobLevel]),
-    [[1, 0], [2, 1], [3, 2], [4, 0]]
-  )
+  assert.deepEqual(decorated.map(job => job.id), [1, 10, 20])
+  assert.deepEqual(decorated[0].childJobs.map(job => [job.id, job.jobLevel]), [[2, 1]])
+  assert.deepEqual(decorated[0].childJobs[0].childJobs.map(job => [job.id, job.jobLevel]), [[3, 2]])
+  assert.deepEqual(decorated[1].childJobs.map(job => [job.id, job.jobLevel]), [[11, 1]])
+  assert.deepEqual(decorated[2].childJobs, [])
   assert.notStrictEqual(decorated, jobs)
   assert.notStrictEqual(decorated[0], jobs[0])
   assert.deepEqual(jobs, original)
@@ -402,10 +522,10 @@ test('keeps an orphaned cross-page child at one level and infers parents from ch
 
   const decorated = decorateMemoryJobs(jobs)
 
-  assert.deepEqual(
-    Object.fromEntries(decorated.map(job => [job.id, job.jobLevel])),
-    { 11: 1, 12: 0, 13: 1, 14: 0 }
-  )
+  assert.deepEqual(decorated.map(job => job.id), [11, 12, 14])
+  assert.equal(decorated[0].jobLevel, 1)
+  assert.deepEqual(decorated[1].childJobs.map(job => [job.id, job.jobLevel]), [[13, 1]])
+  assert.deepEqual(decorated[2].childJobs, [])
 })
 
 test('protects job decoration from circular parent graphs', () => {
@@ -417,9 +537,10 @@ test('protects job decoration from circular parent graphs', () => {
 
   const decorated = decorateMemoryJobs(jobs)
 
-  assert.equal(decorated.length, jobs.length)
+  assert.deepEqual(decorated.map(job => job.id), [21, 22, 23])
   assert.ok(decorated.every(job => Number.isFinite(job.jobLevel)))
   assert.ok(decorated.every(job => job.jobLevel >= 0))
+  assert.ok(decorated.every(job => job.childJobs.length === 0))
 })
 
 test('safely decorates null jobs and jobs with invalid child_job_ids', () => {
@@ -435,13 +556,12 @@ test('safely decorates null jobs and jobs with invalid child_job_ids', () => {
 
   const decorated = decorateMemoryJobs(jobs)
 
-  assert.equal(decorated.length, jobs.length)
+  assert.deepEqual(decorated.map(job => job?.id ?? null), [null, 31, 32, 33, 34])
   assert.equal(decorated[0], null)
   assert.equal(decorated[1].jobLevel, 0)
   assert.equal(decorated[2].jobLevel, 0)
   assert.equal(decorated[3].jobLevel, 0)
-  assert.equal(decorated[4].jobLevel, 0)
-  assert.equal(decorated[5].jobLevel, 1)
+  assert.deepEqual(decorated[4].childJobs.map(job => [job.id, job.jobLevel]), [[35, 1]])
   assert.deepEqual(jobs, original)
 })
 

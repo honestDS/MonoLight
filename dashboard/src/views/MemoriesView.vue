@@ -2,9 +2,25 @@
   <div class="memory-view">
     <section class="settings-panel">
       <div class="section-heading">
-        <div>
+        <div class="section-heading-content">
           <h2>{{ $t('memories.title') }}</h2>
           <p>{{ $t('memories.settings') }}</p>
+          <Transition name="memory-task-transition" mode="out-in">
+            <div v-if="currentMemoryTask" key="task-summary" class="memory-task-summary">
+              <div class="memory-task-summary-item">
+                <span>{{ $t('memories.current_task') }}</span>
+                <strong>{{ operationLabel(currentMemoryTask.operation) }}<span v-if="currentMemoryTask.id"> #{{ currentMemoryTask.id }}</span></strong>
+              </div>
+              <div class="memory-task-summary-item memory-task-progress">
+                <span>{{ $t('memories.progress') }}</span>
+                <div v-if="currentMemoryTask.total > 0 && currentMemoryTask.completed !== null" class="memory-task-progress-value">
+                  <el-progress :percentage="currentMemoryTask.percentage ?? 0" :show-text="false" />
+                  <span>{{ currentMemoryTask.completed }} / {{ currentMemoryTask.total }}</span>
+                </div>
+                <el-tag v-else size="small" type="warning">{{ statusText(currentMemoryTask.status) }}</el-tag>
+              </div>
+            </div>
+          </Transition>
         </div>
         <div class="heading-actions">
           <el-button size="small" @click="loadSettings()" :loading="settingsLoading">{{ $t('memories.refresh') }}</el-button>
@@ -19,90 +35,97 @@
             :loading="actionLoading === `cleanup-${cleanupRetryId}`">
             {{ $t('memories.cleanup_retry') }}
           </el-button>
+          <el-button size="small" @click="settingsExpanded = !settingsExpanded" :aria-expanded="settingsExpanded">
+            {{ settingsExpanded ? $t('memories.collapse_settings') : $t('memories.expand_settings') }}
+          </el-button>
         </div>
       </div>
 
-      <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
-      <div class="settings-grid" v-loading="settingsLoading">
-        <div class="config-block">
-          <strong>{{ $t('memories.active_config') }}</strong>
-          <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ nestedSetting('active', 'channel_id', 'active_embedding_channel_id') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('active', 'model_id', 'active_embedding_model_id') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('active', 'dimensions', 'active_embedding_dimensions') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('active', 'collection', 'active_collection_name') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.revision') }}</span><b>{{ nestedSetting('active', 'revision', 'active_embedding_revision') }}</b></div>
-        </div>
-        <div class="config-block">
-          <strong>{{ $t('memories.target_config') }}</strong>
-          <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ nestedSetting('target', 'channel_id', 'target_embedding_channel_id') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('target', 'model_id', 'target_embedding_model_id') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('target', 'dimensions', 'target_embedding_dimensions') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('target', 'collection', 'target_collection_name') }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.migration_status') }}</span><StatusTag :status="settings.migration?.status || setting('migration_status')" :active-text="statusText(settings.migration?.status || setting('migration_status'))" :inactive-text="statusText(settings.migration?.status || setting('migration_status'))" :active-type="statusType(settings.migration?.status || setting('migration_status'))" :inactive-type="statusType(settings.migration?.status || setting('migration_status'))" /></div>
-        </div>
-        <div class="config-block progress-block">
-          <strong>{{ $t('memories.progress') }}</strong>
-          <el-progress :percentage="migrationPercentage" :status="(settings.migration?.status || setting('migration_status')) === 'failed' ? 'exception' : undefined" />
-          <div class="progress-counts">
-            <span>{{ $t('memories.total_count') }} {{ settings.migration?.total_count ?? setting('migration_total_count') ?? 0 }}</span>
-            <span>{{ $t('memories.success_count') }} {{ settings.migration?.success_count ?? setting('migration_success_count') ?? 0 }}</span>
-            <span>{{ $t('memories.failure_count') }} {{ settings.migration?.failure_count ?? setting('migration_failure_count') ?? 0 }}</span>
+      <el-collapse-transition>
+        <div v-show="settingsExpanded" class="settings-content">
+          <el-alert v-if="!configured" type="info" :closable="false" show-icon :title="$t('memories.no_config')" />
+          <div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">
+            <div class="config-block">
+              <strong>{{ $t('memories.active_config') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('active', 'channel_id', 'active_embedding_channel_id')) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('active', 'model_id', 'active_embedding_model_id') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('active', 'dimensions', 'active_embedding_dimensions') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('active', 'collection', 'active_collection_name') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.revision') }}</span><b>{{ nestedSetting('active', 'revision', 'active_embedding_revision') }}</b></div>
+            </div>
+            <div class="config-block">
+              <strong>{{ $t('memories.target_config') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.channel') }}</span><b>{{ channelName(nestedSetting('target', 'channel_id', 'target_embedding_channel_id')) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.model') }}</span><b>{{ nestedSetting('target', 'model_id', 'target_embedding_model_id') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.dimensions') }}</span><b>{{ nestedSetting('target', 'dimensions', 'target_embedding_dimensions') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.collection') }}</span><b class="mono">{{ nestedSetting('target', 'collection', 'target_collection_name') }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.migration_status') }}</span><StatusTag :status="settings.migration?.status || setting('migration_status')" :active-text="statusText(settings.migration?.status || setting('migration_status'))" :inactive-text="statusText(settings.migration?.status || setting('migration_status'))" :active-type="statusType(settings.migration?.status || setting('migration_status'))" :inactive-type="statusType(settings.migration?.status || setting('migration_status'))" /></div>
+            </div>
+            <div class="config-block progress-block">
+              <strong>{{ $t('memories.progress') }}</strong>
+              <el-progress :percentage="migrationPercentage" :status="(settings.migration?.status || setting('migration_status')) === 'failed' ? 'exception' : undefined" />
+              <div class="progress-counts">
+                <span>{{ $t('memories.total_count') }} {{ settings.migration?.total_count ?? setting('migration_total_count') ?? 0 }}</span>
+                <span>{{ $t('memories.success_count') }} {{ settings.migration?.success_count ?? setting('migration_success_count') ?? 0 }}</span>
+                <span>{{ $t('memories.failure_count') }} {{ settings.migration?.failure_count ?? setting('migration_failure_count') ?? 0 }}</span>
+              </div>
+              <div class="config-line"><span>{{ $t('memories.index_status') }}</span><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></div>
+              <div class="config-line"><span>{{ $t('memories.cleanup_status') }}</span><StatusTag :status="settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status')" :active-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :active-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" /></div>
+              <div class="config-line"><span>{{ $t('memories.capacity') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }} / {{ settings.capacity?.max_active_records ?? setting('max_active_records') ?? 0 }}</b></div>
+            </div>
           </div>
-          <div class="config-line"><span>{{ $t('memories.index_status') }}</span><StatusTag :status="settings.index?.status || setting('index_status')" :active-text="statusText(settings.index?.status || setting('index_status'))" :inactive-text="statusText(settings.index?.status || setting('index_status'))" :active-type="statusType(settings.index?.status || setting('index_status'))" :inactive-type="statusType(settings.index?.status || setting('index_status'))" /></div>
-          <div class="config-line"><span>{{ $t('memories.cleanup_status') }}</span><StatusTag :status="settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status')" :active-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-text="statusText(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :active-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" :inactive-type="statusType(settings.old_collection_cleanup?.status || setting('old_collection_cleanup_status'))" /></div>
-          <div class="config-line"><span>{{ $t('memories.capacity') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }} / {{ settings.capacity?.max_active_records ?? setting('max_active_records') ?? 0 }}</b></div>
-        </div>
-      </div>
 
-      <div class="settings-grid organization-settings">
-        <div class="config-block">
-          <strong>{{ $t('memories.capacity_settings') }}</strong>
-          <div class="config-line"><span>{{ $t('memories.active_record_count') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.organize_trigger_records') }}</span><b>{{ settings.capacity?.organize_trigger_records ?? 45 }} / {{ settings.capacity?.max_active_records ?? 50 }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.content_max_tokens') }}</span><b>{{ contentMaxTokens }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.capacity_status') }}</span><el-tag :type="capacityOverLimit ? 'danger' : 'success'">{{ statusText(settings.capacity?.status || 'normal') }}</el-tag></div>
-          <div class="config-line"><span>{{ $t('memories.over_limit') }}</span><b>{{ capacityOverLimit ? $t('memories.yes') : $t('memories.no') }}</b></div>
-        </div>
-        <div class="config-block organization-form">
-          <strong>{{ $t('memories.organization_settings') }}</strong>
-           <div class="config-line"><span>{{ $t('memories.auto_organize') }}</span><el-switch v-model="organizationForm.auto_organize_enabled" @change="markOrganizationFormDirty" /></div>
-          <el-form label-position="top" class="organization-select-form">
-            <el-form-item :label="$t('memories.organization_channel')">
-               <el-select v-model="organizationForm.channel_id" clearable class="full-width-input" :placeholder="$t('memories.organization_channel_placeholder')" @change="handleOrganizationChannelChange()">
-                <el-option v-for="channel in channels" :key="channel.id" :label="`${channel.name} (${channel.id})`" :value="channel.id" />
-              </el-select>
-            </el-form-item>
-            <el-form-item :label="$t('memories.organization_model')">
-               <el-select v-model="organizationForm.model_id" clearable class="full-width-input" :placeholder="$t('memories.organization_model_placeholder')" :disabled="!organizationForm.channel_id" @change="markOrganizationFormDirty">
-                <el-option v-for="model in organizationModelsForChannel" :key="model.model_id" :label="model.model_id" :value="model.model_id" />
-              </el-select>
-            </el-form-item>
-          </el-form>
-          <div v-if="currentOrganizationModel" class="model-summary">
-            <div class="config-line"><span>{{ $t('memories.selected_model') }}</span><b>{{ currentOrganizationModel.model_id }}</b></div>
-            <div class="config-line"><span>{{ $t('memories.context_window_k') }}</span><b>{{ currentOrganizationModel.context_window_k ?? '-' }}</b></div>
-            <div class="config-line"><span>{{ $t('memories.model_max_tokens') }}</span><b>{{ currentOrganizationModel.max_tokens ?? '-' }}</b></div>
-            <div class="config-line"><span>{{ $t('memories.required_output_tokens') }}</span><b>{{ settings.organization?.required_output_tokens ?? '-' }}</b></div>
+          <div class="settings-grid organization-settings">
+            <div class="config-block">
+              <strong>{{ $t('memories.capacity_settings') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.active_record_count') }}</span><b>{{ settings.capacity?.active_record_count ?? setting('active_record_count') ?? 0 }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organize_trigger_records') }}</span><b>{{ settings.capacity?.organize_trigger_records ?? 45 }} / {{ settings.capacity?.max_active_records ?? 50 }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.content_max_tokens') }}</span><b>{{ contentMaxTokens }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.capacity_status') }}</span><el-tag :type="capacityOverLimit ? 'danger' : 'success'">{{ statusText(settings.capacity?.status || 'normal') }}</el-tag></div>
+              <div class="config-line"><span>{{ $t('memories.over_limit') }}</span><b>{{ capacityOverLimit ? $t('memories.yes') : $t('memories.no') }}</b></div>
+            </div>
+            <div class="config-block organization-form">
+              <strong>{{ $t('memories.organization_settings') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.auto_organize') }}</span><el-switch v-model="organizationForm.auto_organize_enabled" @change="markOrganizationFormDirty" /></div>
+              <el-form label-position="top" class="organization-select-form">
+                <el-form-item :label="$t('memories.organization_channel')">
+                  <el-select v-model="organizationForm.channel_id" clearable class="full-width-input" :placeholder="$t('memories.organization_channel_placeholder')" @change="handleOrganizationChannelChange()">
+                    <el-option v-for="channel in organizationChannels" :key="channel.id" :label="`${channel.name} (${channel.id})`" :value="channel.id" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item :label="$t('memories.organization_model')">
+                  <el-select v-model="organizationForm.model_id" clearable class="full-width-input" :placeholder="$t('memories.organization_model_placeholder')" :disabled="!organizationForm.channel_id" @change="markOrganizationFormDirty">
+                    <el-option v-for="model in organizationModelsForChannel" :key="model.model_id" :label="model.model_id" :value="model.model_id" />
+                  </el-select>
+                </el-form-item>
+              </el-form>
+              <div v-if="currentOrganizationModel" class="model-summary">
+                <div class="config-line"><span>{{ $t('memories.selected_model') }}</span><b>{{ currentOrganizationModel.model_id }}</b></div>
+                <div class="config-line"><span>{{ $t('memories.context_window_k') }}</span><b>{{ currentOrganizationModel.context_window_k ?? '-' }}</b></div>
+                <div class="config-line"><span>{{ $t('memories.model_max_tokens') }}</span><b>{{ currentOrganizationModel.max_tokens ?? '-' }}</b></div>
+                <div class="config-line"><span>{{ $t('memories.required_output_tokens') }}</span><b>{{ settings.organization?.required_output_tokens ?? '-' }}</b></div>
+              </div>
+              <div v-if="backendOrganizationModel" class="model-summary">
+                <div class="config-line"><span>{{ $t('memories.backend_current_model') }}</span><b>{{ backendOrganizationModel.model_id || '-' }}</b></div>
+              </div>
+            </div>
+            <div class="config-block">
+              <strong>{{ $t('memories.organization_jobs') }}</strong>
+              <div class="config-line"><span>{{ $t('memories.current_job') }}</span><b>{{ settings.organization?.current_job_id ?? '-' }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.recent_job') }}</span><b>{{ settings.organization?.recent_job_id ?? '-' }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.recent_job_status') }}</span><StatusTag :status="settings.organization?.recent_job?.status" :active-text="statusText(settings.organization?.recent_job?.status)" :inactive-text="statusText(settings.organization?.recent_job?.status)" :active-type="statusType(settings.organization?.recent_job?.status)" :inactive-type="statusType(settings.organization?.recent_job?.status)" /></div>
+              <div class="config-line"><span>{{ $t('memories.last_organized_at') }}</span><b>{{ formatTime(settings.organization?.last_run_at || settings.organization?.recent_job?.finished_at) }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organization_error') }}</span><b class="text-wrap">{{ settings.organization?.error || settings.organization?.recent_job?.error || '-' }}</b></div>
+              <div v-if="settings.organization?.validation_error" class="config-line"><span>{{ $t('memories.organization_validation_error') }}</span><b class="text-wrap">{{ settings.organization.validation_error }}</b></div>
+              <div class="config-line"><span>{{ $t('memories.organize_blocking') }}</span><b class="text-wrap">{{ blockingText(settings.blocking?.organize) }}</b></div>
+            </div>
           </div>
-          <div v-if="backendOrganizationModel" class="model-summary">
-            <div class="config-line"><span>{{ $t('memories.backend_current_model') }}</span><b>{{ backendOrganizationModel.model_id || '-' }}</b></div>
-          </div>
-        </div>
-        <div class="config-block">
-          <strong>{{ $t('memories.organization_jobs') }}</strong>
-          <div class="config-line"><span>{{ $t('memories.current_job') }}</span><b>{{ settings.organization?.current_job_id ?? '-' }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.recent_job') }}</span><b>{{ settings.organization?.recent_job_id ?? '-' }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.recent_job_status') }}</span><StatusTag :status="settings.organization?.recent_job?.status" :active-text="statusText(settings.organization?.recent_job?.status)" :inactive-text="statusText(settings.organization?.recent_job?.status)" :active-type="statusType(settings.organization?.recent_job?.status)" :inactive-type="statusType(settings.organization?.recent_job?.status)" /></div>
-          <div class="config-line"><span>{{ $t('memories.last_organized_at') }}</span><b>{{ formatTime(settings.organization?.last_run_at || settings.organization?.recent_job?.finished_at) }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.organization_error') }}</span><b class="text-wrap">{{ settings.organization?.error || settings.organization?.recent_job?.error || '-' }}</b></div>
-          <div v-if="settings.organization?.validation_error" class="config-line"><span>{{ $t('memories.organization_validation_error') }}</span><b class="text-wrap">{{ settings.organization.validation_error }}</b></div>
-          <div class="config-line"><span>{{ $t('memories.organize_blocking') }}</span><b class="text-wrap">{{ blockingText(settings.blocking?.organize) }}</b></div>
-        </div>
-      </div>
 
-      <el-alert v-if="settingsError" class="settings-error" type="warning" :closable="false" show-icon>
-        <template #title>{{ settingsError }}</template>
-      </el-alert>
+          <el-alert v-if="settingsError" class="settings-error" type="warning" :closable="false" show-icon>
+            <template #title>{{ settingsError }}</template>
+          </el-alert>
+        </div>
+      </el-collapse-transition>
     </section>
 
     <el-tabs v-model="activeTab" @tab-change="handleTabChange" class="memory-tabs">
@@ -126,10 +149,9 @@
           <el-button @click="openEditor()">{{ $t('memories.create') }}</el-button>
           <el-button @click="loadMemories">{{ $t('memories.refresh') }}</el-button>
         </div>
-        <el-table :data="memories" v-loading="memoriesLoading" border stripe class="memory-table">
+        <el-table :data="memories" v-loading="memoriesLoading" border stripe class="memory-table memory-data-table">
           <el-table-column prop="id" :label="$t('memories.memory_id')" width="88" align="center" />
-          <el-table-column prop="memory_key" :label="$t('memories.memory_key')" min-width="190" show-overflow-tooltip />
-          <el-table-column :label="$t('memories.content_preview')" min-width="300"><template #default="{ row }"><div class="content-preview">{{ row.content || '-' }}</div></template></el-table-column>
+          <el-table-column :label="$t('memories.content_preview')" min-width="200"><template #default="{ row }"><div class="content-preview">{{ row.content || '-' }}</div></template></el-table-column>
           <el-table-column :label="$t('memories.type')" width="120" align="center"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column>
           <el-table-column prop="content_token_count" :label="$t('memories.token_count')" width="100" align="center" />
           <el-table-column :label="$t('memories.pinned')" width="90" align="center"><template #default="{ row }"><el-tag :type="row.pinned ? 'warning' : 'info'">{{ row.pinned ? $t('memories.pinned_yes') : $t('memories.pinned_no') }}</el-tag></template></el-table-column>
@@ -137,9 +159,9 @@
           <el-table-column :label="$t('memories.current_status')" width="130" align="center"><template #default="{ row }"><el-tag :type="recordStatusType(row)">{{ recordStatus(row) }}</el-tag></template></el-table-column>
           <el-table-column prop="version" :label="$t('memories.version')" width="76" align="center" />
           <el-table-column :label="$t('memories.updated_at')" width="170"><template #default="{ row }">{{ formatTime(row.updated_at) }}</template></el-table-column>
-          <el-table-column :label="$t('memories.actions')" width="390" fixed="right" align="center">
+          <el-table-column :label="$t('memories.actions')" width="280" fixed="right" header-align="center">
             <template #default="{ row }">
-              <div class="action-buttons">
+              <div class="memory-action-buttons">
                 <el-button size="small" type="info" @click="showDetails(row)">{{ $t('memories.view') }}</el-button>
                 <el-button size="small" type="primary" @click="openEditor(row)" :disabled="!canMutateRecord(row)">{{ $t('memories.edit') }}</el-button>
                 <el-button size="small" @click="showHistory(row)">{{ $t('memories.history') }}</el-button>
@@ -160,26 +182,60 @@
           <el-input v-model="jobFilters.memory_id" :placeholder="$t('memories.memory_id')" clearable class="small-input" @keyup.enter="resetAndLoadJobs" />
           <el-button type="primary" @click="resetAndLoadJobs">{{ $t('common.confirm') }}</el-button><el-button @click="loadJobs">{{ $t('memories.refresh') }}</el-button>
         </div>
-        <el-table :data="jobs" v-loading="jobsLoading" border stripe>
+        <el-table :data="jobs" v-loading="jobsLoading" border stripe row-key="id" :tree-props="{ children: 'childJobs' }" :default-expand-all="false" class="memory-data-table">
           <el-table-column prop="id" :label="$t('memories.job_id')" width="90" align="center" />
-          <el-table-column :label="$t('memories.operation')" width="190"><template #default="{ row }"><div class="job-tree" :style="{ paddingLeft: `${row.jobLevel * 18}px` }"><el-tag v-if="row.jobLevel" size="small" type="info">{{ $t('memories.job_child') }}</el-tag><el-tag v-else-if="row.child_job_ids?.length" size="small" type="success">{{ $t('memories.job_parent') }}</el-tag><span>{{ operationLabel(row.operation) }}</span></div></template></el-table-column>
+          <el-table-column :label="$t('memories.operation')" width="190"><template #default="{ row }"><div class="job-tree"><el-tag v-if="row.jobLevel" size="small" type="info">{{ $t('memories.job_child') }}</el-tag><el-tag v-else-if="row.child_job_ids?.length" size="small" type="success">{{ $t('memories.job_parent') }}</el-tag><span>{{ operationLabel(row.operation) }}</span></div></template></el-table-column>
           <el-table-column prop="memory_id" :label="$t('memories.memory_id')" width="100" align="center" />
           <el-table-column :label="$t('memories.status')" width="120" align="center"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag></template></el-table-column>
           <el-table-column :label="$t('memories.snapshot_count')" width="100" align="center"><template #default="{ row }">{{ row.snapshot_count ?? '-' }}</template></el-table-column>
           <el-table-column :label="$t('memories.organization_counts')" min-width="300"><template #default="{ row }">{{ jobCountsText(row) }}</template></el-table-column>
-          <el-table-column :label="$t('memories.token_budget')" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ tokenBudgetText(row.token_budget) }}</template></el-table-column>
           <el-table-column prop="attempt_count" :label="$t('memories.attempt')" width="90" align="center" />
           <el-table-column :label="$t('memories.error')" min-width="260" show-overflow-tooltip><template #default="{ row }">{{ jobError(row) }}</template></el-table-column>
           <el-table-column :label="$t('memories.created_at')" width="170"><template #default="{ row }">{{ formatTime(row.created_at) }}</template></el-table-column>
-          <el-table-column :label="$t('memories.actions')" width="250" fixed="right" align="center"><template #default="{ row }"><div class="action-buttons"><el-button v-if="canRetry(row)" size="small" type="warning" @click="retryJob(row)">{{ $t('memories.retry') }}</el-button><el-button v-if="canCancel(row)" size="small" type="danger" @click="cancelJob(row)">{{ $t('memories.cancel_job') }}</el-button><el-button v-if="canShowDeletedHistory(row)" size="small" @click="showDeletedHistory(row)">{{ $t('memories.history') }}</el-button><el-button size="small" type="info" @click="showJob(row)">{{ $t('memories.view') }}</el-button></div></template></el-table-column>
+          <el-table-column :label="$t('memories.actions')" width="250" fixed="right" header-align="center">
+            <template #default="{ row }">
+              <div class="memory-action-buttons">
+                <el-button v-if="canRetry(row)" size="small" type="warning" @click="retryJob(row)">{{ $t('memories.retry') }}</el-button>
+                <el-button v-if="canCancel(row)" size="small" type="danger" @click="cancelJob(row)">{{ $t('memories.cancel_job') }}</el-button>
+                <el-button v-if="canShowDeletedHistory(row)" size="small" @click="showDeletedHistory(row)">{{ $t('memories.history') }}</el-button>
+                <el-button size="small" type="info" @click="showJob(row)">{{ $t('memories.view') }}</el-button>
+              </div>
+            </template>
+          </el-table-column>
         </el-table>
         <div class="table-footer"><span>{{ $t('common.total_items', { total: jobTotal }) }}</span><el-pagination v-model:current-page="jobPage" v-model:page-size="jobPageSize" :total="jobTotal" :page-sizes="[10, 20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="loadJobs" @size-change="resetAndLoadJobs" /></div>
       </el-tab-pane>
 
       <el-tab-pane :label="$t('memories.migrations')" name="migrations">
         <div class="filter-bar"><el-button @click="loadMigrations">{{ $t('memories.refresh') }}</el-button></div>
-        <el-table :data="migrations" v-loading="migrationsLoading" border stripe>
-          <el-table-column :label="$t('memories.migration_job')" width="110" align="center"><template #default="{ row }">{{ migrationId(row) }}</template></el-table-column><el-table-column :label="$t('memories.status')" width="140" align="center"><template #default="{ row }"><el-tag :type="statusType(row.status || row.migration_status)">{{ statusText(row.status || row.migration_status) }}</el-tag></template></el-table-column><el-table-column :label="$t('memories.target')" min-width="250"><template #default="{ row }">{{ migrationTarget(row) }}</template></el-table-column><el-table-column :label="$t('memories.progress')" min-width="180"><template #default="{ row }">{{ progressText(row) }}</template></el-table-column><el-table-column :label="$t('memories.error')" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.error || row.migration_error || '-' }}</template></el-table-column><el-table-column :label="$t('memories.actions')" width="350" fixed="right" align="center"><template #default="{ row }"><div class="action-buttons"><el-button size="small" type="info" @click="showMigration(row)">{{ $t('memories.view') }}</el-button><el-button v-if="canRetryMigration(row)" size="small" type="warning" @click="retryMigration(row)">{{ $t('memories.migration_retry') }}</el-button><el-button v-if="canCancelMigration(row)" size="small" type="danger" @click="cancelMigration(row)">{{ $t('memories.migration_cancel') }}</el-button><el-button v-if="cleanupId(row)" size="small" type="danger" @click="retryCleanup(cleanupId(row))">{{ $t('memories.cleanup_retry') }}</el-button></div></template></el-table-column>
+        <el-table :data="migrations" v-loading="migrationsLoading" border stripe class="memory-data-table">
+          <el-table-column :label="$t('memories.migration_job')" width="110" align="center">
+            <template #default="{ row }">{{ migrationId(row) }}</template>
+          </el-table-column>
+          <el-table-column :label="$t('memories.status')" width="140" align="center">
+            <template #default="{ row }">
+              <el-tag :type="statusType(row.status || row.migration_status)">{{ statusText(row.status || row.migration_status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column :label="$t('memories.target')" min-width="250">
+            <template #default="{ row }">{{ migrationTarget(row) }}</template>
+          </el-table-column>
+          <el-table-column :label="$t('memories.progress')" min-width="180">
+            <template #default="{ row }">{{ progressText(row) }}</template>
+          </el-table-column>
+          <el-table-column :label="$t('memories.error')" min-width="220" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.error || row.migration_error || '-' }}</template>
+          </el-table-column>
+          <el-table-column :label="$t('memories.actions')" width="350" fixed="right" header-align="center">
+            <template #default="{ row }">
+              <div class="memory-action-buttons">
+                <el-button size="small" type="info" @click="showMigration(row)">{{ $t('memories.view') }}</el-button>
+                <el-button v-if="canRetryMigration(row)" size="small" type="warning" @click="retryMigration(row)">{{ $t('memories.migration_retry') }}</el-button>
+                <el-button v-if="canCancelMigration(row)" size="small" type="danger" @click="cancelMigration(row)">{{ $t('memories.migration_cancel') }}</el-button>
+                <el-button v-if="cleanupId(row)" size="small" type="danger" @click="retryCleanup(cleanupId(row))">{{ $t('memories.cleanup_retry') }}</el-button>
+              </div>
+            </template>
+          </el-table-column>
         </el-table>
         <div class="table-footer"><span>{{ $t('common.total_items', { total: migrationTotal }) }}</span><el-pagination v-model:current-page="migrationPage" v-model:page-size="migrationPageSize" :total="migrationTotal" :page-sizes="[10, 20, 50]" layout="total, sizes, prev, pager, next, jumper" @current-change="loadMigrations" @size-change="resetAndLoadMigrations" /></div>
       </el-tab-pane>
@@ -227,6 +283,7 @@ import {
   createLatestRequestTracker,
   decorateMemoryJobs,
   estimateMemoryTokens,
+  getCurrentMemoryTask,
   getOrganizationModelsForChannel,
   isMemoryContentTooLong,
   memoryOperationLabelKey,
@@ -240,6 +297,7 @@ const memoryTypes = MEMORY_TYPES
 const jobStatuses = MEMORY_JOB_STATUSES
 const jobOperations = MEMORY_JOB_OPERATIONS
 const activeTab = ref('memories')
+const settingsExpanded = ref(false)
 const settings = reactive({})
 const settingsLoading = ref(false)
 const actionLoading = ref('')
@@ -292,6 +350,11 @@ const pageData = (response) => {
 const formatTime = (value) => value ? new Date(value).toLocaleString() : '-'
 const setting = (key) => settings.store?.[key] ?? settings[key] ?? '-'
 const nestedSetting = (section, key, legacyKey) => settings[section]?.[key] ?? setting(legacyKey)
+const channelName = (channelId) => {
+  if (channelId === null || channelId === undefined || channelId === '' || channelId === '-') return '-'
+  const channel = channels.value.find(item => String(item.id) === String(channelId))
+  return typeof channel?.name === 'string' && channel.name.trim() ? channel.name : '-'
+}
 const numericSetting = (key, fallback) => {
   const value = Number(setting(key))
   return Number.isFinite(value) ? value : fallback
@@ -311,7 +374,8 @@ const migrationPercentage = computed(() => {
   const total = Number(settings.migration?.total_count ?? numericSetting('migration_total_count', 0))
   return total ? Math.min(100, Math.round(Number(settings.migration?.success_count ?? numericSetting('migration_success_count', 0)) * 100 / total)) : 0
 })
-const organizationModelsForChannel = computed(() => getOrganizationModelsForChannel(channels.value, organizationForm.channel_id))
+const organizationChannels = computed(() => channels.value.filter(channel => channel.is_active !== false))
+const organizationModelsForChannel = computed(() => getOrganizationModelsForChannel(organizationChannels.value, organizationForm.channel_id))
 const currentOrganizationModel = computed(() => organizationModelsForChannel.value.find(model => model.model_id === organizationForm.model_id) || null)
 const backendOrganizationModel = computed(() => settings.organization?.model || null)
 const requiredOutputTokens = computed(() => settings.requiredOutputTokens ?? Number(settings.organization?.required_output_tokens || 0))
@@ -328,6 +392,7 @@ const settingsError = computed(() => {
   ]
   return candidates.find(value => typeof value === 'string' && value.trim() && value.trim() !== '-') || ''
 })
+const currentMemoryTask = computed(() => getCurrentMemoryTask(settings))
 
 const typeLabel = (value) => t(`memories.type_${value}`, value || '-')
 const sourceLabel = (value) => {
@@ -413,7 +478,7 @@ const loadChannels = async () => {
       if (!data.items.length || allChannels.length >= total || data.items.length < 100) break
       page += 1
     }
-    channels.value = allChannels.filter(channel => channel.is_active !== false)
+    channels.value = allChannels
     handleOrganizationChannelChange(false)
   } catch (error) { ElMessage.error(error.message || t('memories.load_failed')) }
 }
@@ -548,11 +613,15 @@ onBeforeUnmount(() => {
 
 .memory-view { min-width: 0; }
 .settings-panel { padding: 20px; margin-bottom: 18px; background: #fff; border: 1px solid var(--color-border-light); }
-.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.section-heading { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.section-heading-content { min-width: 0; flex: 1; }
 .section-heading h2 { margin: 0 0 4px; font-size: 22px; color: var(--color-text-main); }
 .section-heading p { margin: 0; color: var(--color-text-secondary); }
-.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
+.settings-content { display: flow-root; }
 .settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.runtime-settings-grid { margin-top: 0; }
+.settings-content > .el-alert + .runtime-settings-grid { margin-top: 16px; }
 .config-block { min-width: 0; padding: 16px; background: #f8fafc; border: 1px solid #e5e7eb; }
 .config-block strong { display: block; margin-bottom: 12px; color: var(--color-text-main); }
 .config-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; color: var(--color-text-secondary); font-size: 13px; }
@@ -565,11 +634,15 @@ onBeforeUnmount(() => {
 .memory-tabs { background: #fff; padding: 0 20px 20px; border: 1px solid var(--color-border-light); }
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0; }
 .keyword-input { width: 240px; }.filter-input { width: 150px; }.sort-input { width: 130px; }.order-input { width: 110px; }.operation-input { width: 190px; }.small-input { width: 120px; }
-.memory-table { width: 100%; }.content-preview { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.45; }
+.memory-table { width: 100%; }.memory-data-table { position: relative; isolation: isolate; }.memory-data-table > .el-loading-mask { z-index: 4; }.content-preview { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.45; }
 .table-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 16px; color: var(--color-text-secondary); font-size: 13px; }
 .memory-content { max-height: 360px; margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font: inherit; line-height: 1.55; }
-.action-buttons { flex-wrap: wrap; gap: 4px; }.action-buttons .el-button { margin-left: 0; }.job-tree { display: flex; align-items: center; gap: 6px; }
+.memory-action-buttons { width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }.memory-action-buttons .el-button { margin-left: 0; }.job-tree { display: flex; align-items: center; gap: 6px; }
+.memory-task-summary { display: flex; align-items: center; gap: 24px; min-width: 0; margin-top: 8px; width: 100%; color: var(--color-text-secondary); font-size: 13px; white-space: nowrap; overflow: hidden; }
+.memory-task-summary-item { display: flex; align-items: center; gap: 8px; min-width: 0; }.memory-task-summary-item strong { color: var(--color-text-main); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.memory-task-progress { min-width: 0; flex: 1; }.memory-task-progress-value { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; color: var(--color-text-main); }.memory-task-progress-value .el-progress { min-width: 40px; flex: 1; }
+.memory-task-transition-enter-active, .memory-task-transition-leave-active { transition: opacity 180ms ease, transform 180ms ease; }.memory-task-transition-enter-from, .memory-task-transition-leave-to { opacity: 0; transform: translateY(-6px); }
+.memory-view .el-collapse-transition-enter-active, .memory-view .el-collapse-transition-leave-active { transition-duration: 180ms !important; }
 .token-estimate { display: flex; justify-content: space-between; gap: 12px; margin: -4px 0 14px 120px; color: var(--color-text-secondary); font-size: 12px; }.token-estimate-error { color: var(--el-color-danger); }
 @media (max-width: 1100px) { .settings-grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 760px) { .settings-grid { grid-template-columns: 1fr; }.section-heading { flex-direction: column; }.heading-actions { justify-content: flex-start; }.filter-bar > * { width: 100% !important; }.table-footer { align-items: flex-start; flex-direction: column; overflow-x: auto; }.token-estimate { margin-left: 0; } }
+@media (max-width: 760px) { .settings-grid { grid-template-columns: 1fr; }.section-heading { flex-wrap: wrap; }.heading-actions { justify-content: flex-start; }.filter-bar > * { width: 100% !important; }.table-footer { align-items: flex-start; flex-direction: column; overflow-x: auto; }.token-estimate { margin-left: 0; } }
 </style>

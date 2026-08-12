@@ -700,6 +700,7 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         snapshot_count=active_count,
     )
     unfinished_jobs = await memory_job_crud.list_unfinished_by_uid(db, uid=normalized_uid)
+    current_job = unfinished_jobs[0] if unfinished_jobs else None
     active_organization_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.ORGANIZE]
     active_reindex_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.REINDEX]
     active_migration_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION]
@@ -797,6 +798,7 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
         },
         "old_collection_cleanup": cleanup,
         "migration_job": _job_view(migration_job),
+        "current_job": _job_view(current_job),
         "store": {
             **flat,
             "content_max_tokens": MEMORY_CONTENT_MAX_TOKENS,

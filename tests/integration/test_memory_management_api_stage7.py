@@ -1021,6 +1021,7 @@ async def test_memory_stage11_settings_api_exposes_organization_state_without_se
         assert updated_data["organization"]["model"]["usage"] == "CHAT"
         assert updated_data["organization"]["current_job_id"] is None
         assert updated_data["organization"]["recent_job_id"] is None
+        assert updated_data["current_job"] is None
         assert set(updated_data["blocking"]) == {"organize", "maintenance"}
         _assert_no_organization_secrets(updated_data)
 
@@ -1050,6 +1051,7 @@ async def test_memory_stage11_settings_api_exposes_organization_state_without_se
         assert data["capacity"]["organize_trigger_records"] == 45
         assert data["capacity"]["content_max_tokens"] == 160
         assert data["capacity"]["active_record_count"] == 1
+        assert data["current_job"]["id"] == organize_job_id
         assert data["organization"]["current_job_id"] == organize_job_id
         assert data["organization"]["recent_job_id"] == organize_job_id
         assert data["organization"]["current_job"]["id"] == organize_job_id
