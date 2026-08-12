@@ -37,8 +37,8 @@ const validOrganizationModel = (overrides = {}) => ({
 
 const validOrganizationForm = (overrides = {}) => ({
   auto_organize_enabled: false,
-  channel_id: 7,
-  model_id: 'organizer-model',
+  organization_channel_id: 7,
+  organization_model_id: 'organizer-model',
   ...overrides
 })
 
@@ -89,8 +89,8 @@ test('normalizes nested settings into stable capacity and organization display v
     },
     organization: {
       auto_organize_enabled: true,
-      channel_id: 8,
-      model_id: 'organizer-model',
+      organization_channel_id: 8,
+      organization_model_id: 'organizer-model',
       required_output_tokens: '6400'
     }
   }
@@ -107,15 +107,15 @@ test('normalizes nested settings into stable capacity and organization display v
   })
   assert.deepEqual(normalized.organizationForm, {
     auto_organize_enabled: true,
-    channel_id: 8,
-    model_id: 'organizer-model'
+    organization_channel_id: 8,
+    organization_model_id: 'organizer-model'
   })
   assert.equal(normalized.requiredOutputTokens, 6400)
   assert.equal(normalized.contentMaxTokens, 160)
   assert.equal(normalized.activeRecordCount, 47)
   assert.equal(normalized.maxActiveRecords, 50)
-  assert.equal(normalized.organizationForm.channel_id, 8)
-  assert.equal(normalized.organizationForm.model_id, 'organizer-model')
+  assert.equal(normalized.organizationForm.organization_channel_id, 8)
+  assert.equal(normalized.organizationForm.organization_model_id, 'organizer-model')
   assert.deepEqual(settings, original)
 })
 
@@ -144,13 +144,33 @@ test('normalizes legacy flat settings with the same display shape and defaults',
   })
   assert.deepEqual(normalized.organizationForm, {
     auto_organize_enabled: false,
-    channel_id: 4,
-    model_id: 'legacy-organizer'
+    organization_channel_id: 4,
+    organization_model_id: 'legacy-organizer'
   })
   assert.equal(normalized.requiredOutputTokens, 3200)
   assert.equal(normalized.contentMaxTokens, 160)
   assert.equal(normalized.activeRecordCount, 12)
   assert.equal(normalized.maxActiveRecords, 50)
+  assert.deepEqual(settings, original)
+})
+
+test('normalizes top-level memory_organization input into the canonical organization form', () => {
+  const settings = {
+    memory_organization: {
+      auto_organize_enabled: true,
+      organization_channel_id: 9,
+      organization_model_id: 'top-level-organizer'
+    }
+  }
+  const original = clone(settings)
+
+  const normalized = normalizeMemorySettings(settings)
+
+  assert.deepEqual(normalized.organizationForm, {
+    auto_organize_enabled: true,
+    organization_channel_id: 9,
+    organization_model_id: 'top-level-organizer'
+  })
   assert.deepEqual(settings, original)
 })
 
@@ -164,8 +184,8 @@ test('normalizes null, empty, and invalid settings values to safe top-level defa
     },
     organization: {
       auto_organize_enabled: null,
-      channel_id: '',
-      model_id: '',
+      organization_channel_id: '',
+      organization_model_id: '',
       required_output_tokens: Number.NaN
     }
   }
@@ -177,8 +197,8 @@ test('normalizes null, empty, and invalid settings values to safe top-level defa
   assert.equal(normalized.capacity.organize_trigger_records, 45)
   assert.equal(normalized.capacity.content_max_tokens, 160)
   assert.equal(normalized.organizationForm.auto_organize_enabled, false)
-  assert.equal(normalized.organizationForm.channel_id, null)
-  assert.equal(normalized.organizationForm.model_id, null)
+  assert.equal(normalized.organizationForm.organization_channel_id, null)
+  assert.equal(normalized.organizationForm.organization_model_id, null)
   assert.equal(normalized.requiredOutputTokens, 0)
   assert.equal(normalized.contentMaxTokens, 160)
   assert.equal(normalized.activeRecordCount, 0)
@@ -193,8 +213,8 @@ test('normalizes null, empty, and invalid settings values to safe top-level defa
     assert.equal(safe.requiredOutputTokens, 0)
     assert.deepEqual(safe.organizationForm, {
       auto_organize_enabled: false,
-      channel_id: null,
-      model_id: null
+      organization_channel_id: null,
+      organization_model_id: null
     })
   }
 })
@@ -238,15 +258,15 @@ test('filters organization models by channel, CHAT usage, model id, and enabled 
 
 test('validates organization selection pairs and auto-organization requirements', () => {
   assert.equal(
-    validateOrganizationSettings(validOrganizationForm({ channel_id: 7, model_id: null }), validOrganizationModel(), 6400),
+    validateOrganizationSettings(validOrganizationForm({ organization_channel_id: 7, organization_model_id: null }), validOrganizationModel(), 6400),
     'organization_selection_pair_required'
   )
   assert.equal(
-    validateOrganizationSettings(validOrganizationForm({ channel_id: null, model_id: 'organizer-model' }), validOrganizationModel(), 6400),
+    validateOrganizationSettings(validOrganizationForm({ organization_channel_id: null, organization_model_id: 'organizer-model' }), validOrganizationModel(), 6400),
     'organization_selection_pair_required'
   )
   assert.equal(
-    validateOrganizationSettings(validOrganizationForm({ auto_organize_enabled: true, channel_id: null, model_id: null }), null, 6400),
+    validateOrganizationSettings(validOrganizationForm({ auto_organize_enabled: true, organization_channel_id: null, organization_model_id: null }), null, 6400),
     'organization_model_required'
   )
 })
@@ -295,7 +315,7 @@ test('rejects models whose output budget is below the required organization outp
 test('accepts cleared settings and valid enabled or disabled organization configurations', () => {
   assert.equal(
     validateOrganizationSettings(
-      validOrganizationForm({ auto_organize_enabled: false, channel_id: null, model_id: null }),
+      validOrganizationForm({ auto_organize_enabled: false, organization_channel_id: null, organization_model_id: null }),
       null,
       6400
     ),
@@ -314,8 +334,8 @@ test('accepts cleared settings and valid enabled or disabled organization config
 test('builds organization settings payload without server-owned or contextual fields', () => {
   const form = {
     auto_organize_enabled: true,
-    channel_id: 7,
-    model_id: 'organizer-model',
+    organization_channel_id: 7,
+    organization_model_id: 'organizer-model',
     uid: 'user-1',
     records: [{ id: 1 }],
     session_id: 'session-1',

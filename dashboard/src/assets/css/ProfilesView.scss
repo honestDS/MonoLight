@@ -133,4 +133,28 @@
     overflow-y: auto;
     padding-right: 4px;
   }
+
+  .mb-15 {
+    margin-bottom: 15px;
+  }
+
+  .model-summary {
+    margin-top: 8px;
+  }
+
+  .config-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 28px;
+    color: var(--color-text-secondary);
+    font-size: 13px;
+  }
+
+  .config-line b {
+    color: var(--color-text-main);
+    font-weight: 500;
+    text-align: right;
+  }
 }

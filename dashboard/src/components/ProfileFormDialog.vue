@@ -6,6 +6,55 @@
           <el-tab-pane :label="$t('profiles.base_settings')" name="base">
             <div class="tab-pane-content">
               <div class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.base_settings') }}</div>
+                <el-form-item :label="$t('profiles.profile_name')">
+                  <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
+                </el-form-item>
+                <el-form-item v-if="showOwnerColumn && dialogType === 'create'" :label="$t('profiles.owner_username')">
+                  <el-select v-model="form.uid" :placeholder="$t('profiles.select_owner')" filterable class="full-width-input" @change="$emit('owner-change', $event)">
+                    <el-option v-for="item in users" :key="item.uid" :label="item.username" :value="item.uid"></el-option>
+                  </el-select>
+                </el-form-item>
+                <el-form-item :label="$t('profiles.associated_prompt')">
+                  <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
+                    <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                  </el-select>
+                </el-form-item>
+                <el-form-item :label="$t('profiles.context_summary_threshold')">
+                  <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
+                    <el-option
+                      v-for="percent in contextSummaryThresholdOptions"
+                      :key="percent"
+                      :label="`${percent}%`"
+                      :value="percent"
+                    ></el-option>
+                  </el-select>
+                  <div class="help-text mt-5">{{ $t('profiles.context_summary_threshold_hint') }}</div>
+                </el-form-item>
+              </div>
+            </div>
+          </el-tab-pane>
+
+          <!-- 记忆设置 -->
+          <el-tab-pane :label="$t('profiles.memory_settings')" name="memory">
+            <div class="tab-pane-content">
+              <el-alert
+                v-if="memorySettingsUnavailable"
+                type="warning"
+                :closable="false"
+                show-icon
+                :title="$t('profiles.memory_settings_unavailable')"
+                class="mb-15"
+              />
+              <el-alert
+                v-else-if="memorySettingsReady && memoryStorageConfigured === false"
+                type="warning"
+                :closable="false"
+                show-icon
+                :title="$t('profiles.memory_storage_not_configured')"
+                class="mb-15"
+              />
+              <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.long_term_memory_settings') }}</div>
                 <el-form-item :label="$t('profiles.long_term_memory_enabled')">
                   <el-switch v-model="form.configs.memory.enabled"></el-switch>
@@ -55,32 +104,44 @@
                 </template>
                 <div v-else class="help-text">{{ $t('profiles.memory_embedding_create_hint') }}</div>
               </div>
-              <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.base_settings') }}</div>
-                <el-form-item :label="$t('profiles.profile_name')">
-                  <el-input v-model="form.name" :placeholder="$t('profiles.unique_name')"></el-input>
+
+              <div v-loading="memorySettingsLoading" class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.memory_organization_settings') }}</div>
+                <el-form-item :label="$t('profiles.auto_organize_enabled')">
+                  <el-switch v-model="form.memory_organization.auto_organize_enabled" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady" />
+                  <div class="help-text mt-5">{{ $t('profiles.auto_organize_enabled_hint') }}</div>
                 </el-form-item>
-                <el-form-item v-if="showOwnerColumn && dialogType === 'create'" :label="$t('profiles.owner_username')">
-                  <el-select v-model="form.uid" :placeholder="$t('profiles.select_owner')" filterable class="full-width-input">
-                    <el-option v-for="item in users" :key="item.uid" :label="item.username" :value="item.uid"></el-option>
+                <el-form-item :label="$t('profiles.organization_channel')">
+                  <el-select
+                    v-model="form.memory_organization.organization_channel_id"
+                    clearable
+                    filterable
+                    class="full-width-input"
+                    :placeholder="$t('profiles.organization_channel_placeholder')"
+                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady"
+                  >
+                    <el-option v-for="channel in memoryOrganizationChannels" :key="channel.id" :label="channel.name" :value="channel.id" />
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.associated_prompt')">
-                  <el-select v-model="form.prompt_id" :placeholder="$t('profiles.optional_prompt')" clearable class="full-width-input">
-                    <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
+                <el-form-item :label="$t('profiles.organization_model')">
+                  <el-select
+                    v-model="form.memory_organization.organization_model_id"
+                    clearable
+                    filterable
+                    class="full-width-input"
+                    :placeholder="$t('profiles.organization_model_placeholder')"
+                    :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady || !form.memory_organization.organization_channel_id"
+                  >
+                    <el-option v-for="model in memoryOrganizationModels" :key="model.model_id" :label="model.model_id" :value="model.model_id" />
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.context_summary_threshold')">
-                  <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
-                    <el-option
-                      v-for="percent in contextSummaryThresholdOptions"
-                      :key="percent"
-                      :label="`${percent}%`"
-                      :value="percent"
-                    ></el-option>
-                  </el-select>
-                  <div class="help-text mt-5">{{ $t('profiles.context_summary_threshold_hint') }}</div>
-                </el-form-item>
+                <div v-if="memoryOrganizationModel" class="model-summary">
+                  <div class="config-line"><span>{{ $t('profiles.selected_model') }}</span><b>{{ memoryOrganizationModel.model_id }}</b></div>
+                  <div class="config-line"><span>{{ $t('profiles.context_window_k') }}</span><b>{{ memoryOrganizationModel.context_window_k ?? '-' }}</b></div>
+                  <div class="config-line"><span>{{ $t('profiles.model_max_tokens') }}</span><b>{{ memoryOrganizationModel.max_tokens ?? '-' }}</b></div>
+                  <div class="config-line"><span>{{ $t('profiles.required_output_tokens') }}</span><b>{{ memoryOrganizationRequiredOutputTokens ?? '-' }}</b></div>
+                </div>
+                <div v-else class="help-text">{{ $t('profiles.organization_model_not_selected') }}</div>
               </div>
             </div>
           </el-tab-pane>
@@ -363,7 +424,7 @@
       </el-form>
       <template #footer>
         <el-button @click="$emit('update:dialogVisible', false)" size="default">{{ $t('profiles.cancel') }}</el-button>
-        <el-button type="primary" @click="$emit('submit')" size="default" :loading="submitting">{{ $t('profiles.save') }}</el-button>
+        <el-button type="primary" @click="$emit('submit')" size="default" :loading="submitting" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady">{{ $t('profiles.save') }}</el-button>
       </template>
     </el-dialog>
 </template>
@@ -388,6 +449,14 @@ defineProps({
   memoryEmbeddingOptions: { type: Array, required: true },
   memoryEmbeddingPreviewing: { type: Boolean, required: true },
   memoryEmbeddingTargetKey: { type: String, default: '' },
+  memoryOrganizationChannels: { type: Array, required: true },
+  memoryOrganizationModels: { type: Array, required: true },
+  memoryOrganizationModel: { type: Object, default: null },
+  memoryOrganizationRequiredOutputTokens: { type: Number, default: 0 },
+  memorySettingsLoading: { type: Boolean, required: true },
+  memorySettingsReady: { type: Boolean, required: true },
+  memorySettingsUnavailable: { type: Boolean, required: true },
+  memoryStorageConfigured: { type: Boolean, default: true },
   prompts: { type: Array, required: true },
   showOwnerColumn: { type: Boolean, required: true },
   submitting: { type: Boolean, required: true },
@@ -398,6 +467,7 @@ defineProps({
 defineEmits([
   'add-allowed-operation-dir',
   'add-file-send-blocked-extension',
+  'owner-change',
   'remove-allowed-operation-dir',
   'remove-file-send-blocked-extension',
   'preview-memory-embedding',

@@ -498,14 +498,16 @@ dashboard/src/views/
 ├── HistoryLogs.vue         # 历史日志页面
 ├── KnowledgeBase.vue       # 知识库管理页面
 ├── LoginView.vue           # 登录页面
-├── MemoriesView.vue        # 长期记忆管理页面
+├── MemoriesView.vue        # 长期记忆数据、作业与运行状态页面，配置入口集中到 Profile 记忆设置
 ├── MessagePlatformsView.vue # 消息平台管理页面
-├── ProfilesView.vue        # Profile 管理页面
+├── ProfilesView.vue        # Profile 管理页面，协调 Profile 级记忆参数与用户级自动整理设置
 ├── PromptsView.vue         # Prompt 管理页面
 ├── RealTimeLogs.vue        # 实时日志页面
 ├── ScheduledTasksView.vue  # 定时任务管理页面
 └── UsersView.vue           # 用户管理页面
 ```
+
+`dashboard/src/components/ProfileFormDialog.vue` 的记忆设置页集中编辑 Profile 级召回参数、嵌入配置和用户级自动整理设置；自动整理数据仍由后端按用户唯一保存，避免同一用户的多个 Profile 产生冲突。
 
 `dashboard/src/api/` 对应后端接口层，`components/` 提供共享界面组件，`composables/` 提供页面共用逻辑，`router/`、`i18n/` 和 `utils/` 分别承载路由、多语言和前端辅助能力。
 

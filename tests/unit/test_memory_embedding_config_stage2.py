@@ -42,7 +42,16 @@ from app.models.memory import (
     LongTermMemoryRecord,
     LongTermMemoryStore,
 )
-from app.models.profile import LongTermMemoryConfig, Profile, ProfileConfig
+from app.models.profile import (
+    LongTermMemoryConfig,
+    LongTermMemoryOrganizationConfig,
+    Profile,
+    ProfileConfig,
+    ProfileCreate,
+    ProfileResponse,
+    ProfileUpdate,
+)
+from app.schemas.memory import MemorySettingsUpdateRequest
 from scripts import migration_20260803_add_memory_embedding_selection_token as selection_token_migration
 
 MEMORY_CONFIG_TABLES = [
@@ -166,6 +175,56 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
         "candidate_k": 12,
         "result_max_chars": 8192,
     }
+
+
+def test_memory_organization_contract_uses_canonical_fields_and_defaults() -> None:
+    organization = LongTermMemoryOrganizationConfig.model_validate({})
+
+    assert set(LongTermMemoryOrganizationConfig.model_fields) == {
+        "auto_organize_enabled",
+        "organization_channel_id",
+        "organization_model_id",
+    }
+    assert organization.model_dump() == {
+        "auto_organize_enabled": False,
+        "organization_channel_id": None,
+        "organization_model_id": None,
+    }
+    assert set(MemorySettingsUpdateRequest.model_fields) == set(LongTermMemoryOrganizationConfig.model_fields)
+    assert MemorySettingsUpdateRequest.model_validate({}).model_dump() == organization.model_dump()
+    assert "channel_id" not in LongTermMemoryOrganizationConfig.model_fields
+    assert "model_id" not in LongTermMemoryOrganizationConfig.model_fields
+
+
+@pytest.mark.parametrize("model", [LongTermMemoryOrganizationConfig, MemorySettingsUpdateRequest])
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"organization_channel_id": 1},
+        {"organization_model_id": "chat-model"},
+    ],
+)
+def test_memory_organization_requires_channel_and_model_as_a_pair(model, values: dict) -> None:
+    with pytest.raises(ValueError):
+        model.model_validate(values)
+
+
+def test_memory_settings_update_request_forbids_extra_fields() -> None:
+    with pytest.raises(ValueError):
+        MemorySettingsUpdateRequest.model_validate({"unexpected": True})
+
+
+def test_profile_memory_organization_is_exposed_at_profile_boundary_only() -> None:
+    assert "memory_organization" in ProfileCreate.model_fields
+    assert "memory_organization" in ProfileUpdate.model_fields
+    assert "memory_organization" in ProfileResponse.model_fields
+    assert "auto_organize_enabled" not in LongTermMemoryConfig.model_fields
+    assert "organization_channel_id" not in LongTermMemoryConfig.model_fields
+    assert "organization_model_id" not in LongTermMemoryConfig.model_fields
+    assert "auto_organize_enabled" not in ProfileConfig.model_validate({}).memory.model_dump()
+    assert "organization_channel_id" not in ProfileConfig.model_validate({}).memory.model_dump()
+    assert "organization_model_id" not in ProfileConfig.model_validate({}).memory.model_dump()
+    assert set(ProfileConfig.model_fields["memory"].annotation.model_fields) == set(LongTermMemoryConfig.model_fields)
 
 
 @pytest.mark.parametrize(

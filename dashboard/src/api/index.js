@@ -167,6 +167,7 @@ export const profileApi = {
   setDefault: (id) => request.post(`/profiles/set-default?profile_id=${id}`),
   update: (id, data) => request.post(`/profiles/update?profile_id=${id}`, data),
   delete: (id) => request.post(`/profiles/delete?profile_id=${id}`),
+  memorySettings: (params = {}) => request.get('/profiles/memory-settings', { params }),
   memoryEmbeddingPreview: (data) => request.post('/profiles/memory-embedding-preview', data),
   memoryEmbeddingConfirm: (data) => request.post('/profiles/memory-embedding-confirm', data),
   types: () => request.get('/profiles/types'),

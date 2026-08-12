@@ -24,7 +24,6 @@
         </div>
         <div class="heading-actions">
           <el-button size="small" @click="loadSettings()" :loading="settingsLoading">{{ $t('memories.refresh') }}</el-button>
-          <el-button type="primary" size="small" @click="saveSettings" :loading="actionLoading === 'settings'">{{ $t('memories.save_settings') }}</el-button>
           <el-button type="success" size="small" @click="organize" :loading="actionLoading === 'organize'" :disabled="organizeBlocked">{{ $t('memories.organize_now') }}</el-button>
           <el-button type="warning" size="small" @click="reindex" :loading="actionLoading === 'reindex'" :disabled="!configured">{{ $t('memories.reindex') }}</el-button>
           <el-button
@@ -83,31 +82,6 @@
               <div class="config-line"><span>{{ $t('memories.content_max_tokens') }}</span><b>{{ contentMaxTokens }}</b></div>
               <div class="config-line"><span>{{ $t('memories.capacity_status') }}</span><el-tag :type="capacityOverLimit ? 'danger' : 'success'">{{ statusText(settings.capacity?.status || 'normal') }}</el-tag></div>
               <div class="config-line"><span>{{ $t('memories.over_limit') }}</span><b>{{ capacityOverLimit ? $t('memories.yes') : $t('memories.no') }}</b></div>
-            </div>
-            <div class="config-block organization-form">
-              <strong>{{ $t('memories.organization_settings') }}</strong>
-              <div class="config-line"><span>{{ $t('memories.auto_organize') }}</span><el-switch v-model="organizationForm.auto_organize_enabled" @change="markOrganizationFormDirty" /></div>
-              <el-form label-position="top" class="organization-select-form">
-                <el-form-item :label="$t('memories.organization_channel')">
-                  <el-select v-model="organizationForm.channel_id" clearable class="full-width-input" :placeholder="$t('memories.organization_channel_placeholder')" @change="handleOrganizationChannelChange()">
-                    <el-option v-for="channel in organizationChannels" :key="channel.id" :label="`${channel.name} (${channel.id})`" :value="channel.id" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item :label="$t('memories.organization_model')">
-                  <el-select v-model="organizationForm.model_id" clearable class="full-width-input" :placeholder="$t('memories.organization_model_placeholder')" :disabled="!organizationForm.channel_id" @change="markOrganizationFormDirty">
-                    <el-option v-for="model in organizationModelsForChannel" :key="model.model_id" :label="model.model_id" :value="model.model_id" />
-                  </el-select>
-                </el-form-item>
-              </el-form>
-              <div v-if="currentOrganizationModel" class="model-summary">
-                <div class="config-line"><span>{{ $t('memories.selected_model') }}</span><b>{{ currentOrganizationModel.model_id }}</b></div>
-                <div class="config-line"><span>{{ $t('memories.context_window_k') }}</span><b>{{ currentOrganizationModel.context_window_k ?? '-' }}</b></div>
-                <div class="config-line"><span>{{ $t('memories.model_max_tokens') }}</span><b>{{ currentOrganizationModel.max_tokens ?? '-' }}</b></div>
-                <div class="config-line"><span>{{ $t('memories.required_output_tokens') }}</span><b>{{ settings.organization?.required_output_tokens ?? '-' }}</b></div>
-              </div>
-              <div v-if="backendOrganizationModel" class="model-summary">
-                <div class="config-line"><span>{{ $t('memories.backend_current_model') }}</span><b>{{ backendOrganizationModel.model_id || '-' }}</b></div>
-              </div>
             </div>
             <div class="config-block">
               <strong>{{ $t('memories.organization_jobs') }}</strong>
@@ -279,17 +253,14 @@ import { MEMORY_JOB_OPERATIONS, MEMORY_JOB_STATUSES, MEMORY_TYPES } from '../con
 import StatusTag from '../components/StatusTag.vue'
 import {
   buildOrganizePayload,
-  buildOrganizationSettingsPayload,
   createLatestRequestTracker,
   decorateMemoryJobs,
   estimateMemoryTokens,
   getCurrentMemoryTask,
-  getOrganizationModelsForChannel,
   isMemoryContentTooLong,
   memoryOperationLabelKey,
   memorySourceLabelKey,
-  normalizeMemorySettings,
-  validateOrganizationSettings
+  normalizeMemorySettings
 } from '../utils/memoryManagement'
 
 const { t } = useI18n()
@@ -331,7 +302,6 @@ const selectedJob = ref(null)
 const migrationVisible = ref(false)
 const selectedMigration = ref(null)
 const pollTimer = ref(null)
-const organizationFormDirty = ref(false)
 const settingsRequestTracker = createLatestRequestTracker()
 const memoriesRequestTracker = createLatestRequestTracker()
 const jobsRequestTracker = createLatestRequestTracker()
@@ -339,7 +309,6 @@ const migrationsRequestTracker = createLatestRequestTracker()
 const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
 const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
 const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
-const organizationForm = reactive({ auto_organize_enabled: false, channel_id: null, model_id: null })
 
 const unwrap = (response) => response?.data?.data ?? response?.data ?? {}
 const pageData = (response) => {
@@ -374,11 +343,6 @@ const migrationPercentage = computed(() => {
   const total = Number(settings.migration?.total_count ?? numericSetting('migration_total_count', 0))
   return total ? Math.min(100, Math.round(Number(settings.migration?.success_count ?? numericSetting('migration_success_count', 0)) * 100 / total)) : 0
 })
-const organizationChannels = computed(() => channels.value.filter(channel => channel.is_active !== false))
-const organizationModelsForChannel = computed(() => getOrganizationModelsForChannel(organizationChannels.value, organizationForm.channel_id))
-const currentOrganizationModel = computed(() => organizationModelsForChannel.value.find(model => model.model_id === organizationForm.model_id) || null)
-const backendOrganizationModel = computed(() => settings.organization?.model || null)
-const requiredOutputTokens = computed(() => settings.requiredOutputTokens ?? Number(settings.organization?.required_output_tokens || 0))
 const contentTokenCount = computed(() => estimateMemoryTokens(form.content))
 const contentTooLong = computed(() => isMemoryContentTooLong(form.content, contentMaxTokens.value))
 const settingsError = computed(() => {
@@ -440,16 +404,10 @@ const tokenBudgetText = (budget) => budget ? [
   `${t('memories.required_output_tokens')}: ${budget.required_output_tokens ?? '-'}`
 ].join(' / ') : '-'
 
-const applySettings = (data, { syncOrganizationForm = true } = {}) => {
+const applySettings = (data) => {
   const normalizedData = normalizeMemorySettings(data)
   Object.keys(settings).forEach(key => delete settings[key])
   Object.assign(settings, normalizedData)
-  if (syncOrganizationForm) {
-    organizationForm.auto_organize_enabled = normalizedData.organizationForm.auto_organize_enabled
-    organizationForm.channel_id = normalizedData.organizationForm.channel_id
-    organizationForm.model_id = normalizedData.organizationForm.model_id
-    organizationFormDirty.value = false
-  }
 }
 
 const loadSettings = async (silent = false) => {
@@ -458,7 +416,7 @@ const loadSettings = async (silent = false) => {
   try {
     const data = unwrap(await memoryApi.settings())
     if (!settingsRequestTracker.isCurrent(requestSeq)) return
-    applySettings(data, { syncOrganizationForm: !silent || !organizationFormDirty.value })
+    applySettings(data)
   } catch (error) {
     if (settingsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
@@ -479,7 +437,6 @@ const loadChannels = async () => {
       page += 1
     }
     channels.value = allChannels
-    handleOrganizationChannelChange(false)
   } catch (error) { ElMessage.error(error.message || t('memories.load_failed')) }
 }
 
@@ -532,26 +489,8 @@ const resetAndLoadMemories = () => { memoryPage.value = 1; loadMemories() }
 const resetAndLoadJobs = () => { jobPage.value = 1; loadJobs() }
 const resetAndLoadMigrations = () => { migrationPage.value = 1; loadMigrations() }
 const handleTabChange = (tab) => { if (tab === 'jobs') loadJobs(); if (tab === 'migrations') loadMigrations() }
-const refreshAll = () => { if (actionLoading.value !== 'settings') loadSettings(true); loadMemories(true); if (activeTab.value === 'jobs') loadJobs(true); if (activeTab.value === 'migrations') loadMigrations(true) }
+const refreshAll = () => { loadSettings(true); loadMemories(true); if (activeTab.value === 'jobs') loadJobs(true); if (activeTab.value === 'migrations') loadMigrations(true) }
 
-const markOrganizationFormDirty = () => { organizationFormDirty.value = true }
-const handleOrganizationChannelChange = (markDirty = true) => {
-  if (!organizationForm.channel_id || !organizationModelsForChannel.value.some(model => model.model_id === organizationForm.model_id)) organizationForm.model_id = null
-  if (markDirty) organizationFormDirty.value = true
-}
-const saveSettings = async () => {
-  const model = currentOrganizationModel.value
-  const validationError = validateOrganizationSettings(organizationForm, model, requiredOutputTokens.value)
-  if (validationError) return ElMessage.warning(t(`memories.${validationError}`, { required: requiredOutputTokens.value }))
-  actionLoading.value = 'settings'
-  settingsRequestTracker.invalidate()
-  settingsLoading.value = false
-  try {
-    const data = unwrap(await memoryApi.updateSettings(buildOrganizationSettingsPayload(organizationForm)))
-    applySettings(data)
-    ElMessage.info(t('memories.settings_saved'))
-  } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
-}
 const organize = async () => {
   actionLoading.value = 'organize'
   try { await memoryApi.organize(buildOrganizePayload(newDedupeKey())); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
@@ -630,7 +569,7 @@ onBeforeUnmount(() => {
 .mono { font-family: Consolas, monospace; font-size: 12px; }
 .progress-counts { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; color: var(--color-text-secondary); font-size: 12px; }
 .settings-error { margin-top: 16px; }
-.organization-select-form { margin-top: 12px; }.organization-select-form .el-form-item { margin-bottom: 10px; }.model-summary { margin-top: 8px; }
+.organization-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .memory-tabs { background: #fff; padding: 0 20px 20px; border: 1px solid var(--color-border-light); }
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0; }
 .keyword-input { width: 240px; }.filter-input { width: 150px; }.sort-input { width: 130px; }.order-input { width: 110px; }.operation-input { width: 190px; }.small-input { width: 120px; }

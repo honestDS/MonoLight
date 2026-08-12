@@ -6,7 +6,9 @@ import test from 'node:test'
 
 import { defaultProfileConfigs, routeNameMap } from '../src/constants/index.js'
 import enMemories from '../src/i18n/locales/en/memories.js'
+import enProfiles from '../src/i18n/locales/en/profiles.js'
 import zhMemories from '../src/i18n/locales/zh/memories.js'
+import zhProfiles from '../src/i18n/locales/zh/profiles.js'
 
 const dashboardRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const readSource = relativePath => readFileSync(resolve(dashboardRoot, relativePath), 'utf8')
@@ -16,6 +18,7 @@ const appSource = readSource('src/App.vue')
 const appScssSource = readSource('src/assets/css/app.scss')
 const constantsSource = readSource('src/constants/index.js')
 const memoriesSource = readSource('src/views/MemoriesView.vue')
+const profileFormSource = readSource('src/components/ProfileFormDialog.vue')
 const profilesSource = readSource('src/views/ProfilesView.vue')
 const routerSource = readSource('src/router/index.js')
 
@@ -125,6 +128,60 @@ test('memoryApi pin and unpin POST requests do not send a request body', () => {
   assert.match(apiSource, /unpin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/unpin`\)/)
   assert.doesNotMatch(apiSource, /pin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/pin`,/)
   assert.doesNotMatch(apiSource, /unpin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/unpin`,/)
+})
+
+test('profileApi exposes user memory settings through the profile GET endpoint', () => {
+  assert.match(apiSource, /memorySettings:\s*\(params\s*=\s*\{\}\)\s*=>\s*request\.get\('\/profiles\/memory-settings',\s*\{\s*params\s*\}\)/)
+})
+
+test('ProfileFormDialog separates profile memory settings from user auto organization settings', () => {
+  const baseStart = profileFormSource.indexOf('<el-tab-pane :label="$t(\'profiles.base_settings\')"')
+  const memoryStart = profileFormSource.indexOf('<el-tab-pane :label="$t(\'profiles.memory_settings\')"')
+  const modelStart = profileFormSource.indexOf('<el-tab-pane :label="$t(\'profiles.model_settings\')"')
+  assert.ok(baseStart >= 0 && memoryStart > baseStart && modelStart > memoryStart)
+
+  const baseSource = profileFormSource.slice(baseStart, memoryStart)
+  const memorySource = profileFormSource.slice(memoryStart, modelStart)
+  assert.doesNotMatch(baseSource, /long_term_memory|form\.configs\.memory|memory_embedding|memory_organization/)
+  assert.match(memorySource, /form\.configs\.memory\.enabled/)
+  assert.match(memorySource, /form\.configs\.memory\.top_k/)
+  assert.match(memorySource, /form\.configs\.memory\.candidate_k/)
+  assert.match(memorySource, /form\.configs\.memory\.result_max_chars/)
+  assert.match(memorySource, /memoryEmbeddingTargetKey/)
+  assert.match(memorySource, /form\.memory_organization\.auto_organize_enabled/)
+  assert.match(memorySource, /form\.memory_organization\.organization_channel_id/)
+  assert.match(memorySource, /form\.memory_organization\.organization_model_id/)
+  assert.match(memorySource, /<el-option v-for="channel in memoryOrganizationChannels"[^>]*:label="channel\.name"/)
+  assert.doesNotMatch(memorySource, /memoryOrganizationChannels"[^>]*:[^>]*label="[^"\n]*channel\.id/)
+  assert.match(profileFormSource, /<el-button type="primary"[\s\S]*:disabled="memorySettingsLoading \|\| memorySettingsUnavailable \|\| !memorySettingsReady"[\s\S]*\$t\('profiles\.save'\)/)
+})
+
+const requiredProfileMemoryKeys = [
+  'memory_settings', 'long_term_memory_settings', 'long_term_memory_enabled', 'long_term_memory_enabled_hint',
+  'memory_storage_not_configured', 'memory_settings_unavailable', 'memory_top_k', 'memory_top_k_hint',
+  'memory_candidate_k', 'memory_candidate_k_hint', 'memory_result_max_chars', 'memory_result_max_chars_hint',
+  'memory_embedding_target', 'memory_embedding_target_placeholder', 'memory_embedding_target_hint',
+  'memory_embedding_current', 'memory_embedding_preview', 'memory_embedding_preview_hint',
+  'memory_embedding_not_configured', 'memory_embedding_dimensions', 'memory_embedding_estimated_records',
+  'memory_embedding_confirmation_title', 'memory_embedding_confirmation_first_notice',
+  'memory_embedding_confirmation_change_notice', 'memory_embedding_confirmation_same_notice',
+  'memory_embedding_confirmation_check', 'memory_embedding_confirm', 'memory_embedding_confirm_success',
+  'memory_embedding_create_hint', 'memory_organization_settings', 'auto_organize_enabled',
+  'auto_organize_enabled_hint', 'organization_channel', 'organization_channel_placeholder',
+  'organization_model', 'organization_model_placeholder', 'selected_model', 'context_window_k',
+  'model_max_tokens', 'required_output_tokens', 'organization_model_not_selected',
+  'organization_selection_pair_required', 'organization_model_limits_invalid',
+  'organization_max_tokens_too_small', 'organization_model_required', 'organization_model_invalid',
+  'load_memory_settings_failed', 'memory_settings_unavailable'
+]
+
+test('English and Chinese profiles namespaces contain matching memory settings keys', () => {
+  for (const [locale, messages] of [['en', enProfiles], ['zh', zhProfiles]]) {
+    for (const key of requiredProfileMemoryKeys) {
+      assert.equal(typeof messages[key], 'string', `${locale}.profiles.${key} is missing`)
+    }
+  }
+  assert.deepEqual(Object.keys(enProfiles).sort(), Object.keys(zhProfiles).sort())
 })
 
 test('defaultProfileConfigs includes independent memory defaults', () => {
@@ -240,7 +297,35 @@ test('ProfilesView performs memory embedding preview and confirmation as separat
   assert.doesNotMatch(confirmSource, /memoryEmbeddingPreview\(/)
 })
 
-test('ProfilesView ordinary saves omit confirmation fields and keep unconfirmed targets inactive', () => {
+test('ProfilesView loads user memory settings with a latest-request tracker', () => {
+  const loadStart = profilesSource.indexOf('const loadMemorySettings = async')
+  const loadEnd = profilesSource.indexOf('const removeAllowedOperationDir', loadStart)
+  assert.notEqual(loadStart, -1)
+  assert.notEqual(loadEnd, -1)
+
+  const loadSource = profilesSource.slice(loadStart, loadEnd)
+  assert.match(profilesSource, /const memorySettingsRequestTracker = createLatestRequestTracker\(\)/)
+  assert.match(loadSource, /const requestSeq = memorySettingsRequestTracker\.begin\(\)/)
+  assert.match(loadSource, /profileApi\.memorySettings\(params\)/)
+  assert.match(loadSource, /if \(!memorySettingsRequestTracker\.isCurrent\(requestSeq\)\) return/)
+  assert.match(loadSource, /if \(memorySettingsRequestTracker\.isCurrent\(requestSeq\)\) memorySettingsLoading\.value = false/)
+})
+
+test('ProfilesView reloads user memory settings when an administrator changes the create owner', () => {
+  const ownerStart = profilesSource.indexOf('const handleMemoryOwnerChange =')
+  const visibilityStart = profilesSource.indexOf('const handleDialogVisibilityChange', ownerStart)
+  assert.notEqual(ownerStart, -1)
+  assert.notEqual(visibilityStart, -1)
+
+  const ownerSource = profilesSource.slice(ownerStart, visibilityStart)
+  assert.match(profilesSource, /@owner-change="handleMemoryOwnerChange"/)
+  assert.match(ownerSource, /if \(!dialogVisible\.value \|\| dialogType\.value !== 'create'\) return/)
+  assert.match(ownerSource, /form\.uid = uid \|\| null/)
+  assert.match(ownerSource, /form\.memory_organization = \{[\s\S]*organization_channel_id: null[\s\S]*organization_model_id: null/)
+  assert.match(ownerSource, /loadMemorySettings\(\)/)
+})
+
+test('ProfilesView sends auto organization settings at the top level and keeps configs.memory profile-scoped', () => {
   const buildStart = profilesSource.indexOf('const buildConfigsForSave =')
   const submitStart = profilesSource.indexOf('const submitForm', buildStart)
   const saveEnd = profilesSource.indexOf('onMounted(() =>', submitStart)
@@ -255,14 +340,16 @@ test('ProfilesView ordinary saves omit confirmation fields and keep unconfirmed 
   const buildSource = profilesSource.slice(buildStart, submitStart)
   const currentSource = profilesSource.slice(currentStart, currentLabelStart)
 
-  assert.match(saveSource, /profileApi\.create\(\{[\s\S]*configs:\s*buildConfigsForSave\(\)/)
-  assert.match(saveSource, /profileApi\.update\(form\.id,\s*\{[\s\S]*configs:\s*buildConfigsForSave\(\)/)
+  assert.match(saveSource, /profileApi\.create\(\{[\s\S]*memory_organization:\s*buildOrganizationSettingsPayload\(form\.memory_organization\),[\s\S]*configs:\s*buildConfigsForSave\(\)/)
+  assert.match(saveSource, /profileApi\.update\(form\.id,\s*\{[\s\S]*memory_organization:\s*buildOrganizationSettingsPayload\(form\.memory_organization\),[\s\S]*configs:\s*buildConfigsForSave\(\)/)
+  assert.match(profilesSource, /import \{[\s\S]*buildOrganizationSettingsPayload,[\s\S]*validateOrganizationSettings[\s\S]*\} from '\.\.\/utils\/memoryManagement'/)
 
   assert.match(currentSource, /channel_id:\s*memoryRuntime\.value\.embedding_channel_id\s*\?\?\s*form\.configs\.memory\?\.embedding_channel_id/)
   assert.match(currentSource, /model_id:\s*memoryRuntime\.value\.embedding_model_id\s*\?\?\s*form\.configs\.memory\?\.embedding_model_id/)
   assert.match(buildSource, /const active = currentMemoryEmbedding\.value/)
   assert.match(buildSource, /configs\.memory\.embedding_channel_id = active\.channel_id \|\| null/)
   assert.match(buildSource, /configs\.memory\.embedding_model_id = active\.model_id \|\| null/)
+  assert.doesNotMatch(buildSource, /auto_organize_enabled|organization_channel_id|organization_model_id/)
   assert.match(profilesSource, /watch\(memoryEmbeddingTargetKey, \(\) => \{[\s\S]*memoryPreview\.value = null[\s\S]*memoryConfirmationChecked\.value = false[\s\S]*\}\)/)
   assert.match(profilesSource, /if \(confirmed\.configs\?\.memory\) form\.configs\.memory = \{ \.\.\.form\.configs\.memory, \.\.\.confirmed\.configs\.memory \}/)
 })
@@ -309,33 +396,30 @@ test('MemoriesView exposes deleted history as view-only from delete jobs', () =>
   assert.match(memoriesSource, /memories\.deleted_history_read_only/)
 })
 
-test('MemoriesView marks organization form edits as dirty', () => {
-  assert.match(memoriesSource, /const organizationFormDirty = ref\(false\)/)
-  assert.match(memoriesSource, /<el-switch[\s\S]*@change="markOrganizationFormDirty"/)
-  assert.match(memoriesSource, /<el-select v-model="organizationForm\.channel_id"[\s\S]*@change="handleOrganizationChannelChange\(\)"/)
-  assert.match(memoriesSource, /<el-select v-model="organizationForm\.model_id"[\s\S]*@change="markOrganizationFormDirty"/)
-  assert.match(memoriesSource, /const markOrganizationFormDirty = \(\) => \{ organizationFormDirty\.value = true \}/)
-  assert.match(memoriesSource, /const handleOrganizationChannelChange = \(markDirty = true\) => \{[\s\S]*if \(markDirty\) organizationFormDirty\.value = true/)
-})
-
-test('MemoriesView only synchronizes organization form from clean or explicit settings loads', () => {
-  const loadStart = memoriesSource.indexOf('const loadSettings = async')
-  const loadEnd = memoriesSource.indexOf('const loadChannels = async', loadStart)
-  assert.notEqual(loadStart, -1)
-  assert.notEqual(loadEnd, -1)
-
-  const loadSource = memoriesSource.slice(loadStart, loadEnd)
-  assert.match(loadSource, /applySettings\(data, \{ syncOrganizationForm: !silent \|\| !organizationFormDirty\.value \}\)/)
+test('MemoriesView keeps runtime settings and organization actions read-only', () => {
+  assert.doesNotMatch(memoriesSource, /saveSettings/)
+  assert.doesNotMatch(memoriesSource, /memories\.save_settings/)
+  assert.doesNotMatch(memoriesSource, /organizationForm/)
+  assert.doesNotMatch(memoriesSource, /memoryApi\.updateSettings/)
+  assert.doesNotMatch(memoriesSource, /auto_organize_enabled|organization_channel_id|organization_model_id/)
+  assert.doesNotMatch(memoriesSource, /<el-switch\b|v-model="[^"]*organization/)
+  assert.match(memoriesSource, /memoryApi\.settings\(\)/)
+  assert.match(memoriesSource, /const refreshAll = \(\) => \{[\s\S]*loadSettings\(true\)/)
+  assert.match(memoriesSource, /const organize = async \(\) =>/)
+  assert.match(memoriesSource, /memoryApi\.organize\(buildOrganizePayload\(newDedupeKey\(\)\)\)/)
+  assert.match(memoriesSource, /const currentMemoryTask = computed\(\(\) => getCurrentMemoryTask\(settings\)\)/)
+  assert.match(memoriesSource, /settings\.organization\?\.current_job_id/)
+  assert.match(memoriesSource, /settings\.organization\?\.recent_job\?\.status/)
 })
 
 test('MemoriesView polls settings and memories while limiting tab-specific polling', () => {
   const refreshStart = memoriesSource.indexOf('const refreshAll =')
-  const refreshEnd = memoriesSource.indexOf('const markOrganizationFormDirty =', refreshStart)
+  const refreshEnd = memoriesSource.indexOf('const organize =', refreshStart)
   assert.notEqual(refreshStart, -1)
   assert.notEqual(refreshEnd, -1)
 
   const refreshSource = memoriesSource.slice(refreshStart, refreshEnd)
-  assert.match(refreshSource, /if \(actionLoading\.value !== 'settings'\) loadSettings\(true\)/)
+  assert.match(refreshSource, /loadSettings\(true\)/)
   assert.match(refreshSource, /loadMemories\(true\)/)
   assert.match(refreshSource, /if \(activeTab\.value === 'jobs'\) loadJobs\(true\)/)
   assert.match(refreshSource, /if \(activeTab\.value === 'migrations'\) loadMigrations\(true\)/)
@@ -437,25 +521,6 @@ test('MemoriesView renders memory jobs as a collapsed tree without manual indent
   assert.doesNotMatch(jobsSource, /tokenBudgetText\(row\.token_budget\)/)
 })
 
-test('MemoriesView invalidates settings GETs around settings saves', () => {
-  const saveStart = memoriesSource.indexOf('const saveSettings = async')
-  const saveEnd = memoriesSource.indexOf('const organize = async', saveStart)
-  assert.notEqual(saveStart, -1)
-  assert.notEqual(saveEnd, -1)
-
-  const saveSource = memoriesSource.slice(saveStart, saveEnd)
-  const invalidateIndex = saveSource.indexOf('settingsRequestTracker.invalidate()')
-  const loadingIndex = saveSource.indexOf('settingsLoading.value = false')
-  const postIndex = saveSource.indexOf('memoryApi.updateSettings(')
-  const applyIndex = saveSource.indexOf('applySettings(data)')
-  const catchIndex = saveSource.indexOf('} catch (error)')
-  assert.ok(invalidateIndex >= 0 && invalidateIndex < postIndex)
-  assert.ok(loadingIndex >= 0 && loadingIndex < postIndex)
-  assert.ok(postIndex >= 0 && postIndex < applyIndex)
-  assert.ok(applyIndex >= 0 && applyIndex < catchIndex)
-  assert.doesNotMatch(saveSource.slice(catchIndex), /applySettings\(|organizationFormDirty\.value\s*=\s*false/)
-})
-
 test('MemoriesView uses begin and isCurrent for every polled collection tracker', () => {
   const loaders = [
     ['loadSettings', 'settingsRequestTracker'],
@@ -491,27 +556,23 @@ test('MemoriesView creates and invalidates all four request trackers on unmount'
 })
 
 test('MemoriesView uses dedicated management payload builders and id-only pin actions', () => {
-  const saveStart = memoriesSource.indexOf('const saveSettings = async')
-  const organizeStart = memoriesSource.indexOf('const organize = async', saveStart)
+  const organizeStart = memoriesSource.indexOf('const organize = async')
   const resetFormStart = memoriesSource.indexOf('const resetForm =', organizeStart)
   const togglePinStart = memoriesSource.indexOf('const togglePin = async')
   const historyStart = memoriesSource.indexOf('const showHistory = async', togglePinStart)
-  assert.ok(saveStart >= 0 && organizeStart > saveStart)
+  assert.ok(organizeStart >= 0)
   assert.ok(resetFormStart > organizeStart)
   assert.ok(togglePinStart >= 0 && historyStart > togglePinStart)
 
-  const saveSource = memoriesSource.slice(saveStart, organizeStart)
   const organizeSource = memoriesSource.slice(organizeStart, resetFormStart)
   const pinSource = memoriesSource.slice(togglePinStart, historyStart)
 
-  assert.match(saveSource, /memoryApi\.updateSettings\(buildOrganizationSettingsPayload\(organizationForm\)\)/)
   assert.match(organizeSource, /memoryApi\.organize\(buildOrganizePayload\(newDedupeKey\(\)\)\)/)
   assert.match(pinSource, /memoryApi\.unpin\(row\.id\)/)
   assert.match(pinSource, /memoryApi\.pin\(row\.id\)/)
   assert.doesNotMatch(pinSource, /memoryApi\.(pin|unpin)\([^)]*,/)
 
   for (const field of ['uid', 'records', 'session', 'collection']) {
-    assert.doesNotMatch(saveSource, new RegExp(`\\b${field}\\b`), `settings save must not mention ${field}`)
     assert.doesNotMatch(organizeSource, new RegExp(`\\b${field}\\b`), `organize must not mention ${field}`)
     assert.doesNotMatch(pinSource, new RegExp(`\\b${field}\\b`), `pin action must not mention ${field}`)
   }
@@ -529,7 +590,7 @@ test('MemoriesView only renders available organization counts', () => {
   assert.doesNotMatch(countsSource, /\$\{row\.\w+ \?\? 0\}/)
 })
 
-test('MemoriesView renders embedding channel names and keeps organization choices active-only', () => {
+test('MemoriesView renders embedding channel names without channel IDs', () => {
   assert.match(memoriesSource, /channelName\(nestedSetting\('active', 'channel_id', 'active_embedding_channel_id'\)\)/)
   assert.match(memoriesSource, /channelName\(nestedSetting\('target', 'channel_id', 'target_embedding_channel_id'\)\)/)
 
@@ -545,7 +606,5 @@ test('MemoriesView renders embedding channel names and keeps organization choice
   assert.doesNotMatch(channelNameSource, /return String\(channelId\)/)
 
   assert.match(memoriesSource, /channels\.value = allChannels\n/)
-  assert.match(memoriesSource, /const organizationChannels = computed\(\(\) => channels\.value\.filter\(channel => channel\.is_active !== false\)\)/)
-  assert.match(memoriesSource, /getOrganizationModelsForChannel\(organizationChannels\.value, organizationForm\.channel_id\)/)
-  assert.match(memoriesSource, /<el-option v-for="channel in organizationChannels"[^>]*:label="`\$\{channel\.name\} \(\$\{channel\.id\}\)`"/)
+  assert.doesNotMatch(memoriesSource, /organizationChannels|organizationForm/)
 })

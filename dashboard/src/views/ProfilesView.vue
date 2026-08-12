@@ -68,11 +68,21 @@
       :memory-embedding-options="memoryEmbeddingOptions"
       :memory-embedding-previewing="memoryEmbeddingPreviewing"
       v-model:memory-embedding-target-key="memoryEmbeddingTargetKey"
+      :memory-organization-channels="memoryOrganizationChannels"
+      :memory-organization-models="memoryOrganizationModels"
+      :memory-organization-model="memoryOrganizationModel"
+      :memory-organization-required-output-tokens="memoryOrganizationRequiredOutputTokens"
+      :memory-settings-loading="memorySettingsLoading"
+      :memory-settings-ready="memorySettingsReady"
+      :memory-settings-unavailable="memorySettingsUnavailable"
+      :memory-storage-configured="memoryStorageConfigured"
       :prompts="prompts"
       :show-owner-column="showOwnerColumn"
       :submitting="submitting"
       :tool-options="toolOptions"
       :users="users"
+      @update:dialog-visible="handleDialogVisibilityChange"
+      @owner-change="handleMemoryOwnerChange"
       @add-allowed-operation-dir="addAllowedOperationDir"
       @add-file-send-blocked-extension="addFileSendBlockedExtension"
       @remove-allowed-operation-dir="removeAllowedOperationDir"
@@ -167,6 +177,13 @@ import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import ProfileFormDialog from '../components/ProfileFormDialog.vue'
 import { defaultProfileConfigs } from '../constants'
 import { SUPPORT_LOCALES } from '../i18n'
+import {
+  buildOrganizationSettingsPayload,
+  createLatestRequestTracker,
+  getOrganizationModelsForChannel,
+  normalizeMemorySettings,
+  validateOrganizationSettings
+} from '../utils/memoryManagement'
 
 const { t } = useI18n()
 
@@ -197,6 +214,12 @@ const memoryConfirmationVisible = ref(false)
 const memoryConfirmationChecked = ref(false)
 const memoryEmbeddingConfirming = ref(false)
 const memoryRuntime = ref({})
+const memorySettingsLoading = ref(false)
+const memorySettingsReady = ref(false)
+const memorySettingsUnavailable = ref(false)
+const memoryStorageConfigured = ref(true)
+const memoryOrganizationRequiredOutputTokens = ref(0)
+const memorySettingsRequestTracker = createLatestRequestTracker()
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 
@@ -240,8 +263,8 @@ const memoryEmbeddingOptions = computed(() => channels.value
 
 const formatMemorySelection = (selection) => {
   if (!selection?.channel_id || !selection?.model_id) return t('profiles.memory_embedding_not_configured')
-  const channel = channels.value.find(item => item.id === selection.channel_id)
-  return channel ? `${channel.name} / ${selection.model_id}` : `${selection.channel_id} / ${selection.model_id}`
+  const channel = channels.value.find(item => String(item.id) === String(selection.channel_id))
+  return channel ? `${channel.name} / ${selection.model_id}` : t('profiles.memory_embedding_not_configured')
 }
 
 const form = reactive({
@@ -250,8 +273,22 @@ const form = reactive({
   name: '',
   prompt_id: null,
   knowledge_base_ids: [],
+  memory_organization: {
+    auto_organize_enabled: false,
+    organization_channel_id: null,
+    organization_model_id: null
+  },
   configs: defaultProfileConfigs()
 })
+
+const memoryOrganizationChannels = computed(() => channels.value.filter(channel => channel.is_active !== false))
+const memoryOrganizationModels = computed(() => getOrganizationModelsForChannel(
+  memoryOrganizationChannels.value,
+  form.memory_organization.organization_channel_id
+))
+const memoryOrganizationModel = computed(() => memoryOrganizationModels.value.find(model => (
+  String(model.model_id) === String(form.memory_organization.organization_model_id)
+)) || null)
 
 const knowledgeBaseOptions = computed(() => knowledgeBases.value
   .filter(item => !form.uid || item.uid === form.uid)
@@ -281,6 +318,23 @@ const memoryPreviewRequiresMigration = computed(() => {
 watch(() => form.uid, () => {
   form.knowledge_base_ids = form.knowledge_base_ids.filter(id => knowledgeBaseOptions.value.some(item => item.value === id))
 })
+
+const normalizeMemoryOrganizationSelection = () => {
+  if (!memoryOrganizationChannels.value.length) return
+  const channelId = form.memory_organization.organization_channel_id
+  if (!channelId || !memoryOrganizationModels.value.some(model => String(model.model_id) === String(form.memory_organization.organization_model_id))) {
+    form.memory_organization.organization_model_id = null
+  }
+}
+
+watch(
+  [() => form.memory_organization.organization_channel_id, memoryOrganizationChannels],
+  () => {
+    if (memorySettingsLoading.value && !memoryOrganizationChannels.value.length) return
+    normalizeMemoryOrganizationSelection()
+  },
+  { deep: true }
+)
 
 watch(memoryEmbeddingTargetKey, () => {
   memoryPreview.value = null
@@ -424,6 +478,34 @@ const addAllowedOperationDir = () => {
   }
 }
 
+const loadMemorySettings = async () => {
+  const requestSeq = memorySettingsRequestTracker.begin()
+  memorySettingsLoading.value = true
+  memorySettingsReady.value = false
+  memorySettingsUnavailable.value = false
+  memoryOrganizationRequiredOutputTokens.value = 0
+  memoryStorageConfigured.value = false
+  const params = form.uid ? { uid: form.uid } : {}
+  try {
+    const res = await profileApi.memorySettings(params)
+    if (!memorySettingsRequestTracker.isCurrent(requestSeq)) return
+    const normalized = normalizeMemorySettings(res.data.data || {})
+    form.memory_organization = { ...normalized.organizationForm }
+    memoryOrganizationRequiredOutputTokens.value = normalized.requiredOutputTokens
+    memoryStorageConfigured.value = normalized.configured !== undefined
+      ? Boolean(normalized.configured)
+      : Boolean(normalized.active_embedding_channel_id && normalized.active_embedding_model_id)
+    memorySettingsReady.value = true
+  } catch (err) {
+    if (memorySettingsRequestTracker.isCurrent(requestSeq)) {
+      memorySettingsUnavailable.value = true
+      ElMessage.error(err.message || t('profiles.load_memory_settings_failed'))
+    }
+  } finally {
+    if (memorySettingsRequestTracker.isCurrent(requestSeq)) memorySettingsLoading.value = false
+  }
+}
+
 const removeAllowedOperationDir = (value) => {
   form.configs.tool.allowed_operation_dirs = form.configs.tool.allowed_operation_dirs.filter(item => item !== value)
 }
@@ -540,6 +622,11 @@ const handleSetDefault = async (id) => {
 const showDialog = (type, row = null) => {
   dialogType.value = type
   activeTab.value = 'base'
+  memorySettingsLoading.value = false
+  memorySettingsReady.value = false
+  memorySettingsUnavailable.value = false
+  memoryStorageConfigured.value = true
+  memoryOrganizationRequiredOutputTokens.value = 0
   allowedOperationDirInput.value = ''
   fileSendBlockedExtensionInput.value = ''
   memoryPreview.value = null
@@ -551,6 +638,11 @@ const showDialog = (type, row = null) => {
     form.name = row.name
     form.prompt_id = row.prompt_id
     form.knowledge_base_ids = [...(row.knowledge_base_ids || [])]
+    form.memory_organization = {
+      auto_organize_enabled: Boolean(row.memory_organization?.auto_organize_enabled),
+      organization_channel_id: row.memory_organization?.organization_channel_id ?? null,
+      organization_model_id: row.memory_organization?.organization_model_id ?? null
+    }
     const base = defaultProfileConfigs()
     if (row.configs) {
       if (row.configs.tool) migrateToolConfig(row.configs.tool)
@@ -582,11 +674,36 @@ const showDialog = (type, row = null) => {
     form.name = ''
     form.prompt_id = null
     form.knowledge_base_ids = []
+    form.memory_organization = {
+      auto_organize_enabled: false,
+      organization_channel_id: null,
+      organization_model_id: null
+    }
     form.configs = defaultProfileConfigs()
     memoryRuntime.value = {}
     memoryEmbeddingTargetKey.value = ''
   }
   dialogVisible.value = true
+  loadMemorySettings()
+}
+
+const handleMemoryOwnerChange = (uid) => {
+  if (!dialogVisible.value || dialogType.value !== 'create') return
+  form.uid = uid || null
+  form.memory_organization = {
+    auto_organize_enabled: false,
+    organization_channel_id: null,
+    organization_model_id: null
+  }
+  loadMemorySettings()
+}
+
+const handleDialogVisibilityChange = (visible) => {
+  if (visible) return
+  memorySettingsRequestTracker.invalidate()
+  memorySettingsLoading.value = false
+  memorySettingsReady.value = false
+  memorySettingsUnavailable.value = false
 }
 
 const buildConfigsForSave = () => {
@@ -603,6 +720,15 @@ const submitForm = async () => {
   }
   if (dialogType.value === 'create' && showOwnerColumn.value && !form.uid) {
     return ElMessage.warning(t('profiles.select_owner'))
+  }
+
+  const organizationValidationError = validateOrganizationSettings(
+    form.memory_organization,
+    memoryOrganizationModel.value,
+    memoryOrganizationRequiredOutputTokens.value
+  )
+  if (organizationValidationError) {
+    return ElMessage.warning(t(`profiles.${organizationValidationError}`, { required: memoryOrganizationRequiredOutputTokens.value }))
   }
 
   // 清理无效规则与旧版规则级启用状态，并按后端规则排序：priority 数字越小越优先。
@@ -635,6 +761,7 @@ const submitForm = async () => {
         name: form.name,
         prompt_id: form.prompt_id,
         knowledge_base_ids: form.knowledge_base_ids,
+        memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
         configs: buildConfigsForSave()
       })
     } else {
@@ -642,6 +769,7 @@ const submitForm = async () => {
         name: form.name,
         prompt_id: form.prompt_id,
         knowledge_base_ids: form.knowledge_base_ids,
+        memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
         configs: buildConfigsForSave()
       })
     }

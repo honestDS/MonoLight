@@ -10,7 +10,9 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    StrictBool,
     StrictInt,
+    StrictStr,
     field_validator,
     model_validator,
 )
@@ -25,6 +27,7 @@ from sqlmodel import (
 )
 
 from app.core.constants import (
+    ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
     ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE,
@@ -166,6 +169,20 @@ class LongTermMemoryConfig(BaseModel):
     def validate_candidate_k(self) -> "LongTermMemoryConfig":
         if self.candidate_k < self.top_k:
             raise ValueError(t(ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL))
+        return self
+
+
+class LongTermMemoryOrganizationConfig(BaseModel):
+    """长期记忆自动整理配置。"""
+
+    auto_organize_enabled: StrictBool = PydanticField(False)
+    organization_channel_id: StrictInt | None = PydanticField(default=None, gt=0)
+    organization_model_id: StrictStr | None = PydanticField(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_organization_selection(self) -> "LongTermMemoryOrganizationConfig":
+        if (self.organization_channel_id is None) != (self.organization_model_id is None):
+            raise ValueError(t(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID))
         return self
 
 
@@ -330,6 +347,7 @@ class ProfileCreate(ProfileBase):
     knowledge_base_ids: list[int] | None = None
     confirm_memory_embedding_selection: bool = False
     memory_embedding_selection_signature: str | None = None
+    memory_organization: LongTermMemoryOrganizationConfig | None = None
 
 
 class ProfileUpdate(SQLModel):
@@ -341,6 +359,7 @@ class ProfileUpdate(SQLModel):
     knowledge_base_ids: list[int] | None = None
     confirm_memory_embedding_selection: bool = False
     memory_embedding_selection_signature: str | None = None
+    memory_organization: LongTermMemoryOrganizationConfig | None = None
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 
@@ -383,4 +402,5 @@ class ProfileResponse(ProfileBase):
     username: str | None = None
     knowledge_base_ids: list[int] = Field(default_factory=list)
     memory_runtime: ProfileMemoryRuntime = PydanticField(default_factory=ProfileMemoryRuntime)
+    memory_organization: LongTermMemoryOrganizationConfig = PydanticField(default_factory=LongTermMemoryOrganizationConfig)
     model_config = ConfigDict(from_attributes=True)

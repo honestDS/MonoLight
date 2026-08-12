@@ -1,10 +1,9 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from app.core.constants import (
-    ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
@@ -18,6 +17,7 @@ from app.models.memory import (
     LongTermMemorySource,
     LongTermMemoryType,
 )
+from app.models.profile import LongTermMemoryOrganizationConfig
 
 
 class _MemoryRequest(BaseModel):
@@ -68,16 +68,8 @@ class MemoryMaintenanceRequest(_MemoryRequest):
     max_attempts: StrictInt = Field(default=3, ge=1)
 
 
-class MemorySettingsUpdateRequest(_MemoryRequest):
-    auto_organize_enabled: StrictBool
-    organization_channel_id: StrictInt | None = Field(default=None, gt=0)
-    organization_model_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
-
-    @model_validator(mode="after")
-    def validate_organization_selection(self) -> "MemorySettingsUpdateRequest":
-        if (self.organization_channel_id is None) != (self.organization_model_id is None):
-            raise ValueError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID)
-        return self
+class MemorySettingsUpdateRequest(LongTermMemoryOrganizationConfig, _MemoryRequest):
+    model_config = ConfigDict(extra="forbid")
 
 
 class MemoryOrganizeRequest(_MemoryRequest):

@@ -6,6 +6,7 @@ CRUD 支持对话、上下文总结、重排和图像生成渠道；default 校�
 from fastapi import (
     APIRouter,
     Depends,
+    Query,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -22,6 +23,7 @@ from app.core.constants import (
     ERR_PROFILE_NOT_FOUND,
     ERR_PROMPT_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
+    MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_PROFILE_CREATED,
     MSG_PROFILE_DELETED,
     MSG_PROFILE_MEMORY_EMBEDDING_CONFIRMED,
@@ -41,6 +43,7 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.i18n import t
+from app.core.memory import get_memory_settings, update_organization_settings
 from app.core.memory.embedding_config import (
     build_memory_runtime,
     confirm_embedding_selection,
@@ -56,6 +59,7 @@ from app.core.profile_validation import (
 from app.core.security import get_current_user
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding
 from app.models.profile import (
+    LongTermMemoryOrganizationConfig,
     ProfileConfig,
     ProfileCreate,
     ProfileMemoryEmbeddingConfirmRequest,
@@ -64,6 +68,7 @@ from app.models.profile import (
     ProfileUpdate,
 )
 from app.providers.database import get_db
+from app.schemas.memory import MemorySettingsResponse
 from app.schemas.response import (
     PageData,
     StandardResponse,
@@ -141,8 +146,43 @@ async def build_profile_response(
     configs["memory"]["embedding_channel_id"] = store.active_embedding_channel_id if store and store.active_embedding_revision > 0 else None
     configs["memory"]["embedding_model_id"] = store.active_embedding_model_id if store and store.active_embedding_revision > 0 else None
     item.configs = configs
+    item.memory_organization = LongTermMemoryOrganizationConfig(
+        auto_organize_enabled=store.auto_organize_enabled if store is not None else False,
+        organization_channel_id=store.organization_channel_id if store is not None else None,
+        organization_model_id=store.organization_model_id if store is not None else None,
+    )
     item.memory_runtime = build_memory_runtime(profile, store)
     return item
+
+
+async def sync_profile_memory_organization(
+    db: AsyncSession,
+    *,
+    uid: str | None,
+    memory_organization: LongTermMemoryOrganizationConfig | None,
+) -> None:
+    if memory_organization is None or uid is None:
+        return
+    store = await memory_store_crud.get_by_uid(db, uid=uid)
+    if store is None and not memory_organization.auto_organize_enabled and memory_organization.organization_channel_id is None and memory_organization.organization_model_id is None:
+        return
+    await update_organization_settings(
+        db,
+        uid=uid,
+        auto_organize_enabled=memory_organization.auto_organize_enabled,
+        organization_channel_id=memory_organization.organization_channel_id,
+        organization_model_id=memory_organization.organization_model_id,
+        commit=False,
+    )
+
+
+async def get_memory_embedding_target_uid(db: AsyncSession, profile_id: int, current_user) -> str:
+    profile = await profile_crud.get(db, profile_id)
+    if profile is None or (not getattr(current_user, "is_superuser", False) and profile.uid != current_user.uid):
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+    if profile.uid is None:
+        raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+    return profile.uid
 
 
 async def check_admin_privilege(current_user=Depends(get_current_user)):
@@ -182,6 +222,7 @@ async def create_profile(
             raise ParameterException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
+    memory_organization = profile_in.memory_organization
     try:
         db_profile = await profile_crud.create(
             db,
@@ -190,11 +231,13 @@ async def create_profile(
                     "knowledge_base_ids",
                     "confirm_memory_embedding_selection",
                     "memory_embedding_selection_signature",
+                    "memory_organization",
                 }
             ),
             commit=False,
         )
         await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await sync_profile_memory_organization(db, uid=db_profile.uid, memory_organization=memory_organization)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -311,6 +354,7 @@ async def update_profile(
             raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
 
     knowledge_base_ids = profile_in.knowledge_base_ids
+    memory_organization = profile_in.memory_organization
     try:
         db_profile = await profile_crud.update(
             db,
@@ -320,12 +364,14 @@ async def update_profile(
                     "knowledge_base_ids",
                     "confirm_memory_embedding_selection",
                     "memory_embedding_selection_signature",
+                    "memory_organization",
                 },
                 exclude_unset=True,
             ),
             commit=False,
         )
         await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await sync_profile_memory_organization(db, uid=db_profile.uid, memory_organization=memory_organization)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -338,6 +384,18 @@ async def update_profile(
     )
 
 
+@router.get("/memory-settings", response_model=StandardResponse[MemorySettingsResponse])
+async def get_profile_memory_settings(
+    uid: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if uid is not None and not getattr(current_user, "is_superuser", False) and uid != current_user.uid:
+        raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+    result = await get_memory_settings(db, uid=uid or current_user.uid)
+    return StandardResponse.success(data=result, message=MSG_MEMORY_SETTINGS_SUCCESS)
+
+
 @router.post("/memory-embedding-preview")
 async def profile_memory_embedding_preview(
     request: ProfileMemoryEmbeddingPreviewRequest,
@@ -345,9 +403,10 @@ async def profile_memory_embedding_preview(
     current_user=Depends(get_current_user),
 ):
     try:
+        target_uid = await get_memory_embedding_target_uid(db, request.profile_id, current_user)
         data = await preview_embedding_selection(
             db,
-            uid=current_user.uid,
+            uid=target_uid,
             profile_id=request.profile_id,
             embedding_channel_id=request.embedding_channel_id,
             embedding_model_id=request.embedding_model_id,
@@ -365,9 +424,10 @@ async def profile_memory_embedding_confirm(
     current_user=Depends(get_current_user),
 ):
     try:
+        target_uid = await get_memory_embedding_target_uid(db, request.profile_id, current_user)
         profile, _store = await confirm_embedding_selection(
             db,
-            uid=current_user.uid,
+            uid=target_uid,
             profile_id=request.profile_id,
             memory=request.memory,
             embedding_selection_signature=request.embedding_selection_signature,

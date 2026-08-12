@@ -96,6 +96,7 @@ export const normalizeMemorySettings = (data) => {
   const store = isObject(source.store) ? source.store : {}
   const rawCapacity = isObject(source.capacity) ? source.capacity : {}
   const rawOrganization = isObject(source.organization) ? source.organization : {}
+  const rawMemoryOrganization = isObject(source.memory_organization) ? source.memory_organization : {}
 
   const capacity = {
     ...rawCapacity,
@@ -130,24 +131,34 @@ export const normalizeMemorySettings = (data) => {
   const organization = {
     ...rawOrganization,
     auto_organize_enabled: normalizeBooleanSetting(firstDefined(
+      rawMemoryOrganization.auto_organize_enabled,
       rawOrganization.auto_organize_enabled,
       store.auto_organize_enabled,
       source.auto_organize_enabled,
       false
     )),
     channel_id: normalizeOrganizationId(firstDefined(
+      rawMemoryOrganization.channel_id,
+      rawMemoryOrganization.organization_channel_id,
       rawOrganization.channel_id,
+      rawOrganization.organization_channel_id,
       store.organization_channel_id,
       source.organization_channel_id,
+      source.channel_id,
       null
     )),
     model_id: normalizeOrganizationId(firstDefined(
+      rawMemoryOrganization.model_id,
+      rawMemoryOrganization.organization_model_id,
       rawOrganization.model_id,
+      rawOrganization.organization_model_id,
       store.organization_model_id,
       source.organization_model_id,
+      source.model_id,
       null
     )),
     required_output_tokens: toFiniteNumber(firstDefined(
+      rawMemoryOrganization.required_output_tokens,
       rawOrganization.required_output_tokens,
       source.required_output_tokens,
       source.organization_required_output_tokens,
@@ -158,8 +169,8 @@ export const normalizeMemorySettings = (data) => {
 
   const organizationForm = {
     auto_organize_enabled: organization.auto_organize_enabled,
-    channel_id: organization.channel_id,
-    model_id: organization.model_id
+    organization_channel_id: organization.channel_id,
+    organization_model_id: organization.model_id
   }
   const requiredOutputTokens = organization.required_output_tokens
   const contentMaxTokens = capacity.content_max_tokens
@@ -180,7 +191,7 @@ export const normalizeMemorySettings = (data) => {
 
 export const getOrganizationModelsForChannel = (channels, channelId) => {
   if (!Array.isArray(channels)) return []
-  const channel = channels.find(item => item?.id === channelId)
+  const channel = channels.find(item => String(item?.id) === String(channelId))
   if (!Array.isArray(channel?.model_ids)) return []
   return channel.model_ids.filter(model => (
     model?.model_id &&
@@ -190,8 +201,8 @@ export const getOrganizationModelsForChannel = (channels, channelId) => {
 }
 
 export const validateOrganizationSettings = (form, selectedModel, requiredOutputTokens) => {
-  const hasChannel = form?.channel_id !== null && form?.channel_id !== undefined && form?.channel_id !== ''
-  const hasModel = Boolean(form?.model_id)
+  const hasChannel = form?.organization_channel_id !== null && form?.organization_channel_id !== undefined && form?.organization_channel_id !== ''
+  const hasModel = Boolean(form?.organization_model_id)
 
   if (hasChannel !== hasModel) return 'organization_selection_pair_required'
 
@@ -217,12 +228,12 @@ export const validateOrganizationSettings = (form, selectedModel, requiredOutput
 }
 
 export const buildOrganizationSettingsPayload = (form) => {
-  const hasChannel = form?.channel_id !== null && form?.channel_id !== undefined && form?.channel_id !== ''
-  const hasModel = Boolean(form?.model_id)
+  const hasChannel = form?.organization_channel_id !== null && form?.organization_channel_id !== undefined && form?.organization_channel_id !== ''
+  const hasModel = Boolean(form?.organization_model_id)
   return {
     auto_organize_enabled: Boolean(form?.auto_organize_enabled),
-    organization_channel_id: hasChannel ? form.channel_id : null,
-    organization_model_id: hasModel ? form.model_id : null
+    organization_channel_id: hasChannel ? form.organization_channel_id : null,
+    organization_model_id: hasModel ? form.organization_model_id : null
   }
 }
 

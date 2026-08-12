@@ -13,6 +13,7 @@ _PROFILE_NON_PERSISTED_FIELDS = {
     "knowledge_base_ids",
     "confirm_memory_embedding_selection",
     "memory_embedding_selection_signature",
+    "memory_organization",
 }
 
 
