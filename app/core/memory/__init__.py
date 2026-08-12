@@ -15,6 +15,7 @@ from app.core.memory.identifiers import (
     build_memory_active_mutation_key,
     build_memory_collection_name,
     build_memory_organization_active_mutation_key,
+    build_memory_staged_vector_item_id,
     build_memory_vector_item_id,
 )
 from app.core.memory.maintenance import submit_memory_cleanup_retry, submit_memory_reindex
@@ -155,6 +156,7 @@ __all__ = [
     "build_memory_content_hash",
     "build_memory_record_snapshot",
     "build_memory_organization_active_mutation_key",
+    "build_memory_staged_vector_item_id",
     "build_memory_vector_item_id",
     "build_organization_execution_request",
     "build_organization_merge_child_dedupe_key",

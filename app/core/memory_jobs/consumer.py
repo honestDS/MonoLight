@@ -222,6 +222,7 @@ class MemoryJobConsumer:
         for job_id, entry in tuple(self._running.items()):
             if entry.task.done():
                 continue
+            renewed = False
             try:
                 async with self._session_factory() as db:
                     renewed = await memory_job_crud.renew_lease(
@@ -235,12 +236,14 @@ class MemoryJobConsumer:
                 raise
             except Exception as exc:
                 self._log_database_exception(entry.uid, job_id, entry.worker_id, exc)
-                continue
 
             if not renewed:
-                current = self._running.get(job_id)
-                if current is entry and not entry.task.done():
-                    entry.task.cancel()
+                self._cancel_running_job(job_id, entry)
+
+    def _cancel_running_job(self, job_id: int, entry: _RunningJob) -> None:
+        current = self._running.get(job_id)
+        if current is entry and not entry.task.done():
+            entry.task.cancel()
 
     async def _claim_available_jobs(self) -> int:
         available_slots = self._max_concurrency - sum(not entry.task.done() for entry in self._running.values())

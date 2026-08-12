@@ -1155,6 +1155,55 @@ async def test_running_cancel_finishes_cancelled_and_clears_target(
 
 
 @pytest.mark.asyncio
+async def test_renew_database_exception_cancels_running_job(
+    memory_job_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "renew-exception-user"
+    job_id = await _create_direct_job(
+        memory_job_database,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        dedupe_key="renew-exception",
+    )
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(_context) -> dict[str, Any]:
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            stopped.set()
+        return {"unexpected": True}
+
+    executor = MemoryJobExecutor(
+        {LongTermMemoryMutationOperation.REINDEX: handler},
+        session_factory=memory_job_database,
+    )
+    consumer = _consumer(executor, memory_job_database)
+    try:
+        assert await consumer.run_once() == 1
+        await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT_SECONDS)
+        entry = consumer._running[job_id]
+
+        async def raise_renew_error(*_args: Any, **_kwargs: Any) -> bool:
+            raise RuntimeError("renew failed")
+
+        monkeypatch.setattr(memory_job_crud, "renew_lease", raise_renew_error)
+        await consumer._renew_running_jobs()
+        await asyncio.wait_for(stopped.wait(), timeout=WAIT_TIMEOUT_SECONDS)
+        await asyncio.wait_for(asyncio.gather(entry.task, return_exceptions=True), timeout=WAIT_TIMEOUT_SECONDS)
+        assert entry.task.cancelled()
+        assert job_id not in consumer._running
+    finally:
+        release.set()
+        monkeypatch.undo()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
 async def test_two_consumers_compete_for_one_job_and_handler_runs_once(
     memory_job_database: async_sessionmaker[AsyncSession],
 ) -> None:

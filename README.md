@@ -2,6 +2,10 @@
 
 MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（General Autonomous Agent）核心基座。
 
+<p align="center">
+  <img src="./docs/banner.png" alt="MonoLight Banner" width="100%" />
+</p>
+
 ## 我们的愿景
 
 当智能体从简单的回答问题走向执行命令、修改文件和管理任务时，一次微小的误判就可能对真实系统造成不可逆的损害。MonoLight 诞生于对这个核心痛点的思考：我们如何在赋予智能体自主执行能力的同时，保留人类对关键操作的知情权、控制权与追溯权？这不仅是一个技术框架的构建，更是一场关于基于人工智能的新型人机交互模式的探索与实验。
@@ -9,16 +13,13 @@ MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（Gene
 作为一个功能完备的通用自主智能体基座，MonoLight 整合了多模态模型渠道、异步事件分发、双模型安全审计、知识检索与多平台适配。它不追求完全脱离人类的绝对无人化，而是通过严密的执行前审计与人工确认卡片机制，为智能体划定一条清晰且安全的行为边界。
 
 无论是日常的智能办公交互、复杂的服务器自动运维，还是物理设备的逻辑指令下发，MonoLight 都致力于将大模型的决策能力安全地转化为现实世界的执行力。我们希望通过这一系统，实验并寻找一种人类与自主智能体协同共生的新型交互范式。
+
 ---
 
-## AI Agent 开发规范守则
+## PR/Issue
 
 > [!IMPORTANT]
-> 所有参与本项目贡献的 AI Agent 必须严格遵守以下开发标准与架构原则：
-> 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
-> 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
-> 2. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
-> 3. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
+> 项目当前处于早期活跃开发阶段，架构仍在快速演进中，暂不接受 Pull Request。欢迎通过 Issue 报告使用中遇到的问题或提出改进建议，你的反馈对我们非常重要。
 
 ## 1. 核心特性
 
@@ -32,7 +33,7 @@ MonoLight 不只是一个对话界面或单次工具调用封装，而是一套�
 - **IM 消息平台接入**：无需停留在浏览器中，即可从日常聊天软件使用完整的智能体能力。当前已支持微信 OpenClaw 扫码接入、文本/图片/文件双向收发、连续消息自动合并以及聊天内工具调用和安全确认；后台任务与定时任务完成后可主动回推结果，投递失败会自动重试。
 - **完整的可视化工作台**：提供聊天与会话历史、工具执行结果、审计确认卡片、知识库、模型渠道、提示词、定时任务、消息平台以及实时和历史日志管理。
 - **多用户与数据隔离**：支持用户与角色管理，并隔离不同用户的会话数据；每个 IM 接入账号还可绑定指定用户与 Profile。
-- **自托管与数据掌控**：支持 SQLite、MySQL 和 PostgreSQL，可从个人本地部署扩展到多用户部署，模型渠道、提示词和运行数据均由部署者自行管理。
+- **自托管与数据掌控**：支持 SQLite、MySQL，可从个人本地部署扩展到多用户部署，模型渠道、提示词和运行数据均由部署者自行管理。
 
 ## 已知限制
 - 连续对话以上一轮 API 返回的真实 input token 数为基线，增量估算下一轮；运行时提示仅附加到每轮最新用户消息，跨轮时会从旧消息移到新消息，因此下一轮发送前的增量估算会保留上一轮提示的 token，可能略微高估并提前触发上下文总结。真实模型响应返回 usage 后，界面展示会由实际值校正；当前暂不通过额外探测请求校准，以避免额外 token 消耗。
@@ -46,17 +47,20 @@ MonoLight 不只是一个对话界面或单次工具调用封装，而是一套�
 - [ ] **Skill 动态加载**: 实现技能库的热插拔与在线热更新机制。
 - [ ] **全模态支持**: 除了图片、文本、文件的数据传输，还支持视频、音频等多媒体数据的上传与交互。
 - [ ] **接入 QQ平台 消息适配器**: 实现与 QQ平台 的消息交互功能。
-- [ ] **长期记忆管理**: 借助现有的关系型数据库原文存储+RAG机制，实现用户会话的长期记忆与上下文理解的稠密与稀疏混合检索。
-- [ ] **用户偏好管理**: 借助现有的关系型数据库原文存储+RAG机制，实现用户级的个性化偏好录入(LLM自主录入)及混合检索。
+- [x] **长期记忆管理**: 借助现有的关系型数据库原文存储+RAG机制，实现用户会话的长期记忆与上下文理解的稠密与稀疏混合检索。
+- [x] **用户偏好管理**: 借助现有的关系型数据库原文存储+RAG机制，实现用户级的个性化偏好录入(LLM自主录入)及混合检索。
 - [ ] **企业级审计系统**: 使用平台自带的双模型审计机制(已实现)，实现企业级的审计报告自动生成与发送，且在发送后立即删除暂存在服务器上的审计数据，避免被恶意篡改或泄露。
+- [ ] **SETUP 机制**: 重构并简化安全部署流程，为不熟悉 Agent 相关配置的用户提供更友好的部署体验。
 
 ## 4. 技术架构
-详细文档请参考 [ARCHITECTURE.md](./ARCHITECTURE.md)
-
-## 5. 开源协议
-本项目采用 AGPL-3.0 协议开源。
+架构文档 [ARCHITECTURE.md](./ARCHITECTURE.md)
+开发规范 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md)
 
 ## 运行服务
+
+> [!IMPORTANT]
+**在实际部署前，请一定优先修改 `.env` 中的 `ADMIN_RESET_TOKEN` 重置Token与 `MONOLIGH_ENCRYPTION_KEY` 加密密钥，以确保系统安全。**
+我们会在未来版本引入setup机制，重构并简化安全部署流程。
 
 项目包含 Web 服务和四个独立 Worker：消息平台 Worker、后台任务 Worker、终端 Worker 和会话最终回复 Worker。Web 服务支持多个 Worker，四个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
 
@@ -94,16 +98,6 @@ python -m app.workers.session_reply
 
 多实例部署时，所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
 
-### Shell 交互终端配置与运维
-
-在 Profile 的 `tool.enabled_tools` 中启用 `execute_shell` 即可使用 Shell 交互终端；`terminal_status`、`terminal_read`、`terminal_write`、`terminal_resize` 和 `terminal_close` 等终端伴随工具会自动暴露，不需要单独加入 `enabled_tools`。`execute_shell` 的 `execution_mode` 为必填参数，表示同一条原命令的输入输出和生命周期模式，与编程语言无关；两种模式都执行原命令本身。
-
-`tool_timeout` 是 Profile 级工具超时。非交互 Shell 在该时间内等待进程完成，超时后结束进程并返回超时结果。交互终端的 `terminal_write` 使用同一时间预算完成写入、等待和内部输出读取；超时只结束本次等待，返回 `read_timed_out=true`、`read_result=null` 和 `read_offset`，不会关闭终端，后续应通过 `terminal_read` 从该 offset 继续读取。
-
-Web、会话最终回复 Worker 与 terminal Worker 必须连接同一个数据库；终端 PTY 由取得数据库租约的 terminal Worker 独占。输出正文只保存在 terminal Worker 的有界内存中，数据库保存 offset、sequence 等边界信息，stdout 和 stderr 合并读取。terminal Worker 重启或租约恢复不会恢复旧输出正文，遗留会话会按恢复规则清理并标记为 `LOST`。
-
-正常结束交互终端应调用 `terminal_close`，不要直接删除 `terminal_session` 或 `terminal_control_command` 记录。删除聊天会话时，系统会先按 PID、`create_time` 和 `boot_time` 校验并清理关联进程，再删除终端记录。交互终端当前支持 Windows ConPTY 和 Linux PTY，其他平台不支持 `interactive`。
-
 ## 自动化测试
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。
 
@@ -113,3 +107,24 @@ Web、会话最终回复 Worker 与 terminal Worker 必须连接同一个数据�
 ```bash
 PYTHONPATH=. pytest tests/
 ```
+
+## AI Agent 开发规范守则
+
+> [!IMPORTANT]
+> 所有参与本项目贡献的 AI Agent 必须严格遵守以下开发标准与架构原则：
+> 1. 阅读并执行 [DEVELOPMENT_GUIDE.md](./DEVELOPMENT_GUIDE.md) 中的命名规范、代码风格（Ruff）及测试要求。
+> 2. 参考 [ARCHITECTURE.md](./ARCHITECTURE.md) 以确保符合系统设计与模块依赖关系。
+> 2. 在提交任何代码前，必须确保通过 `ruff check` 与 `ruff format` 检查。
+> 3. 所有测试用例的编写或修改必须严格基于目标代码的实际实现。在编写测试前，AI Agent 必须完整阅读并解析目标源码，确保 Mock 逻辑与业务流转完全对齐，严禁凭经验或假设编写测试代码。
+
+## 致谢
+
+MonoLight 的诞生离不开开源社区的滋养。在开发过程中，以下项目为我们提供了重要的设计灵感与思路参考：
+
+- **[New API](https://github.com/QuantumNous/new-api)** —— 新一代大模型网关与 AI 资产管理系统。MonoLight 的**模型渠道路由与多模型调度**设计深受其启发。
+- **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** —— 开源一体化 Agentic 聊天机器人平台。MonoLight 的**知识库工具化与 IM 平台接入**思路借鉴了该项目的优秀实践。
+
+感谢开源社区中每一位先行者的探索与分享。
+
+## 5. 开源协议
+本项目采用 AGPL-3.0 协议开源。

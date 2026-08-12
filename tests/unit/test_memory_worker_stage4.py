@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from app.core.i18n import t
 from app.core.memory import (
     MemoryRecallStatus,
     build_memory_content_hash,
+    build_memory_staged_vector_item_id,
     build_memory_vector_item_id,
     memory_service,
     normalize_memory_content,
@@ -32,8 +34,10 @@ from app.core.memory import service as memory_service_module
 from app.core.memory_jobs.consumer import MemoryJobConsumer, create_memory_job_consumer
 from app.core.memory_jobs.executor import (
     MemoryJobDeterministicError,
+    MemoryJobExecutionContext,
     MemoryJobExecutionResult,
     MemoryJobExecutor,
+    MemoryJobLeaseLostError,
 )
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.memory import (
@@ -703,7 +707,8 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
         assert record.is_active is True
         assert record.pending_mutation_job_id is None
         assert record.content_token_count == estimate_tokens(record.content)
-        assert record.vector_item_id == build_memory_vector_item_id(record.id, 1)
+        assert record.vector_item_id is not None
+        assert record.vector_item_id.startswith(build_memory_vector_item_id(record.id, 1))
 
         revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=record.id)
         assert [revision.version for revision in revisions] == [1]
@@ -895,10 +900,18 @@ async def test_update_keeps_old_ready_version_during_embedding_then_publishes_v2
         assert record.content == "new content"
         assert record.content_token_count == estimate_tokens(record.content)
         assert record.suppress_recall is False
-        assert record.vector_item_id == build_memory_vector_item_id(memory_id, 2)
+        assert record.vector_item_id is not None
+        assert record.vector_item_id.startswith(build_memory_vector_item_id(memory_id, 2))
+        assert record.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
         assert build_memory_vector_item_id(memory_id, 1) not in vector_backend.collections["memory-collection-v1"]["items"]
-        assert build_memory_vector_item_id(memory_id, 2) in vector_backend.collections["memory-collection-v1"]["items"]
-        assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)] == [2, 1]
+        assert [
+            revision.version
+            for revision in await _get_revisions(
+                memory_session_factory,
+                uid=uid,
+                memory_id=memory_id,
+            )
+        ] == [2, 1]
         revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
         assert revisions[0].content_token_count == record.content_token_count
         assert finished.result["version"] == 2
@@ -979,8 +992,9 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
         assert created_record.version == 1
         assert created_record.content == expected_create
         assert created_record.content_hash == build_memory_content_hash(expected_create)
-        assert created_record.vector_item_id == build_memory_vector_item_id(memory_id, 1)
-        assert build_memory_vector_item_id(memory_id, 1) in vector_backend.collections["memory-collection-v1"]["items"]
+        assert created_record.vector_item_id is not None
+        assert created_record.vector_item_id.startswith(build_memory_vector_item_id(memory_id, 1))
+        assert created_record.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
 
         update_result = await _update_service_memory(
             memory_session_factory,
@@ -1005,9 +1019,10 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
         assert updated_record.version == 2
         assert updated_record.content == expected_update
         assert updated_record.content_hash == build_memory_content_hash(expected_update)
-        assert updated_record.vector_item_id == build_memory_vector_item_id(memory_id, 2)
+        assert updated_record.vector_item_id is not None
+        assert updated_record.vector_item_id.startswith(build_memory_vector_item_id(memory_id, 2))
+        assert updated_record.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
         assert build_memory_vector_item_id(memory_id, 1) not in vector_backend.collections["memory-collection-v1"]["items"]
-        assert build_memory_vector_item_id(memory_id, 2) in vector_backend.collections["memory-collection-v1"]["items"]
 
         async def fake_loader(_db: AsyncSession, _channel_id: int, _model_id: str) -> object:
             return _runtime_config()
@@ -1027,7 +1042,7 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
             assert limit == 10
             return [
                 SimpleNamespace(
-                    id=build_memory_vector_item_id(memory_id, 2),
+                    id=updated_record.vector_item_id,
                     metadata={
                         "uid": uid,
                         "memory_id": memory_id,
@@ -1387,6 +1402,128 @@ async def test_transient_embedding_or_vector_error_retries_without_damaging_read
 
 
 @pytest.mark.asyncio
+async def test_recovered_owner_cannot_delete_reclaimed_owner_vector_item(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "staged-vector-race-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid)
+    submission = await _update_service_memory(
+        memory_session_factory,
+        uid=uid,
+        dedupe_key="staged-vector-race",
+        memory_id=memory_id,
+        expected_version=1,
+        content="reclaimed owner content",
+        memory_key="reclaimed-owner-key",
+    )
+    assert submission.job.id is not None
+    job_id = submission.job.id
+
+    async with memory_session_factory() as db:
+        old_claim = await memory_job_crud.try_claim(
+            db,
+            uid=uid,
+            job_id=job_id,
+            owner="old-owner",
+            lease_seconds=1,
+            enabled_operations=[LongTermMemoryMutationOperation.UPDATE],
+        )
+    assert old_claim is not None
+
+    old_written = asyncio.Event()
+    release_old_upsert = asyncio.Event()
+    upsert_calls = 0
+
+    async def coordinated_upsert(
+        collection_name: str,
+        item_ids: list[str],
+        documents: list[str],
+        embeddings: list[list[float]],
+        metadatas: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> int:
+        nonlocal upsert_calls
+        upsert_calls += 1
+        result = await vector_backend.upsert(
+            collection_name,
+            item_ids,
+            documents,
+            embeddings,
+            metadatas,
+            **kwargs,
+        )
+        if upsert_calls == 1:
+            old_written.set()
+            await release_old_upsert.wait()
+        return result
+
+    monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", coordinated_upsert)
+    old_context = MemoryJobExecutionContext(
+        job=old_claim,
+        worker_id="old-owner",
+        session_factory=memory_session_factory,
+    )
+    old_task = asyncio.create_task(memory_handlers._handle_update(old_context))
+    try:
+        await asyncio.wait_for(old_written.wait(), timeout=WAIT_TIMEOUT_SECONDS)
+        old_item_id = build_memory_staged_vector_item_id(memory_id, 2, job_id, "old-owner")
+        assert old_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+
+        async with memory_session_factory() as db:
+            now = await get_database_time(db)
+            await db.execute(
+                update(LongTermMemoryMutationJob)
+                .where(
+                    LongTermMemoryMutationJob.uid == uid,
+                    LongTermMemoryMutationJob.id == job_id,
+                )
+                .values(lock_until=now - timedelta(seconds=1))
+            )
+            await db.commit()
+            recovery = await memory_job_crud.recover_expired(db, delay_seconds=0)
+        assert recovery.retried == 1
+
+        async with memory_session_factory() as db:
+            new_claim = await memory_job_crud.try_claim(
+                db,
+                uid=uid,
+                job_id=job_id,
+                owner="new-owner",
+                lease_seconds=30,
+                enabled_operations=[LongTermMemoryMutationOperation.UPDATE],
+            )
+        assert new_claim is not None
+        new_context = MemoryJobExecutionContext(
+            job=new_claim,
+            worker_id="new-owner",
+            session_factory=memory_session_factory,
+        )
+        new_result = await memory_handlers._handle_update(new_context)
+        assert new_result.finalized
+        new_item_id = build_memory_staged_vector_item_id(memory_id, 2, job_id, "new-owner")
+        assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+
+        release_old_upsert.set()
+        with pytest.raises(MemoryJobLeaseLostError):
+            await old_task
+
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+        assert record is not None
+        assert record.vector_item_id == new_item_id
+        assert old_item_id not in vector_backend.collections["memory-collection-v1"]["items"]
+        assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+    finally:
+        release_old_upsert.set()
+        if not old_task.done():
+            old_task.cancel()
+        await asyncio.gather(old_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_max_attempt_embedding_failure_fails_create_and_clears_placeholder_and_active_key(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
@@ -1722,7 +1859,9 @@ async def test_active_store_change_during_embedding_retries_cleans_new_item_and_
         assert restored is not None
         assert restored.version == 2
         assert restored.content == "config changed content"
-        assert restored.vector_item_id == build_memory_vector_item_id(memory_id, 2)
+        assert restored.vector_item_id is not None
+        assert restored.vector_item_id.startswith(build_memory_vector_item_id(memory_id, 2))
+        assert restored.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
     finally:
         await consumer.stop()
 
@@ -1834,7 +1973,6 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
         candidate_id = submission.job.payload["candidate"]["memory_id"]
         assert candidate_id == 1
         old_item_id = build_memory_vector_item_id(candidate_id, 1)
-        new_item_id = build_memory_vector_item_id(replacement_memory_id, 1)
         old_item = dict(vector_backend.collections["memory-collection-v1"]["items"][old_item_id])
 
         assert await consumer.run_once() == 1
@@ -1880,7 +2018,8 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
         assert replacement.pending_mutation_job_id is None
         assert replacement.content_token_count == estimate_tokens("replacement content")
         assert replacement.source == LongTermMemorySource.USER_API
-        assert replacement.vector_item_id == new_item_id
+        assert replacement.vector_item_id is not None
+        assert replacement.vector_item_id.startswith(build_memory_vector_item_id(replacement_memory_id, 1))
         replacement_revisions = await _get_revisions(
             memory_session_factory,
             uid=uid,
@@ -1908,7 +2047,7 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
             assert store is not None
             assert store.migration_delta_high_watermark == 2
         assert old_item_id in vector_backend.collections["memory-collection-v1"]["items"]
-        assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+        assert replacement.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
         assert vector_backend.collections["memory-collection-v1"]["items"][old_item_id] == old_item
 
         deltas = await _get_deltas(memory_session_factory, uid=uid, migration_job_id=migration_job_id)
@@ -1933,7 +2072,7 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
         )
         assert await _get_record(memory_session_factory, uid=uid, memory_id=candidate_id) is None
         assert old_item_id not in vector_backend.collections["memory-collection-v1"]["items"]
-        assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+        assert replacement.vector_item_id in vector_backend.collections["memory-collection-v1"]["items"]
         assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=candidate_id)] == [1]
     finally:
         release.set()

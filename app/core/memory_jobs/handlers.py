@@ -53,7 +53,7 @@ from app.core.memory import (
     append_memory_embedding_delta,
     build_memory_active_mutation_key,
     build_memory_record_snapshot,
-    build_memory_vector_item_id,
+    build_memory_staged_vector_item_id,
     normalize_memory_publication_payload,
     normalize_memory_record_snapshot,
 )
@@ -2154,7 +2154,12 @@ async def _execute_publication(
 
         await context.checkpoint()
         next_version = snapshot.expected_version + 1
-        item_id = build_memory_vector_item_id(snapshot.memory_id, next_version)
+        item_id = build_memory_staged_vector_item_id(
+            snapshot.memory_id,
+            next_version,
+            snapshot.job_id,
+            snapshot.owner,
+        )
         metadata = _build_vector_metadata(snapshot, next_version)
         phase = "vector_write"
         item_written = True
@@ -2246,7 +2251,7 @@ async def _execute_replacement(context: MemoryJobExecutionContext) -> MemoryJobE
         vector = _validate_embedding_result(embeddings, snapshot.active_embedding_dimensions)
 
         await context.checkpoint()
-        item_id = build_memory_vector_item_id(snapshot.memory_id, 1)
+        item_id = build_memory_staged_vector_item_id(snapshot.memory_id, 1, snapshot.job_id, snapshot.owner)
         metadata = _build_vector_metadata(snapshot, 1)
         phase = "vector_write"
         item_written = True
@@ -2331,7 +2336,12 @@ async def _execute_organization_merge(context: MemoryJobExecutionContext) -> Mem
 
         await context.checkpoint()
         next_version = snapshot.expected_version + 1
-        item_id = build_memory_vector_item_id(snapshot.primary_memory_id, next_version)
+        item_id = build_memory_staged_vector_item_id(
+            snapshot.primary_memory_id,
+            next_version,
+            snapshot.job_id,
+            snapshot.owner,
+        )
         metadata = {
             "memory_id": snapshot.primary_memory_id,
             "uid": snapshot.uid,

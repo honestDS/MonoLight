@@ -35,6 +35,7 @@ from app.core.memory import (
     build_memory_content_hash,
     build_memory_organization_active_mutation_key,
     build_memory_record_snapshot,
+    build_memory_staged_vector_item_id,
     build_memory_vector_item_id,
     normalize_memory_content,
     normalize_memory_key,
@@ -100,6 +101,11 @@ ACTIVE_EMBEDDING_REVISION = 3
 INDEX_REVISION = 8
 POLICY_VERSION = 5
 COLLECTION_NAME = "organization-merge-collection"
+
+
+def _staged_vector_id_prefix(memory_id: int, version: int, job_id: int) -> str:
+    staged_id = build_memory_staged_vector_item_id(memory_id, version, job_id, "test-owner")
+    return staged_id.rsplit("_o", 1)[0] + "_o"
 
 
 class _FakeVectorBackend:
@@ -700,13 +706,22 @@ async def test_running_organization_merge_cancelled_after_external_call_cleans_o
         started.set()
         await release_external_call.wait()
 
+    new_vector_prefix = _staged_vector_id_prefix(1, 2, child_id)
+    staged_vector_id: str | None = None
+
+    async def block_upsert(collection_name: str, item_ids: list[str]) -> None:
+        nonlocal staged_vector_id
+        if len(item_ids) != 1 or not item_ids[0].startswith(new_vector_prefix):
+            return
+        staged_vector_id = item_ids[0]
+        await block_external_call(collection_name, item_ids)
+
     if cancel_phase == "embedding":
         vector_backend.embedding_hook = block_external_call
     else:
-        vector_backend.upsert_hook = block_external_call
+        vector_backend.upsert_hook = block_upsert
 
     consumer = _consumer(memory_session_factory)
-    new_vector_id = build_memory_vector_item_id(1, 2)
     try:
         assert await consumer.run_once() == 1
         await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT_SECONDS)
@@ -724,7 +739,7 @@ async def test_running_organization_merge_cancelled_after_external_call_cleans_o
         )
         assert cancelled.active_mutation_key is None
         collection = vector_backend.collections[COLLECTION_NAME]
-        assert new_vector_id not in collection["items"]
+        assert staged_vector_id is None or staged_vector_id not in collection["items"]
         assert all(build_memory_vector_item_id(memory_id, 1) in collection["items"] for memory_id in source_ids)
         for memory_id in source_ids:
             record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
@@ -762,7 +777,6 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
     before = await _get_record(memory_session_factory, uid=uid, memory_id=1)
     assert before is not None
     old_vector_id = build_memory_vector_item_id(1, 1)
-    new_vector_id = build_memory_vector_item_id(1, 2)
     consumer = _consumer(memory_session_factory)
     try:
         finished = await _run_child(
@@ -803,8 +817,10 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
 
         collection = vector_backend.collections[COLLECTION_NAME]
         assert old_vector_id not in collection["items"]
-        assert new_vector_id in collection["items"]
-        new_item = collection["items"][new_vector_id]
+        assert record.vector_item_id is not None
+        assert record.vector_item_id.startswith(build_memory_vector_item_id(1, 2))
+        assert record.vector_item_id in collection["items"]
+        new_item = collection["items"][record.vector_item_id]
         assert new_item["document"] == record.content
         assert new_item["metadata"] == {
             "memory_id": 1,
@@ -817,6 +833,7 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
             "updated_at": new_item["metadata"]["updated_at"],
         }
         assert finished.result is not None
+        assert finished.result["vector_item_id"] == record.vector_item_id
         assert "content" not in finished.result
         assert "organized update content" not in json.dumps(finished.result)
         async with memory_session_factory() as db:
@@ -849,19 +866,30 @@ async def test_organization_merge_update_retries_external_vector_failure_and_pub
     before = await _get_record(memory_session_factory, uid=uid, memory_id=1)
     assert before is not None
     old_vector_id = build_memory_vector_item_id(1, 1)
-    new_vector_id = build_memory_vector_item_id(1, 2)
+    new_vector_prefix = _staged_vector_id_prefix(1, 2, child_id)
+    failed_staged_vector_id: str | None = None
     failures_remaining = 1
 
-    async def fail_once(*_args: Any, **_kwargs: Any) -> None:
+    async def fail_embedding_once(*_args: Any, **_kwargs: Any) -> None:
         nonlocal failures_remaining
         if failures_remaining:
             failures_remaining -= 1
             raise RuntimeError("simulated vector failure")
 
+    async def fail_upsert_once(_collection_name: str, item_ids: list[str]) -> None:
+        nonlocal failed_staged_vector_id, failures_remaining
+        if len(item_ids) != 1 or not item_ids[0].startswith(new_vector_prefix):
+            return
+        if failed_staged_vector_id is None:
+            failed_staged_vector_id = item_ids[0]
+        if failures_remaining:
+            failures_remaining -= 1
+            raise RuntimeError("simulated vector failure")
+
     if failure_stage == "embedding":
-        vector_backend.embedding_hook = fail_once
+        vector_backend.embedding_hook = fail_embedding_once
     else:
-        vector_backend.upsert_hook = fail_once
+        vector_backend.upsert_hook = fail_upsert_once
 
     consumer = _consumer(memory_session_factory)
     try:
@@ -890,10 +918,11 @@ async def test_organization_merge_update_retries_external_vector_failure_and_pub
         assert [record.id for record in recallable] == list(source_ids)
         collection = vector_backend.collections[COLLECTION_NAME]
         assert old_vector_id in collection["items"]
-        assert new_vector_id not in collection["items"]
         if failure_stage == "upsert":
-            assert vector_backend.upsert_calls[0]["ids"] == [new_vector_id]
-            assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+            assert failed_staged_vector_id is not None
+            assert failed_staged_vector_id not in collection["items"]
+            assert (COLLECTION_NAME, [failed_staged_vector_id]) in vector_backend.delete_calls
+            assert vector_backend.upsert_calls[0]["ids"] == [failed_staged_vector_id]
 
         async with memory_session_factory() as db:
             now = await get_database_time(db)
@@ -920,7 +949,13 @@ async def test_organization_merge_update_retries_external_vector_failure_and_pub
         assert [revision.version for revision in revisions] == [2, 1]
         collection = vector_backend.collections[COLLECTION_NAME]
         assert old_vector_id not in collection["items"]
-        assert new_vector_id in collection["items"]
+        assert record.vector_item_id is not None
+        assert record.vector_item_id.startswith(new_vector_prefix)
+        assert record.vector_item_id in collection["items"]
+        assert finished.result["vector_item_id"] == record.vector_item_id
+        assert vector_backend.upsert_calls[-1]["ids"] == [record.vector_item_id]
+        if failed_staged_vector_id is not None:
+            assert failed_staged_vector_id != record.vector_item_id
         assert (COLLECTION_NAME, [old_vector_id]) in vector_backend.delete_calls
     finally:
         await consumer.stop()
@@ -1215,10 +1250,12 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
 
         collection = vector_backend.collections[COLLECTION_NAME]
         assert build_memory_vector_item_id(1, 1) not in collection["items"]
-        assert build_memory_vector_item_id(1, 2) in collection["items"]
+        assert primary.vector_item_id is not None
+        assert primary.vector_item_id.startswith(build_memory_vector_item_id(1, 2))
+        assert primary.vector_item_id in collection["items"]
         assert build_memory_vector_item_id(2, 1) in collection["items"]
         assert build_memory_vector_item_id(3, 1) in collection["items"]
-        primary_item = collection["items"][build_memory_vector_item_id(1, 2)]
+        primary_item = collection["items"][primary.vector_item_id]
         assert primary_item["document"] == "organized three record content"
         assert primary_item["metadata"]["memory_id"] == 1
         assert primary_item["metadata"]["uid"] == uid
@@ -1228,6 +1265,7 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert primary_item["metadata"]["source"] == LongTermMemorySource.AUTO_ORGANIZE.value
         assert primary_item["metadata"]["embedding_revision"] == ACTIVE_EMBEDDING_REVISION
         assert finished.result is not None
+        assert finished.result["vector_item_id"] == primary.vector_item_id
         assert finished.result["cleanup_job_ids"] == [job.id for job in cleanup_jobs]
         assert finished.result["tombstoned_memory_ids"] == [2, 3]
         assert "organized three record content" not in json.dumps(finished.result)
@@ -1445,15 +1483,17 @@ async def test_organization_merge_active_embedding_change_after_vector_write_fai
         max_attempts=1,
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in (1, 2, 3)}
-    new_vector_id = build_memory_vector_item_id(1, 2)
+    new_vector_prefix = _staged_vector_id_prefix(1, 2, child_id)
+    staged_vector_id: str | None = None
     old_vector_items = {build_memory_vector_item_id(memory_id, 1): dict(vector_backend.collections[COLLECTION_NAME]["items"][build_memory_vector_item_id(memory_id, 1)]) for memory_id in (1, 2, 3)}
     changed = False
 
     async def change_active_store(_collection_name: str, item_ids: list[str]) -> None:
-        nonlocal changed
-        if changed or item_ids != [new_vector_id]:
+        nonlocal changed, staged_vector_id
+        if changed or len(item_ids) != 1 or not item_ids[0].startswith(new_vector_prefix):
             return
         changed = True
+        staged_vector_id = item_ids[0]
         async with memory_session_factory() as db:
             updated = await memory_store_crud.update_by_uid(
                 db,
@@ -1475,9 +1515,10 @@ async def test_organization_merge_active_embedding_change_after_vector_write_fai
         )
         assert failed.active_mutation_key is None
         assert changed is True
-        assert any(new_vector_id in call["ids"] for call in vector_backend.upsert_calls)
+        assert staged_vector_id is not None
+        assert any(staged_vector_id in call["ids"] for call in vector_backend.upsert_calls)
         collection = vector_backend.collections[COLLECTION_NAME]
-        assert new_vector_id not in collection["items"]
+        assert staged_vector_id not in collection["items"]
         assert all(build_memory_vector_item_id(memory_id, 1) in collection["items"] for memory_id in (1, 2, 3))
         assert all(collection["items"][item_id] == item for item_id, item in old_vector_items.items())
         for memory_id in (1, 2, 3):
@@ -1523,14 +1564,16 @@ async def test_organization_merge_active_migration_after_vector_write_fails_befo
         target_memory_key="migration-during-publish-key",
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
-    new_vector_id = build_memory_vector_item_id(1, 2)
+    new_vector_prefix = _staged_vector_id_prefix(1, 2, child_id)
+    staged_vector_id: str | None = None
     changed = False
 
     async def start_migration(_collection_name: str, item_ids: list[str]) -> None:
-        nonlocal changed
-        if changed or item_ids != [new_vector_id]:
+        nonlocal changed, staged_vector_id
+        if changed or len(item_ids) != 1 or not item_ids[0].startswith(new_vector_prefix):
             return
         changed = True
+        staged_vector_id = item_ids[0]
         async with memory_session_factory() as db:
             updated = await memory_store_crud.update_by_uid(
                 db,
@@ -1556,10 +1599,11 @@ async def test_organization_merge_active_migration_after_vector_write_fails_befo
         assert failed.error == t(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         assert failed.active_mutation_key is None
         assert changed is True
-        assert any(new_vector_id in call["ids"] for call in vector_backend.upsert_calls)
-        assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+        assert staged_vector_id is not None
+        assert any(staged_vector_id in call["ids"] for call in vector_backend.upsert_calls)
+        assert (COLLECTION_NAME, [staged_vector_id]) in vector_backend.delete_calls
         collection = vector_backend.collections[COLLECTION_NAME]
-        assert new_vector_id not in collection["items"]
+        assert staged_vector_id not in collection["items"]
         assert all(build_memory_vector_item_id(memory_id, 1) in collection["items"] for memory_id in source_ids)
         for memory_id in source_ids:
             record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
@@ -1604,7 +1648,8 @@ async def test_organization_merge_reindex_boundary_fails_without_publication(
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
     old_vector_items = {build_memory_vector_item_id(memory_id, 1): dict(vector_backend.collections[COLLECTION_NAME]["items"][build_memory_vector_item_id(memory_id, 1)]) for memory_id in source_ids}
-    new_vector_id = build_memory_vector_item_id(1, 2)
+    new_vector_prefix = _staged_vector_id_prefix(1, 2, child_id)
+    staged_vector_id: str | None = None
     switched = False
 
     if reindex_phase == "before_execution":
@@ -1618,10 +1663,11 @@ async def test_organization_merge_reindex_boundary_fails_without_publication(
     else:
 
         async def switch_to_reindexing(_collection_name: str, item_ids: list[str]) -> None:
-            nonlocal switched
-            if switched or item_ids != [new_vector_id]:
+            nonlocal switched, staged_vector_id
+            if switched or len(item_ids) != 1 or not item_ids[0].startswith(new_vector_prefix):
                 return
             switched = True
+            staged_vector_id = item_ids[0]
             async with memory_session_factory() as db:
                 updated = await memory_store_crud.update_by_uid(
                     db,
@@ -1650,11 +1696,13 @@ async def test_organization_merge_reindex_boundary_fails_without_publication(
             assert vector_backend.upsert_calls == []
         else:
             assert switched is True
-            assert any(call["ids"] == [new_vector_id] for call in vector_backend.upsert_calls)
-            assert (COLLECTION_NAME, [new_vector_id]) in vector_backend.delete_calls
+            assert staged_vector_id is not None
+            assert any(call["ids"] == [staged_vector_id] for call in vector_backend.upsert_calls)
+            assert (COLLECTION_NAME, [staged_vector_id]) in vector_backend.delete_calls
 
         collection = vector_backend.collections[COLLECTION_NAME]
-        assert new_vector_id not in collection["items"]
+        if staged_vector_id is not None:
+            assert staged_vector_id not in collection["items"]
         for item_id, item in old_vector_items.items():
             assert collection["items"][item_id] == item
         for memory_id in source_ids:
@@ -1709,7 +1757,6 @@ async def test_organization_merge_active_migration_before_execution_fails_and_re
         assert updated is not None
         await db.commit()
 
-    new_vector_id = build_memory_vector_item_id(1, 2)
     consumer = _consumer(memory_session_factory)
     try:
         failed = await _run_child(
@@ -1723,7 +1770,7 @@ async def test_organization_merge_active_migration_before_execution_fails_and_re
         assert failed.error == t(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         assert failed.active_mutation_key is None
         assert vector_backend.upsert_calls == []
-        assert new_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+        assert not any(item_id.startswith(build_memory_vector_item_id(1, 2)) for item_id in vector_backend.collections[COLLECTION_NAME]["items"])
         assert await _get_all_deltas(memory_session_factory, uid=uid) == []
         assert await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id) == []
         for memory_id in source_ids:
@@ -1765,7 +1812,6 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
         max_attempts=1,
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in (1, 2, 3)}
-    new_vector_id = build_memory_vector_item_id(1, 2)
     original_append = memory_handlers.append_memory_embedding_delta
     append_calls = 0
 
@@ -1788,7 +1834,7 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
         )
         assert append_calls == 2
         assert failed.active_mutation_key is None
-        assert new_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+        assert not any(item_id.startswith(build_memory_vector_item_id(1, 2)) for item_id in vector_backend.collections[COLLECTION_NAME]["items"])
         assert await _get_all_deltas(memory_session_factory, uid=uid) == []
         assert await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id) == []
         for memory_id in (1, 2, 3):
@@ -1846,7 +1892,6 @@ async def test_organization_merge_cleanup_creation_conflict_rolls_back_all_datab
         max_attempts=1,
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in (1, 2, 3)}
-    new_vector_id = build_memory_vector_item_id(1, 2)
 
     async def raise_cleanup_conflict(*_args: Any, **_kwargs: Any) -> Any:
         raise MemoryJobTargetBusyError("existing cleanup business conflict")
@@ -1862,7 +1907,7 @@ async def test_organization_merge_cleanup_creation_conflict_rolls_back_all_datab
             status=LongTermMemoryMutationStatus.FAILED,
         )
         assert failed.active_mutation_key is None
-        assert new_vector_id not in vector_backend.collections[COLLECTION_NAME]["items"]
+        assert not any(item_id.startswith(build_memory_vector_item_id(1, 2)) for item_id in vector_backend.collections[COLLECTION_NAME]["items"])
         assert await _get_cleanup_jobs(memory_session_factory, uid=uid, merge_job_id=child_id) == []
         assert await _get_all_deltas(memory_session_factory, uid=uid) == []
         for memory_id in (1, 2, 3):

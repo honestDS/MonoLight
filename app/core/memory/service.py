@@ -47,7 +47,6 @@ from app.core.memory.capacity import load_memory_capacity_snapshot
 from app.core.memory.errors import MemoryConflictError, MemoryNotFoundError, MemoryValidationError
 from app.core.memory.identifiers import (
     build_memory_active_mutation_key,
-    build_memory_vector_item_id,
 )
 from app.core.memory.normalization import (
     _normalize_dedupe_key,
@@ -1133,7 +1132,6 @@ class LongTermMemoryService:
         valid_hits: list[tuple[Any, int, int]] = []
         for hit in hits:
             metadata = getattr(hit, "metadata", None)
-            hit_id = getattr(hit, "id", None)
             if not isinstance(metadata, dict) or metadata.get("uid") != normalized_uid:
                 continue
             if isinstance(metadata.get("embedding_revision"), bool) or not isinstance(metadata.get("embedding_revision"), int) or metadata.get("embedding_revision") != active_snapshot[2]:
@@ -1141,8 +1139,6 @@ class LongTermMemoryService:
             hit_memory_id = metadata.get("memory_id")
             hit_version = metadata.get("version")
             if isinstance(hit_memory_id, bool) or not isinstance(hit_memory_id, int) or hit_memory_id < 1 or isinstance(hit_version, bool) or not isinstance(hit_version, int) or hit_version < 1:
-                continue
-            if hit_id != build_memory_vector_item_id(hit_memory_id, hit_version):
                 continue
             candidate_ids.append(hit_memory_id)
             valid_hits.append((hit, hit_memory_id, hit_version))
