@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.dispatchers import memory_recall as precheck_module
-from app.core.dispatchers import memory_recall_persistence as persistence_module
-from app.core.dispatchers.memory_recall_types import MemoryRecallContext
+from app.core.dispatchers.memory import persistence as persistence_module
+from app.core.dispatchers.memory import recall as precheck_module
+from app.core.dispatchers.memory.types import MemoryRecallContext
 from app.core.exceptions import LLMException
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME

@@ -5,7 +5,6 @@ from app.core.channel_router import select_channel
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.context import ContextManager
 from app.core.crud.session import session_crud
-from app.core.dispatchers.memory_recall_types import MemoryRecallContext
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import (
     MANAGE_LONGTERM_MEMORY_TOOL_NAME,
@@ -34,6 +33,8 @@ from app.core.utils.request_token_baseline import (
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
+
+from .types import MemoryRecallContext
 
 
 async def select_initial_channel(context: MemoryRecallContext) -> bool:

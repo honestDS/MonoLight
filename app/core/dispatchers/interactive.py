@@ -35,8 +35,7 @@ from app.core.crud.audit import audit_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
-from app.core.dispatchers.memory_recall import run_memory_recall_precheck
-from app.core.dispatchers.memory_recall_types import MemoryRecallContext
+from app.core.dispatchers.memory import MemoryRecallContext, run_memory_recall_precheck
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import channel_log_extra, get_logger

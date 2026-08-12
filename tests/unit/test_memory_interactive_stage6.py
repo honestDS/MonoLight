@@ -8,7 +8,7 @@ from app.core.dispatchers import interactive as interactive_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
-from app.core.dispatchers.memory_recall_types import build_result
+from app.core.dispatchers.memory.types import build_result
 from app.core.prompts import PROMPT_MAX_TURNS_REACHED
 from app.core.tools import MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA
 from app.core.tools.longterm_memory import MANAGE_LONGTERM_MEMORY_TOOL_NAME

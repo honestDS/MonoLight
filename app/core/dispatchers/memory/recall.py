@@ -1,25 +1,5 @@
 import uuid
 
-from app.core.dispatchers.memory_recall_persistence import (
-    append_once,
-    load_dedupe_messages,
-    save_and_execute_recall,
-)
-from app.core.dispatchers.memory_recall_request import (
-    build_correction_messages,
-    fallback_channel,
-    generate,
-    prepare_request_messages,
-    response_is_valid,
-    select_initial_channel,
-    update_output_metadata,
-)
-from app.core.dispatchers.memory_recall_types import (
-    MemoryRecallContext,
-    MemoryRecallPrecheckResult,
-    build_result,
-    get_profile_id,
-)
 from app.core.exceptions import LLMException
 from app.core.log import get_logger
 from app.core.utils.dispatcher.helpers import (
@@ -28,6 +8,27 @@ from app.core.utils.dispatcher.helpers import (
     resolve_chat_params,
 )
 from app.models.message import InternalMessage
+
+from .persistence import (
+    append_once,
+    load_dedupe_messages,
+    save_and_execute_recall,
+)
+from .request import (
+    build_correction_messages,
+    fallback_channel,
+    generate,
+    prepare_request_messages,
+    response_is_valid,
+    select_initial_channel,
+    update_output_metadata,
+)
+from .types import (
+    MemoryRecallContext,
+    MemoryRecallPrecheckResult,
+    build_result,
+    get_profile_id,
+)
 
 logger = get_logger(__name__)
 

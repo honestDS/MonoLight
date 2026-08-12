@@ -293,10 +293,12 @@ app/core/dispatchers/
 ├── background.py           # 后台对话分发
 ├── interactive.py          # 交互式对话分发
 ├── interactive_helpers.py  # 交互式分发辅助
-├── memory_recall.py        # 对话记忆召回集成
-├── memory_recall_types.py  # 记忆召回数据结构
-├── memory_recall_request.py # 记忆召回请求组件
-├── memory_recall_persistence.py # 记忆召回持久化组件
+├── memory/                 # 长期记忆召回组件
+│   ├── __init__.py         # 记忆召回公开导出
+│   ├── persistence.py      # 记忆召回持久化组件
+│   ├── recall.py           # 对话记忆召回集成
+│   ├── request.py          # 记忆召回请求组件
+│   └── types.py            # 记忆召回数据结构
 ├── non_stream.py           # 非流式对话分发
 ├── shared.py               # 分发器共用组件
 └── stream.py               # 流式对话分发
