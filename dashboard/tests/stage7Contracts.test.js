@@ -263,3 +263,83 @@ test('MemoriesView exposes deleted history as view-only from delete jobs', () =>
   assert.match(memoriesSource, /v-if="!historyReadOnly"[\s\S]*restoreRevision\(row\)/)
   assert.match(memoriesSource, /memories\.deleted_history_read_only/)
 })
+
+test('MemoriesView marks organization form edits as dirty', () => {
+  assert.match(memoriesSource, /const organizationFormDirty = ref\(false\)/)
+  assert.match(memoriesSource, /<el-switch[\s\S]*@change="markOrganizationFormDirty"/)
+  assert.match(memoriesSource, /<el-select v-model="organizationForm\.channel_id"[\s\S]*@change="handleOrganizationChannelChange\(\)"/)
+  assert.match(memoriesSource, /<el-select v-model="organizationForm\.model_id"[\s\S]*@change="markOrganizationFormDirty"/)
+  assert.match(memoriesSource, /const markOrganizationFormDirty = \(\) => \{ organizationFormDirty\.value = true \}/)
+  assert.match(memoriesSource, /const handleOrganizationChannelChange = \(markDirty = true\) => \{[\s\S]*if \(markDirty\) organizationFormDirty\.value = true/)
+})
+
+test('MemoriesView only synchronizes organization form from clean or explicit settings loads', () => {
+  const loadStart = memoriesSource.indexOf('const loadSettings = async')
+  const loadEnd = memoriesSource.indexOf('const loadChannels = async', loadStart)
+  assert.notEqual(loadStart, -1)
+  assert.notEqual(loadEnd, -1)
+
+  const loadSource = memoriesSource.slice(loadStart, loadEnd)
+  assert.match(loadSource, /applySettings\(data, \{ syncOrganizationForm: !silent \|\| !organizationFormDirty\.value \}\)/)
+})
+
+test('MemoriesView polls settings and memories while limiting tab-specific polling', () => {
+  const refreshStart = memoriesSource.indexOf('const refreshAll =')
+  const refreshEnd = memoriesSource.indexOf('const markOrganizationFormDirty =', refreshStart)
+  assert.notEqual(refreshStart, -1)
+  assert.notEqual(refreshEnd, -1)
+
+  const refreshSource = memoriesSource.slice(refreshStart, refreshEnd)
+  assert.match(refreshSource, /if \(actionLoading\.value !== 'settings'\) loadSettings\(true\)/)
+  assert.match(refreshSource, /loadMemories\(true\)/)
+  assert.match(refreshSource, /if \(activeTab\.value === 'jobs'\) loadJobs\(true\)/)
+  assert.match(refreshSource, /if \(activeTab\.value === 'migrations'\) loadMigrations\(true\)/)
+})
+
+test('MemoriesView invalidates settings GETs around settings saves', () => {
+  const saveStart = memoriesSource.indexOf('const saveSettings = async')
+  const saveEnd = memoriesSource.indexOf('const organize = async', saveStart)
+  assert.notEqual(saveStart, -1)
+  assert.notEqual(saveEnd, -1)
+
+  const saveSource = memoriesSource.slice(saveStart, saveEnd)
+  const sequenceIndex = saveSource.indexOf('settingsRequestSeq += 1')
+  const loadingIndex = saveSource.indexOf('settingsLoading.value = false')
+  const postIndex = saveSource.indexOf('memoryApi.updateSettings(')
+  const applyIndex = saveSource.indexOf('applySettings(data)')
+  const catchIndex = saveSource.indexOf('} catch (error)')
+  assert.ok(sequenceIndex >= 0 && sequenceIndex < postIndex)
+  assert.ok(loadingIndex >= 0 && loadingIndex < postIndex)
+  assert.ok(postIndex >= 0 && postIndex < applyIndex)
+  assert.ok(applyIndex >= 0 && applyIndex < catchIndex)
+  assert.doesNotMatch(saveSource.slice(catchIndex), /applySettings\(|organizationFormDirty\.value\s*=\s*false/)
+})
+
+test('MemoriesView rejects stale responses for every polled collection', () => {
+  const loaders = [
+    ['loadSettings', 'settingsRequestSeq'],
+    ['loadMemories', 'memoriesRequestSeq'],
+    ['loadJobs', 'jobsRequestSeq'],
+    ['loadMigrations', 'migrationsRequestSeq']
+  ]
+
+  for (const [loader, sequence] of loaders) {
+    assert.match(
+      memoriesSource,
+      new RegExp(`const ${loader} = async \\(silent = false\\) => \\{[\\s\\S]*?const requestSeq = \\+\\+${sequence}[\\s\\S]*?if \\(requestSeq !== ${sequence}\\) return`),
+      `${loader} must reject stale responses`
+    )
+  }
+})
+
+test('MemoriesView only renders available organization counts', () => {
+  const countsStart = memoriesSource.indexOf('const jobCountsText =')
+  const budgetStart = memoriesSource.indexOf('const tokenBudgetText =', countsStart)
+  assert.notEqual(countsStart, -1)
+  assert.notEqual(budgetStart, -1)
+
+  const countsSource = memoriesSource.slice(countsStart, budgetStart)
+  assert.match(countsSource, /filter\(\(\[, value\]\) => value !== null && value !== undefined\)/)
+  assert.match(countsSource, /return counts\.length \? [\s\S]*: '-'/)
+  assert.doesNotMatch(countsSource, /\$\{row\.\w+ \?\? 0\}/)
+})

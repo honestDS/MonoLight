@@ -191,7 +191,11 @@ export const memoryApi = {
   migration: (id) => request.get(`/memories/embedding-migrations/${id}`),
   retryMigration: (id) => request.post(`/memories/embedding-migrations/${id}/retry`),
   cancelMigration: (id) => request.post(`/memories/embedding-migrations/${id}/cancel`),
-  retryCleanup: (id) => request.post(`/memories/collections/${id}/cleanup-retry`)
+  retryCleanup: (id) => request.post(`/memories/collections/${id}/cleanup-retry`),
+  updateSettings: (data) => request.post('/memories/settings', data),
+  organize: (data) => request.post('/memories/organize', data),
+  pin: (id) => request.post(`/memories/${id}/pin`),
+  unpin: (id) => request.post(`/memories/${id}/unpin`)
 }
 
 export const promptApi = {

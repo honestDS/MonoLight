@@ -19,7 +19,7 @@ export const routeNameMap = {
 
 export const MEMORY_TYPES = ['fact', 'preference', 'project', 'todo', 'constraint']
 export const MEMORY_JOB_STATUSES = ['pending', 'running', 'retry', 'succeeded', 'failed', 'cancelled']
-export const MEMORY_JOB_OPERATIONS = ['create', 'update', 'restore', 'reindex', 'delete_cleanup', 'embedding_migration']
+export const MEMORY_JOB_OPERATIONS = ['create', 'update', 'restore', 'reindex', 'delete_cleanup', 'embedding_migration', 'create_with_eviction', 'organize', 'organize_merge']
 export const MEMORY_MIGRATION_STATUSES = ['preparing', 'building', 'catching_up', 'validating', 'switching', 'succeeded', 'failed', 'cancelled']
 
 // 默认渠道配置

@@ -164,6 +164,29 @@ def _organization_job_payload(*, snapshot_count: int = 2, channel_id: int = 1, m
     }
 
 
+def _organization_merge_payload(*, parent_job_id: int, action: str, source_ids: list[int]) -> dict:
+    return {
+        "parent_job_id": parent_job_id,
+        "snapshot_digest": "a" * 64,
+        "active_embedding_revision": 1,
+        "index_revision": 1,
+        "policy_version": 1,
+        "action": action,
+        "sources": [
+            {"memory_id": memory_id, "expected_version": 1, "pinned": False}
+            for memory_id in source_ids
+        ],
+        "primary_memory_id": source_ids[0],
+        "target": {
+            "content": "organized memory content",
+            "memory_key": "organized-memory",
+            "memory_type": "fact",
+            "content_token_count": 3,
+            "content_hash": "b" * 64,
+        },
+    }
+
+
 def _assert_no_organization_secrets(value: object) -> None:
     forbidden_keys = {"api_key", "base_url", "http_proxy", "custom_headers"}
     forbidden_values = {
@@ -1185,30 +1208,26 @@ async def test_memory_stage11_job_summaries_are_top_level_and_secret_free(
         },
     )
     assert parent.id is not None
-    child = await _create_job(
+    merge_child = await _create_job(
         db_session,
-        dedupe_key="stage11-summary-child",
+        dedupe_key="stage11-summary-merge-child",
         operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
         status=LongTermMemoryMutationStatus.FAILED,
         parent_job_id=parent.id,
-        payload={
-            **_organization_job_payload(snapshot_count=2),
-            "parent_job_id": parent.id,
-        },
-        result={
-            "snapshot_count": 2,
-            "keep_count": 0,
-            "update_count": 0,
-            "merge_count": 1,
-            "conflict_count": 0,
-            "stale_count": 1,
-            "skipped_count": 0,
-            "child_job_ids": [parent.id + 1],
-            "budget": {"required_input_tokens": 301, "available_input_tokens": 499},
-            "context_error": {"status": "organization_context_exceeded"},
-        },
+        payload=_organization_merge_payload(parent_job_id=parent.id, action="merge", source_ids=[7, 8]),
+        result={"action": "merge"},
     )
-    assert child.id is not None
+    assert merge_child.id is not None
+    update_child = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-update-child",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        parent_job_id=parent.id,
+        payload=_organization_merge_payload(parent_job_id=parent.id, action="update", source_ids=[9]),
+        result={"action": "update"},
+    )
+    assert update_child.id is not None
     await memory_job_crud.update_status(
         db_session,
         uid="user-a",
@@ -1223,7 +1242,7 @@ async def test_memory_stage11_job_summaries_are_top_level_and_secret_free(
             "conflict_count": 0,
             "stale_count": 0,
             "skipped_count": 1,
-            "child_job_ids": [child.id],
+            "child_job_ids": [merge_child.id, update_child.id],
             "budget": {"required_input_tokens": 300, "available_input_tokens": 500},
             "context_error": None,
         },
@@ -1245,21 +1264,95 @@ async def test_memory_stage11_job_summaries_are_top_level_and_secret_free(
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         parent_detail = _assert_standard(await client.get(f"/api/v1/memories/jobs/{parent.id}"), 200)["data"]
         child_list = _assert_standard(await client.get("/api/v1/memories/jobs?operation=organize_merge"), 200)
-        _assert_page(child_list, total=1)
-        child_detail = child_list["data"]["items"][0]
+        _assert_page(child_list, total=2)
+        child_details = {item["id"]: item for item in child_list["data"]["items"]}
+        merge_detail = child_details[merge_child.id]
+        update_detail = child_details[update_child.id]
 
     assert expected_fields.issubset(parent_detail)
     assert parent_detail["parent_job_id"] is None
     assert parent_detail["snapshot_count"] == 2
-    assert parent_detail["child_job_ids"] == [child.id]
+    assert parent_detail["child_job_ids"] == [merge_child.id, update_child.id]
     assert parent_detail["token_budget"] == {"required_input_tokens": 300, "available_input_tokens": 500}
-    assert expected_fields.issubset(child_detail)
-    assert child_detail["parent_job_id"] == parent.id
-    assert child_detail["merge_count"] == 1
-    assert child_detail["stale_count"] == 1
-    assert child_detail["context_error"] == {"status": "organization_context_exceeded"}
+    assert expected_fields.issubset(merge_detail)
+    assert merge_detail["parent_job_id"] == parent.id
+    assert merge_detail["snapshot_count"] == 2
+    assert merge_detail["keep_count"] == 0
+    assert merge_detail["update_count"] == 0
+    assert merge_detail["merge_count"] == 1
+    assert merge_detail["conflict_count"] == 0
+    assert merge_detail["stale_count"] is None
+    assert merge_detail["skipped_count"] is None
+    assert expected_fields.issubset(update_detail)
+    assert update_detail["parent_job_id"] == parent.id
+    assert update_detail["snapshot_count"] == 1
+    assert update_detail["keep_count"] == 0
+    assert update_detail["update_count"] == 1
+    assert update_detail["merge_count"] == 0
+    assert update_detail["conflict_count"] == 0
+    assert update_detail["stale_count"] is None
+    assert update_detail["skipped_count"] is None
     _assert_no_organization_secrets(parent_detail)
-    _assert_no_organization_secrets(child_detail)
+    _assert_no_organization_secrets(merge_detail)
+    _assert_no_organization_secrets(update_detail)
+
+
+@pytest.mark.asyncio
+async def test_memory_stage11_organize_merge_summary_requires_valid_action_and_sources(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    missing_action = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-missing-action",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        payload={"sources": [{"memory_id": 1, "expected_version": 1}]},
+        result={},
+    )
+    empty_sources = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-empty-sources",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        payload={"action": "merge", "sources": []},
+        result={},
+    )
+    invalid_sources = await _create_job(
+        db_session,
+        dedupe_key="stage11-summary-invalid-sources",
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        status=LongTermMemoryMutationStatus.FAILED,
+        payload={
+            "action": "merge",
+            "sources": [{"memory_id": 1, "expected_version": 0}],
+        },
+        result={},
+    )
+    assert missing_action.id is not None
+    assert empty_sources.id is not None
+    assert invalid_sources.id is not None
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        missing_action_detail = _assert_standard(
+            await client.get(f"/api/v1/memories/jobs/{missing_action.id}"),
+            200,
+        )["data"]
+        empty_sources_detail = _assert_standard(
+            await client.get(f"/api/v1/memories/jobs/{empty_sources.id}"),
+            200,
+        )["data"]
+        invalid_sources_detail = _assert_standard(
+            await client.get(f"/api/v1/memories/jobs/{invalid_sources.id}"),
+            200,
+        )["data"]
+
+    for key in ("keep_count", "update_count", "merge_count", "conflict_count"):
+        assert missing_action_detail[key] is None
+    assert missing_action_detail["snapshot_count"] == 1
+    assert empty_sources_detail["snapshot_count"] is None
+    assert invalid_sources_detail["snapshot_count"] is None
 
 
 @pytest.mark.asyncio

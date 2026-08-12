@@ -165,6 +165,19 @@ def _job_view(job: LongTermMemoryMutationJob | None) -> dict[str, Any] | None:
         snapshot = payload.get("snapshot")
         if isinstance(snapshot, dict):
             snapshot_count = _summary_integer(snapshot.get("count"))
+    if snapshot_count is None and operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE and isinstance(payload, dict):
+        sources = payload.get("sources")
+        if (
+            isinstance(sources, list)
+            and sources
+            and all(
+                isinstance(source, dict)
+                and _summary_integer(source.get("memory_id"), positive=True) is not None
+                and _summary_integer(source.get("expected_version"), positive=True) is not None
+                for source in sources
+            )
+        ):
+            snapshot_count = len(sources)
 
     parent_job_id = _summary_integer(_summary_value(result, payload, "parent_job_id"), positive=True)
     if parent_job_id is None:
@@ -190,6 +203,18 @@ def _job_view(job: LongTermMemoryMutationJob | None) -> dict[str, Any] | None:
         "token_budget": token_budget,
         "context_error": context_error,
     }
+    if operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE:
+        action = _summary_value(result, payload, "action")
+        if action in {"update", "merge"}:
+            derived_counts = {
+                "keep_count": 0,
+                "update_count": 1 if action == "update" else 0,
+                "merge_count": 1 if action == "merge" else 0,
+                "conflict_count": 0,
+            }
+            for key, value in derived_counts.items():
+                if summary[key] is None:
+                    summary[key] = value
     if summary["token_budget"] is None and isinstance(payload, dict):
         organization_model = payload.get("organization_model")
         if isinstance(organization_model, dict):
