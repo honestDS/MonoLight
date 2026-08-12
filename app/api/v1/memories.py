@@ -26,7 +26,6 @@ from app.core.constants import (
     MSG_MEMORY_ORGANIZE_SUBMITTED,
     MSG_MEMORY_PINNED,
     MSG_MEMORY_REINDEX_SUBMITTED,
-    MSG_MEMORY_RESTORED,
     MSG_MEMORY_RESUMED,
     MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_MEMORY_SETTINGS_UPDATED,
@@ -70,7 +69,6 @@ from app.schemas.memory import (
     MemoryOrganizeResponse,
     MemoryRecordDetailResponse,
     MemoryRecordResponse,
-    MemoryRestoreRequest,
     MemoryResumeCurrentRequest,
     MemoryRevisionResponse,
     MemorySettingsResponse,
@@ -418,30 +416,6 @@ async def list_memory_history_api(
     )
     data = _page_data(result)
     return StandardResponse.success(data=data, message=MSG_MEMORY_HISTORY_SUCCESS)
-
-
-@router.post(
-    "/{memory_id}/restore",
-    response_model=StandardResponse[MemoryMutationResponse],
-    responses={400: {"model": StandardResponse[MemoryContentTooLongErrorData]}},
-)
-async def restore_memory_api(
-    request: MemoryRestoreRequest,
-    memory_id: int = Path(..., ge=1),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    result = await memory_service.restore(
-        db,
-        uid=current_user.uid,
-        dedupe_key=request.dedupe_key or _new_dedupe_key(),
-        memory_id=memory_id,
-        revision_version=request.revision_version,
-        expected_version=request.expected_version,
-        source=LongTermMemorySource.USER_API,
-        max_attempts=request.max_attempts,
-    )
-    return StandardResponse.success(data=_mutation_data(result), message=MSG_MEMORY_RESTORED)
 
 
 @router.post("/{memory_id}/resume-current", response_model=StandardResponse[MemoryMutationResponse])

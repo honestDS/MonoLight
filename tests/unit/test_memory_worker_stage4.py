@@ -22,7 +22,6 @@ from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.i18n import t
 from app.core.memory import (
-    MemoryNotFoundError,
     MemoryRecallStatus,
     build_memory_content_hash,
     build_memory_vector_item_id,
@@ -620,7 +619,6 @@ async def test_default_stage4_executor_operations_and_factory_are_shared(
         {
             LongTermMemoryMutationOperation.CREATE,
             LongTermMemoryMutationOperation.UPDATE,
-            LongTermMemoryMutationOperation.RESTORE,
             LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
             LongTermMemoryMutationOperation.DELETE_CLEANUP,
             LongTermMemoryMutationOperation.REINDEX,
@@ -1207,58 +1205,6 @@ async def test_update_suppress_current_is_cleared_after_success_and_worker_reche
         assert after_resume is not None
         assert after_resume.suppress_recall is False
         assert after_resume.suppressed_by_job_id is None
-    finally:
-        await consumer.stop()
-
-
-@pytest.mark.asyncio
-async def test_completed_delete_rejects_restore_and_keeps_history(
-    memory_session_factory: async_sessionmaker[AsyncSession],
-    vector_backend: _FakeVectorBackend,
-) -> None:
-    uid = "restore-worker-user"
-    await _configure_store(memory_session_factory, uid=uid)
-    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
-    memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid)
-    consumer = _consumer(memory_session_factory)
-    try:
-        async with memory_session_factory() as db:
-            deleted = await memory_service.delete(
-                db,
-                uid=uid,
-                dedupe_key="delete-before-restore",
-                memory_id=memory_id,
-                expected_version=1,
-            )
-        assert deleted.job is not None
-        tombstone = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert tombstone is not None
-        assert tombstone.is_active is False
-        assert tombstone.deleted_at is not None
-        await _run_job(
-            consumer,
-            memory_session_factory,
-            uid=uid,
-            job_id=deleted.job.id,
-            status=LongTermMemoryMutationStatus.SUCCEEDED,
-        )
-
-        async with memory_session_factory() as db:
-            with pytest.raises(MemoryNotFoundError):
-                await memory_service.restore(
-                    db,
-                    uid=uid,
-                    dedupe_key="restore-v1",
-                    memory_id=memory_id,
-                    revision_version=1,
-                    expected_version=1,
-                )
-        record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert record is None
-        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
-        assert [revision.version for revision in revisions] == [1]
-        assert revisions[0].content == "old content"
-        assert vector_backend.collections["memory-collection-v1"]["items"] == {}
     finally:
         await consumer.stop()
 

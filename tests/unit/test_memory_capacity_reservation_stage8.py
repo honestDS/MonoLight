@@ -17,7 +17,7 @@ from app.core.constants import (
     MEMORY_CONTENT_MAX_TOKENS,
     MEMORY_MAX_ACTIVE_RECORDS,
 )
-from app.core.crud.memory import memory_record_crud, memory_revision_crud, memory_store_crud
+from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     MemoryConflictError,
@@ -46,9 +46,9 @@ from app.models.memory import (
 MEMORY_TABLES = [
     LongTermMemoryStore.__table__,
     LongTermMemoryRecord.__table__,
-    LongTermMemoryRevision.__table__,
     LongTermMemoryMutationJob.__table__,
     LongTermMemoryEmbeddingDelta.__table__,
+    LongTermMemoryRevision.__table__,
 ]
 
 
@@ -150,34 +150,6 @@ async def _create_record(
     return await memory_record_crud.create(
         db,
         **values,
-        commit=False,
-    )
-
-
-async def _create_revision(
-    db: AsyncSession,
-    *,
-    uid: str,
-    memory_id: int,
-    version: int,
-    memory_key: str,
-    content: str,
-) -> LongTermMemoryRevision:
-    normalized_content, content_token_count, content_hash = _content_token_count(content)
-    return await memory_revision_crud.create(
-        db,
-        uid=uid,
-        memory_id=memory_id,
-        version=version,
-        memory_key=memory_key,
-        memory_type=LongTermMemoryType.FACT,
-        content=normalized_content,
-        content_token_count=content_token_count,
-        content_hash=content_hash,
-        source=LongTermMemorySource.USER_API,
-        source_id="stage8-capacity-history",
-        change_evidence="stage8 capacity history",
-        published_at=datetime.now(UTC),
         commit=False,
     )
 
@@ -927,70 +899,6 @@ async def test_cancelled_pending_create_releases_slot_for_a_different_create(
 
 
 @pytest.mark.asyncio
-async def test_restore_rejects_when_last_capacity_slot_is_pending_create(
-    memory_database: async_sessionmaker[AsyncSession],
-) -> None:
-    uid = "capacity-restore-owner"
-    other_uid = "capacity-restore-other"
-    async with memory_database() as db:
-        await _create_store(db, uid=uid)
-        await _create_store(db, uid=other_uid)
-        await _seed_active_records(db, uid=uid, count=49)
-        deleted = await _create_record(
-            db,
-            uid=uid,
-            memory_key="deleted-for-restore",
-            content="deleted current content",
-            is_active=False,
-            deleted=True,
-        )
-        assert deleted.id is not None
-        revision = await _create_revision(
-            db,
-            uid=uid,
-            memory_id=deleted.id,
-            version=1,
-            memory_key="restored-memory-key",
-            content="restored content",
-        )
-        await db.commit()
-
-    pending_create = await _submit_create(
-        memory_database,
-        uid=uid,
-        dedupe_key="reserve-before-restore",
-        memory_key="reserve-before-restore-key",
-    )
-    assert pending_create.status == MemoryMutationStatus.ACCEPTED
-    assert revision.version is not None
-
-    async with memory_database() as db:
-        with pytest.raises(MemoryConflictError) as exc_info:
-            await memory_service.restore(
-                db,
-                uid=uid,
-                dedupe_key="restore-while-reserved",
-                memory_id=deleted.id,
-                revision_version=revision.version,
-                expected_version=1,
-                source=LongTermMemorySource.USER_API,
-                source_id="stage8-restore-request",
-            )
-        owner_pending = await _count_pending_create_slots(db, uid=uid)
-        other_pending = await _count_pending_create_slots(db, uid=other_uid)
-        restore_jobs = await memory_job_crud.count(
-            db,
-            uid=uid,
-            operation=LongTermMemoryMutationOperation.RESTORE,
-        )
-
-    assert exc_info.value.message == ERR_MEMORY_CAPACITY_PENDING
-    assert owner_pending == 1
-    assert other_pending == 0
-    assert restore_jobs == 0
-
-
-@pytest.mark.asyncio
 async def test_over_limit_legacy_data_rejects_growth_but_allows_safe_mutations_and_shrinking(
     memory_database: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1000,29 +908,11 @@ async def test_over_limit_legacy_data_rejects_growth_but_allows_safe_mutations_a
         await _create_store(db, uid=uid)
         await _create_store(db, uid=other_uid)
         records = await _seed_active_records(db, uid=uid, count=51, oversized_index=0)
-        restore_record = await _create_record(
-            db,
-            uid=uid,
-            memory_key="legacy-deleted-record",
-            content="legacy deleted content",
-            is_active=False,
-            deleted=True,
-        )
-        assert restore_record.id is not None
-        restore_revision = await _create_revision(
-            db,
-            uid=uid,
-            memory_id=restore_record.id,
-            version=1,
-            memory_key="legacy-restore-key",
-            content="legacy restore content",
-        )
         await db.commit()
 
     assert records[0].id is not None
     assert records[1].id is not None
     assert records[2].id is not None
-    assert restore_revision.version is not None
 
     async with memory_database() as db:
         with pytest.raises(MemoryConflictError) as create_error:
@@ -1035,17 +925,6 @@ async def test_over_limit_legacy_data_rejects_growth_but_allows_safe_mutations_a
                 memory_type=LongTermMemoryType.FACT,
                 source=LongTermMemorySource.USER_API,
                 source_id="stage8-over-limit-create",
-            )
-        with pytest.raises(MemoryConflictError) as restore_error:
-            await memory_service.restore(
-                db,
-                uid=uid,
-                dedupe_key="over-limit-restore",
-                memory_id=restore_record.id,
-                revision_version=restore_revision.version,
-                expected_version=1,
-                source=LongTermMemorySource.USER_API,
-                source_id="stage8-over-limit-restore",
             )
         with pytest.raises(MemoryConflictError) as update_error:
             await memory_service.update(
@@ -1062,7 +941,6 @@ async def test_over_limit_legacy_data_rejects_growth_but_allows_safe_mutations_a
             )
 
     assert create_error.value.message == ERR_MEMORY_OVER_LIMIT
-    assert restore_error.value.message == ERR_MEMORY_OVER_LIMIT
     assert update_error.value.message == ERR_MEMORY_OVER_LIMIT
 
     async with memory_database() as db:

@@ -51,7 +51,6 @@ _AUTO_ORGANIZATION_TRIGGER_OPERATIONS = frozenset(
         LongTermMemoryMutationOperation.CREATE,
         LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
         LongTermMemoryMutationOperation.UPDATE,
-        LongTermMemoryMutationOperation.RESTORE,
     }
 )
 

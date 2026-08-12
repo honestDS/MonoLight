@@ -48,6 +48,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         retry_job,
         unpin_memory,
     )
+    from app.core.memory_jobs.manager import MemoryJobValidationError, memory_job_manager
     from app.models.memory import (
         LongTermMemoryMutationJob,
         LongTermMemoryMutationOperation,
@@ -447,6 +448,49 @@ async def test_failed_publication_retry_requeues_and_enforces_version_and_uid(
     async with memory_session_factory() as db:
         with pytest.raises(MemoryConflictError):
             await retry_job(db, uid=uid, job_id=stale_failed.id)
+
+
+@pytest.mark.asyncio
+async def test_restore_jobs_remain_queryable_but_are_not_retryable(memory_session_factory) -> None:
+    uid = "stage7-restore-compatibility"
+    failed = await _create_raw_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.RESTORE,
+        dedupe_key="legacy-restore",
+        status=LongTermMemoryMutationStatus.FAILED,
+        memory_id=42,
+        expected_version=2,
+        payload={"restored_from_version": 1},
+    )
+    assert failed.id is not None
+
+    async with memory_session_factory() as db:
+        jobs = await list_jobs(db, uid=uid, operation=LongTermMemoryMutationOperation.RESTORE)
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await retry_job(db, uid=uid, job_id=failed.id)
+
+    assert jobs["total"] == 1
+    assert jobs["items"][0]["operation"] == LongTermMemoryMutationOperation.RESTORE.value
+    assert exc_info.value.message == ERR_MEMORY_JOB_TARGET_STATE_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_new_restore_jobs_are_rejected_by_the_submission_manager(memory_session_factory) -> None:
+    uid = "stage7-restore-submission-disabled"
+    await configure_store(memory_session_factory, uid=uid)
+    async with memory_session_factory() as db:
+        with pytest.raises(MemoryJobValidationError):
+            await memory_job_manager.submit(
+                db,
+                uid=uid,
+                operation=LongTermMemoryMutationOperation.RESTORE,
+                dedupe_key="new-restore",
+                payload={"restored_from_version": 1},
+                active_mutation_key="restore-target",
+                memory_id=1,
+                expected_version=1,
+            )
 
 
 @pytest.mark.asyncio

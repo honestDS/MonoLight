@@ -184,7 +184,6 @@ export const memoryApi = {
   retryJob: (id) => request.post(`/memories/jobs/${id}/retry`),
   cancelJob: (id) => request.post(`/memories/jobs/${id}/cancel`),
   history: (id, params) => request.get(`/memories/${id}/history`, { params }),
-  restore: (id, data) => request.post(`/memories/${id}/restore`, data),
   resumeCurrent: (id, data) => request.post(`/memories/${id}/resume-current`, data),
   settings: () => request.get('/memories/settings'),
   reindex: (data) => request.post('/memories/reindex', data),

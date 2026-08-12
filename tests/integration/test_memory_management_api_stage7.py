@@ -633,7 +633,7 @@ async def test_memory_api_retries_real_failed_delete_cleanup_and_rejects_cancel(
 
 
 @pytest.mark.asyncio
-async def test_memory_history_restore_and_resume_current(api_app: tuple[FastAPI, SimpleNamespace], db_session: AsyncSession) -> None:
+async def test_memory_history_route_is_read_only_and_resume_current_is_preserved(api_app: tuple[FastAPI, SimpleNamespace], db_session: AsyncSession) -> None:
     app, _current_user = api_app
     await _create_store(db_session)
     record = await _create_record(db_session, version=2, content="current content")
@@ -655,14 +655,11 @@ async def test_memory_history_restore_and_resume_current(api_app: tuple[FastAPI,
         history = _assert_standard(await client.get(f"/api/v1/memories/{record_id}/history?size=1"), 200)
         _assert_page(history, total=2, size=1)
         assert history["data"]["items"][0]["content_token_count"] == estimate_tokens(normalize_memory_content("current content"))
-        restored = _assert_standard(
-            await client.post(
-                f"/api/v1/memories/{record_id}/restore",
-                json={"revision_version": 1, "expected_version": 2, "dedupe_key": "restore-a"},
-            ),
-            200,
+        restore = await client.post(
+            f"/api/v1/memories/{record_id}/restore",
+            json={"revision_version": 1, "expected_version": 2},
         )
-        assert restored["data"]["status"] == "accepted"
+        _assert_standard(restore, 404)
 
     resumed_record = await _create_record(
         db_session,
@@ -781,53 +778,6 @@ async def test_memory_api_rejects_overlong_manual_mutations_without_enqueue_or_t
     assert persisted is not None
     assert persisted.content == "short content"
     assert persisted.version == 1
-
-
-@pytest.mark.asyncio
-async def test_memory_api_rejects_overlong_restore_without_enqueue_or_truncation(
-    api_app: tuple[FastAPI, SimpleNamespace],
-    db_session: AsyncSession,
-) -> None:
-    app, _current_user = api_app
-    await _create_store(db_session)
-    record = await _create_record(db_session, memory_key="restore-target", content="short content")
-    record_id = int(record.id)
-    oversized_content = "historical oversized " * 181
-    await memory_revision_crud.create(
-        db_session,
-        uid="user-a",
-        memory_id=record_id,
-        version=2,
-        memory_key="historical-oversized",
-        memory_type=LongTermMemoryType.FACT,
-        content=oversized_content,
-        content_token_count=estimate_tokens(normalize_memory_content(oversized_content)),
-        content_hash=build_memory_content_hash(oversized_content),
-        source=LongTermMemorySource.USER_API,
-    )
-    await db_session.commit()
-
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            f"/api/v1/memories/{record_id}/restore",
-            json={"revision_version": 2, "expected_version": 1},
-        )
-
-    payload = _assert_standard(response, 400)
-    assert set(payload["data"]) == {"status", "actual_tokens", "max_tokens", "retryable"}
-    assert payload["data"]["status"] == "content_too_long"
-    assert payload["data"]["actual_tokens"] > 160
-    assert payload["data"]["max_tokens"] == 160
-    assert payload["data"]["retryable"] is True
-    assert await memory_job_crud.count(db_session, uid="user-a") == 0
-    persisted = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=record_id)
-    assert persisted is not None
-    assert persisted.content == "short content"
-    assert persisted.version == 1
-    historical = await memory_revision_crud.get_by_memory_id(db_session, uid="user-a", memory_id=record_id, version=2)
-    assert historical is not None
-    assert historical.content == oversized_content
-    assert historical.content_token_count > 160
 
 
 @pytest.mark.asyncio

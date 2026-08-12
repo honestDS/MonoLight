@@ -65,10 +65,6 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
       pattern: /history:\s*\(id,\s*params\)\s*=>\s*request\.get\(`\/memories\/\$\{id\}\/history`,\s*\{\s*params\s*\}\)/
     },
     {
-      name: 'restore',
-      pattern: /restore:\s*\(id,\s*data\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/restore`,\s*data\)/
-    },
-    {
       name: 'resumeCurrent',
       pattern: /resumeCurrent:\s*\(id,\s*data\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/resume-current`,\s*data\)/
     },
@@ -366,7 +362,7 @@ const requiredMemoryKeys = [
   'suppress_current', 'suppress_hint', 'save', 'cancel', 'required',
   'accepted_processing', 'delete_confirm', 'save_failed', 'load_failed', 'delete_success',
   'operation_success', 'operation_failed', 'details', 'history_title', 'revision_version', 'published_at',
-  'restore', 'restore_confirm', 'restore_success', 'no_history', 'deleted_history_read_only', 'job_id', 'operation', 'status', 'attempt',
+  'no_history', 'deleted_history_read_only', 'job_id', 'operation', 'status', 'attempt',
   'error', 'retry', 'cancel_job', 'retry_confirm', 'cancel_confirm', 'retry_success', 'cancel_success',
   'migration_detail', 'migration_job', 'snapshot', 'delta', 'total_count', 'success_count', 'failure_count',
   'target', 'migration_retry', 'migration_cancel', 'migration_retry_success', 'migration_cancel_success',
@@ -388,12 +384,22 @@ test('English and Chinese memories namespaces contain the complete stage 7 key s
 })
 
 test('MemoriesView exposes deleted history as view-only from delete jobs', () => {
-  assert.match(memoriesSource, /const historyReadOnly = ref\(false\)/)
   assert.match(memoriesSource, /const canShowDeletedHistory = \(row\) => row\.operation === 'delete_cleanup'/)
   assert.match(memoriesSource, /row\?\.result\?\.record_snapshot/)
   assert.match(memoriesSource, /row\?\.payload\?\.record_snapshot/)
-  assert.match(memoriesSource, /v-if="!historyReadOnly"[\s\S]*restoreRevision\(row\)/)
+  assert.doesNotMatch(memoriesSource, /historyReadOnly|restoreRevision|memories\.restore/)
+  assert.match(memoriesSource, /<el-alert type="info"[\s\S]*memories\.deleted_history_read_only/)
   assert.match(memoriesSource, /memories\.deleted_history_read_only/)
+})
+
+test('memory restore API and history restore action are removed while resume-current remains', () => {
+  assert.doesNotMatch(apiSource, /memoryApi\s*=\s*\{[\s\S]*restore:/)
+  assert.match(apiSource, /resumeCurrent:\s*\(id,\s*data\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/resume-current`,\s*data\)/)
+  assert.doesNotMatch(memoriesSource, /memoryApi\.restore|restoreRevision|restore_confirm|restore_success/)
+})
+
+test('MemoriesView never offers retry for legacy restore jobs', () => {
+  assert.match(memoriesSource, /const canRetry = \(row\) => \{\s*if \(row\.operation === 'restore'\) return false/)
 })
 
 test('MemoriesView keeps runtime settings and organization actions read-only', () => {

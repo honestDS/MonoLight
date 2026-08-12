@@ -364,16 +364,12 @@ def _normalize_publication_for_job(
     allowed_fields = _PUBLICATION_PAYLOAD_FIELDS
     if operation == LongTermMemoryMutationOperation.UPDATE:
         allowed_fields = _PUBLICATION_PAYLOAD_FIELDS | {"suppress_current"}
-    elif operation == LongTermMemoryMutationOperation.RESTORE:
-        allowed_fields = _PUBLICATION_PAYLOAD_FIELDS | {"restored_from_version"}
     if set(payload) != allowed_fields:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
     _validate_payload_source_fields(payload, job)
     if operation == LongTermMemoryMutationOperation.UPDATE:
         if not isinstance(payload.get("suppress_current"), bool):
             raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-    elif operation == LongTermMemoryMutationOperation.RESTORE:
-        _require_positive_int(payload.get("restored_from_version"), message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
     return payload
 
 
@@ -1031,12 +1027,6 @@ def _validate_record_state(
         if payload["suppress_current"] and (not record.suppress_recall or record.suppressed_by_job_id != job_id):
             raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
         return
-    if operation == LongTermMemoryMutationOperation.RESTORE:
-        if record.is_active and record.deleted_at is not None:
-            raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-        if not record.is_active and record.deleted_at is None:
-            raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-        return
     raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
 
 
@@ -1059,12 +1049,6 @@ def _validate_publication_capacity(
         if capacity.occupied_count > max_active_records:
             raise _deterministic(ERR_MEMORY_CAPACITY_PENDING)
         return
-
-    if operation == LongTermMemoryMutationOperation.RESTORE and not record.is_active:
-        if capacity.active_count >= max_active_records:
-            raise _deterministic(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=max_active_records)
-        if capacity.occupied_count >= max_active_records:
-            raise _deterministic(ERR_MEMORY_CAPACITY_PENDING)
 
 
 async def _validate_unique_publication(
@@ -2587,10 +2571,6 @@ async def _handle_update(context: MemoryJobExecutionContext) -> MemoryJobExecuti
     return await _execute_publication(context, LongTermMemoryMutationOperation.UPDATE)
 
 
-async def _handle_restore(context: MemoryJobExecutionContext) -> MemoryJobExecutionResult:
-    return await _execute_publication(context, LongTermMemoryMutationOperation.RESTORE)
-
-
 async def _handle_organization_merge(context: MemoryJobExecutionContext) -> MemoryJobExecutionResult:
     return await _execute_organization_merge(context)
 
@@ -2602,7 +2582,6 @@ def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Han
         LongTermMemoryMutationOperation.CREATE: _handle_create,
         LongTermMemoryMutationOperation.CREATE_WITH_EVICTION: _handle_create_with_eviction,
         LongTermMemoryMutationOperation.UPDATE: _handle_update,
-        LongTermMemoryMutationOperation.RESTORE: _handle_restore,
         LongTermMemoryMutationOperation.DELETE_CLEANUP: _handle_delete_cleanup,
         LongTermMemoryMutationOperation.ORGANIZE_MERGE: _handle_organization_merge,
     }

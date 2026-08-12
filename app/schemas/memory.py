@@ -52,13 +52,6 @@ class MemoryDeleteRequest(_MemoryRequest):
     max_attempts: StrictInt = Field(default=3, ge=1)
 
 
-class MemoryRestoreRequest(_MemoryRequest):
-    revision_version: StrictInt = Field(gt=0)
-    expected_version: StrictInt = Field(ge=0)
-    dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
-    max_attempts: StrictInt = Field(default=3, ge=1)
-
-
 class MemoryResumeCurrentRequest(_MemoryRequest):
     expected_version: StrictInt = Field(ge=0)
 
@@ -296,7 +289,6 @@ __all__ = [
     "MemoryOrganizationSettingsResponse",
     "MemoryRecordResponse",
     "MemoryRecordDetailResponse",
-    "MemoryRestoreRequest",
     "MemoryResumeCurrentRequest",
     "MemoryRevisionResponse",
     "MemorySortField",

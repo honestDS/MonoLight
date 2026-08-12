@@ -548,7 +548,6 @@ async def test_consumer_calls_auto_helper_only_for_successful_memory_publication
         LongTermMemoryMutationOperation.CREATE,
         LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
         LongTermMemoryMutationOperation.UPDATE,
-        LongTermMemoryMutationOperation.RESTORE,
     ]
     success_jobs = {
         operation: await _create_direct_job(
@@ -630,7 +629,6 @@ async def test_consumer_calls_auto_helper_only_for_successful_memory_publication
             LongTermMemoryMutationOperation.CREATE: success_handler,
             LongTermMemoryMutationOperation.CREATE_WITH_EVICTION: success_handler,
             LongTermMemoryMutationOperation.UPDATE: success_handler,
-            LongTermMemoryMutationOperation.RESTORE: success_handler,
             LongTermMemoryMutationOperation.DELETE_CLEANUP: success_handler,
             LongTermMemoryMutationOperation.ORGANIZE: success_handler,
             LongTermMemoryMutationOperation.EXTRACT: failure_handler,
@@ -651,7 +649,7 @@ async def test_consumer_calls_auto_helper_only_for_successful_memory_publication
         shutdown_retry_delay_seconds=1,
     )
     try:
-        assert await consumer.run_once() == 8
+        assert await consumer.run_once() == 7
         for operation, job in success_jobs.items():
             assert job.id is not None
             await _wait_for_status(

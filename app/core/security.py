@@ -94,6 +94,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
     async with AsyncSessionLocal() as session:
         user = await user_crud.get_by_username(db=session, username=username)
-        if user is None:
-            raise credentials_exception
-        return user
+    if user is None or user.is_active is not True:
+        raise credentials_exception
+    return user

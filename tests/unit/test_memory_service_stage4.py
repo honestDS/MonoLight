@@ -11,17 +11,15 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_OVER_LIMIT, MEMORY_CONTENT_MAX_TOKENS
+from app.core.constants import ERR_MEMORY_OVER_LIMIT
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_record_crud,
-    memory_revision_crud,
     memory_store_crud,
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     MemoryConflictError,
-    MemoryContentTooLongError,
     MemoryMutationStatus,
     MemoryNotFoundError,
     MemoryRecallStatus,
@@ -57,9 +55,9 @@ from app.models.memory import (
 MEMORY_TABLES = [
     LongTermMemoryStore.__table__,
     LongTermMemoryRecord.__table__,
-    LongTermMemoryRevision.__table__,
     LongTermMemoryEmbeddingDelta.__table__,
     LongTermMemoryMutationJob.__table__,
+    LongTermMemoryRevision.__table__,
 ]
 
 
@@ -173,35 +171,6 @@ async def _create_record(
         record.vector_item_id = build_memory_vector_item_id(record.id, version)
         await db.flush()
     return record
-
-
-async def _create_revision(
-    db: AsyncSession,
-    *,
-    uid: str,
-    memory_id: int,
-    version: int,
-    memory_key: str,
-    content: str,
-    source: LongTermMemorySource = LongTermMemorySource.AUTO_EXTRACT,
-    source_id: str | None = "historical-source",
-) -> LongTermMemoryRevision:
-    return await memory_revision_crud.create(
-        db,
-        uid=uid,
-        memory_id=memory_id,
-        version=version,
-        memory_key=memory_key,
-        memory_type=LongTermMemoryType.FACT,
-        content=content,
-        content_token_count=estimate_tokens(normalize_memory_content(content)),
-        content_hash=build_memory_content_hash(content),
-        source=source,
-        source_id=source_id,
-        change_evidence=f"history {version}",
-        published_at=datetime.now(UTC),
-        commit=False,
-    )
 
 
 async def _get_record(
@@ -882,278 +851,6 @@ async def test_delete_new_dedupe_on_already_deleted_record_is_unchanged_and_uid_
     assert current is not None
     assert current.is_active is False
     assert await _get_job(memory_database, uid="deleted-owner", job_id=unchanged.job_id or 0) is None
-
-
-async def _create_deleted_memory_with_history(
-    db: AsyncSession,
-    *,
-    uid: str,
-    max_active_records: int = 50,
-) -> tuple[LongTermMemoryRecord, LongTermMemoryRevision, LongTermMemoryRevision]:
-    await _create_store(db, uid=uid, max_active_records=max_active_records)
-    record = await _create_record(
-        db,
-        uid=uid,
-        memory_key="current-key",
-        content="current content",
-        version=2,
-        indexed_version=2,
-        is_active=False,
-        deleted=True,
-    )
-    first = await _create_revision(
-        db,
-        uid=uid,
-        memory_id=record.id,
-        version=1,
-        memory_key="old-key",
-        content="old content",
-    )
-    second = await _create_revision(
-        db,
-        uid=uid,
-        memory_id=record.id,
-        version=2,
-        memory_key="current-key",
-        content="current content",
-    )
-    await db.commit()
-    return record, first, second
-
-
-@pytest.mark.asyncio
-async def test_list_history_is_uid_scoped_and_restore_builds_job_from_revision_with_current_source(
-    memory_database: async_sessionmaker[AsyncSession],
-) -> None:
-    async with memory_database() as db:
-        record, first, second = await _create_deleted_memory_with_history(
-            db,
-            uid="restore-owner",
-        )
-        memory_id = record.id
-        first_version = first.version
-        second_version = second.version
-        assert memory_id is not None
-        assert first_version is not None
-        assert second_version is not None
-        await _create_store(db, uid="restore-other")
-        history = await memory_service.list_history(db, uid="restore-owner", memory_id=memory_id)
-        history_versions = [item.version for item in history]
-        history_uids = [item.uid for item in history]
-        result = await memory_service.restore(
-            db,
-            uid="restore-owner",
-            dedupe_key="restore-request",
-            memory_id=memory_id,
-            revision_version=first_version,
-            expected_version=2,
-            source=LongTermMemorySource.USER_API,
-            source_id="current-request-source",
-            source_message_id=88,
-        )
-        with pytest.raises(MemoryNotFoundError):
-            await memory_service.list_history(db, uid="restore-other", memory_id=memory_id)
-
-    assert history_versions == [second_version, first_version]
-    assert history_uids == ["restore-owner", "restore-owner"]
-    assert result.status == MemoryMutationStatus.ACCEPTED
-    job = await _get_job(memory_database, uid="restore-owner", job_id=result.job_id)
-    assert job is not None
-    assert job.operation == LongTermMemoryMutationOperation.RESTORE
-    assert job.memory_id == memory_id
-    assert job.expected_version == 2
-    assert job.payload["content"] == "old content"
-    assert job.payload["content_token_count"] == estimate_tokens(job.payload["content"])
-    assert job.payload["memory_key"] == "old-key"
-    assert job.payload["restored_from_version"] == 1
-    assert job.payload["source"] == "user_api"
-    assert job.payload["source_id"] == "current-request-source"
-    assert job.payload["source_message_id"] == 88
-
-
-@pytest.mark.asyncio
-async def test_restore_checks_version_capacity_ownership_and_duplicate_key_or_hash(
-    memory_database: async_sessionmaker[AsyncSession],
-) -> None:
-    async with memory_database() as db:
-        record, first, _second = await _create_deleted_memory_with_history(
-            db,
-            uid="restore-check-user",
-        )
-        memory_id = record.id
-        first_version = first.version
-        assert memory_id is not None
-        assert first_version is not None
-        with pytest.raises(MemoryConflictError):
-            await memory_service.restore(
-                db,
-                uid="restore-check-user",
-                dedupe_key="restore-wrong-version",
-                memory_id=memory_id,
-                revision_version=first_version,
-                expected_version=1,
-            )
-
-        await _create_store(db, uid="restore-capacity-user", max_active_records=1)
-        await _create_record(
-            db,
-            uid="restore-capacity-user",
-            memory_key="active-capacity",
-            content="active capacity",
-        )
-        capacity_record = await _create_record(
-            db,
-            uid="restore-capacity-user",
-            memory_key="deleted-capacity",
-            content="deleted capacity",
-            is_active=False,
-            deleted=True,
-        )
-        capacity_revision = await _create_revision(
-            db,
-            uid="restore-capacity-user",
-            memory_id=capacity_record.id,
-            version=1,
-            memory_key="capacity-old",
-            content="capacity old",
-        )
-        capacity_memory_id = capacity_record.id
-        capacity_revision_version = capacity_revision.version
-        assert capacity_memory_id is not None
-        assert capacity_revision_version is not None
-        await _create_store(db, uid="restore-foreign-user")
-        await db.commit()
-        with pytest.raises(MemoryConflictError):
-            await memory_service.restore(
-                db,
-                uid="restore-capacity-user",
-                dedupe_key="restore-at-capacity",
-                memory_id=capacity_memory_id,
-                revision_version=capacity_revision_version,
-                expected_version=1,
-            )
-        with pytest.raises(MemoryNotFoundError):
-            await memory_service.restore(
-                db,
-                uid="restore-foreign-user",
-                dedupe_key="restore-foreign",
-                memory_id=memory_id,
-                revision_version=first_version,
-                expected_version=2,
-            )
-
-        duplicate_record = await _create_record(
-            db,
-            uid="restore-check-user",
-            memory_key="duplicate-key",
-            content="duplicate-content",
-        )
-        duplicate_target = await _create_record(
-            db,
-            uid="restore-check-user",
-            memory_key="another-current-key",
-            content="another-current-content",
-            is_active=False,
-            deleted=True,
-        )
-        duplicate_revision = await _create_revision(
-            db,
-            uid="restore-check-user",
-            memory_id=duplicate_target.id,
-            version=1,
-            memory_key=duplicate_record.memory_key,
-            content=duplicate_record.content,
-        )
-        await db.commit()
-        duplicate = await memory_service.restore(
-            db,
-            uid="restore-check-user",
-            dedupe_key="restore-duplicate",
-            memory_id=duplicate_target.id,
-            revision_version=duplicate_revision.version,
-            expected_version=1,
-        )
-
-    assert duplicate.status == MemoryMutationStatus.EXISTING
-    assert duplicate.memory_id == duplicate_record.id
-
-
-@pytest.mark.asyncio
-async def test_restore_same_dedupe_with_different_revision_conflicts(
-    memory_database: async_sessionmaker[AsyncSession],
-) -> None:
-    async with memory_database() as db:
-        record, first, second = await _create_deleted_memory_with_history(
-            db,
-            uid="restore-dedupe-user",
-        )
-        memory_id = record.id
-        first_version = first.version
-        second_version = second.version
-        assert memory_id is not None
-        assert first_version is not None
-        assert second_version is not None
-        first_result = await memory_service.restore(
-            db,
-            uid="restore-dedupe-user",
-            dedupe_key="restore-same-dedupe",
-            memory_id=memory_id,
-            revision_version=first_version,
-            expected_version=2,
-        )
-        with pytest.raises(MemoryConflictError):
-            await memory_service.restore(
-                db,
-                uid="restore-dedupe-user",
-                dedupe_key="restore-same-dedupe",
-                memory_id=memory_id,
-                revision_version=second_version,
-                expected_version=2,
-            )
-
-    assert first_result.status == MemoryMutationStatus.ACCEPTED
-    job = await _get_job(memory_database, uid="restore-dedupe-user", job_id=first_result.job_id)
-    assert job is not None
-    assert job.payload["restored_from_version"] == first_version
-
-
-@pytest.mark.asyncio
-async def test_restore_rejects_historical_over_limit_content_before_enqueue(
-    memory_database: async_sessionmaker[AsyncSession],
-) -> None:
-    uid = "restore-over-limit-user"
-    oversized_content = " ".join(["oversized"] * (MEMORY_CONTENT_MAX_TOKENS + 20))
-    async with memory_database() as db:
-        await _create_store(db, uid=uid)
-        record = await _create_record(
-            db,
-            uid=uid,
-            memory_key="deleted-key",
-            content="current content",
-            is_active=False,
-            deleted=True,
-        )
-        revision = await _create_revision(
-            db,
-            uid=uid,
-            memory_id=record.id,
-            version=1,
-            memory_key="oversized-key",
-            content=oversized_content,
-        )
-        await db.commit()
-
-        with pytest.raises(MemoryContentTooLongError):
-            await memory_service.restore(
-                db,
-                uid=uid,
-                dedupe_key="restore-over-limit",
-                memory_id=record.id,
-                revision_version=revision.version,
-                expected_version=1,
-            )
-
-    assert await _get_job(memory_database, uid=uid, job_id=1) is None
 
 
 @pytest.mark.asyncio

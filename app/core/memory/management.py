@@ -13,7 +13,6 @@ from app.core.constants import (
     ERR_MEMORY_MIGRATION_NOT_FOUND,
     ERR_MEMORY_NOT_CONFIGURED,
     ERR_MEMORY_RECORD_NOT_FOUND,
-    ERR_MEMORY_VERSION_INVALID,
     MEMORY_CONTENT_MAX_TOKENS,
     MEMORY_MAX_ACTIVE_RECORDS,
     MEMORY_ORGANIZE_TRIGGER_RECORDS,
@@ -303,32 +302,6 @@ async def _retry_publication_job(
             expected_version=job.expected_version,
             suppress_current=suppress_current,
         )
-    elif job.operation == LongTermMemoryMutationOperation.RESTORE:
-        if job.memory_id is None or job.expected_version is None:
-            raise MemoryConflictError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-        revision_version = payload.get("restored_from_version")
-        if revision_version is None:
-            raise MemoryValidationError(ERR_MEMORY_JOB_PAYLOAD_INVALID)
-        revision_version = _require_positive(
-            revision_version,
-            field="revision_version",
-            error_key=ERR_MEMORY_VERSION_INVALID,
-        )
-        result = await memory_service.restore(
-            db,
-            uid=uid,
-            dedupe_key=dedupe_key,
-            memory_id=job.memory_id,
-            revision_version=revision_version,
-            expected_version=job.expected_version,
-            source=payload["source"],
-            source_id=payload["source_id"],
-            source_session_id=payload["source_session_id"],
-            source_profile_id=payload["source_profile_id"],
-            source_message_id=payload["source_message_id"],
-            max_attempts=job.max_attempts,
-            commit=False,
-        )
     else:
         raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
     if _json_value(result.status) != "accepted" or result.job is None:
@@ -400,7 +373,6 @@ async def retry_job(db: AsyncSession, *, uid: str, job_id: int) -> dict[str, Any
             LongTermMemoryMutationOperation.CREATE,
             LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
             LongTermMemoryMutationOperation.UPDATE,
-            LongTermMemoryMutationOperation.RESTORE,
         }:
             result = await _retry_publication_job(db, uid=normalized_uid, job=job)
         elif operation in {

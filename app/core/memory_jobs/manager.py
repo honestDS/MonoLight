@@ -57,7 +57,6 @@ _TARGET_OPERATIONS = frozenset(
         LongTermMemoryMutationOperation.CREATE,
         LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
         LongTermMemoryMutationOperation.UPDATE,
-        LongTermMemoryMutationOperation.RESTORE,
         LongTermMemoryMutationOperation.DELETE_CLEANUP,
     }
 )
@@ -340,20 +339,12 @@ class MemoryJobManager:
                     operation
                     in {
                         LongTermMemoryMutationOperation.UPDATE,
-                        LongTermMemoryMutationOperation.RESTORE,
                         LongTermMemoryMutationOperation.DELETE_CLEANUP,
                     }
                     and memory_id is None
                 ):
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="memory_id"))
-                if (
-                    operation
-                    in {
-                        LongTermMemoryMutationOperation.UPDATE,
-                        LongTermMemoryMutationOperation.RESTORE,
-                    }
-                    and expected_version is None
-                ):
+                if operation == LongTermMemoryMutationOperation.UPDATE and expected_version is None:
                     raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_REQUIRED, field="expected_version"))
                 if (
                     operation
@@ -430,7 +421,6 @@ class MemoryJobManager:
                 operation
                 in {
                     LongTermMemoryMutationOperation.UPDATE,
-                    LongTermMemoryMutationOperation.RESTORE,
                     LongTermMemoryMutationOperation.DELETE_CLEANUP,
                 }
                 and memory_id is not None

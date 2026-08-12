@@ -932,7 +932,10 @@ async def test_shutdown_release_at_max_attempts_fails_and_rejects_old_owner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", list(LongTermMemoryMutationOperation))
+@pytest.mark.parametrize(
+    "operation",
+    [operation for operation in LongTermMemoryMutationOperation if operation != LongTermMemoryMutationOperation.RESTORE],
+)
 async def test_executor_routes_each_memory_operation_once_and_returns_execution_result(
     memory_job_database: async_sessionmaker[AsyncSession],
     operation: LongTermMemoryMutationOperation,
@@ -1019,7 +1022,7 @@ async def test_consumer_success_deterministic_failure_and_retryable_retry(
     retry_id = await _create_direct_job(
         memory_job_database,
         uid=uid,
-        operation=LongTermMemoryMutationOperation.RESTORE,
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
         dedupe_key="retryable",
     )
     attempts: dict[str, int] = {}
@@ -1040,7 +1043,7 @@ async def test_consumer_success_deterministic_failure_and_retryable_retry(
         {
             LongTermMemoryMutationOperation.REINDEX: success_handler,
             LongTermMemoryMutationOperation.UPDATE: deterministic_handler,
-            LongTermMemoryMutationOperation.RESTORE: retry_handler,
+            LongTermMemoryMutationOperation.ORGANIZE_MERGE: retry_handler,
         },
         session_factory=memory_job_database,
     )

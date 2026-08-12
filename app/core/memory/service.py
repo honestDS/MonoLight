@@ -23,10 +23,8 @@ from app.core.constants import (
     ERR_MEMORY_RECALL_UNAVAILABLE,
     ERR_MEMORY_RECORD_NOT_FOUND,
     ERR_MEMORY_RESTORE_CONDITION_INVALID,
-    ERR_MEMORY_REVISION_NOT_FOUND,
     ERR_MEMORY_SNAPSHOT_UID_FORBIDDEN,
     ERR_MEMORY_VERSION_CONFLICT,
-    ERR_MEMORY_VERSION_INVALID,
     ERR_VALUE_MUST_BE_BETWEEN,
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
@@ -133,7 +131,6 @@ def _is_legacy_publication_payload(
     if normalized_operation not in {
         LongTermMemoryMutationOperation.CREATE,
         LongTermMemoryMutationOperation.UPDATE,
-        LongTermMemoryMutationOperation.RESTORE,
     }:
         return False
     if not isinstance(existing_payload, dict) or "content_token_count" in existing_payload:
@@ -875,120 +872,6 @@ class LongTermMemoryService:
                     },
                     commit=False,
                 )
-            await _finish(db, commit=commit)
-            return _accepted(submission)
-        except Exception:
-            await db.rollback()
-            raise
-
-    async def restore(
-        self,
-        db: AsyncSession,
-        uid: str,
-        dedupe_key: str,
-        memory_id: int,
-        revision_version: int,
-        expected_version: int,
-        source: LongTermMemorySource | str = LongTermMemorySource.USER_API,
-        source_id: str | None = None,
-        source_session_id: str | None = None,
-        source_profile_id: int | None = None,
-        source_message_id: int | None = None,
-        max_attempts: int = 3,
-        commit: bool = True,
-    ) -> MemoryMutationResult:
-        try:
-            _validate_commit(commit)
-            normalized_uid = _normalize_uid(uid)
-            normalized_dedupe_key = _normalize_dedupe_key(dedupe_key)
-            normalized_memory_id = _require_positive(memory_id, field="memory_id")
-            normalized_revision_version = _require_positive(revision_version, field="revision_version", error_key=ERR_MEMORY_VERSION_INVALID)
-            normalized_expected_version = _require_non_negative(expected_version, field="expected_version")
-            attempts, normalized_source, normalized_source_id, normalized_session_id, normalized_profile_id, normalized_message_id = _validate_source_and_attempts(
-                max_attempts=max_attempts,
-                source=source,
-                source_id=source_id,
-                source_session_id=source_session_id,
-                source_profile_id=source_profile_id,
-                source_message_id=source_message_id,
-            )
-            active_key = build_memory_active_mutation_key(normalized_uid, memory_id=normalized_memory_id)
-            revision = await memory_revision_crud.get_by_memory_id(
-                db,
-                uid=normalized_uid,
-                memory_id=normalized_memory_id,
-                version=normalized_revision_version,
-            )
-            if revision is None:
-                raise MemoryNotFoundError(ERR_MEMORY_REVISION_NOT_FOUND)
-            payload = _publication_payload(
-                content=revision.content,
-                memory_key=revision.memory_key,
-                memory_type=revision.memory_type,
-                change_evidence=revision.change_evidence,
-                source=normalized_source,
-                source_id=normalized_source_id,
-                source_session_id=normalized_session_id,
-                source_profile_id=normalized_profile_id,
-                source_message_id=normalized_message_id,
-            )
-            payload["restored_from_version"] = normalized_revision_version
-            existing_job = await memory_job_manager.get_job_by_dedupe_key(db, uid=normalized_uid, dedupe_key=normalized_dedupe_key)
-            if existing_job is not None:
-                submission = await _accept_existing_job(
-                    db,
-                    existing_job,
-                    fallback_active_mutation_key=active_key,
-                    operation=LongTermMemoryMutationOperation.RESTORE,
-                    payload=payload,
-                    memory_id=normalized_memory_id,
-                    expected_version=normalized_expected_version,
-                    source_session_id=normalized_session_id,
-                    source_profile_id=normalized_profile_id,
-                    source_message_id=normalized_message_id,
-                    max_attempts=attempts,
-                    use_existing_identity=False,
-                )
-                await _finish(db, commit=commit)
-                return _accepted(submission)
-            record = await memory_record_crud.get_by_id(db, uid=normalized_uid, memory_id=normalized_memory_id)
-            if record is None:
-                raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
-            store = await _lock_active_store(db, normalized_uid)
-            if record.pending_mutation_job_id is not None:
-                raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
-            if record.version != normalized_expected_version:
-                raise MemoryConflictError(ERR_MEMORY_VERSION_CONFLICT)
-            if record.is_active and _same_publication(record, payload):
-                await _finish(db, commit=commit)
-                return MemoryMutationResult(status=MemoryMutationStatus.UNCHANGED, record=record)
-            key_record = await memory_record_crud.get_by_key(db, uid=normalized_uid, memory_key=payload["memory_key"])
-            hash_record = await memory_record_crud.get_by_content_hash(db, uid=normalized_uid, content_hash=payload["content_hash"])
-            if (key_record is not None and key_record.id != normalized_memory_id) or (hash_record is not None and hash_record.id != normalized_memory_id):
-                await _finish(db, commit=commit)
-                return MemoryMutationResult(status=MemoryMutationStatus.EXISTING, record=key_record or hash_record)
-            capacity = await load_memory_capacity_snapshot(db, normalized_uid, store.max_active_records)
-            if capacity.is_over_limit:
-                raise MemoryConflictError(ERR_MEMORY_OVER_LIMIT)
-            if not record.is_active:
-                if capacity.active_count == store.max_active_records:
-                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_EXCEEDED, maximum=store.max_active_records)
-                if capacity.occupied_count >= store.max_active_records:
-                    raise MemoryConflictError(ERR_MEMORY_CAPACITY_PENDING, maximum=store.max_active_records)
-            submission = await _submit_job(
-                db,
-                uid=normalized_uid,
-                operation=LongTermMemoryMutationOperation.RESTORE,
-                dedupe_key=normalized_dedupe_key,
-                payload=payload,
-                active_mutation_key=active_key,
-                memory_id=normalized_memory_id,
-                expected_version=normalized_expected_version,
-                source_session_id=normalized_session_id,
-                source_profile_id=normalized_profile_id,
-                source_message_id=normalized_message_id,
-                max_attempts=attempts,
-            )
             await _finish(db, commit=commit)
             return _accepted(submission)
         except Exception:
