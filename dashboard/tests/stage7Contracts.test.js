@@ -95,12 +95,35 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
     {
       name: 'retryCleanup',
       pattern: /retryCleanup:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/collections\/\$\{id\}\/cleanup-retry`\)/
+    },
+    {
+      name: 'updateSettings',
+      pattern: /updateSettings:\s*\(data\)\s*=>\s*request\.post\('\/memories\/settings',\s*data\)/
+    },
+    {
+      name: 'organize',
+      pattern: /organize:\s*\(data\)\s*=>\s*request\.post\('\/memories\/organize',\s*data\)/
+    },
+    {
+      name: 'pin',
+      pattern: /pin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/pin`\)/
+    },
+    {
+      name: 'unpin',
+      pattern: /unpin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/unpin`\)/
     }
   ]
 
   for (const endpoint of endpoints) {
     assert.match(apiSource, endpoint.pattern, `memoryApi.${endpoint.name} is incomplete`)
   }
+})
+
+test('memoryApi pin and unpin POST requests do not send a request body', () => {
+  assert.match(apiSource, /pin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/pin`\)/)
+  assert.match(apiSource, /unpin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/unpin`\)/)
+  assert.doesNotMatch(apiSource, /pin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/pin`,/)
+  assert.doesNotMatch(apiSource, /unpin:\s*\(id\)\s*=>\s*request\.post\(`\/memories\/\$\{id\}\/unpin`,/)
 })
 
 test('defaultProfileConfigs includes independent memory defaults', () => {
@@ -303,32 +326,76 @@ test('MemoriesView invalidates settings GETs around settings saves', () => {
   assert.notEqual(saveEnd, -1)
 
   const saveSource = memoriesSource.slice(saveStart, saveEnd)
-  const sequenceIndex = saveSource.indexOf('settingsRequestSeq += 1')
+  const invalidateIndex = saveSource.indexOf('settingsRequestTracker.invalidate()')
   const loadingIndex = saveSource.indexOf('settingsLoading.value = false')
   const postIndex = saveSource.indexOf('memoryApi.updateSettings(')
   const applyIndex = saveSource.indexOf('applySettings(data)')
   const catchIndex = saveSource.indexOf('} catch (error)')
-  assert.ok(sequenceIndex >= 0 && sequenceIndex < postIndex)
+  assert.ok(invalidateIndex >= 0 && invalidateIndex < postIndex)
   assert.ok(loadingIndex >= 0 && loadingIndex < postIndex)
   assert.ok(postIndex >= 0 && postIndex < applyIndex)
   assert.ok(applyIndex >= 0 && applyIndex < catchIndex)
   assert.doesNotMatch(saveSource.slice(catchIndex), /applySettings\(|organizationFormDirty\.value\s*=\s*false/)
 })
 
-test('MemoriesView rejects stale responses for every polled collection', () => {
+test('MemoriesView uses begin and isCurrent for every polled collection tracker', () => {
   const loaders = [
-    ['loadSettings', 'settingsRequestSeq'],
-    ['loadMemories', 'memoriesRequestSeq'],
-    ['loadJobs', 'jobsRequestSeq'],
-    ['loadMigrations', 'migrationsRequestSeq']
+    ['loadSettings', 'settingsRequestTracker'],
+    ['loadMemories', 'memoriesRequestTracker'],
+    ['loadJobs', 'jobsRequestTracker'],
+    ['loadMigrations', 'migrationsRequestTracker']
   ]
 
   for (const [loader, sequence] of loaders) {
     assert.match(
       memoriesSource,
-      new RegExp(`const ${loader} = async \\(silent = false\\) => \\{[\\s\\S]*?const requestSeq = \\+\\+${sequence}[\\s\\S]*?if \\(requestSeq !== ${sequence}\\) return`),
-      `${loader} must reject stale responses`
+      new RegExp(`const ${loader} = async \\(silent = false\\) => \\{[\\s\\S]*?const requestSeq = ${sequence}\\.begin\\(\\)[\\s\\S]*?if \\(!${sequence}\\.isCurrent\\(requestSeq\\)\\) return`),
+      `${loader} must reject stale responses through ${sequence}`
     )
+  }
+})
+
+test('MemoriesView creates and invalidates all four request trackers on unmount', () => {
+  const trackers = [
+    'settingsRequestTracker',
+    'memoriesRequestTracker',
+    'jobsRequestTracker',
+    'migrationsRequestTracker'
+  ]
+  const unmountStart = memoriesSource.indexOf('onBeforeUnmount(() =>')
+  assert.notEqual(unmountStart, -1)
+  const unmountSource = memoriesSource.slice(unmountStart)
+
+  for (const tracker of trackers) {
+    assert.match(memoriesSource, new RegExp(`const ${tracker} = createLatestRequestTracker\\(\\)`))
+    assert.match(unmountSource, new RegExp(`${tracker}\\.invalidate\\(\\)`))
+  }
+})
+
+test('MemoriesView uses dedicated management payload builders and id-only pin actions', () => {
+  const saveStart = memoriesSource.indexOf('const saveSettings = async')
+  const organizeStart = memoriesSource.indexOf('const organize = async', saveStart)
+  const resetFormStart = memoriesSource.indexOf('const resetForm =', organizeStart)
+  const togglePinStart = memoriesSource.indexOf('const togglePin = async')
+  const historyStart = memoriesSource.indexOf('const showHistory = async', togglePinStart)
+  assert.ok(saveStart >= 0 && organizeStart > saveStart)
+  assert.ok(resetFormStart > organizeStart)
+  assert.ok(togglePinStart >= 0 && historyStart > togglePinStart)
+
+  const saveSource = memoriesSource.slice(saveStart, organizeStart)
+  const organizeSource = memoriesSource.slice(organizeStart, resetFormStart)
+  const pinSource = memoriesSource.slice(togglePinStart, historyStart)
+
+  assert.match(saveSource, /memoryApi\.updateSettings\(buildOrganizationSettingsPayload\(organizationForm\)\)/)
+  assert.match(organizeSource, /memoryApi\.organize\(buildOrganizePayload\(newDedupeKey\(\)\)\)/)
+  assert.match(pinSource, /memoryApi\.unpin\(row\.id\)/)
+  assert.match(pinSource, /memoryApi\.pin\(row\.id\)/)
+  assert.doesNotMatch(pinSource, /memoryApi\.(pin|unpin)\([^)]*,/)
+
+  for (const field of ['uid', 'records', 'session', 'collection']) {
+    assert.doesNotMatch(saveSource, new RegExp(`\\b${field}\\b`), `settings save must not mention ${field}`)
+    assert.doesNotMatch(organizeSource, new RegExp(`\\b${field}\\b`), `organize must not mention ${field}`)
+    assert.doesNotMatch(pinSource, new RegExp(`\\b${field}\\b`), `pin action must not mention ${field}`)
   }
 })
 

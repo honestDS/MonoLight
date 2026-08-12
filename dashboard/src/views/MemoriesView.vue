@@ -221,6 +221,19 @@ import { useI18n } from 'vue-i18n'
 import { channelApi, memoryApi } from '../api'
 import { MEMORY_JOB_OPERATIONS, MEMORY_JOB_STATUSES, MEMORY_TYPES } from '../constants'
 import StatusTag from '../components/StatusTag.vue'
+import {
+  buildOrganizePayload,
+  buildOrganizationSettingsPayload,
+  createLatestRequestTracker,
+  decorateMemoryJobs,
+  estimateMemoryTokens,
+  getOrganizationModelsForChannel,
+  isMemoryContentTooLong,
+  memoryOperationLabelKey,
+  memorySourceLabelKey,
+  normalizeMemorySettings,
+  validateOrganizationSettings
+} from '../utils/memoryManagement'
 
 const { t } = useI18n()
 const memoryTypes = MEMORY_TYPES
@@ -261,10 +274,10 @@ const migrationVisible = ref(false)
 const selectedMigration = ref(null)
 const pollTimer = ref(null)
 const organizationFormDirty = ref(false)
-let settingsRequestSeq = 0
-let memoriesRequestSeq = 0
-let jobsRequestSeq = 0
-let migrationsRequestSeq = 0
+const settingsRequestTracker = createLatestRequestTracker()
+const memoriesRequestTracker = createLatestRequestTracker()
+const jobsRequestTracker = createLatestRequestTracker()
+const migrationsRequestTracker = createLatestRequestTracker()
 const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
 const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
 const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
@@ -284,9 +297,9 @@ const numericSetting = (key, fallback) => {
   return Number.isFinite(value) ? value : fallback
 }
 const configured = computed(() => settings.configured !== undefined ? Boolean(settings.configured) : Boolean(setting('active_embedding_channel_id') !== '-' && setting('active_embedding_model_id') !== '-' && setting('active_collection_name') !== '-'))
-const contentMaxTokens = computed(() => Number(settings.capacity?.content_max_tokens ?? numericSetting('content_max_tokens', 160)))
-const activeRecordCount = computed(() => Number(settings.capacity?.active_record_count ?? numericSetting('active_record_count', 0)))
-const maxActiveRecords = computed(() => Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
+const contentMaxTokens = computed(() => settings.contentMaxTokens ?? Number(settings.capacity?.content_max_tokens ?? numericSetting('content_max_tokens', 160)))
+const activeRecordCount = computed(() => settings.activeRecordCount ?? Number(settings.capacity?.active_record_count ?? numericSetting('active_record_count', 0)))
+const maxActiveRecords = computed(() => settings.maxActiveRecords ?? Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
 const capacityOverLimit = computed(() => ['over_limit', 'full'].includes(settings.capacity?.status) || activeRecordCount.value > maxActiveRecords.value)
 const organizeBlocked = computed(() => Boolean(settings.blocking?.organize?.blocked))
 const cleanupRetryId = computed(() => {
@@ -298,12 +311,12 @@ const migrationPercentage = computed(() => {
   const total = Number(settings.migration?.total_count ?? numericSetting('migration_total_count', 0))
   return total ? Math.min(100, Math.round(Number(settings.migration?.success_count ?? numericSetting('migration_success_count', 0)) * 100 / total)) : 0
 })
-const organizationModelsForChannel = computed(() => channels.value.find(channel => channel.id === organizationForm.channel_id)?.model_ids?.filter(model => model.usage === 'CHAT' && model.model_id && model.is_enabled !== false) || [])
+const organizationModelsForChannel = computed(() => getOrganizationModelsForChannel(channels.value, organizationForm.channel_id))
 const currentOrganizationModel = computed(() => organizationModelsForChannel.value.find(model => model.model_id === organizationForm.model_id) || null)
 const backendOrganizationModel = computed(() => settings.organization?.model || null)
-const requiredOutputTokens = computed(() => Number(settings.organization?.required_output_tokens || 0))
+const requiredOutputTokens = computed(() => settings.requiredOutputTokens ?? Number(settings.organization?.required_output_tokens || 0))
 const contentTokenCount = computed(() => estimateMemoryTokens(form.content))
-const contentTooLong = computed(() => contentTokenCount.value > contentMaxTokens.value)
+const contentTooLong = computed(() => isMemoryContentTooLong(form.content, contentMaxTokens.value))
 const settingsError = computed(() => {
   const candidates = [
     settings.migration?.error,
@@ -316,18 +329,16 @@ const settingsError = computed(() => {
   return candidates.find(value => typeof value === 'string' && value.trim() && value.trim() !== '-') || ''
 })
 
-function estimateMemoryTokens(value) {
-  const normalized = String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ')
-  if (!normalized) return 0
-  const characters = Array.from(normalized)
-  const chineseCount = characters.filter(character => character >= '\u4e00' && character <= '\u9fff').length
-  return Math.floor(chineseCount * 1.5 + (characters.length - chineseCount) * 0.3)
-}
-
 const typeLabel = (value) => t(`memories.type_${value}`, value || '-')
-const sourceLabel = (value) => t(`memories.source_${value}`, value || '-')
+const sourceLabel = (value) => {
+  const labelKey = memorySourceLabelKey(value)
+  return labelKey === `memories.source_${value}` ? t(labelKey) : labelKey
+}
 const statusText = (value) => value ? t(`memories.status_${value}`, value) : t('memories.not_available')
-const operationLabel = (value) => value ? t(`memories.operation_${value}`, value) : '-'
+const operationLabel = (value) => {
+  const labelKey = memoryOperationLabelKey(value)
+  return labelKey === `memories.operation_${value}` ? t(labelKey) : labelKey
+}
 const statusType = (value) => ['succeeded', 'ready', 'confirmed', 'none', 'normal'].includes(value) ? 'success' : ['failed', 'over_limit', 'full'].includes(value) ? 'danger' : ['cancelled'].includes(value) ? 'info' : 'warning'
 const recordStatus = (row) => row.deleted_at ? t('memories.deleted') : row.suppress_recall ? t('memories.suppressed') : row.pending_mutation_job_id ? t('memories.pending') : statusText(row.index_status || 'ready')
 const recordStatusType = (row) => row.deleted_at ? 'danger' : row.suppress_recall ? 'warning' : row.pending_mutation_job_id ? 'warning' : statusType(row.index_status || 'ready')
@@ -365,27 +376,28 @@ const tokenBudgetText = (budget) => budget ? [
 ].join(' / ') : '-'
 
 const applySettings = (data, { syncOrganizationForm = true } = {}) => {
+  const normalizedData = normalizeMemorySettings(data)
   Object.keys(settings).forEach(key => delete settings[key])
-  Object.assign(settings, data || {})
+  Object.assign(settings, normalizedData)
   if (syncOrganizationForm) {
-    organizationForm.auto_organize_enabled = Boolean(data?.organization?.auto_organize_enabled)
-    organizationForm.channel_id = data?.organization?.channel_id ?? null
-    organizationForm.model_id = data?.organization?.model_id ?? null
+    organizationForm.auto_organize_enabled = normalizedData.organizationForm.auto_organize_enabled
+    organizationForm.channel_id = normalizedData.organizationForm.channel_id
+    organizationForm.model_id = normalizedData.organizationForm.model_id
     organizationFormDirty.value = false
   }
 }
 
 const loadSettings = async (silent = false) => {
-  const requestSeq = ++settingsRequestSeq
+  const requestSeq = settingsRequestTracker.begin()
   settingsLoading.value = !silent
   try {
     const data = unwrap(await memoryApi.settings())
-    if (requestSeq !== settingsRequestSeq) return
+    if (!settingsRequestTracker.isCurrent(requestSeq)) return
     applySettings(data, { syncOrganizationForm: !silent || !organizationFormDirty.value })
   } catch (error) {
-    if (requestSeq === settingsRequestSeq && !silent) ElMessage.error(error.message || t('memories.load_failed'))
+    if (settingsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
-    if (requestSeq === settingsRequestSeq) settingsLoading.value = false
+    if (settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
   }
 }
 
@@ -407,66 +419,47 @@ const loadChannels = async () => {
 }
 
 const loadMemories = async (silent = false) => {
-  const requestSeq = ++memoriesRequestSeq
+  const requestSeq = memoriesRequestTracker.begin()
   memoriesLoading.value = !silent
   try {
     const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }))
-    if (requestSeq !== memoriesRequestSeq) return
+    if (!memoriesRequestTracker.isCurrent(requestSeq)) return
     memories.value = data.items
     memoryTotal.value = data.total
   } catch (error) {
-    if (requestSeq === memoriesRequestSeq && !silent) ElMessage.error(error.message || t('memories.load_failed'))
+    if (memoriesRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
-    if (requestSeq === memoriesRequestSeq) memoriesLoading.value = false
+    if (memoriesRequestTracker.isCurrent(requestSeq)) memoriesLoading.value = false
   }
 }
 
-const decorateJobs = (items) => {
-  const byId = new Map(items.map(item => [item.id, item]))
-  const parentByChild = new Map()
-  items.forEach(item => (item.child_job_ids || []).forEach(childId => parentByChild.set(childId, item.id)))
-  return items.map(item => {
-    let parentId = item.parent_job_id || parentByChild.get(item.id)
-    let level = Number.isInteger(parentId) && parentId > 0 ? 1 : 0
-    const seen = new Set()
-    while (parentId && byId.has(parentId) && !seen.has(parentId)) {
-      seen.add(parentId)
-      const nextParentId = byId.get(parentId).parent_job_id || parentByChild.get(parentId)
-      if (!Number.isInteger(nextParentId) || nextParentId <= 0) break
-      level += 1
-      parentId = nextParentId
-    }
-    return { ...item, jobLevel: level }
-  })
-}
-
 const loadJobs = async (silent = false) => {
-  const requestSeq = ++jobsRequestSeq
+  const requestSeq = jobsRequestTracker.begin()
   jobsLoading.value = !silent
   try {
     const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined }))
-    if (requestSeq !== jobsRequestSeq) return
-    jobs.value = decorateJobs(data.items)
+    if (!jobsRequestTracker.isCurrent(requestSeq)) return
+    jobs.value = decorateMemoryJobs(data.items)
     jobTotal.value = data.total
   } catch (error) {
-    if (requestSeq === jobsRequestSeq && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
+    if (jobsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
   } finally {
-    if (requestSeq === jobsRequestSeq) jobsLoading.value = false
+    if (jobsRequestTracker.isCurrent(requestSeq)) jobsLoading.value = false
   }
 }
 
 const loadMigrations = async (silent = false) => {
-  const requestSeq = ++migrationsRequestSeq
+  const requestSeq = migrationsRequestTracker.begin()
   migrationsLoading.value = !silent
   try {
     const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value }))
-    if (requestSeq !== migrationsRequestSeq) return
+    if (!migrationsRequestTracker.isCurrent(requestSeq)) return
     migrations.value = data.items
     migrationTotal.value = data.total
   } catch (error) {
-    if (requestSeq === migrationsRequestSeq && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
+    if (migrationsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
   } finally {
-    if (requestSeq === migrationsRequestSeq) migrationsLoading.value = false
+    if (migrationsRequestTracker.isCurrent(requestSeq)) migrationsLoading.value = false
   }
 }
 
@@ -482,26 +475,21 @@ const handleOrganizationChannelChange = (markDirty = true) => {
   if (markDirty) organizationFormDirty.value = true
 }
 const saveSettings = async () => {
-  const hasChannel = organizationForm.channel_id !== null && organizationForm.channel_id !== ''
-  const hasModel = Boolean(organizationForm.model_id)
-  if (hasChannel !== hasModel) return ElMessage.warning(t('memories.organization_selection_pair_required'))
   const model = currentOrganizationModel.value
-  if (hasChannel && (!model || model.usage !== 'CHAT' || model.is_enabled === false)) return ElMessage.warning(t('memories.organization_model_invalid'))
-  if (hasChannel && (!Number.isInteger(Number(model.context_window_k)) || Number(model.context_window_k) <= 0 || !Number.isInteger(Number(model.max_tokens)) || Number(model.max_tokens) <= 0)) return ElMessage.warning(t('memories.organization_model_limits_invalid'))
-  if (hasChannel && Number(model.max_tokens) < requiredOutputTokens.value) return ElMessage.warning(t('memories.organization_max_tokens_too_small', { required: requiredOutputTokens.value }))
-  if (organizationForm.auto_organize_enabled && !model) return ElMessage.warning(t('memories.organization_model_required'))
+  const validationError = validateOrganizationSettings(organizationForm, model, requiredOutputTokens.value)
+  if (validationError) return ElMessage.warning(t(`memories.${validationError}`, { required: requiredOutputTokens.value }))
   actionLoading.value = 'settings'
-  settingsRequestSeq += 1
+  settingsRequestTracker.invalidate()
   settingsLoading.value = false
   try {
-    const data = unwrap(await memoryApi.updateSettings({ auto_organize_enabled: organizationForm.auto_organize_enabled, organization_channel_id: hasChannel ? organizationForm.channel_id : null, organization_model_id: hasModel ? organizationForm.model_id : null }))
+    const data = unwrap(await memoryApi.updateSettings(buildOrganizationSettingsPayload(organizationForm)))
     applySettings(data)
     ElMessage.info(t('memories.settings_saved'))
   } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
 }
 const organize = async () => {
   actionLoading.value = 'organize'
-  try { await memoryApi.organize({ dedupe_key: newDedupeKey() }); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
+  try { await memoryApi.organize(buildOrganizePayload(newDedupeKey())); ElMessage.info(t('memories.organize_submitted')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' }
 }
 
 const resetForm = () => Object.assign(form, { id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
@@ -546,7 +534,13 @@ const retryCleanup = async (id) => { actionLoading.value = `cleanup-${id}`; try 
 const showMigration = async (row) => { try { selectedMigration.value = unwrap(await memoryApi.migration(migrationId(row))) || row; migrationVisible.value = true } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 
 onMounted(() => { loadSettings(); loadChannels(); loadMemories(); pollTimer.value = window.setInterval(refreshAll, 5000) })
-onBeforeUnmount(() => { if (pollTimer.value) window.clearInterval(pollTimer.value) })
+onBeforeUnmount(() => {
+  if (pollTimer.value) window.clearInterval(pollTimer.value)
+  settingsRequestTracker.invalidate()
+  memoriesRequestTracker.invalidate()
+  jobsRequestTracker.invalidate()
+  migrationsRequestTracker.invalidate()
+})
 </script>
 
 <style lang="scss">
