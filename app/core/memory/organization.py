@@ -35,6 +35,7 @@ from app.core.constants import (
 from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.exceptions import LLMException
+from app.core.i18n import t
 from app.core.memory.errors import MemoryConflictError, MemoryContentTooLongError, MemoryValidationError
 from app.core.memory.normalization import (
     _normalize_dedupe_key,
@@ -697,9 +698,9 @@ def validate_organization_model_output(
 
 def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
     if isinstance(snapshot_count, bool) or not isinstance(snapshot_count, int):
-        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, field="snapshot_count")
+        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "snapshot_count"})
     if snapshot_count < 0:
-        raise MemoryValidationError(ERR_VALUE_MUST_BE_NON_NEGATIVE, field="snapshot_count")
+        raise MemoryValidationError(ERR_VALUE_MUST_BE_NON_NEGATIVE, params={"field": "snapshot_count"})
     return snapshot_count * (MEMORY_CONTENT_MAX_TOKENS + MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS)
 
 
@@ -899,7 +900,7 @@ def _restore_organization_model_config(
     try:
         protocol_enum = ModelProtocol(raw_protocol.upper())
         if protocol_enum not in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]:
-            raise ValueError("organization protocol is not a chat protocol")
+            raise ValueError(t(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID))
         protocol = resolve_model_protocol({"protocol": protocol_enum.value})
     except (KeyError, TypeError, ValueError) as exc:
         raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID) from exc
@@ -1181,21 +1182,21 @@ def build_organization_merge_child_payload(
     policy_version: int,
 ) -> dict[str, Any]:
     if not isinstance(item, MemoryOrganizationValidatedItem):
-        raise ValueError("item must be a validated organization item")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if item.action not in {"update", "merge"} or item.target is None:
-        raise ValueError("organization merge child requires update or merge target")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if isinstance(parent_job_id, bool) or not isinstance(parent_job_id, int) or parent_job_id < 1:
-        raise ValueError("parent_job_id must be positive")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if isinstance(group_index, bool) or not isinstance(group_index, int) or group_index < 0:
-        raise ValueError("group_index must be non-negative")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
     if item.action == "update":
         if len(item.sources) != 1 or item.primary_memory_id is not None:
-            raise ValueError("update organization item must have one source")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         primary_memory_id = item.sources[0].memory_id
     else:
         if item.primary_memory_id is None or item.primary_memory_id not in {source.memory_id for source in item.sources}:
-            raise ValueError("merge primary memory must belong to sources")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         primary_memory_id = item.primary_memory_id
 
     payload = {
@@ -1233,11 +1234,11 @@ def build_organization_merge_child_dedupe_key(
     payload: Mapping[str, Any],
 ) -> str:
     if isinstance(parent_job_id, bool) or not isinstance(parent_job_id, int) or parent_job_id < 1:
-        raise ValueError("parent_job_id must be positive")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if isinstance(group_index, bool) or not isinstance(group_index, int) or group_index < 0:
-        raise ValueError("group_index must be non-negative")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if not isinstance(payload, dict):
-        raise ValueError("payload must be a dictionary")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     canonical = canonical_json_dumps(
         {
             "group_index": group_index,
@@ -1507,7 +1508,7 @@ async def update_organization_settings(
     normalized_uid = _normalize_uid(uid)
     normalized_commit = _validate_commit(commit)
     if not isinstance(auto_organize_enabled, bool):
-        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, field="auto_organize_enabled")
+        raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "auto_organize_enabled"})
     if (organization_channel_id is None) != (organization_model_id is None):
         _raise_organization_config_invalid()
     if organization_channel_id is not None and organization_model_id is not None:
@@ -1568,9 +1569,9 @@ def evaluate_organization_merge_pins(
     source_id_set = set(source_ids)
 
     if primary_memory_id not in source_id_set:
-        raise ValueError("primary_memory_id must belong to source_memory_ids")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     if not set(pinned_ids).issubset(source_id_set):
-        raise ValueError("pinned_memory_ids must be a subset of source_memory_ids")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
     if len(pinned_ids) > 1:
         return MemoryOrganizationPinPolicyResult(

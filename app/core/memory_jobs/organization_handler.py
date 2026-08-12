@@ -132,7 +132,7 @@ def _response_metadata(response: Any) -> tuple[dict[str, Any], str | None]:
     usage = _json_safe(response.usage)
     finish_reason = _json_safe(response.finish_reason)
     if not isinstance(usage, dict) or (finish_reason is not None and not isinstance(finish_reason, str)):
-        raise ValueError("organization response metadata is invalid")
+        raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     return usage, finish_reason
 
 

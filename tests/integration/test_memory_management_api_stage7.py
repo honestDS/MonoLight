@@ -172,10 +172,7 @@ def _organization_merge_payload(*, parent_job_id: int, action: str, source_ids: 
         "index_revision": 1,
         "policy_version": 1,
         "action": action,
-        "sources": [
-            {"memory_id": memory_id, "expected_version": 1, "pinned": False}
-            for memory_id in source_ids
-        ],
+        "sources": [{"memory_id": memory_id, "expected_version": 1, "pinned": False} for memory_id in source_ids],
         "primary_memory_id": source_ids[0],
         "target": {
             "content": "organized memory content",

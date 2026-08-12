@@ -216,15 +216,15 @@ def _validate_existing_organization_job(
 ) -> None:
     try:
         if job.uid != uid or job.dedupe_key != dedupe_key:
-            raise ValueError("organization job identity mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if job.parent_job_id is not None:
-            raise ValueError("organization job parent boundary mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if LongTermMemoryMutationOperation(job.operation) != LongTermMemoryMutationOperation.ORGANIZE:
-            raise ValueError("organization job operation mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if job.memory_id is not None or job.expected_version is not None:
-            raise ValueError("organization job target boundary mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if job.source_session_id is not None or job.source_profile_id is not None or job.source_message_id is not None:
-            raise ValueError("organization job source boundary mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
         status = LongTermMemoryMutationStatus(job.status)
         if status in {
@@ -240,15 +240,15 @@ def _validate_existing_organization_job(
         }:
             expected_active_mutation_key = None
         else:
-            raise ValueError("organization job status mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if job.active_mutation_key != expected_active_mutation_key:
-            raise ValueError("organization job active key mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
         from app.core.memory.organization import restore_organization_execution_payload
 
         restored = restore_organization_execution_payload(job.payload)
         if restored.snapshot.digest != snapshot_digest or restored.snapshot.policy_version != policy_version:
-            raise ValueError("organization job snapshot mismatch")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     except Exception as exc:
         raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT)) from exc
 
@@ -1069,7 +1069,7 @@ class MemoryJobManager:
             raw_sources = payload["sources"]
             target = payload["target"]
             if not _is_integer(primary_memory_id) or primary_memory_id < 1 or not isinstance(raw_sources, list) or not isinstance(target, dict) or not isinstance(target.get("memory_key"), str) or not target["memory_key"] or not isinstance(target.get("content_hash"), str) or not target["content_hash"]:
-                raise ValueError("organization merge child payload identity is invalid")
+                raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             source_by_id: dict[int, dict[str, Any]] = {}
             for source in raw_sources:
                 if (
@@ -1082,10 +1082,10 @@ class MemoryJobManager:
                     or not isinstance(source.get("pinned"), bool)
                     or source["memory_id"] in source_by_id
                 ):
-                    raise ValueError("organization merge child source is invalid")
+                    raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
                 source_by_id[source["memory_id"]] = dict(source)
             if primary_memory_id not in source_by_id:
-                raise ValueError("organization merge child primary source is invalid")
+                raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             ordered_sources = [source_by_id[memory_id] for memory_id in sorted(source_by_id)]
             payload = {**payload, "sources": ordered_sources}
             expected_version = source_by_id[primary_memory_id]["expected_version"]

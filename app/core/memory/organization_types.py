@@ -5,10 +5,12 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from app.core.constants import (
+    ERR_MEMORY_ORGANIZATION_PLAN_INVALID,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
     MEMORY_ORGANIZE_CONFLICT_REASON_MAX_CHARS,
 )
+from app.core.i18n import t
 from app.models.memory import LongTermMemoryType
 
 
@@ -64,7 +66,7 @@ class MemoryOrganizationConflict(_MemoryOrganizationModel):
     @classmethod
     def _validate_reason_not_blank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("reason must contain non-whitespace characters")
+            raise ValueError(t(ERR_MEMORY_ORGANIZATION_PLAN_INVALID))
         return value
 
 

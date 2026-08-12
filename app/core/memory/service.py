@@ -1091,7 +1091,7 @@ class LongTermMemoryService:
             normalized_uid = _normalize_uid(uid)
             normalized_memory_id = _require_positive(memory_id, field="memory_id")
             if not isinstance(pinned, bool):
-                raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, field="pinned")
+                raise MemoryValidationError(ERR_MEMORY_FIELD_TYPE_INVALID, params={"field": "pinned"})
             current_record = await memory_record_crud.get_by_id(
                 db,
                 uid=normalized_uid,

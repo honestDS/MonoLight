@@ -460,17 +460,17 @@ def _validate_organization_merge_payload(
             or not isinstance(raw_target, dict)
             or set(raw_target) != _ORGANIZATION_MERGE_TARGET_FIELDS
         ):
-            raise ValueError("organization merge payload identity is invalid")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
         source_by_id: dict[int, dict[str, Any]] = {}
         for raw_source in raw_sources:
             if set(raw_source) != _ORGANIZATION_MERGE_SOURCE_FIELDS:
-                raise ValueError("organization merge source fields are invalid")
+                raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             memory_id = raw_source["memory_id"]
             expected_version = raw_source["expected_version"]
             pinned = raw_source["pinned"]
             if not isinstance(memory_id, int) or isinstance(memory_id, bool) or memory_id < 1 or not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 1 or not isinstance(pinned, bool) or memory_id in source_by_id:
-                raise ValueError("organization merge source identity is invalid")
+                raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             source_by_id[memory_id] = {
                 "memory_id": memory_id,
                 "expected_version": expected_version,
@@ -478,15 +478,15 @@ def _validate_organization_merge_payload(
             }
         ordered_sources = tuple(source_by_id[memory_id] for memory_id in sorted(source_by_id))
         if list(raw_sources) != list(ordered_sources):
-            raise ValueError("organization merge sources are not sorted")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if action == "update" and (len(ordered_sources) != 1 or primary_memory_id != ordered_sources[0]["memory_id"]):
-            raise ValueError("organization update source is invalid")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if action == "merge" and (len(ordered_sources) < 2 or primary_memory_id not in source_by_id):
-            raise ValueError("organization merge source group is invalid")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if sum(source["pinned"] for source in ordered_sources) > 1:
-            raise ValueError("organization merge has multiple pinned sources")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if any(source["pinned"] for source in ordered_sources) and not source_by_id[primary_memory_id]["pinned"]:
-            raise ValueError("organization merge pinned source is not primary")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
 
         raw_target_with_source = {
             "content": raw_target["content"],
@@ -504,7 +504,7 @@ def _validate_organization_merge_payload(
         normalized_target_with_source = normalize_memory_publication_payload(raw_target_with_source)
         normalized_target = {field: normalized_target_with_source[field] for field in _ORGANIZATION_MERGE_TARGET_FIELDS}
         if raw_target != normalized_target:
-            raise ValueError("organization merge target is not normalized")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         if (
             not isinstance(job.memory_id, int)
             or isinstance(job.memory_id, bool)
@@ -516,7 +516,7 @@ def _validate_organization_merge_payload(
             or job.source_profile_id is not None
             or job.source_message_id is not None
         ):
-            raise ValueError("organization merge job target identity is invalid")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
         expected_active_key = build_memory_active_mutation_key(job.uid, memory_id=primary_memory_id)
         terminal_active_key = (
             allow_terminal_active_key
@@ -529,7 +529,7 @@ def _validate_organization_merge_payload(
             }
         )
         if job.active_mutation_key != expected_active_key and not terminal_active_key:
-            raise ValueError("organization merge active mutation key is invalid")
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     except (MemoryValidationError, KeyError, TypeError, ValueError) as exc:
         raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID) from exc
 

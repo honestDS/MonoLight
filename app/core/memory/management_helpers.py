@@ -167,16 +167,7 @@ def _job_view(job: LongTermMemoryMutationJob | None) -> dict[str, Any] | None:
             snapshot_count = _summary_integer(snapshot.get("count"))
     if snapshot_count is None and operation == LongTermMemoryMutationOperation.ORGANIZE_MERGE and isinstance(payload, dict):
         sources = payload.get("sources")
-        if (
-            isinstance(sources, list)
-            and sources
-            and all(
-                isinstance(source, dict)
-                and _summary_integer(source.get("memory_id"), positive=True) is not None
-                and _summary_integer(source.get("expected_version"), positive=True) is not None
-                for source in sources
-            )
-        ):
+        if isinstance(sources, list) and sources and all(isinstance(source, dict) and _summary_integer(source.get("memory_id"), positive=True) is not None and _summary_integer(source.get("expected_version"), positive=True) is not None for source in sources):
             snapshot_count = len(sources)
 
     parent_job_id = _summary_integer(_summary_value(result, payload, "parent_job_id"), positive=True)
