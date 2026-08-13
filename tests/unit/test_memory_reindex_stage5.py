@@ -26,7 +26,12 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.crud.memory_maintenance import memory_maintenance_job_crud
     from app.core.memory import submit_memory_reindex
     from app.core.memory_jobs import reindex_handler
-    from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobLeaseLostError
+    from app.core.memory_jobs.executor import (
+        MemoryJobExecutionContext,
+        MemoryJobExecutor,
+        MemoryJobLeaseLostError,
+        MemoryJobRetryableError,
+    )
     from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
     from app.core.memory_jobs.maintenance_state import ValidationSnapshot, record_snapshot
     from app.models.memory import (
@@ -206,6 +211,118 @@ async def test_memory_reindex_builds_switches_and_cleans_old_collection(
         assert metadata["version"] == record.version
         checked_count += 1
     assert checked_count == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_reindex_rejects_corrupted_nonfirst_target_embedding(
+    memory_session_factory,
+    vector_backend: Stage5VectorBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "stage5-corrupted-nonfirst-vector-user"
+    old_collection = "stage5-corrupted-nonfirst-vector-old"
+    channel_id = 4
+    model_id = "stage5-corrupted-nonfirst-vector-model"
+    dimensions = 3
+    signature = "stage5-corrupted-nonfirst-vector-signature"
+    embedding_revision = 5
+    index_revision = 8
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=channel_id,
+        model_id=model_id,
+        dimensions=dimensions,
+        signature=signature,
+        active_revision=embedding_revision,
+        index_revision=index_revision,
+        collection_name=old_collection,
+    )
+    await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="first",
+        version=2,
+    )
+    second_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="second",
+        version=4,
+    )
+    vector_backend.runtime_configs[(channel_id, model_id)] = runtime_config(
+        channel_id=channel_id,
+        model_id=model_id,
+        dimensions=dimensions,
+    )
+    await vector_backend.get_or_create_collection(old_collection, metadata={"legacy": True})
+
+    async with memory_session_factory() as db:
+        submission = await submit_memory_reindex(
+            db,
+            uid=uid,
+            dedupe_key="stage5-corrupted-nonfirst-vector-dedupe",
+        )
+    assert submission.job.id is not None
+    target_collection = submission.job.payload["target"]["collection"]
+
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        job_id=submission.job.id,
+    )
+    assert claimed is not None
+
+    original_reconcile_collection = reindex_handler.reconcile_collection
+
+    async def corrupt_second_embedding(
+        context: Any,
+        *,
+        records: list[Any],
+        config: dict[str, Any],
+        purpose: str,
+    ) -> Any:
+        assert len(records) >= 2
+        target = vector_backend.collections.get(config["collection"])
+        assert target is not None
+        target_item = target["items"].get(second_record.vector_item_id)
+        assert target_item is not None
+        assert target_item["document"] == second_record.content
+        assert target_item["metadata"]["uid"] == uid
+        assert target_item["metadata"]["embedding_revision"] == embedding_revision
+        assert target_item["metadata"]["version"] == second_record.version
+        target_item["embedding"] = [999.0] * dimensions
+        return await original_reconcile_collection(
+            context,
+            records=records,
+            config=config,
+            purpose=purpose,
+        )
+
+    monkeypatch.setattr(reindex_handler, "reconcile_collection", corrupt_second_embedding)
+    executor = MemoryJobExecutor(
+        {LongTermMemoryMutationOperation.REINDEX: reindex_handler.handle_reindex},
+        session_factory=memory_session_factory,
+    )
+    with pytest.raises(MemoryJobRetryableError):
+        await executor.execute_claimed(claimed, "stage5-worker")
+
+    target = vector_backend.collections.get(target_collection)
+    assert target is not None
+    target_item = target["items"].get(second_record.vector_item_id)
+    assert target_item is not None
+    assert target_item["embedding"] == [999.0] * dimensions
+    assert target_item["document"] == second_record.content
+    assert target_item["metadata"]["uid"] == uid
+    assert target_item["metadata"]["embedding_revision"] == embedding_revision
+    assert target_item["metadata"]["version"] == second_record.version
+
+    async with memory_session_factory() as db:
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert store is not None
+    assert store.active_collection_name == old_collection
+    assert store.index_revision == index_revision
 
 
 @pytest.mark.asyncio

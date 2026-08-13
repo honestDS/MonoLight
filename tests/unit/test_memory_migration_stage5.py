@@ -538,6 +538,162 @@ async def test_embedding_migration_sample_query_failure_does_not_switch(
 
 
 @pytest.mark.asyncio
+async def test_embedding_migration_rejects_corrupted_non_sampled_target_vector(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "stage5-migration-vector-validation-user"
+    old_collection = "stage5-migration-vector-validation-old"
+    target_collection = "stage5-migration-vector-validation-target"
+    source = {
+        "channel_id": 5,
+        "model_id": "memory-model-vector-source",
+        "dimensions": 3,
+        "signature": "stage5-vector-validation-source",
+        "collection": old_collection,
+        "revision": 1,
+    }
+    target = {
+        "channel_id": 6,
+        "model_id": "memory-model-vector-target",
+        "dimensions": 4,
+        "signature": "stage5-vector-validation-target",
+        "collection": target_collection,
+        "revision": 2,
+    }
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=source["channel_id"],
+        model_id=source["model_id"],
+        dimensions=source["dimensions"],
+        signature=source["signature"],
+        active_revision=source["revision"],
+        index_revision=9,
+        collection_name=old_collection,
+    )
+    first_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="vector-validation-first",
+        content="vector-validation-content-first",
+        content_hash="vector-hash-first",
+        vector_item_id="vector-validation-first",
+    )
+    second_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="vector-validation-second",
+        content="vector-validation-content-second",
+        content_hash="vector-hash-second",
+        vector_item_id="vector-validation-second",
+    )
+    assert first_record.id is not None
+    assert second_record.id is not None
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        await memory_embedding_revision_crud.create(
+            db,
+            uid=uid,
+            revision=1,
+            to_channel_id=source["channel_id"],
+            to_model_id=source["model_id"],
+            to_dimensions=source["dimensions"],
+            to_signature=source["signature"],
+            to_collection=source["collection"],
+            status=LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED,
+            confirmed_at=now,
+            finished_at=now,
+        )
+    await vector_backend.get_or_create_collection(old_collection, metadata={"legacy": True})
+    vector_backend.runtime_configs[(target["channel_id"], target["model_id"])] = runtime_config(
+        channel_id=target["channel_id"],
+        model_id=target["model_id"],
+        dimensions=target["dimensions"],
+    )
+    job = await _prepare_embedding_migration(
+        memory_session_factory,
+        uid=uid,
+        dedupe_key="stage5-migration-vector-validation",
+        source=source,
+        target=target,
+    )
+    assert job.id is not None
+
+    original_reconcile_collection = migration_handler.reconcile_collection
+    corrupted_item_id: str | None = None
+    corrupted_document: str | None = None
+    corrupted_metadata: dict[str, Any] | None = None
+
+    async def reconcile_with_corrupted_vector(
+        context: Any,
+        *,
+        records: list[Any],
+        config: dict[str, Any],
+        purpose: str,
+    ) -> Any:
+        nonlocal corrupted_item_id, corrupted_document, corrupted_metadata
+        if config["collection"] == target_collection:
+            target_items = vector_backend.collections[target_collection]["items"]
+            item_ids = list(target_items)
+            assert len(item_ids) == 2
+            corrupted_item_id = item_ids[1]
+            corrupted_item = target_items[corrupted_item_id]
+            expected_record = next(record for record in records if record.vector_item_id == corrupted_item_id)
+            assert corrupted_item["document"] == expected_record.content
+            corrupted_document = corrupted_item["document"]
+            corrupted_metadata = dict(corrupted_item["metadata"])
+            corrupted_item["embedding"] = [9.0] * target["dimensions"]
+        return await original_reconcile_collection(
+            context,
+            records=records,
+            config=config,
+            purpose=purpose,
+        )
+
+    monkeypatch.setattr(migration_handler, "reconcile_collection", reconcile_with_corrupted_vector)
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+        job_id=job.id,
+        owner="stage5-migration-vector-validation-worker",
+    )
+    assert claimed is not None
+    executor = MemoryJobExecutor(
+        {LongTermMemoryMutationOperation.EMBEDDING_MIGRATION: handle_embedding_migration},
+        session_factory=memory_session_factory,
+    )
+    with pytest.raises(MemoryJobRetryableError):
+        await executor.execute_claimed(claimed, "stage5-migration-vector-validation-worker")
+
+    async with memory_session_factory() as db:
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+        revision = await memory_embedding_revision_crud.get_by_revision(db, uid=uid, revision=2)
+    assert corrupted_item_id is not None
+    assert corrupted_document is not None
+    assert corrupted_metadata is not None
+    target_item = vector_backend.collections[target_collection]["items"][corrupted_item_id]
+    assert target_item["embedding"] == [9.0] * target["dimensions"]
+    assert target_item["document"] == corrupted_document
+    assert target_item["metadata"] == corrupted_metadata
+    assert store is not None
+    assert store.active_embedding_channel_id == source["channel_id"]
+    assert store.active_embedding_model_id == source["model_id"]
+    assert store.active_embedding_dimensions == source["dimensions"]
+    assert store.active_embedding_signature == source["signature"]
+    assert store.active_embedding_revision == source["revision"]
+    assert store.active_collection_name == old_collection
+    assert store.index_revision == 9
+    assert store.migration_status == LongTermMemoryMigrationStatus.VALIDATING
+    assert store.active_collection_name != target_collection
+    assert target_collection in vector_backend.collections
+    assert revision is not None
+    assert revision.status == LongTermMemoryEmbeddingRevisionStatus.RUNNING
+
+
+@pytest.mark.asyncio
 async def test_embedding_migration_switch_is_fenced_after_expired_lease_recovery(
     memory_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
