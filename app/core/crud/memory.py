@@ -620,6 +620,7 @@ class CRUDLongTermMemoryRecord:
                 LongTermMemoryRecord.id == memory_id,
                 LongTermMemoryRecord.is_active.is_(True),
                 LongTermMemoryRecord.deleted_at.is_(None),
+                LongTermMemoryRecord.pending_mutation_job_id.is_(None),
             )
             .values(
                 pinned=pinned,

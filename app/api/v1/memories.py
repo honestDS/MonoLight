@@ -393,6 +393,7 @@ async def retry_memory_collection_cleanup_api(
     result = await submit_memory_cleanup_retry(
         db,
         uid=current_user.uid,
+        job_id=job_id,
         dedupe_key=request.dedupe_key or _new_dedupe_key(f"memory-cleanup-retry-{job_id}"),
         max_attempts=request.max_attempts,
     )

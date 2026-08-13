@@ -940,6 +940,17 @@ async def test_memory_collection_cleanup_retry_and_state_guard(api_app: tuple[Fa
     store.old_collection_cleanup_job_id = old_job_id
     await db_session.commit()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        invalid_retry = await client.post(
+            "/api/v1/memories/collections/999999/cleanup-retry",
+            json={"dedupe_key": "cleanup-retry-invalid-job-id"},
+        )
+        _assert_standard(invalid_retry, 409)
+        unchanged_store = await memory_store_crud.get_by_uid(db_session, uid="user-a")
+        assert unchanged_store is not None
+        assert unchanged_store.old_collection_cleanup_job_id == old_job_id
+        assert unchanged_store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.FAILED
+        assert await memory_job_crud.get_by_dedupe_key(db_session, uid="user-a", dedupe_key="cleanup-retry-invalid-job-id") is None
+
         retried = _assert_standard(
             await client.post(
                 f"/api/v1/memories/collections/{old_job_id}/cleanup-retry",

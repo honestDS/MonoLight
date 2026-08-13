@@ -167,6 +167,7 @@ def _job_matches_submission_identity(
     operation: LongTermMemoryMutationOperation,
     active_mutation_key: str | None,
     memory_id: int | None,
+    parent_job_id: int | None,
     expected_version: int | None,
     payload: dict[str, Any],
     source_session_id: str | None,
@@ -181,7 +182,7 @@ def _job_matches_submission_identity(
         return False
     if existing_operation != operation:
         return False
-    if job.parent_job_id is not None:
+    if job.parent_job_id != parent_job_id:
         return False
     if job.active_mutation_key != active_mutation_key and not (
         operation == LongTermMemoryMutationOperation.ORGANIZE
@@ -356,6 +357,7 @@ class MemoryJobManager:
         payload: dict[str, Any],
         active_mutation_key: str | None = None,
         memory_id: int | None = None,
+        parent_job_id: int | None = None,
         expected_version: int | None = None,
         source_session_id: str | None = None,
         source_profile_id: int | None = None,
@@ -387,6 +389,10 @@ class MemoryJobManager:
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="memory_id"))
             if memory_id is not None and memory_id <= 0:
                 raise MemoryJobValidationError(t(ERR_VALUE_MUST_BE_POSITIVE, field="memory_id"))
+            if parent_job_id is not None and not _is_integer(parent_job_id):
+                raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="parent_job_id"))
+            if parent_job_id is not None and parent_job_id <= 0:
+                raise MemoryJobValidationError(t(ERR_VALUE_MUST_BE_POSITIVE, field="parent_job_id"))
             if expected_version is not None and not _is_integer(expected_version):
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field="expected_version"))
             if expected_version is not None and expected_version < 0:
@@ -447,6 +453,7 @@ class MemoryJobManager:
                 "dedupe_key": dedupe_key,
                 "active_mutation_key": active_mutation_key,
                 "memory_id": memory_id,
+                "parent_job_id": parent_job_id,
                 "expected_version": expected_version,
                 "payload": payload,
                 "source_session_id": source_session_id,
@@ -473,6 +480,7 @@ class MemoryJobManager:
                     operation=operation,
                     active_mutation_key=active_mutation_key,
                     memory_id=memory_id,
+                    parent_job_id=parent_job_id,
                     expected_version=expected_version,
                     payload=payload,
                     source_session_id=source_session_id,

@@ -189,6 +189,7 @@ async def test_reindex_cleanup_retry_after_switch(
         first = await submit_memory_cleanup_retry(
             db,
             uid=uid,
+            job_id=original_job_id,
             dedupe_key="stage5-cleanup-reindex-retry",
         )
     assert first.created
@@ -208,6 +209,7 @@ async def test_reindex_cleanup_retry_after_switch(
         second = await submit_memory_cleanup_retry(
             db,
             uid=uid,
+            job_id=original_job_id,
             dedupe_key="stage5-cleanup-reindex-retry",
         )
     assert not second.created
@@ -352,6 +354,7 @@ async def test_reindex_cleanup_retry_after_expired_switch_failure(
         submission = await submit_memory_cleanup_retry(
             db,
             uid=uid,
+            job_id=original_job_id,
             dedupe_key="stage5-cleanup-reindex-expired-retry",
         )
     assert submission.created
@@ -443,6 +446,7 @@ async def test_migration_cleanup_retry_after_cancellation(
         submission = await submit_memory_cleanup_retry(
             db,
             uid=uid,
+            job_id=original_job_id,
             dedupe_key="stage5-cleanup-migration-retry",
         )
     assert submission.created
