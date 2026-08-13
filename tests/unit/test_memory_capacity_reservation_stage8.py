@@ -234,8 +234,7 @@ async def test_full_capacity_create_accepts_replacement_and_reserves_candidate_w
     assert result.job is not None
     assert result.job.id is not None
     assert result.job.operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION
-    assert result.job.memory_id is not None
-    assert result.job.memory_id > max(existing_ids)
+    assert result.job.memory_id is None
     assert result.job.active_mutation_key == build_memory_active_mutation_key(uid, memory_key=memory_key)
 
     normalized_content, content_token_count, content_hash = _content_token_count(content)
@@ -248,12 +247,10 @@ async def test_full_capacity_create_accepts_replacement_and_reserves_candidate_w
         current_store = await memory_store_crud.get_by_uid(db, uid=uid)
         active_count = await memory_record_crud.count_active(db, uid=uid)
         pending_create_count = await _count_pending_create_slots(db, uid=uid)
-        replacement_record = await memory_record_crud.get_by_id(db, uid=uid, memory_id=job.memory_id)
 
     assert candidate is not None
     assert current_store is not None
     assert candidate.pending_mutation_job_id == job.id
-    assert replacement_record is None
     assert active_count == MEMORY_MAX_ACTIVE_RECORDS
     assert pending_create_count == 0
     assert set(job.payload) == {"publication", "candidate", "store"}
@@ -576,7 +573,7 @@ async def test_replacement_retry_reuses_job_candidate_and_memory_id_but_changed_
     assert first.job is not None
     assert retry.job is not None
     assert retry.job.id == first.job.id
-    assert retry.job.memory_id == first.job.memory_id
+    assert retry.job.memory_id is None
     assert retry.job.payload["candidate"] == first.job.payload["candidate"]
 
     other_result = await _submit_create(
@@ -669,7 +666,7 @@ async def test_cancelled_replacement_clears_candidate_and_allows_another_full_ca
     )
     assert first.job is not None
     assert first.job.id is not None
-    assert first.job.memory_id is not None
+    assert first.job.memory_id is None
     candidate_id = first.job.payload["candidate"]["memory_id"]
 
     async with memory_database() as db:
@@ -680,7 +677,6 @@ async def test_cancelled_replacement_clears_candidate_and_allows_another_full_ca
     async with memory_database() as db:
         cancelled = await memory_job_crud.get_by_id(db, uid=uid, job_id=first.job.id)
         candidate = await memory_record_crud.get_by_id(db, uid=uid, memory_id=candidate_id)
-        unmaterialized = await memory_record_crud.get_by_id(db, uid=uid, memory_id=first.job.memory_id)
     assert cancelled is not None
     assert cancelled.status == LongTermMemoryMutationStatus.CANCELLED
     assert candidate is not None
@@ -692,7 +688,6 @@ async def test_cancelled_replacement_clears_candidate_and_allows_another_full_ca
     assert candidate.indexed_version == candidate.version
     assert candidate.vector_item_id
     assert candidate.pinned is False
-    assert unmaterialized is None
 
     second = await _submit_create(
         memory_database,

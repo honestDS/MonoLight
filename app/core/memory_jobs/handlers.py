@@ -85,7 +85,6 @@ from app.models.memory import (
     LongTermMemorySource,
 )
 from app.providers.database import AsyncSessionLocal
-from app.providers.database.time import get_database_time
 from app.providers.vector import (
     async_delete_collection_items,
     async_get_or_create_collection,
@@ -832,11 +831,6 @@ async def _validate_replacement_capacity(
         raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
 
 
-async def _assert_memory_id_available(db: Any, memory_id: int) -> None:
-    if await memory_record_crud.exists_by_global_id(db, memory_id=memory_id):
-        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-
-
 def _validate_active_store(store: Any) -> tuple[int, str, int, str, int, str, int]:
     channel_id = getattr(store, "active_embedding_channel_id", None)
     model_id = getattr(store, "active_embedding_model_id", None)
@@ -1018,7 +1012,7 @@ def _validate_record_state(
     if operation == LongTermMemoryMutationOperation.CREATE:
         if record.version != 0 or record.is_active or record.deleted_at is not None:
             raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
-        if record.memory_key is not None or record.content != "" or record.content_token_count != 0 or record.content_hash is not None or record.indexed_version != 0 or record.index_status != LongTermMemoryRecordIndexStatus.PENDING:
+        if record.memory_key is not None or record.content != "" or record.content_token_count != 0 or record.content_hash is not None or record.vector_item_id is not None or record.indexed_version != 0 or record.index_status != LongTermMemoryRecordIndexStatus.PENDING:
             raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
         return
     if operation == LongTermMemoryMutationOperation.UPDATE:
@@ -1061,6 +1055,32 @@ async def _validate_unique_publication(
     key_record = await memory_record_crud.get_by_key(db, uid=uid, memory_key=payload["memory_key"])
     hash_record = await memory_record_crud.get_by_content_hash(db, uid=uid, content_hash=payload["content_hash"])
     if (key_record is not None and key_record.id != memory_id) or (hash_record is not None and hash_record.id != memory_id):
+        raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+
+
+def _validate_replacement_placeholder(
+    record: Any,
+    *,
+    uid: str,
+    job_id: int,
+    memory_id: int,
+) -> None:
+    if (
+        record is None
+        or record.uid != uid
+        or record.id != memory_id
+        or record.version != 0
+        or record.indexed_version != 0
+        or record.is_active
+        or record.deleted_at is not None
+        or record.memory_key is not None
+        or record.content != ""
+        or record.content_token_count != 0
+        or record.content_hash is not None
+        or record.vector_item_id is not None
+        or record.pending_mutation_job_id != job_id
+        or _enum_value(record.index_status) != LongTermMemoryRecordIndexStatus.PENDING.value
+    ):
         raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
 
 
@@ -1117,12 +1137,10 @@ async def _prepare_publication(
                     max_active_records=max_active_records,
                 )
                 if memory_id is None:
-                    next_memory_id = await memory_record_crud.get_next_memory_id(db, minimum_id=job_id)
                     placeholder = await memory_record_crud.create_pending_placeholder(
                         db,
                         uid=uid,
                         job_id=job_id,
-                        memory_id=next_memory_id,
                         commit=False,
                     )
                     if placeholder.id is None:
@@ -1211,7 +1229,6 @@ async def _prepare_replacement(context: MemoryJobExecutionContext) -> _MemoryRep
                 LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
             )
             publication, candidate, store_snapshot = _validate_replacement_payload(claim)
-            memory_id = _require_positive_int(claim.memory_id, message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
             if claim.expected_version is not None:
                 raise _deterministic(ERR_MEMORY_JOB_PAYLOAD_INVALID)
             active_key = build_memory_active_mutation_key(claim.uid, memory_key=publication["memory_key"])
@@ -1235,7 +1252,40 @@ async def _prepare_replacement(context: MemoryJobExecutionContext) -> _MemoryRep
                 job_id=job_id,
                 candidate=candidate,
             )
-            await _assert_memory_id_available(db, memory_id)
+            if claim.memory_id is None:
+                placeholder = await memory_record_crud.create_pending_placeholder(
+                    db,
+                    uid=claim.uid,
+                    job_id=job_id,
+                    commit=False,
+                )
+                memory_id = _require_positive_int(placeholder.id, message_key=ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+                if not await memory_job_crud.assign_create_memory_id(
+                    db,
+                    uid=claim.uid,
+                    job_id=job_id,
+                    memory_id=memory_id,
+                    owner=context.worker_id,
+                    commit=False,
+                ):
+                    current = await memory_job_crud.get_active_claim(
+                        db,
+                        uid=claim.uid,
+                        job_id=job_id,
+                        owner=context.worker_id,
+                    )
+                    if current is None:
+                        raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+                    raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            else:
+                memory_id = _require_positive_int(claim.memory_id, message_key=ERR_MEMORY_JOB_PAYLOAD_INVALID)
+                placeholder = await memory_record_crud.get_by_id(db, uid=claim.uid, memory_id=memory_id)
+                _validate_replacement_placeholder(
+                    placeholder,
+                    uid=claim.uid,
+                    job_id=job_id,
+                    memory_id=memory_id,
+                )
             await _validate_unique_publication(db, uid=claim.uid, memory_id=memory_id, payload=publication)
 
             runtime_config = await load_embedding_runtime_config(
@@ -1725,45 +1775,50 @@ async def _publish_replacement(
                 job_id=snapshot.job_id,
                 candidate=candidate,
             )
-            await _assert_memory_id_available(db, memory_id)
+            replacement_record = await memory_record_crud.get_by_id(db, uid=snapshot.uid, memory_id=memory_id)
+            _validate_replacement_placeholder(
+                replacement_record,
+                uid=snapshot.uid,
+                job_id=snapshot.job_id,
+                memory_id=memory_id,
+            )
             await _validate_unique_publication(db, uid=snapshot.uid, memory_id=memory_id, payload=publication)
             if claim.cancel_requested_at is not None:
                 raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
 
-            now = await get_database_time(db)
-            new_record = await memory_record_crud.create(
+            published = await memory_record_crud.publish_pending_version(
                 db,
                 uid=snapshot.uid,
-                id=memory_id,
-                memory_key=publication["memory_key"],
-                memory_type=publication["memory_type"],
-                content=publication["content"],
-                content_token_count=publication["content_token_count"],
-                content_hash=publication["content_hash"],
-                version=1,
-                indexed_version=1,
-                vector_item_id=vector_item_id,
-                source=publication["source"],
-                source_id=publication["source_id"],
-                source_session_id=publication["source_session_id"],
-                source_profile_id=publication["source_profile_id"],
-                source_message_id=publication["source_message_id"],
-                source_job_id=snapshot.job_id,
-                change_evidence=publication["change_evidence"],
-                is_active=True,
-                pinned=False,
-                pending_mutation_job_id=None,
-                suppress_recall=False,
-                suppressed_by_job_id=None,
-                index_status=LongTermMemoryRecordIndexStatus.READY,
-                created_at=now,
-                updated_at=now,
-                indexed_at=now,
-                deleted_at=None,
+                memory_id=memory_id,
+                job_id=snapshot.job_id,
+                expected_version=0,
+                values={
+                    "memory_key": publication["memory_key"],
+                    "memory_type": publication["memory_type"],
+                    "content": publication["content"],
+                    "content_token_count": publication["content_token_count"],
+                    "content_hash": publication["content_hash"],
+                    "vector_item_id": vector_item_id,
+                    "source": publication["source"],
+                    "source_id": publication["source_id"],
+                    "source_session_id": publication["source_session_id"],
+                    "source_profile_id": publication["source_profile_id"],
+                    "source_message_id": publication["source_message_id"],
+                    "source_job_id": snapshot.job_id,
+                    "change_evidence": publication["change_evidence"],
+                    "is_active": True,
+                    "suppress_recall": False,
+                    "suppressed_by_job_id": None,
+                    "index_status": LongTermMemoryRecordIndexStatus.READY,
+                    "deleted_at": None,
+                },
                 commit=False,
             )
-            if new_record.id != memory_id:
+            if published is None or published.id != memory_id:
                 raise _deterministic(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            published_at = getattr(published, "indexed_at", None)
+            if not isinstance(published_at, datetime):
+                raise _retryable(ERR_MEMORY_JOB_PUBLICATION_FAILED)
             await memory_revision_crud.create(
                 db,
                 uid=snapshot.uid,
@@ -1781,8 +1836,7 @@ async def _publish_replacement(
                 source_message_id=publication["source_message_id"],
                 source_job_id=snapshot.job_id,
                 change_evidence=publication["change_evidence"],
-                published_at=now,
-                created_at=now,
+                published_at=published_at,
                 commit=False,
             )
 

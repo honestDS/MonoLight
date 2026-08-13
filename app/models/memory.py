@@ -318,6 +318,7 @@ class LongTermMemoryRecord(SQLModel, table=True):
             "updated_at",
             "id",
         ),
+        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)

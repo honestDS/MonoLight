@@ -43,6 +43,7 @@ from app.models.memory import (
     LongTermMemoryStore,
 )
 from scripts import migration_20260803_add_longterm_memory as memory_migration
+from scripts import migration_20260813_add_memory_id_allocator as memory_id_allocator_migration
 
 MEMORY_TABLES = [
     LongTermMemoryStore.__table__,
@@ -248,8 +249,10 @@ async def _migrate_memory_database() -> object:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         await memory_migration.migrate(session)
+        await memory_id_allocator_migration.migrate(session)
         await session.commit()
         await memory_migration.migrate(session)
+        await memory_id_allocator_migration.migrate(session)
         await session.commit()
     return engine
 
@@ -289,6 +292,7 @@ def test_long_term_memory_v2_models_expose_defaults_enums_constraints_and_indexe
     } <= set(LongTermMemoryStore.__table__.c.keys())
     assert {"content_token_count", "pinned", "last_recalled_at"} <= set(LongTermMemoryRecord.__table__.c.keys())
     assert "content_token_count" in LongTermMemoryRevision.__table__.c
+    assert LongTermMemoryRecord.__table__.dialect_options["sqlite"].get("autoincrement") is True
 
     eviction_index = next(index for index in LongTermMemoryRecord.__table__.indexes if index.name == "ix_ltm_record_eviction_candidate")
     assert tuple(eviction_index.columns.keys()) == (
@@ -337,6 +341,7 @@ def test_long_term_memory_v2_models_compile_for_sqlite_and_mysql():
             assert str(CreateTable(table).compile(dialect=dialect)).strip()
             for index in table.indexes:
                 assert str(CreateIndex(index).compile(dialect=dialect)).strip()
+    assert "AUTOINCREMENT" in str(CreateTable(LongTermMemoryRecord.__table__).compile(dialect=sqlite.dialect())).upper()
 
 
 @pytest.mark.asyncio
@@ -431,7 +436,9 @@ async def test_long_term_memory_migration_preserves_existing_database_tables_and
 
         async with session_factory() as session:
             await memory_migration.migrate(session)
+            await memory_id_allocator_migration.migrate(session)
             await memory_migration.migrate(session)
+            await memory_id_allocator_migration.migrate(session)
             await session.commit()
 
         async with engine.connect() as connection:

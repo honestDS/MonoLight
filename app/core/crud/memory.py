@@ -495,32 +495,6 @@ class CRUDLongTermMemoryEmbeddingSelectionToken:
 
 
 class CRUDLongTermMemoryRecord:
-    async def get_next_memory_id(self, db: AsyncSession, *, minimum_id: int = 1) -> int:
-        result = await db.execute(
-            select(
-                select(func.max(LongTermMemoryRecord.id)).scalar_subquery(),
-                select(func.max(LongTermMemoryRevision.memory_id)).scalar_subquery(),
-                select(func.max(LongTermMemoryMutationJob.memory_id)).scalar_subquery(),
-                select(func.max(LongTermMemoryEmbeddingDelta.memory_id)).scalar_subquery(),
-            )
-        )
-        max_values = result.one()
-        next_id = max((int(value) for value in max_values if value is not None), default=0) + 1
-        return max(minimum_id, next_id)
-
-    async def get_next_replacement_memory_id(self, db: AsyncSession, *, replacement_job_id: int) -> int:
-        result = await db.execute(
-            select(
-                select(func.max(LongTermMemoryRecord.id)).scalar_subquery(),
-                select(func.max(LongTermMemoryRevision.memory_id)).scalar_subquery(),
-                select(func.max(LongTermMemoryMutationJob.memory_id)).scalar_subquery(),
-                select(func.max(LongTermMemoryEmbeddingDelta.memory_id)).scalar_subquery(),
-            )
-        )
-        max_values = result.one()
-        current_max = max((int(value) for value in max_values if value is not None), default=0)
-        return current_max + replacement_job_id + 1
-
     async def get_by_id(self, db: AsyncSession, *, uid: str, memory_id: int) -> LongTermMemoryRecord | None:
         result = await db.execute(select(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid, LongTermMemoryRecord.id == memory_id).execution_options(populate_existing=True))
         return result.scalars().first()
@@ -771,7 +745,6 @@ class CRUDLongTermMemoryRecord:
         *,
         uid: str,
         job_id: int,
-        memory_id: int | None = None,
         commit: bool = True,
     ) -> LongTermMemoryRecord:
         now = await get_database_time(db)
@@ -789,8 +762,6 @@ class CRUDLongTermMemoryRecord:
             "created_at": now,
             "updated_at": now,
         }
-        if memory_id is not None:
-            values["id"] = memory_id
         record = LongTermMemoryRecord.model_validate(values)
         db.add(record)
         await _finish(db, commit=commit)
