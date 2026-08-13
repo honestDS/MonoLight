@@ -110,6 +110,35 @@ python -m app.workers.session_reply
 PYTHONPATH=. pytest tests/
 ```
 
+## 项目预览
+
+- 清晰的WEBUI对话页面
+<p align="center">
+  <img src="./docs/screenshot1.png" alt="MonoLight Dialog Page" width="100%" />
+</p>
+
+- 丰富的配置
+<p align="center">
+  <img src="./docs/screenshot2.png" alt="MonoLight Config Page" width="100%" />
+</p>
+<p align="center">
+  <img src="./docs/screenshot3.png" alt="MonoLight Config Page 1" width="100%" />
+</p>
+<p align="center">
+  <img src="./docs/screenshot4.png" alt="MonoLight Config Page 2" width="100%" />
+</p>
+<p align="center">
+  <img src="./docs/screenshot5.png" alt="MonoLight Config Page 3" width="100%" />
+</p>
+<p align="center">
+  <img src="./docs/screenshot6.png" alt="MonoLight Config Page 4" width="100%" />
+</p>
+
+- 详细的实时日志
+<p align="center">
+  <img src="./docs/screenshot7.png" alt="MonoLight Log Page" width="100%" />
+</p>
+
 ## AI Agent 开发规范守则
 
 > [!IMPORTANT]
