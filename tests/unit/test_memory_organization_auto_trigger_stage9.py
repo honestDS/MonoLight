@@ -405,7 +405,7 @@ async def test_auto_organization_accepts_exact_and_overdue_interval_for_naive_an
 
 
 @pytest.mark.asyncio
-async def test_auto_dedupe_reuses_terminal_snapshot_manual_ignores_interval_and_old_payload_survives_model_change(
+async def test_auto_dedupe_reuses_succeeded_snapshot_manual_ignores_interval_and_old_payload_survives_model_change(
     memory_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -496,6 +496,169 @@ async def test_auto_dedupe_reuses_terminal_snapshot_manual_ignores_interval_and_
         )
         == 2
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_organization_retries_failed_snapshot_after_interval(
+    memory_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "auto-failed-retry"
+    fixed_now = datetime(2026, 2, 1, 12, 0, 0, tzinfo=UTC)
+    old_run = fixed_now - timedelta(seconds=MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS)
+    _, records = await _setup_auto_user(memory_database, uid=uid, record_count=45)
+
+    async def fixed_database_time(_db: AsyncSession) -> datetime:
+        return fixed_now
+
+    monkeypatch.setattr(manager_module, "get_database_time", fixed_database_time)
+    manager = MemoryJobManager()
+
+    async with memory_database() as db:
+        first = await manager.submit_auto_organization(db, uid=uid)
+    assert first is not None
+    assert first.created
+    assert first.job.id is not None
+    first_job_id = first.job.id
+    first_dedupe_key = first.job.dedupe_key
+    first_snapshot = first.job.payload["snapshot"]
+
+    async with memory_database() as db:
+        failed = await memory_job_crud.update_status(
+            db,
+            uid=uid,
+            job_id=first_job_id,
+            status=LongTermMemoryMutationStatus.FAILED,
+            clear_active_mutation_key=True,
+        )
+        assert failed is not None
+        updated_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            organization_last_run_at=fixed_now,
+            commit=False,
+        )
+        assert updated_store is not None
+        await db.commit()
+
+    async with memory_database() as db:
+        before = await memory_store_crud.get_by_uid(db, uid=uid)
+        assert before is not None
+        before_store_state = (
+            before.organization_last_job_id,
+            before.organization_last_run_at,
+            before.organization_error,
+        )
+        skipped = await manager.submit_auto_organization(db, uid=uid)
+    assert skipped is None
+    after_skip_store = await _get_store(memory_database, uid=uid)
+    assert (
+        after_skip_store.organization_last_job_id,
+        after_skip_store.organization_last_run_at,
+        after_skip_store.organization_error,
+    ) == before_store_state
+    assert (
+        await _count_jobs(
+            memory_database,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.ORGANIZE,
+        )
+        == 1
+    )
+
+    async with memory_database() as db:
+        unrelated = await manager.submit_organization(
+            db,
+            uid=uid,
+            dedupe_key="unrelated-organization",
+        )
+    assert unrelated.created
+    assert unrelated.job.id is not None
+    assert unrelated.job.payload["trigger"] == "manual"
+
+    async with memory_database() as db:
+        unrelated_finished = await memory_job_crud.update_status(
+            db,
+            uid=uid,
+            job_id=unrelated.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+            clear_active_mutation_key=True,
+        )
+        assert unrelated_finished is not None
+        overdue_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            organization_last_job_id=unrelated.job.id,
+            organization_last_run_at=old_run,
+            commit=False,
+        )
+        assert overdue_store is not None
+        await db.commit()
+
+    async with memory_database() as db:
+        second = await manager.submit_auto_organization(db, uid=uid)
+    assert second is not None
+    assert second.created
+    assert second.job.id is not None
+    assert second.job.id != first_job_id
+    assert second.job.dedupe_key != first_dedupe_key
+    assert second.job.dedupe_key.startswith(first_dedupe_key)
+    assert second.job.payload["snapshot"] == first_snapshot
+    assert {item["memory_id"] for item in second.job.payload["snapshot"]["items"]} == {record.id for record in records}
+
+    assert second.job.id is not None
+    async with memory_database() as db:
+        succeeded_retry = await memory_job_crud.update_status(
+            db,
+            uid=uid,
+            job_id=second.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+            clear_active_mutation_key=True,
+        )
+        assert succeeded_retry is not None
+        due_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            organization_last_run_at=old_run,
+            commit=False,
+        )
+        assert due_store is not None
+        await db.commit()
+
+    async with memory_database() as db:
+        third = await manager.submit_auto_organization(db, uid=uid)
+    assert third is not None
+    assert not third.created
+    assert third.job.id == second.job.id
+    assert third.job.status == LongTermMemoryMutationStatus.SUCCEEDED
+    async with memory_database() as db:
+        organization_jobs = await memory_job_crud.list_by_uid(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.ORGANIZE,
+        )
+    automatic_jobs = [job for job in organization_jobs if job.payload.get("trigger") == "auto"]
+    manual_jobs = [job for job in organization_jobs if job.payload.get("trigger") == "manual"]
+    assert len(organization_jobs) == 3
+    assert len(automatic_jobs) == 2
+    assert len(manual_jobs) == 1
+    assert {job.id for job in automatic_jobs} == {first_job_id, second.job.id}
+
+    async with memory_database() as db:
+        old_failed = await memory_job_crud.get_by_id(db, uid=uid, job_id=first_job_id)
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert old_failed is not None
+    assert old_failed.status == LongTermMemoryMutationStatus.FAILED
+    assert old_failed.dedupe_key == first_dedupe_key
+    assert old_failed.payload == first.job.payload
+    assert old_failed.active_mutation_key is None
+    assert store is not None
+    assert store.organization_last_job_id == second.job.id
+    assert store.organization_last_run_at is not None
+    stored_run_at = store.organization_last_run_at
+    if stored_run_at.tzinfo is None:
+        stored_run_at = stored_run_at.replace(tzinfo=UTC)
+    assert stored_run_at == fixed_now
 
 
 @pytest.mark.asyncio
