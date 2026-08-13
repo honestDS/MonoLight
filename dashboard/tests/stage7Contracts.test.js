@@ -594,12 +594,34 @@ test('MemoriesView uses begin and isCurrent for every polled collection tracker'
   }
 })
 
-test('MemoriesView creates and invalidates all four request trackers on unmount', () => {
+test('MemoriesView protects ordinary and deleted history with one latest-request flow', () => {
+  const historyStart = memoriesSource.indexOf('const loadHistory = async')
+  const historyEnd = memoriesSource.indexOf('const isRecordSnapshot =', historyStart)
+  assert.ok(historyStart >= 0 && historyEnd > historyStart)
+
+  const historySource = memoriesSource.slice(historyStart, historyEnd)
+  assert.match(memoriesSource, /const historyRequestTracker = createLatestRequestTracker\(\)/)
+  assert.match(historySource, /const requestSeq = historyRequestTracker\.begin\(\)/)
+  assert.match(historySource, /history\.value = \[\]/)
+  assert.match(historySource, /memoryApi\.history\(memoryId, \{ page: 1, size: 100 \}\)/)
+  assert.match(historySource, /if \(!historyRequestTracker\.isCurrent\(requestSeq\)\) return/)
+  const staleCheckIndex = historySource.indexOf('if (!historyRequestTracker.isCurrent(requestSeq)) return')
+  const historyWriteIndex = historySource.indexOf('history.value = data.items')
+  assert.ok(staleCheckIndex >= 0 && historyWriteIndex > staleCheckIndex)
+  assert.match(historySource, /if \(historyRequestTracker\.isCurrent\(requestSeq\)\) ElMessage\.error\(/)
+  assert.match(historySource, /if \(historyRequestTracker\.isCurrent\(requestSeq\)\) historyLoading\.value = false/)
+  assert.match(memoriesSource, /const showHistory = \(row\) => loadHistory\(row\.id, row\)/)
+  assert.match(memoriesSource, /const showDeletedHistory = \(row\) => \{[\s\S]*loadHistory\(row\.memory_id,/)
+  assert.doesNotMatch(historySource, /restoreRevision|memoryApi\.restore|memories\.restore/)
+})
+
+test('MemoriesView creates and invalidates all five request trackers on unmount', () => {
   const trackers = [
     'settingsRequestTracker',
     'memoriesRequestTracker',
     'jobsRequestTracker',
-    'migrationsRequestTracker'
+    'migrationsRequestTracker',
+    'historyRequestTracker'
   ]
   const unmountStart = memoriesSource.indexOf('onBeforeUnmount(() =>')
   assert.notEqual(unmountStart, -1)
@@ -615,7 +637,7 @@ test('MemoriesView uses dedicated management payload builders and id-only pin ac
   const organizeStart = memoriesSource.indexOf('const organize = async')
   const resetFormStart = memoriesSource.indexOf('const resetForm =', organizeStart)
   const togglePinStart = memoriesSource.indexOf('const togglePin = async')
-  const historyStart = memoriesSource.indexOf('const showHistory = async', togglePinStart)
+  const historyStart = memoriesSource.indexOf('const loadHistory = async', togglePinStart)
   assert.ok(organizeStart >= 0)
   assert.ok(resetFormStart > organizeStart)
   assert.ok(togglePinStart >= 0 && historyStart > togglePinStart)
