@@ -328,6 +328,124 @@ async def test_migration_list_and_detail_isolate_uid(memory_session_factory) -> 
 
 
 @pytest.mark.asyncio
+async def test_migration_history_uses_revision_progress_when_store_tracks_newer_job(memory_session_factory) -> None:
+    uid = "stage7-migration-history-owner"
+    source, old_target = _migration_configs("stage7-migration-history-old")
+    _current_source, current_target = _migration_configs("stage7-migration-history-current")
+    current_target["revision"] = 3
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=source["channel_id"],
+        model_id=source["model_id"],
+        dimensions=source["dimensions"],
+        signature=source["signature"],
+        active_revision=source["revision"],
+        collection_name=source["collection"],
+    )
+    old_job = await _create_migration_job(
+        memory_session_factory,
+        uid=uid,
+        source=source,
+        target=old_target,
+        dedupe_key="stage7-migration-history-old",
+    )
+    assert old_job.id is not None
+
+    historical_result = {"count": 13, "success_count": 9}
+    old_owner = "stage7-migration-history-old-worker"
+    claimed_old_job = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+        job_id=old_job.id,
+        owner=old_owner,
+    )
+    assert claimed_old_job is not None
+    async with memory_session_factory() as db:
+        finished_at = await get_database_time(db)
+        assert await memory_job_crud.mark_succeeded(
+            db,
+            uid=uid,
+            job_id=old_job.id,
+            owner=old_owner,
+            result=historical_result,
+            commit=False,
+        )
+        old_revision = await memory_embedding_revision_crud.update_by_revision(
+            db,
+            uid=uid,
+            revision=old_target["revision"],
+            status=LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED,
+            result=historical_result,
+            finished_at=finished_at,
+            commit=False,
+        )
+        assert old_revision is not None
+        old_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            migration_status=LongTermMemoryMigrationStatus.SUCCEEDED,
+            migration_total_count=historical_result["count"],
+            migration_success_count=historical_result["success_count"],
+            migration_finished_at=finished_at,
+            commit=False,
+        )
+        assert old_store is not None
+        await db.commit()
+
+    current_job = await _create_migration_job(
+        memory_session_factory,
+        uid=uid,
+        source=source,
+        target=current_target,
+        dedupe_key="stage7-migration-history-current",
+    )
+    assert current_job.id is not None
+    current_progress = {
+        "migration_status": LongTermMemoryMigrationStatus.BUILDING,
+        "migration_snapshot_boundary": 43,
+        "migration_cursor": 19,
+        "migration_total_count": 47,
+        "migration_success_count": 31,
+        "migration_failure_count": 2,
+        "migration_delta_high_watermark": 27,
+        "migration_delta_applied_watermark": 23,
+    }
+    async with memory_session_factory() as db:
+        current_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            **current_progress,
+        )
+        assert current_store is not None
+        assert current_store.migration_job_id == current_job.id
+        listed = await list_embedding_migrations(db, uid=uid, skip=0, limit=10)
+        old_detail = await get_embedding_migration(db, uid=uid, migration_id=old_job.id)
+        current_detail = await get_embedding_migration(db, uid=uid, migration_id=current_job.id)
+
+    assert listed["total"] == 2
+    items_by_job_id = {item["job_id"]: item for item in listed["items"]}
+    old_item = items_by_job_id[old_job.id]
+    current_item = items_by_job_id[current_job.id]
+    for migration in (old_item, old_detail):
+        assert migration["migration_total_count"] == historical_result["count"]
+        assert migration["migration_success_count"] == historical_result["success_count"]
+        assert migration["migration_total_count"] != current_progress["migration_total_count"]
+        assert migration["migration_success_count"] != current_progress["migration_success_count"]
+        assert migration["store"] == {}
+    for migration in (current_item, current_detail):
+        assert migration["migration_job_id"] == current_job.id
+        assert migration["migration_snapshot_boundary"] == current_progress["migration_snapshot_boundary"]
+        assert migration["migration_cursor"] == current_progress["migration_cursor"]
+        assert migration["migration_total_count"] == current_progress["migration_total_count"]
+        assert migration["migration_success_count"] == current_progress["migration_success_count"]
+        assert migration["migration_delta_high_watermark"] == current_progress["migration_delta_high_watermark"]
+        assert migration["migration_delta_applied_watermark"] == current_progress["migration_delta_applied_watermark"]
+        assert migration["store"]["migration_job_id"] == current_job.id
+
+
+@pytest.mark.asyncio
 async def test_failed_migration_retry_creates_new_job_revision_target_and_preserves_active(
     memory_session_factory,
     vector_backend: Stage5VectorBackend,

@@ -230,6 +230,7 @@ const memorySettingsUnavailable = ref(false)
 const memoryStorageConfigured = ref(true)
 const memoryOrganizationRequiredOutputTokens = ref(0)
 const memorySettingsRequestTracker = createLatestRequestTracker()
+let memoryEmbeddingRequestGeneration = 0
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 
@@ -351,9 +352,24 @@ watch(
 )
 
 watch(memoryEmbeddingTargetKey, () => {
+  memoryEmbeddingRequestGeneration += 1
+  memoryEmbeddingPreviewing.value = false
+  memoryEmbeddingConfirming.value = false
   memoryPreview.value = null
   memoryConfirmationChecked.value = false
 })
+
+const invalidateMemoryEmbeddingRequests = () => {
+  memoryEmbeddingRequestGeneration += 1
+}
+
+const isCurrentMemoryEmbeddingRequest = (requestGeneration, profileId, targetKey) => (
+  requestGeneration === memoryEmbeddingRequestGeneration
+  && dialogVisible.value
+  && dialogType.value === 'edit'
+  && String(form.id) === String(profileId)
+  && memoryEmbeddingTargetKey.value === targetKey
+)
 
 const canSetDefaultProfile = (row) => !showOwnerColumn.value || row.uid === currentUid.value
 
@@ -550,27 +566,34 @@ const previewMemoryEmbedding = async () => {
   const target = memoryEmbeddingOptions.value.find(item => item.key === memoryEmbeddingTargetKey.value)
   if (!target) return ElMessage.warning(t('profiles.memory_embedding_target_placeholder'))
 
+  const profileId = form.id
+  const targetKey = target.key
+  const requestGeneration = ++memoryEmbeddingRequestGeneration
   memoryEmbeddingPreviewing.value = true
   try {
     const res = await profileApi.memoryEmbeddingPreview({
-      profile_id: form.id,
+      profile_id: profileId,
       embedding_channel_id: target.channel_id,
       embedding_model_id: target.model_id
     })
+    if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)) return
     memoryPreview.value = res.data.data || null
     memoryConfirmationChecked.value = false
     memoryConfirmationVisible.value = true
   } catch (err) {
+    if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)) return
     ElMessage.error(err.message || t('profiles.submit_failed'))
   } finally {
-    memoryEmbeddingPreviewing.value = false
+    if (requestGeneration === memoryEmbeddingRequestGeneration) memoryEmbeddingPreviewing.value = false
   }
 }
 
 const closeMemoryConfirmation = () => {
+  invalidateMemoryEmbeddingRequests()
   memoryConfirmationVisible.value = false
   memoryConfirmationChecked.value = false
   memoryPreview.value = null
+  memoryEmbeddingConfirming.value = false
 }
 
 const confirmMemoryEmbedding = async () => {
@@ -578,32 +601,43 @@ const confirmMemoryEmbedding = async () => {
   const target = memoryEmbeddingOptions.value.find(item => item.key === memoryEmbeddingTargetKey.value)
   if (!target) return
 
+  const profileId = form.id
+  const targetKey = target.key
   const currentMemory = form.configs.memory || {}
+  const memory = {
+    enabled: currentMemory.enabled,
+    top_k: currentMemory.top_k,
+    candidate_k: currentMemory.candidate_k,
+    result_max_chars: currentMemory.result_max_chars,
+    embedding_channel_id: target.channel_id,
+    embedding_model_id: target.model_id
+  }
+  const embeddingSelectionSignature = memoryPreview.value.embedding_selection_signature
+  const requestGeneration = ++memoryEmbeddingRequestGeneration
   memoryEmbeddingConfirming.value = true
   try {
     const res = await profileApi.memoryEmbeddingConfirm({
-      profile_id: form.id,
-      memory: {
-        enabled: currentMemory.enabled,
-        top_k: currentMemory.top_k,
-        candidate_k: currentMemory.candidate_k,
-        result_max_chars: currentMemory.result_max_chars,
-        embedding_channel_id: target.channel_id,
-        embedding_model_id: target.model_id
-      },
-      embedding_selection_signature: memoryPreview.value.embedding_selection_signature
+      profile_id: profileId,
+      memory,
+      embedding_selection_signature: embeddingSelectionSignature
     })
+    if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)
+      || !memoryConfirmationVisible.value
+      || memoryPreview.value?.embedding_selection_signature !== embeddingSelectionSignature) return
     const confirmed = res.data.data || {}
     if (confirmed.configs?.memory) form.configs.memory = { ...form.configs.memory, ...confirmed.configs.memory }
     memoryRuntime.value = confirmed.memory_runtime || memoryRuntime.value
-    memoryEmbeddingTargetKey.value = `${target.channel_id}::${target.model_id}`
+    memoryEmbeddingTargetKey.value = targetKey
     closeMemoryConfirmation()
     ElMessage.success(t('profiles.memory_embedding_confirm_success'))
     loadProfiles()
   } catch (err) {
+    if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)
+      || !memoryConfirmationVisible.value
+      || memoryPreview.value?.embedding_selection_signature !== embeddingSelectionSignature) return
     ElMessage.error(err.message || t('profiles.submit_failed'))
   } finally {
-    memoryEmbeddingConfirming.value = false
+    if (requestGeneration === memoryEmbeddingRequestGeneration) memoryEmbeddingConfirming.value = false
   }
 }
 
@@ -640,6 +674,7 @@ const handleSetDefault = async (id) => {
 }
 
 const showDialog = (type, row = null) => {
+  invalidateMemoryEmbeddingRequests()
   dialogType.value = type
   activeTab.value = 'base'
   memorySettingsLoading.value = false
@@ -649,6 +684,8 @@ const showDialog = (type, row = null) => {
   memoryOrganizationRequiredOutputTokens.value = 0
   allowedOperationDirInput.value = ''
   fileSendBlockedExtensionInput.value = ''
+  memoryEmbeddingPreviewing.value = false
+  memoryEmbeddingConfirming.value = false
   memoryPreview.value = null
   memoryConfirmationVisible.value = false
   memoryConfirmationChecked.value = false
@@ -720,10 +757,13 @@ const handleMemoryOwnerChange = (uid) => {
 
 const handleDialogVisibilityChange = (visible) => {
   if (visible) return
+  invalidateMemoryEmbeddingRequests()
   memorySettingsRequestTracker.invalidate()
   memorySettingsLoading.value = false
   memorySettingsReady.value = false
   memorySettingsUnavailable.value = false
+  memoryEmbeddingPreviewing.value = false
+  memoryEmbeddingConfirming.value = false
 }
 
 const buildConfigsForSave = () => {

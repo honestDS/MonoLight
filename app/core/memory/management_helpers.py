@@ -320,22 +320,62 @@ def _migration_view(
     payload = job.payload if isinstance(job.payload, dict) else {}
     source = _json_value(payload.get("from")) if isinstance(payload.get("from"), dict) else None
     target = _json_value(payload.get("target")) if isinstance(payload.get("target"), dict) else None
-    store_view = _store_progress_view(store)
+    current_migration = store is not None and job.id is not None and store.migration_job_id == job.id
+    store_view = _store_progress_view(store) if current_migration else {}
+    revision_result = revision.result if revision is not None and isinstance(revision.result, dict) else {}
+    job_result = job.result if isinstance(job.result, dict) else {}
+
+    def historical_value(*keys: str) -> Any:
+        return _summary_value(revision_result, job_result, *keys)
+
+    historical_status = _json_value(revision.status) if revision is not None else None
+    if historical_status is None:
+        historical_status = historical_value("migration_status", "status")
+    if historical_status is None:
+        historical_status = _json_value(job.status)
+    historical_error = historical_value("migration_error", "error")
+    if historical_error is None:
+        historical_error = job.error or (revision.error if revision is not None else None)
+    historical_started_at = revision.started_at if revision is not None else None
+    if historical_started_at is None:
+        historical_started_at = job.started_at
+    if historical_started_at is None:
+        historical_started_at = historical_value("migration_started_at", "started_at")
+    historical_finished_at = revision.finished_at if revision is not None else None
+    if historical_finished_at is None:
+        historical_finished_at = job.finished_at
+    if historical_finished_at is None:
+        historical_finished_at = historical_value("migration_finished_at", "finished_at")
+    historical_progress = {
+        "migration_job_id": job.id,
+        "migration_status": store_view.get("migration_status", historical_status),
+        "migration_snapshot_boundary": store_view.get("migration_snapshot_boundary", historical_value("migration_snapshot_boundary", "snapshot_boundary")),
+        "migration_cursor": store_view.get("migration_cursor", historical_value("migration_cursor", "cursor")),
+        "migration_total_count": store_view.get("migration_total_count", historical_value("migration_total_count", "total_count", "snapshot_count", "count")),
+        "migration_success_count": store_view.get("migration_success_count", historical_value("migration_success_count", "success_count")),
+        "migration_failure_count": store_view.get("migration_failure_count", historical_value("migration_failure_count", "failure_count")),
+        "migration_delta_high_watermark": store_view.get("migration_delta_high_watermark", historical_value("migration_delta_high_watermark", "delta_high_watermark", "high_watermark")),
+        "migration_delta_applied_watermark": store_view.get("migration_delta_applied_watermark", historical_value("migration_delta_applied_watermark", "delta_applied_watermark", "applied_watermark")),
+        "migration_error": store_view.get("migration_error", historical_error),
+        "migration_started_at": store_view.get("migration_started_at", historical_started_at),
+        "migration_finished_at": store_view.get("migration_finished_at", historical_finished_at),
+    }
     item: dict[str, Any] = {
         "id": job.id,
         "job_id": job.id,
         "revision": revision.revision if revision is not None else None,
         "status": _json_value(job.status),
         "job_status": _json_value(job.status),
-        "migration_status": store_view.get("migration_status"),
+        "migration_status": historical_progress["migration_status"],
         "from": source,
         "target": target,
         "embedding_revision": _revision_view(revision),
         "job": _job_view(job),
         "store": store_view,
-        "error": job.error or (revision.error if revision is not None else None),
+        "error": (job.error or (revision.error if revision is not None else None) if current_migration else historical_error),
     }
     item.update(store_view)
+    item.update(historical_progress)
     if isinstance(source, dict):
         item.update(
             {
