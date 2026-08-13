@@ -1,8 +1,10 @@
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
 import chromadb
 import pytest
+from sqlalchemy import update
 
 from tests.unit.memory_stage5_test_support import Stage5VectorBackend, claim_job, configure_store
 
@@ -17,6 +19,7 @@ with patch.object(chromadb, "PersistentClient", ImportSafePersistentClient):
     from app.core.crud.memory_job import memory_job_crud
     from app.core.memory import submit_memory_cleanup_retry
     from app.core.memory_jobs import reindex_handler
+    from app.core.memory_jobs.consumer import MemoryJobConsumer
     from app.core.memory_jobs.executor import MemoryJobExecutor
     from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
     from app.core.memory_jobs.manager import memory_job_manager
@@ -25,6 +28,7 @@ with patch.object(chromadb, "PersistentClient", ImportSafePersistentClient):
         LongTermMemoryEmbeddingRevisionStatus,
         LongTermMemoryIndexStatus,
         LongTermMemoryMigrationStatus,
+        LongTermMemoryMutationJob,
         LongTermMemoryMutationOperation,
         LongTermMemoryMutationStatus,
         LongTermMemoryOldCollectionCleanupStatus,
@@ -246,6 +250,120 @@ async def test_reindex_cleanup_retry_after_switch(
     assert store.old_collection_cleanup_job_id == retry_job_id
     assert store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.SUCCEEDED
     assert source_collection not in vector_backend.collections
+
+
+@pytest.mark.asyncio
+async def test_reindex_cleanup_retry_after_expired_switch_failure(
+    memory_session_factory: Any,
+) -> None:
+    uid = "stage5-cleanup-reindex-expired"
+    source_collection = "stage5-cleanup-reindex-expired-source"
+    target_collection = "stage5-cleanup-reindex-expired-target"
+    embedding_revision = 4
+    target_index_revision = 8
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=11,
+        model_id="stage5-reindex-model",
+        dimensions=3,
+        signature="stage5-reindex-signature",
+        active_revision=embedding_revision,
+        index_revision=target_index_revision,
+        collection_name=target_collection,
+    )
+    payload = {
+        "from": {
+            "channel_id": 11,
+            "model_id": "stage5-reindex-model",
+            "dimensions": 3,
+            "signature": "stage5-reindex-signature",
+            "embedding_revision": embedding_revision,
+            "collection": source_collection,
+            "index_revision": target_index_revision - 1,
+        },
+        "target": {
+            "collection": target_collection,
+            "index_revision": target_index_revision,
+        },
+        "progress": {
+            "phase": "switching",
+            "snapshot_initialized": True,
+            "snapshot_boundary": 0,
+            "cursor": 0,
+            "total_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+        },
+    }
+    original_job = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        dedupe_key="stage5-cleanup-reindex-expired-original",
+        owner="stage5-cleanup-reindex-expired-owner",
+        payload=payload,
+        max_attempts=1,
+    )
+    assert original_job is not None
+    assert original_job.id is not None
+    original_job_id = original_job.id
+
+    async with memory_session_factory() as db:
+        updated_store = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            old_collection_name=source_collection,
+            old_collection_cleanup_status=LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+            old_collection_cleanup_job_id=original_job_id,
+            commit=False,
+        )
+        assert updated_store is not None
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == original_job_id,
+            )
+            .values(lock_until=now - timedelta(seconds=1))
+        )
+        assert result.rowcount == 1
+        await db.commit()
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(session_factory=memory_session_factory),
+        session_factory=memory_session_factory,
+    )
+    await consumer._recover_expired()
+
+    async with memory_session_factory() as db:
+        failed_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=original_job_id)
+        failed_store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert failed_job is not None
+    assert failed_job.status == LongTermMemoryMutationStatus.FAILED
+    assert failed_store is not None
+    assert failed_store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.FAILED
+    assert failed_store.active_collection_name == target_collection
+    assert failed_store.index_revision == target_index_revision
+    assert failed_store.index_status == LongTermMemoryIndexStatus.READY
+
+    async with memory_session_factory() as db:
+        submission = await submit_memory_cleanup_retry(
+            db,
+            uid=uid,
+            dedupe_key="stage5-cleanup-reindex-expired-retry",
+        )
+    assert submission.created
+    assert submission.job.id is not None
+    assert submission.job.id != original_job_id
+    assert submission.job.status == LongTermMemoryMutationStatus.PENDING
+
+    async with memory_session_factory() as db:
+        retried_store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert retried_store is not None
+    assert retried_store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.PENDING
+    assert retried_store.old_collection_cleanup_job_id == submission.job.id
 
 
 @pytest.mark.asyncio

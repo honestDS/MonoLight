@@ -30,6 +30,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         LongTermMemoryMutationJob,
         LongTermMemoryMutationOperation,
         LongTermMemoryMutationStatus,
+        LongTermMemoryOldCollectionCleanupStatus,
     )
     from app.providers.database.time import get_database_time
 
@@ -503,3 +504,210 @@ async def test_expired_max_attempt_migration_is_failed_and_not_switched(
     assert store.active_collection_name != target_collection
     assert revision is not None
     assert revision.status == LongTermMemoryEmbeddingRevisionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_expired_max_attempt_reindex_after_switch_fails_cleanup_only(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "stage5-lifecycle-expired-switched-reindex"
+    source_collection = "stage5-expired-switched-reindex-source"
+    target_collection = "stage5-expired-switched-reindex-target"
+    source_index_revision = 4
+    target_index_revision = 5
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=1,
+        model_id="stage5-reindex-model",
+        dimensions=3,
+        signature="stage5-reindex-signature",
+        active_revision=1,
+        index_revision=source_index_revision,
+        collection_name=source_collection,
+    )
+    payload = _reindex_payload(
+        source_collection=source_collection,
+        target_collection=target_collection,
+        index_revision=source_index_revision,
+    )
+    async with memory_session_factory() as db:
+        started = await memory_maintenance_store_crud.start_reindex(
+            db,
+            uid=uid,
+            expected_active_revision=1,
+            expected_active_collection_name=source_collection,
+            expected_index_revision=source_index_revision,
+            commit=True,
+        )
+    assert started is not None
+    job = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        owner="stage5-expired-switched-reindex-worker",
+        payload=payload,
+        max_attempts=1,
+    )
+    assert job is not None
+    assert job.id is not None
+
+    async with memory_session_factory() as db:
+        switched = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            active_collection_name=target_collection,
+            index_revision=target_index_revision,
+            index_status=LongTermMemoryIndexStatus.READY,
+            old_collection_name=source_collection,
+            old_collection_cleanup_status=LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+            old_collection_cleanup_job_id=job.id,
+            commit=True,
+        )
+    assert switched is not None
+
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == job.id,
+            )
+            .values(lock_until=now - timedelta(seconds=1))
+        )
+        assert result.rowcount == 1
+        await db.commit()
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(session_factory=memory_session_factory),
+        session_factory=memory_session_factory,
+    )
+    await consumer._recover_expired()
+
+    async with memory_session_factory() as db:
+        failed_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=job.id)
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert failed_job is not None
+    assert failed_job.status == LongTermMemoryMutationStatus.FAILED
+    assert store is not None
+    assert store.active_collection_name == target_collection
+    assert store.active_embedding_revision == 1
+    assert store.index_revision == target_index_revision
+    assert store.index_status == LongTermMemoryIndexStatus.READY
+    assert store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.FAILED
+    assert store.old_collection_cleanup_error is not None
+    assert store.old_collection_cleanup_error == failed_job.error
+    assert store.old_collection_cleanup_at is None
+
+
+@pytest.mark.asyncio
+async def test_expired_max_attempt_migration_after_switch_fails_cleanup_only(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "stage5-lifecycle-expired-switched-migration"
+    source_collection = "stage5-expired-switched-migration-source"
+    target_collection = "stage5-expired-switched-migration-target"
+    source, target = _migration_configs(
+        source_collection=source_collection,
+        target_collection=target_collection,
+    )
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=source["channel_id"],
+        model_id=source["model_id"],
+        dimensions=source["dimensions"],
+        signature=source["signature"],
+        active_revision=source["revision"],
+        index_revision=1,
+        collection_name=source_collection,
+    )
+    job = await _prepare_embedding_migration(
+        memory_session_factory,
+        uid=uid,
+        source=source,
+        target=target,
+        dedupe_key="stage5-expired-switched-migration",
+        max_attempts=1,
+        revision_status=LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED,
+    )
+    assert job.id is not None
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+        job_id=job.id,
+        owner="stage5-expired-switched-migration-worker",
+    )
+    assert claimed is not None
+
+    async with memory_session_factory() as db:
+        switched = await memory_store_crud.update_by_uid(
+            db,
+            uid=uid,
+            active_embedding_channel_id=target["channel_id"],
+            active_embedding_model_id=target["model_id"],
+            active_embedding_dimensions=target["dimensions"],
+            active_embedding_signature=target["signature"],
+            active_embedding_revision=target["revision"],
+            active_collection_name=target_collection,
+            index_revision=2,
+            index_status=LongTermMemoryIndexStatus.READY,
+            target_embedding_channel_id=None,
+            target_embedding_model_id=None,
+            target_embedding_dimensions=None,
+            target_embedding_signature=None,
+            target_collection_name=None,
+            migration_status=LongTermMemoryMigrationStatus.SUCCEEDED,
+            old_collection_name=source_collection,
+            old_collection_cleanup_status=LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+            old_collection_cleanup_job_id=job.id,
+            commit=True,
+        )
+    assert switched is not None
+
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == job.id,
+            )
+            .values(lock_until=now - timedelta(seconds=1))
+        )
+        assert result.rowcount == 1
+        await db.commit()
+
+    consumer = MemoryJobConsumer(
+        MemoryJobExecutor(session_factory=memory_session_factory),
+        session_factory=memory_session_factory,
+    )
+    await consumer._recover_expired()
+
+    async with memory_session_factory() as db:
+        failed_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=job.id)
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+        revision = await memory_embedding_revision_crud.get_by_revision(
+            db,
+            uid=uid,
+            revision=target["revision"],
+        )
+    assert failed_job is not None
+    assert failed_job.status == LongTermMemoryMutationStatus.FAILED
+    assert store is not None
+    assert store.migration_status == LongTermMemoryMigrationStatus.SUCCEEDED
+    assert store.active_embedding_channel_id == target["channel_id"]
+    assert store.active_embedding_model_id == target["model_id"]
+    assert store.active_embedding_dimensions == target["dimensions"]
+    assert store.active_embedding_signature == target["signature"]
+    assert store.active_embedding_revision == target["revision"]
+    assert store.active_collection_name == target_collection
+    assert store.index_revision == 2
+    assert store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.FAILED
+    assert store.old_collection_cleanup_error is not None
+    assert store.old_collection_cleanup_error == failed_job.error
+    assert store.old_collection_cleanup_at is None
+    assert revision is not None
+    assert revision.status == LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED
