@@ -114,7 +114,7 @@ PYTHONPATH=. pytest tests/
 
 - 清晰的WEBUI对话页面
 <p align="center">
-  <img src="./docs/screenshot1.png" alt="MonoLight Dialog Page" width="100%" />
+  <img src="./docs/screenshot.png" alt="MonoLight Dialog Page" width="100%" />
 </p>
 
 - 丰富的配置
