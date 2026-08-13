@@ -235,6 +235,30 @@ async def finalize_maintenance_terminal_state(
     store = await memory_store_crud.lock_for_mutation(db, uid=job.uid, commit=False)
     if store is None:
         return
+    if (
+        store.old_collection_cleanup_job_id == job_id
+        and store.old_collection_name
+        and store.old_collection_cleanup_status
+        in {
+            LongTermMemoryOldCollectionCleanupStatus.PENDING,
+            LongTermMemoryOldCollectionCleanupStatus.RUNNING,
+        }
+    ):
+        cleanup_error = error
+        if cleanup_error is None:
+            cleanup_error = t(ERR_MEMORY_OLD_COLLECTION_CLEANUP_FAILED)
+        updated_cleanup = await memory_maintenance_store_crud.update_old_collection_cleanup(
+            db,
+            uid=job.uid,
+            old_collection_cleanup_job_id=job_id,
+            old_collection_cleanup_status=LongTermMemoryOldCollectionCleanupStatus.FAILED,
+            old_collection_cleanup_error=cleanup_error,
+            old_collection_cleanup_at=None,
+            commit=False,
+        )
+        if updated_cleanup is None:
+            return
+        return
     now = await get_database_time(db)
     if operation == REINDEX_OPERATION:
         source_matches = matches_reindex_source(store, payload["from"])
