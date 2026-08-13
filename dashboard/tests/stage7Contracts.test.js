@@ -152,6 +152,56 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
   assert.match(profileFormSource, /<el-button type="primary"[\s\S]*:disabled="memorySettingsLoading \|\| memorySettingsUnavailable \|\| !memorySettingsReady"[\s\S]*\$t\('profiles\.save'\)/)
 })
 
+test('profile knowledge base binding keeps loading state separate from profile saving', () => {
+  assert.match(profilesSource, /const knowledgeBasesLoading = ref\(false\)/)
+  assert.match(profilesSource, /const knowledgeBasesReady = ref\(false\)/)
+  assert.match(profilesSource, /const knowledgeBasesUnavailable = ref\(false\)/)
+
+  const fetchStart = profilesSource.indexOf('const fetchKnowledgeBases = async')
+  const fetchEnd = profilesSource.indexOf('const fetchUsers = async', fetchStart)
+  assert.ok(fetchStart >= 0 && fetchEnd > fetchStart)
+  const fetchSource = profilesSource.slice(fetchStart, fetchEnd)
+  assert.match(fetchSource, /knowledgeBasesLoading\.value = true/)
+  assert.match(fetchSource, /knowledgeBasesReady\.value = false/)
+  assert.match(fetchSource, /knowledgeBasesUnavailable\.value = false/)
+  assert.match(fetchSource, /knowledgeBasesReady\.value = true/)
+  assert.match(fetchSource, /knowledgeBasesUnavailable\.value = true/)
+  assert.match(fetchSource, /knowledgeBasesLoading\.value = false/)
+  assert.doesNotMatch(fetchSource, /knowledgeBases\.value = \[\]/)
+
+  const watcherStart = profilesSource.indexOf('const filterFormKnowledgeBaseIds =')
+  const watcherEnd = profilesSource.indexOf('const normalizeMemoryOrganizationSelection', watcherStart)
+  assert.ok(watcherStart >= 0 && watcherEnd > watcherStart)
+  const watcherSource = profilesSource.slice(watcherStart, watcherEnd)
+  assert.match(watcherSource, /if \(!knowledgeBasesReady\.value\) return/)
+  assert.match(watcherSource, /filterKnowledgeBaseIdsForOwner\(form\.knowledge_base_ids, knowledgeBases\.value, form\.uid\)/)
+  assert.match(watcherSource, /watch\(\(\) => form\.uid, filterFormKnowledgeBaseIds\)/)
+  assert.match(watcherSource, /watch\(\[knowledgeBasesReady, knowledgeBases\], filterFormKnowledgeBaseIds\)/)
+})
+
+test('profile knowledge base selection follows the three-state availability contract', () => {
+  assert.match(profileFormSource, /knowledgeBasesLoading: \{ type: Boolean, required: true \}/)
+  assert.match(profileFormSource, /knowledgeBasesReady: \{ type: Boolean, required: true \}/)
+  assert.match(profileFormSource, /knowledgeBasesUnavailable: \{ type: Boolean, required: true \}/)
+  assert.match(profileFormSource, /<el-select(?=[\s\S]*v-model="form\.knowledge_base_ids")(?=[\s\S]*:disabled="knowledgeBasesLoading \|\| knowledgeBasesUnavailable \|\| !knowledgeBasesReady")[\s\S]*>/)
+})
+
+test('profile save payload includes knowledge base ids only when the list is ready', () => {
+  const submitStart = profilesSource.indexOf('const submitForm =')
+  const submitEnd = profilesSource.indexOf('onMounted(() =>', submitStart)
+  assert.ok(submitStart >= 0 && submitEnd > submitStart)
+  const submitSource = profilesSource.slice(submitStart, submitEnd)
+
+  assert.match(profilesSource, /buildKnowledgeBaseBindingPayload,\s*\n\s*filterKnowledgeBaseIdsForOwner/)
+  assert.match(submitSource, /const payload = \{[\s\S]*const knowledgeBaseIds = buildKnowledgeBaseBindingPayload\(form\.knowledge_base_ids, knowledgeBasesReady\.value\)/)
+  assert.match(submitSource, /if \(knowledgeBaseIds !== undefined\) \{\s*payload\.knowledge_base_ids = knowledgeBaseIds\s*\}/)
+  assert.match(submitSource, /profileApi\.create\(payload\)/)
+  assert.match(submitSource, /profileApi\.update\(form\.id, payload\)/)
+  assert.doesNotMatch(submitSource, /knowledge_base_ids:\s*form\.knowledge_base_ids/)
+  const footerStart = profileFormSource.indexOf('<template #footer>')
+  assert.doesNotMatch(profileFormSource.slice(footerStart), /:disabled="[^"\n]*knowledgeBases(?:Loading|Ready|Unavailable)/)
+})
+
 const requiredProfileMemoryKeys = [
   'memory_settings', 'long_term_memory_settings', 'long_term_memory_enabled', 'long_term_memory_enabled_hint',
   'memory_storage_not_configured', 'memory_settings_unavailable', 'memory_top_k', 'memory_top_k_hint',
@@ -336,8 +386,8 @@ test('ProfilesView sends auto organization settings at the top level and keeps c
   const buildSource = profilesSource.slice(buildStart, submitStart)
   const currentSource = profilesSource.slice(currentStart, currentLabelStart)
 
-  assert.match(saveSource, /profileApi\.create\(\{[\s\S]*memory_organization:\s*buildOrganizationSettingsPayload\(form\.memory_organization\),[\s\S]*configs:\s*buildConfigsForSave\(\)/)
-  assert.match(saveSource, /profileApi\.update\(form\.id,\s*\{[\s\S]*memory_organization:\s*buildOrganizationSettingsPayload\(form\.memory_organization\),[\s\S]*configs:\s*buildConfigsForSave\(\)/)
+  assert.match(saveSource, /const payload = \{[\s\S]*memory_organization:\s*buildOrganizationSettingsPayload\(form\.memory_organization\),[\s\S]*configs:\s*buildConfigsForSave\(\)/)
+  assert.match(saveSource, /profileApi\.create\(payload\)[\s\S]*profileApi\.update\(form\.id, payload\)/)
   assert.match(profilesSource, /import \{[\s\S]*buildOrganizationSettingsPayload,[\s\S]*validateOrganizationSettings[\s\S]*\} from '\.\.\/utils\/memoryManagement'/)
 
   assert.match(currentSource, /channel_id:\s*memoryRuntime\.value\.embedding_channel_id\s*\?\?\s*form\.configs\.memory\?\.embedding_channel_id/)
