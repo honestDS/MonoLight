@@ -1,4 +1,4 @@
-export const createChannelTestManager = () => {
+export const createAbortableTaskManager = () => {
   let generation = 0
   let requestId = 0
   const activeTasks = new Map()
@@ -53,3 +53,5 @@ export const createChannelTestManager = () => {
     activeCount: () => activeTasks.size
   }
 }
+
+export const createChannelTestManager = createAbortableTaskManager

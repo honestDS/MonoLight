@@ -262,6 +262,7 @@ import {
   memorySourceLabelKey,
   normalizeMemorySettings
 } from '../utils/memoryManagement'
+import { createAbortableTaskManager } from '../utils/channelTestManager'
 
 const { t } = useI18n()
 const memoryTypes = MEMORY_TYPES
@@ -301,6 +302,8 @@ const selectedJob = ref(null)
 const migrationVisible = ref(false)
 const selectedMigration = ref(null)
 const pollTimer = ref(null)
+let pollingStopped = false
+const pollingTaskManager = createAbortableTaskManager()
 const settingsRequestTracker = createLatestRequestTracker()
 const memoriesRequestTracker = createLatestRequestTracker()
 const jobsRequestTracker = createLatestRequestTracker()
@@ -411,16 +414,20 @@ const applySettings = (data) => {
 }
 
 const loadSettings = async (silent = false) => {
+  const token = pollingTaskManager.begin('settings')
+  if (!token) return
   const requestSeq = settingsRequestTracker.begin()
-  settingsLoading.value = !silent
+  if (pollingTaskManager.isCurrent(token)) settingsLoading.value = !silent
   try {
-    const data = unwrap(await memoryApi.settings())
-    if (!settingsRequestTracker.isCurrent(requestSeq)) return
+    const data = unwrap(await memoryApi.settings({ signal: token.signal }))
+    if (!pollingTaskManager.isCurrent(token) || !settingsRequestTracker.isCurrent(requestSeq)) return
     applySettings(data)
   } catch (error) {
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
     if (settingsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
-    if (settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
+    if (pollingTaskManager.isCurrent(token) && settingsRequestTracker.isCurrent(requestSeq)) settingsLoading.value = false
+    pollingTaskManager.finish(token)
   }
 }
 
@@ -441,47 +448,59 @@ const loadChannels = async () => {
 }
 
 const loadMemories = async (silent = false) => {
+  const token = pollingTaskManager.begin('memories')
+  if (!token) return
   const requestSeq = memoriesRequestTracker.begin()
-  memoriesLoading.value = !silent
+  if (pollingTaskManager.isCurrent(token)) memoriesLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }))
-    if (!memoriesRequestTracker.isCurrent(requestSeq)) return
+    const data = pageData(await memoryApi.list({ page: memoryPage.value, size: memoryPageSize.value, keyword: filters.keyword || undefined, memory_type: filters.memory_type || undefined, sort_by: filters.sort_by, sort_order: filters.sort_order }, { signal: token.signal }))
+    if (!pollingTaskManager.isCurrent(token) || !memoriesRequestTracker.isCurrent(requestSeq)) return
     memories.value = data.items
     memoryTotal.value = data.total
   } catch (error) {
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
     if (memoriesRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.load_failed'))
   } finally {
-    if (memoriesRequestTracker.isCurrent(requestSeq)) memoriesLoading.value = false
+    if (pollingTaskManager.isCurrent(token) && memoriesRequestTracker.isCurrent(requestSeq)) memoriesLoading.value = false
+    pollingTaskManager.finish(token)
   }
 }
 
 const loadJobs = async (silent = false) => {
+  const token = pollingTaskManager.begin('jobs')
+  if (!token) return
   const requestSeq = jobsRequestTracker.begin()
-  jobsLoading.value = !silent
+  if (pollingTaskManager.isCurrent(token)) jobsLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined }))
-    if (!jobsRequestTracker.isCurrent(requestSeq)) return
+    const data = pageData(await memoryApi.jobs({ page: jobPage.value, size: jobPageSize.value, status: jobFilters.status || undefined, operation: jobFilters.operation || undefined, memory_id: jobFilters.memory_id || undefined }, { signal: token.signal }))
+    if (!pollingTaskManager.isCurrent(token) || !jobsRequestTracker.isCurrent(requestSeq)) return
     jobs.value = decorateMemoryJobs(data.items)
     jobTotal.value = data.total
   } catch (error) {
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
     if (jobsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
   } finally {
-    if (jobsRequestTracker.isCurrent(requestSeq)) jobsLoading.value = false
+    if (pollingTaskManager.isCurrent(token) && jobsRequestTracker.isCurrent(requestSeq)) jobsLoading.value = false
+    pollingTaskManager.finish(token)
   }
 }
 
 const loadMigrations = async (silent = false) => {
+  const token = pollingTaskManager.begin('migrations')
+  if (!token) return
   const requestSeq = migrationsRequestTracker.begin()
-  migrationsLoading.value = !silent
+  if (pollingTaskManager.isCurrent(token)) migrationsLoading.value = !silent
   try {
-    const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value }))
-    if (!migrationsRequestTracker.isCurrent(requestSeq)) return
+    const data = pageData(await memoryApi.migrations({ page: migrationPage.value, size: migrationPageSize.value }, { signal: token.signal }))
+    if (!pollingTaskManager.isCurrent(token) || !migrationsRequestTracker.isCurrent(requestSeq)) return
     migrations.value = data.items
     migrationTotal.value = data.total
   } catch (error) {
+    if (token.signal.aborted || !pollingTaskManager.isCurrent(token)) return
     if (migrationsRequestTracker.isCurrent(requestSeq) && !silent) ElMessage.error(error.message || t('memories.operation_failed'))
   } finally {
-    if (migrationsRequestTracker.isCurrent(requestSeq)) migrationsLoading.value = false
+    if (pollingTaskManager.isCurrent(token) && migrationsRequestTracker.isCurrent(requestSeq)) migrationsLoading.value = false
+    pollingTaskManager.finish(token)
   }
 }
 
@@ -489,7 +508,24 @@ const resetAndLoadMemories = () => { memoryPage.value = 1; loadMemories() }
 const resetAndLoadJobs = () => { jobPage.value = 1; loadJobs() }
 const resetAndLoadMigrations = () => { migrationPage.value = 1; loadMigrations() }
 const handleTabChange = (tab) => { if (tab === 'jobs') loadJobs(); if (tab === 'migrations') loadMigrations() }
-const refreshAll = () => { loadSettings(true); loadMemories(true); if (activeTab.value === 'jobs') loadJobs(true); if (activeTab.value === 'migrations') loadMigrations(true) }
+const refreshAll = async () => {
+  const requests = [loadSettings(true), loadMemories(true)]
+  if (activeTab.value === 'jobs') requests.push(loadJobs(true))
+  if (activeTab.value === 'migrations') requests.push(loadMigrations(true))
+  await Promise.all(requests)
+}
+const scheduleRefresh = () => {
+  if (pollingStopped) return
+  pollTimer.value = window.setTimeout(async () => {
+    pollTimer.value = null
+    if (pollingStopped) return
+    try {
+      await refreshAll()
+    } finally {
+      if (!pollingStopped) scheduleRefresh()
+    }
+  }, 5000)
+}
 
 const organize = async () => {
   actionLoading.value = 'organize'
@@ -552,9 +588,14 @@ const cancelMigration = async (row) => { try { await memoryApi.cancelMigration(m
 const retryCleanup = async (id) => { actionLoading.value = `cleanup-${id}`; try { await memoryApi.retryCleanup(id); ElMessage.info(t('memories.retry_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { actionLoading.value = '' } }
 const showMigration = async (row) => { try { selectedMigration.value = unwrap(await memoryApi.migration(migrationId(row))) || row; migrationVisible.value = true } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 
-onMounted(() => { loadSettings(); loadChannels(); loadMemories(); pollTimer.value = window.setInterval(refreshAll, 5000) })
+onMounted(async () => {
+  await Promise.all([loadSettings(), loadChannels(), loadMemories()])
+  if (!pollingStopped) scheduleRefresh()
+})
 onBeforeUnmount(() => {
-  if (pollTimer.value) window.clearInterval(pollTimer.value)
+  pollingStopped = true
+  if (pollTimer.value) window.clearTimeout(pollTimer.value)
+  pollingTaskManager.invalidate()
   settingsRequestTracker.invalidate()
   memoriesRequestTracker.invalidate()
   jobsRequestTracker.invalidate()

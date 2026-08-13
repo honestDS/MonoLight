@@ -26,7 +26,7 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
   const endpoints = [
     {
       name: 'list',
-      pattern: /list:\s*\(params\)\s*=>\s*request\.get\('\/memories\/list',\s*\{\s*params\s*\}\)/
+      pattern: /list:\s*\(params,\s*config\s*=\s*\{\}\)\s*=>\s*request\.get\('\/memories\/list',\s*\{\s*\.\.\.config,\s*params\s*\}\)/
     },
     {
       name: 'get',
@@ -46,7 +46,7 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
     },
     {
       name: 'jobs',
-      pattern: /jobs:\s*\(params\)\s*=>\s*request\.get\('\/memories\/jobs',\s*\{\s*params\s*\}\)/
+      pattern: /jobs:\s*\(params,\s*config\s*=\s*\{\}\)\s*=>\s*request\.get\('\/memories\/jobs',\s*\{\s*\.\.\.config,\s*params\s*\}\)/
     },
     {
       name: 'job',
@@ -70,7 +70,7 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
     },
     {
       name: 'settings',
-      pattern: /settings:\s*\(\)\s*=>\s*request\.get\('\/memories\/settings'\)/
+      pattern: /settings:\s*\(config\s*=\s*\{\}\)\s*=>\s*request\.get\('\/memories\/settings',\s*config\)/
     },
     {
       name: 'reindex',
@@ -78,7 +78,7 @@ test('memoryApi contains every memory endpoint with the required HTTP method', (
     },
     {
       name: 'migrations',
-      pattern: /migrations:\s*\(params\)\s*=>\s*request\.get\('\/memories\/embedding-migrations',\s*\{\s*params\s*\}\)/
+      pattern: /migrations:\s*\(params,\s*config\s*=\s*\{\}\)\s*=>\s*request\.get\('\/memories\/embedding-migrations',\s*\{\s*\.\.\.config,\s*params\s*\}\)/
     },
     {
       name: 'migration',
@@ -316,8 +316,8 @@ test('MemoriesView uses processing feedback and clears its polling timer', () =>
   assert.match(submitSource, /ElMessage\.info\(t\('memories\.accepted_processing'\)\)/)
   assert.doesNotMatch(submitSource, /ElMessage\.success\(/)
   assert.match(memoriesSource, /const pollTimer = ref\(null\)/)
-  assert.match(memoriesSource, /pollTimer\.value = window\.setInterval\(refreshAll,\s*5000\)/)
-  assert.match(memoriesSource, /onBeforeUnmount\(\(\) => \{[\s\S]*window\.clearInterval\(pollTimer\.value\)[\s\S]*\}\)/)
+  assert.match(memoriesSource, /pollTimer\.value = window\.setTimeout\(async \(\) => \{[\s\S]*await refreshAll\(\)/)
+  assert.match(memoriesSource, /onBeforeUnmount\(\(\) => \{[\s\S]*window\.clearTimeout\(pollTimer\.value\)[\s\S]*\}\)/)
 })
 
 test('ProfilesView performs memory embedding preview and confirmation as separate steps', () => {
@@ -483,8 +483,8 @@ test('MemoriesView keeps runtime settings and organization actions read-only', (
   assert.doesNotMatch(memoriesSource, /memoryApi\.updateSettings/)
   assert.doesNotMatch(memoriesSource, /auto_organize_enabled|organization_channel_id|organization_model_id/)
   assert.doesNotMatch(memoriesSource, /<el-switch\b|v-model="[^"]*organization/)
-  assert.match(memoriesSource, /memoryApi\.settings\(\)/)
-  assert.match(memoriesSource, /const refreshAll = \(\) => \{[\s\S]*loadSettings\(true\)/)
+  assert.match(memoriesSource, /memoryApi\.settings\(\{/)
+  assert.match(memoriesSource, /const refreshAll = async \(\) => \{[\s\S]*loadSettings\(true\)/)
   assert.match(memoriesSource, /const organize = async \(\) =>/)
   assert.match(memoriesSource, /memoryApi\.organize\(buildOrganizePayload\(newDedupeKey\(\)\)\)/)
   assert.match(memoriesSource, /const currentMemoryTask = computed\(\(\) => getCurrentMemoryTask\(settings\)\)/)
@@ -494,15 +494,21 @@ test('MemoriesView keeps runtime settings and organization actions read-only', (
 
 test('MemoriesView polls settings and memories while limiting tab-specific polling', () => {
   const refreshStart = memoriesSource.indexOf('const refreshAll =')
-  const refreshEnd = memoriesSource.indexOf('const organize =', refreshStart)
+  const scheduleStart = memoriesSource.indexOf('const scheduleRefresh =', refreshStart)
+  const organizeStart = memoriesSource.indexOf('const organize =', scheduleStart)
   assert.notEqual(refreshStart, -1)
-  assert.notEqual(refreshEnd, -1)
+  assert.ok(scheduleStart > refreshStart)
+  assert.ok(organizeStart > scheduleStart)
 
-  const refreshSource = memoriesSource.slice(refreshStart, refreshEnd)
+  const refreshSource = memoriesSource.slice(refreshStart, scheduleStart)
+  const scheduleSource = memoriesSource.slice(scheduleStart, organizeStart)
+  assert.match(refreshSource, /const refreshAll = async \(\) => \{/)
   assert.match(refreshSource, /loadSettings\(true\)/)
   assert.match(refreshSource, /loadMemories\(true\)/)
-  assert.match(refreshSource, /if \(activeTab\.value === 'jobs'\) loadJobs\(true\)/)
-  assert.match(refreshSource, /if \(activeTab\.value === 'migrations'\) loadMigrations\(true\)/)
+  assert.match(refreshSource, /if \(activeTab\.value === 'jobs'\) requests\.push\(loadJobs\(true\)\)/)
+  assert.match(refreshSource, /if \(activeTab\.value === 'migrations'\) requests\.push\(loadMigrations\(true\)\)/)
+  assert.match(refreshSource, /await Promise\.all\(requests\)/)
+  assert.match(scheduleSource, /await refreshAll\(\)[\s\S]*if \(!pollingStopped\) scheduleRefresh\(\)/)
 })
 
 test('MemoriesView shows the task summary only for real tasks and keeps it visible when settings expand or collapse', () => {
@@ -601,20 +607,50 @@ test('MemoriesView renders memory jobs as a collapsed tree without manual indent
   assert.doesNotMatch(jobsSource, /tokenBudgetText\(row\.token_budget\)/)
 })
 
-test('MemoriesView uses begin and isCurrent for every polled collection tracker', () => {
+test('MemoriesView uses keyed abortable tasks for every polled collection loader', () => {
   const loaders = [
-    ['loadSettings', 'settingsRequestTracker'],
-    ['loadMemories', 'memoriesRequestTracker'],
-    ['loadJobs', 'jobsRequestTracker'],
-    ['loadMigrations', 'migrationsRequestTracker']
+    {
+      name: 'loadSettings',
+      key: 'settings',
+      tracker: 'settingsRequestTracker',
+      request: /memoryApi\.settings\(\{\s*signal:\s*token\.signal\s*\}\)/
+    },
+    {
+      name: 'loadMemories',
+      key: 'memories',
+      tracker: 'memoriesRequestTracker',
+      request: /memoryApi\.list\([\s\S]*,\s*\{\s*signal:\s*token\.signal\s*\}\)/
+    },
+    {
+      name: 'loadJobs',
+      key: 'jobs',
+      tracker: 'jobsRequestTracker',
+      request: /memoryApi\.jobs\([\s\S]*,\s*\{\s*signal:\s*token\.signal\s*\}\)/
+    },
+    {
+      name: 'loadMigrations',
+      key: 'migrations',
+      tracker: 'migrationsRequestTracker',
+      request: /memoryApi\.migrations\([\s\S]*,\s*\{\s*signal:\s*token\.signal\s*\}\)/
+    }
   ]
 
-  for (const [loader, sequence] of loaders) {
-    assert.match(
-      memoriesSource,
-      new RegExp(`const ${loader} = async \\(silent = false\\) => \\{[\\s\\S]*?const requestSeq = ${sequence}\\.begin\\(\\)[\\s\\S]*?if \\(!${sequence}\\.isCurrent\\(requestSeq\\)\\) return`),
-      `${loader} must reject stale responses through ${sequence}`
-    )
+  for (const [index, loader] of loaders.entries()) {
+    const loaderStart = memoriesSource.indexOf(`const ${loader.name} = async`)
+    const nextLoader = loaders[index + 1]
+    const loaderEnd = nextLoader
+      ? memoriesSource.indexOf(`const ${nextLoader.name} = async`, loaderStart)
+      : memoriesSource.indexOf('const resetAndLoadMemories =', loaderStart)
+    assert.ok(loaderStart >= 0 && loaderEnd > loaderStart, `${loader.name} source is missing`)
+    const loaderSource = memoriesSource.slice(loaderStart, loaderEnd)
+
+    assert.match(loaderSource, new RegExp(`const token = pollingTaskManager\\.begin\\('${loader.key}'\\)`))
+    assert.match(loaderSource, /if \(!token\) return/)
+    assert.match(loaderSource, new RegExp(`const requestSeq = ${loader.tracker}\\.begin\\(\\)`))
+    assert.match(loaderSource, loader.request)
+    assert.ok(loaderSource.includes(`if (!pollingTaskManager.isCurrent(token) || !${loader.tracker}.isCurrent(requestSeq)) return`))
+    assert.match(loaderSource, /if \(token\.signal\.aborted \|\| !pollingTaskManager\.isCurrent\(token\)\) return/)
+    assert.match(loaderSource, /finally \{[\s\S]*pollingTaskManager\.finish\(token\)/)
   }
 })
 
@@ -655,6 +691,9 @@ test('MemoriesView creates and invalidates all five request trackers on unmount'
     assert.match(memoriesSource, new RegExp(`const ${tracker} = createLatestRequestTracker\\(\\)`))
     assert.match(unmountSource, new RegExp(`${tracker}\\.invalidate\\(\\)`))
   }
+  assert.match(unmountSource, /pollingStopped = true/)
+  assert.match(unmountSource, /window\.clearTimeout\(pollTimer\.value\)/)
+  assert.match(unmountSource, /pollingTaskManager\.invalidate\(\)/)
 })
 
 test('MemoriesView uses dedicated management payload builders and id-only pin actions', () => {
