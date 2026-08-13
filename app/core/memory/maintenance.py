@@ -10,7 +10,7 @@ from app.core.crud.memory_job import memory_job_crud
 from app.core.crud.memory_maintenance import memory_maintenance_store_crud
 from app.core.memory.errors import MemoryConflictError
 from app.core.memory.identifiers import build_memory_collection_name
-from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
+from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _require_positive, _validate_commit
 from app.core.memory_jobs.manager import MemoryJobSubmissionResult, memory_job_manager
 from app.models.memory import (
     LongTermMemoryIndexStatus,
@@ -199,6 +199,7 @@ async def submit_memory_cleanup_retry(
     *,
     uid: str,
     dedupe_key: str,
+    job_id: int,
     source_session_id: str | None = None,
     source_profile_id: int | None = None,
     source_message_id: int | None = None,
@@ -208,6 +209,7 @@ async def submit_memory_cleanup_retry(
     try:
         normalized_uid = _normalize_uid(uid)
         normalized_dedupe_key = _normalize_dedupe_key(dedupe_key)
+        normalized_job_id = _require_positive(job_id, field="job_id")
         commit = _validate_commit(commit)
         existing_job = await memory_job_crud.get_by_dedupe_key(
             db,
@@ -218,6 +220,8 @@ async def submit_memory_cleanup_retry(
             store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
             if store is None:
                 raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+            if existing_job.parent_job_id != normalized_job_id:
+                raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
             if store.old_collection_cleanup_job_id != existing_job.id:
                 raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
             if store.old_collection_cleanup_status not in _CLEANUP_RESTARTABLE_STATUSES:
@@ -227,6 +231,7 @@ async def submit_memory_cleanup_retry(
                 uid=normalized_uid,
                 operation=existing_job.operation,
                 dedupe_key=normalized_dedupe_key,
+                parent_job_id=normalized_job_id,
                 payload=existing_job.payload,
                 source_session_id=source_session_id,
                 source_profile_id=source_profile_id,
@@ -244,16 +249,12 @@ async def submit_memory_cleanup_retry(
         store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
         if store is None:
             raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
-        old_cleanup_job_id = store.old_collection_cleanup_job_id
+        if store.old_collection_cleanup_job_id != normalized_job_id:
+            raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
+        old_cleanup_job_id = normalized_job_id
         if store.old_collection_cleanup_status != LongTermMemoryOldCollectionCleanupStatus.FAILED:
             raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         if not store.old_collection_name:
-            raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
-        if isinstance(old_cleanup_job_id, bool):
-            raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
-        if not isinstance(old_cleanup_job_id, int):
-            raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
-        if old_cleanup_job_id < 1:
             raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
 
         old_job = await memory_job_crud.get_by_id(
@@ -282,6 +283,7 @@ async def submit_memory_cleanup_retry(
             uid=normalized_uid,
             operation=old_job.operation,
             dedupe_key=normalized_dedupe_key,
+            parent_job_id=normalized_job_id,
             payload=old_job.payload,
             source_session_id=source_session_id,
             source_profile_id=source_profile_id,

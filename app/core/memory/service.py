@@ -968,6 +968,8 @@ class LongTermMemoryService:
             )
             if current_record is None or not current_record.is_active or current_record.deleted_at is not None:
                 raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
+            if current_record.pending_mutation_job_id is not None:
+                raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
             if current_record.pinned == pinned:
                 await _finish(db, commit=commit)
                 return current_record
@@ -979,6 +981,13 @@ class LongTermMemoryService:
                 commit=commit,
             )
             if record is None:
+                current_record = await memory_record_crud.get_by_id(
+                    db,
+                    uid=normalized_uid,
+                    memory_id=normalized_memory_id,
+                )
+                if current_record is not None and current_record.is_active and current_record.deleted_at is None and current_record.pending_mutation_job_id is not None:
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
                 raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
             return record
         except Exception:

@@ -27,6 +27,7 @@ class _ImportSafePersistentClient:
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.constants import (
         ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
+        ERR_MEMORY_MUTATION_PENDING,
         ERR_MEMORY_RECORD_NOT_FOUND,
     )
     from app.core.crud.memory import (
@@ -283,6 +284,80 @@ async def test_pin_management_entry_is_idempotent_persistent_and_uid_scoped(memo
 
     assert persisted is not None
     assert persisted.pinned is False
+
+
+@pytest.mark.asyncio
+async def test_pin_management_entry_rejects_records_reserved_by_mutation_jobs(memory_session_factory) -> None:
+    uid = "stage7-pin-pending-owner"
+    update_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="pending-update-pin",
+    )
+    organization_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="pending-organization-unpin",
+    )
+
+    async with memory_session_factory() as db:
+        pinned = await pin_memory(db, uid=uid, memory_id=organization_record.id)
+    assert pinned["pinned"] is True
+
+    update_job = await _create_raw_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.UPDATE,
+        dedupe_key="pending-update-pin-job",
+        memory_id=update_record.id,
+        expected_version=update_record.version,
+    )
+    organization_job = await _create_raw_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+        dedupe_key="pending-organization-unpin-job",
+        memory_id=organization_record.id,
+        expected_version=organization_record.version,
+    )
+    assert update_job.id is not None
+    assert organization_job.id is not None
+
+    async with memory_session_factory() as db:
+        assert await memory_record_crud.reserve_pending_mutation(
+            db,
+            uid=uid,
+            memory_id=update_record.id,
+            job_id=update_job.id,
+            expected_version=update_record.version,
+        )
+        assert await memory_record_crud.reserve_pending_mutation(
+            db,
+            uid=uid,
+            memory_id=organization_record.id,
+            job_id=organization_job.id,
+            expected_version=organization_record.version,
+        )
+
+    async with memory_session_factory() as db:
+        with pytest.raises(MemoryConflictError) as pin_exc:
+            await pin_memory(db, uid=uid, memory_id=update_record.id)
+        assert pin_exc.value.message == ERR_MEMORY_MUTATION_PENDING
+
+        with pytest.raises(MemoryConflictError) as unpin_exc:
+            await unpin_memory(db, uid=uid, memory_id=organization_record.id)
+        assert unpin_exc.value.message == ERR_MEMORY_MUTATION_PENDING
+
+    async with memory_session_factory() as db:
+        persisted_update = await memory_record_crud.get_by_id(db, uid=uid, memory_id=update_record.id)
+        persisted_organization = await memory_record_crud.get_by_id(db, uid=uid, memory_id=organization_record.id)
+
+    assert persisted_update is not None
+    assert persisted_update.pinned is False
+    assert persisted_update.pending_mutation_job_id == update_job.id
+    assert persisted_organization is not None
+    assert persisted_organization.pinned is True
+    assert persisted_organization.pending_mutation_job_id == organization_job.id
 
 
 @pytest.mark.asyncio

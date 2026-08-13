@@ -215,6 +215,22 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
             dedupe_key="migration-1",
             payload=payload,
         )
+        parented = await manager.submit(
+            db,
+            uid="user-a",
+            operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+            dedupe_key="migration-parented",
+            payload=payload,
+            parent_job_id=42,
+        )
+        parented_duplicate = await manager.submit(
+            db,
+            uid="user-a",
+            operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+            dedupe_key="migration-parented",
+            payload=payload,
+            parent_job_id=42,
+        )
 
     assert first.created
     assert not second.created
@@ -223,8 +239,31 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
     assert other_user.created
     assert other_user.job.id is not None
     assert other_user.job.id != first.job.id
+    assert parented.created
+    assert not parented_duplicate.created
+    assert parented.job.parent_job_id == 42
+    assert parented_duplicate.job.id == parented.job.id
 
     async with memory_job_database() as db:
+        with pytest.raises(MemoryJobValidationError):
+            await manager.submit(
+                db,
+                uid="user-a",
+                operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+                dedupe_key="migration-parented",
+                payload=payload,
+                parent_job_id=43,
+            )
+        for invalid_parent_job_id in (True, 0):
+            with pytest.raises(MemoryJobValidationError):
+                await manager.submit(
+                    db,
+                    uid="user-a",
+                    operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+                    dedupe_key=f"migration-invalid-parent-{invalid_parent_job_id}",
+                    payload=payload,
+                    parent_job_id=invalid_parent_job_id,
+                )
         with pytest.raises(MemoryJobValidationError):
             await manager.submit(
                 db,
@@ -252,8 +291,12 @@ async def test_manager_dedupes_by_uid_validates_identity_and_isolates_reads(
         assert str(exc_info.value) == t(ERR_MEMORY_JOB_PAYLOAD_INVALID)
 
         assert await manager.get_job(db, uid="user-b", job_id=first.job.id) is None
-        assert [job.uid for job in await manager.list_jobs(db, uid="user-a")] == ["user-a"]
-        assert [job.uid for job in await manager.list_jobs(db, uid="user-b")] == ["user-b"]
+        user_a_jobs = await manager.list_jobs(db, uid="user-a")
+        user_b_jobs = await manager.list_jobs(db, uid="user-b")
+        assert len(user_a_jobs) == 2
+        assert [job.uid for job in user_a_jobs] == ["user-a", "user-a"]
+        assert len(user_b_jobs) == 1
+        assert [job.uid for job in user_b_jobs] == ["user-b"]
 
 
 @pytest.mark.asyncio
