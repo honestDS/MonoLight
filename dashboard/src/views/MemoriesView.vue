@@ -305,6 +305,7 @@ const settingsRequestTracker = createLatestRequestTracker()
 const memoriesRequestTracker = createLatestRequestTracker()
 const jobsRequestTracker = createLatestRequestTracker()
 const migrationsRequestTracker = createLatestRequestTracker()
+const historyRequestTracker = createLatestRequestTracker()
 const filters = reactive({ keyword: '', memory_type: '', sort_by: 'updated_at', sort_order: 'desc' })
 const jobFilters = reactive({ status: '', operation: '', memory_id: '' })
 const form = reactive({ id: null, version: 0, memory_key: '', memory_type: 'fact', content: '', change_evidence: '', suppress_current: false })
@@ -516,11 +517,27 @@ const deleteMemory = async (row) => {
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message || t('memories.operation_failed')) }
 }
 const togglePin = async (row) => { try { if (row.pinned) await memoryApi.unpin(row.id); else await memoryApi.pin(row.id); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
-const showHistory = async (row) => { selectedMemory.value = row; historyVisible.value = true; historyLoading.value = true; try { history.value = pageData(await memoryApi.history(row.id, { page: 1, size: 100 })).items } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { historyLoading.value = false } }
+const loadHistory = async (memoryId, memory) => {
+  const requestSeq = historyRequestTracker.begin()
+  selectedMemory.value = memory
+  history.value = []
+  historyVisible.value = true
+  historyLoading.value = true
+  try {
+    const data = pageData(await memoryApi.history(memoryId, { page: 1, size: 100 }))
+    if (!historyRequestTracker.isCurrent(requestSeq)) return
+    history.value = data.items
+  } catch (error) {
+    if (historyRequestTracker.isCurrent(requestSeq)) ElMessage.error(error.message || t('memories.operation_failed'))
+  } finally {
+    if (historyRequestTracker.isCurrent(requestSeq)) historyLoading.value = false
+  }
+}
+const showHistory = (row) => loadHistory(row.id, row)
 const isRecordSnapshot = (value) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
 const deletedRecordSnapshot = (row) => { const resultSnapshot = row?.result?.record_snapshot; if (isRecordSnapshot(resultSnapshot)) return resultSnapshot; const payloadSnapshot = row?.payload?.record_snapshot; return isRecordSnapshot(payloadSnapshot) ? payloadSnapshot : null }
 const canShowDeletedHistory = (row) => row.operation === 'delete_cleanup' && Boolean(row.memory_id && deletedRecordSnapshot(row))
-const showDeletedHistory = async (row) => { const snapshot = deletedRecordSnapshot(row); if (!snapshot || !row.memory_id) return; selectedMemory.value = { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version }; historyVisible.value = true; historyLoading.value = true; try { history.value = pageData(await memoryApi.history(row.memory_id, { page: 1, size: 100 })).items } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } finally { historyLoading.value = false } }
+const showDeletedHistory = (row) => { const snapshot = deletedRecordSnapshot(row); if (!snapshot || !row.memory_id) return; loadHistory(row.memory_id, { ...snapshot, id: row.memory_id, memory_key: snapshot.memory_key || '', version: snapshot.version }) }
 const resumeCurrent = async (row) => { try { await memoryApi.resumeCurrent(row.id, { expected_version: row.version }); ElMessage.info(t('memories.operation_success')); refreshAll() } catch (error) { ElMessage.error(error.message || t('memories.operation_failed')) } }
 const canRetry = (row) => { if (row.operation === 'restore') return false; return row.operation === 'delete_cleanup' ? row.status === 'failed' : ['failed', 'cancelled'].includes(row.status) }
 const canCancel = (row) => !['succeeded', 'failed', 'cancelled'].includes(row.status) && row.operation !== 'delete_cleanup'
@@ -542,6 +559,7 @@ onBeforeUnmount(() => {
   memoriesRequestTracker.invalidate()
   jobsRequestTracker.invalidate()
   migrationsRequestTracker.invalidate()
+  historyRequestTracker.invalidate()
 })
 </script>
 
