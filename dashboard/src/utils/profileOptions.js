@@ -3,6 +3,19 @@ export const filterProfilesByUid = (profiles, uid) => {
   return profiles.filter(profile => profile?.uid === uid)
 }
 
+export const filterKnowledgeBaseIdsForOwner = (ids, knowledgeBases, uid) => {
+  if (!Array.isArray(ids) || !Array.isArray(knowledgeBases) || !uid) return []
+
+  return ids.filter(id => knowledgeBases.some(item => item?.uid === uid && item?.id === id))
+}
+
+export const buildKnowledgeBaseBindingPayload = (ids, ready) => {
+  if (ready !== true) return undefined
+  if (!Array.isArray(ids)) return []
+
+  return [...new Set(ids.filter(id => id !== null && id !== undefined && id !== ''))]
+}
+
 export const formatProfileOptionLabel = (profile, defaultSuffix = '') => {
   if (typeof profile?.name !== 'string') return ''
   return profile.is_default === true ? profile.name + defaultSuffix : profile.name

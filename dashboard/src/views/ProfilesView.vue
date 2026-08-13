@@ -63,6 +63,9 @@
       :dialog-type="dialogType"
       :form="form"
       :knowledge-base-options="knowledgeBaseOptions"
+      :knowledge-bases-loading="knowledgeBasesLoading"
+      :knowledge-bases-ready="knowledgeBasesReady"
+      :knowledge-bases-unavailable="knowledgeBasesUnavailable"
       :locale-options="localeOptions"
       :memory-embedding-current-label="memoryEmbeddingCurrentLabel"
       :memory-embedding-options="memoryEmbeddingOptions"
@@ -184,6 +187,10 @@ import {
   normalizeMemorySettings,
   validateOrganizationSettings
 } from '../utils/memoryManagement'
+import {
+  buildKnowledgeBaseBindingPayload,
+  filterKnowledgeBaseIdsForOwner
+} from '../utils/profileOptions'
 
 const { t } = useI18n()
 
@@ -192,6 +199,9 @@ const users = ref([])
 const channels = ref([])
 const prompts = ref([])
 const knowledgeBases = ref([])
+const knowledgeBasesLoading = ref(false)
+const knowledgeBasesReady = ref(false)
+const knowledgeBasesUnavailable = ref(false)
 const toolOptions = ref([])
 const showOwnerColumn = ref(false)
 const currentUid = ref(null)
@@ -315,9 +325,13 @@ const memoryPreviewRequiresMigration = computed(() => {
     || current.dimensions !== (preview.actual_dimensions || preview.dimensions)
 })
 
-watch(() => form.uid, () => {
-  form.knowledge_base_ids = form.knowledge_base_ids.filter(id => knowledgeBaseOptions.value.some(item => item.value === id))
-})
+const filterFormKnowledgeBaseIds = () => {
+  if (!knowledgeBasesReady.value) return
+  form.knowledge_base_ids = filterKnowledgeBaseIdsForOwner(form.knowledge_base_ids, knowledgeBases.value, form.uid)
+}
+
+watch(() => form.uid, filterFormKnowledgeBaseIds)
+watch([knowledgeBasesReady, knowledgeBases], filterFormKnowledgeBaseIds)
 
 const normalizeMemoryOrganizationSelection = () => {
   if (!memoryOrganizationChannels.value.length) return
@@ -432,11 +446,17 @@ const fetchChannels = async () => {
 }
 
 const fetchKnowledgeBases = async () => {
+  knowledgeBasesLoading.value = true
+  knowledgeBasesReady.value = false
+  knowledgeBasesUnavailable.value = false
   try {
     const res = await knowledgeBaseApi.list({ page: 1, size: 1000 })
     knowledgeBases.value = res.data.data.items || []
+    knowledgeBasesReady.value = true
   } catch (err) {
-    knowledgeBases.value = []
+    knowledgeBasesUnavailable.value = true
+  } finally {
+    knowledgeBasesLoading.value = false
   }
 }
 
@@ -755,23 +775,22 @@ const submitForm = async () => {
 
   submitting.value = true
   try {
+    const payload = {
+      ...(dialogType.value === 'create' ? { uid: form.uid } : {}),
+      name: form.name,
+      prompt_id: form.prompt_id,
+      memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
+      configs: buildConfigsForSave()
+    }
+    const knowledgeBaseIds = buildKnowledgeBaseBindingPayload(form.knowledge_base_ids, knowledgeBasesReady.value)
+    if (knowledgeBaseIds !== undefined) {
+      payload.knowledge_base_ids = knowledgeBaseIds
+    }
+
     if (dialogType.value === 'create') {
-      await profileApi.create({
-        uid: form.uid,
-        name: form.name,
-        prompt_id: form.prompt_id,
-        knowledge_base_ids: form.knowledge_base_ids,
-        memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
-        configs: buildConfigsForSave()
-      })
+      await profileApi.create(payload)
     } else {
-      await profileApi.update(form.id, {
-        name: form.name,
-        prompt_id: form.prompt_id,
-        knowledge_base_ids: form.knowledge_base_ids,
-        memory_organization: buildOrganizationSettingsPayload(form.memory_organization),
-        configs: buildConfigsForSave()
-      })
+      await profileApi.update(form.id, payload)
     }
     ElMessage.success(t('profiles.save_success'))
     dialogVisible.value = false

@@ -208,6 +208,7 @@
                     filterable
                     collapse-tags
                     collapse-tags-tooltip
+                    :disabled="knowledgeBasesLoading || knowledgeBasesUnavailable || !knowledgeBasesReady"
                   >
                     <el-option v-for="item in knowledgeBaseOptions" :key="item.value" :label="item.label" :value="item.value">
                       <div class="option-with-description">
@@ -444,6 +445,9 @@ defineProps({
   fileSendBlockedExtensionInput: { type: String, required: true },
   form: { type: Object, required: true },
   knowledgeBaseOptions: { type: Array, required: true },
+  knowledgeBasesLoading: { type: Boolean, required: true },
+  knowledgeBasesReady: { type: Boolean, required: true },
+  knowledgeBasesUnavailable: { type: Boolean, required: true },
   localeOptions: { type: Array, required: true },
   memoryEmbeddingCurrentLabel: { type: String, default: '' },
   memoryEmbeddingOptions: { type: Array, required: true },
