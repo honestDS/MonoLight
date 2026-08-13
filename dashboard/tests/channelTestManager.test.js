@@ -1,6 +1,26 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createChannelTestManager } from '../src/utils/channelTestManager.js'
+import {
+  createAbortableTaskManager,
+  createChannelTestManager
+} from '../src/utils/channelTestManager.js'
+
+test('exports the generic factory with the compatible single-flight abort behavior', () => {
+  assert.equal(createAbortableTaskManager, createChannelTestManager)
+
+  const manager = createAbortableTaskManager()
+  const token = manager.begin('same')
+  let currentDuringAbort
+  token.signal.addEventListener('abort', () => {
+    currentDuringAbort = manager.isCurrent(token)
+  })
+
+  assert.notEqual(token, null)
+  assert.equal(manager.begin('same'), null)
+  assert.equal(manager.cancel('same'), true)
+  assert.equal(token.signal.aborted, true)
+  assert.equal(currentDuringAbort, false)
+})
 
 test('allows different keys to run concurrently with independent state', () => {
   const manager = createChannelTestManager()
