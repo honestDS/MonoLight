@@ -1,6 +1,6 @@
 # MonoLight
 
-MonoLight 是一个基于能力控制的自主 AI Agent 运行时，让智能体能够在可配置工具、模型能力适配、执行审计和人工监督机制下可靠运行。
+MonoLight 是一个专注于安全执行与人机协同的通用自主智能体（General Autonomous Agent）运行时。
 
 <p align="center">
   <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
