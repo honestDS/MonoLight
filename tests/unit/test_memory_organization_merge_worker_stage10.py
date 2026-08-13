@@ -1332,9 +1332,16 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert await _get_job(memory_session_factory, uid=f"{uid}-other", job_id=child_id) is None
         async with memory_session_factory() as db:
             assert await memory_record_crud.list_recallable_by_ids(db, uid=f"{uid}-other", memory_ids=source_ids) == []
-            next_memory_id = await memory_record_crud.get_next_memory_id(db)
-        assert next_memory_id not in source_ids
-        assert next_memory_id > max(source_ids)
+            next_record = await memory_record_crud.create(
+                db,
+                uid=uid,
+                memory_key="post-merge-auto-id",
+                content="post merge auto id",
+                content_hash="post-merge-auto-id-hash",
+                is_active=False,
+            )
+        assert next_record.id not in source_ids
+        assert next_record.id > max(source_ids)
     finally:
         await consumer.stop()
 

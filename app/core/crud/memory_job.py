@@ -355,6 +355,20 @@ class CRUDLongTermMemoryMutationJob:
             )
             return
         if operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION:
+            if isinstance(memory_id, bool) or not isinstance(memory_id, int) or memory_id < 1:
+                memory_id = None
+            if memory_id is not None:
+                await db.execute(
+                    delete(LongTermMemoryRecord)
+                    .where(
+                        LongTermMemoryRecord.uid == uid,
+                        LongTermMemoryRecord.id == memory_id,
+                        LongTermMemoryRecord.pending_mutation_job_id == job_id,
+                        LongTermMemoryRecord.version == 0,
+                        LongTermMemoryRecord.is_active.is_(False),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
             candidate = payload.get("candidate") if isinstance(payload, dict) else None
             candidate_memory_id = candidate.get("memory_id") if isinstance(candidate, dict) else None
             if isinstance(candidate_memory_id, bool) or not isinstance(candidate_memory_id, int) or candidate_memory_id < 1:

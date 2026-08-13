@@ -39,7 +39,6 @@ from app.core.crud.memory import (
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -542,18 +541,6 @@ class LongTermMemoryService:
                     await _finish(db, commit=commit)
                     return _accepted(submission)
                 if submission.job.id is None:
-                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
-                replacement_memory_id = await memory_record_crud.get_next_replacement_memory_id(
-                    db,
-                    replacement_job_id=submission.job.id,
-                )
-                if not await memory_job_crud.assign_create_memory_id(
-                    db,
-                    uid=normalized_uid,
-                    job_id=submission.job.id,
-                    memory_id=replacement_memory_id,
-                    commit=False,
-                ):
                     raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
                 if not await memory_record_crud.reserve_eviction_candidate(
                     db,

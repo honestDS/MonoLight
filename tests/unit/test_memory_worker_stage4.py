@@ -743,6 +743,74 @@ async def test_create_publishes_record_revision_vector_and_migration_delta_atomi
 
 
 @pytest.mark.asyncio
+async def test_distinct_user_creates_allocate_database_ids_concurrently(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    users = ("concurrent-id-user-a", "concurrent-id-user-b")
+    for uid in users:
+        await _configure_store(memory_session_factory, uid=uid, collection_name=f"memory-collection-{uid}")
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    placeholder_barrier = asyncio.Barrier(2)
+    original_create_placeholder = memory_record_crud.create_pending_placeholder
+
+    async def create_placeholder_at_barrier(db: AsyncSession, **kwargs: Any) -> Any:
+        await placeholder_barrier.wait()
+        return await original_create_placeholder(db, **kwargs)
+
+    async def unlocked_store_lookup(db: AsyncSession, *, uid: str, commit: bool = True) -> Any:
+        return await memory_store_crud.get_by_uid(db, uid=uid)
+
+    monkeypatch.setattr(memory_record_crud, "create_pending_placeholder", create_placeholder_at_barrier)
+    monkeypatch.setattr(memory_handlers.memory_store_crud, "lock_for_mutation", unlocked_store_lookup)
+    submissions = await asyncio.gather(
+        *(
+            _create_service_memory(
+                memory_session_factory,
+                uid=uid,
+                dedupe_key=f"concurrent-create-{uid}",
+                content=f"content for {uid}",
+                memory_key=f"key-{uid}",
+            )
+            for uid in users
+        )
+    )
+    assert all(submission.job.memory_id is None for submission in submissions)
+    consumer = _consumer(memory_session_factory, max_concurrency=2)
+    try:
+        assert await consumer.run_once() == 2
+        finished_jobs = await asyncio.gather(
+            *(
+                _wait_for_job(
+                    memory_session_factory,
+                    uid=uid,
+                    job_id=submission.job.id,
+                    status=LongTermMemoryMutationStatus.SUCCEEDED,
+                )
+                for uid, submission in zip(users, submissions, strict=True)
+            )
+        )
+    finally:
+        await consumer.stop()
+
+    memory_ids = [job.memory_id for job in finished_jobs]
+    assert all(isinstance(memory_id, int) and memory_id > 0 for memory_id in memory_ids)
+    assert len(set(memory_ids)) == 2
+    for uid, job in zip(users, finished_jobs, strict=True):
+        memory_id = job.memory_id
+        assert memory_id is not None
+        record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+        revisions = await _get_revisions(memory_session_factory, uid=uid, memory_id=memory_id)
+        assert record is not None
+        assert record.id == memory_id
+        assert record.version == 1
+        assert record.vector_item_id is not None
+        assert revisions and revisions[0].memory_id == memory_id
+        assert record.vector_item_id in vector_backend.collections[f"memory-collection-{uid}"]["items"]
+
+
+@pytest.mark.asyncio
 async def test_create_fails_before_embedding_when_existing_active_record_is_over_limit(
     memory_session_factory: async_sessionmaker[AsyncSession],
     vector_backend: _FakeVectorBackend,
@@ -1968,8 +2036,7 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
             memory_key="replacement-key",
         )
         assert submission.job.operation == LongTermMemoryMutationOperation.CREATE_WITH_EVICTION
-        assert submission.job.memory_id is not None
-        replacement_memory_id = submission.job.memory_id
+        assert submission.job.memory_id is None
         candidate_id = submission.job.payload["candidate"]["memory_id"]
         assert candidate_id == 1
         old_item_id = build_memory_vector_item_id(candidate_id, 1)
@@ -2003,6 +2070,9 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
             job_id=submission.job.id,
             status=LongTermMemoryMutationStatus.SUCCEEDED,
         )
+        finished_memory_id = finished.memory_id
+        assert finished_memory_id is not None
+        replacement_memory_id = finished_memory_id
         assert finished.result is not None
         assert finished.result["memory_id"] == replacement_memory_id
         assert finished.result["evicted_memory_id"] == candidate_id
@@ -2146,6 +2216,58 @@ async def test_create_with_eviction_permanent_embedding_failure_preserves_capaci
                 )
                 == []
             )
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_create_with_eviction_retry_reuses_placeholder_memory_id(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "create-with-eviction-retry-user"
+    await _configure_store(memory_session_factory, uid=uid, index_status=LongTermMemoryIndexStatus.READY)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    await _seed_full_ready_records(memory_session_factory, vector_backend, uid=uid)
+    vector_backend.embedding_error = RuntimeError("temporary replacement embedding failure")
+    consumer = _consumer(memory_session_factory)
+    try:
+        submission = await _create_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="create-with-eviction-retry",
+            content="retry replacement content",
+            memory_key="retry-replacement-key",
+            max_attempts=2,
+        )
+        retried = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=submission.job.id,
+            status=LongTermMemoryMutationStatus.RETRY,
+        )
+        placeholder_id = retried.memory_id
+        assert placeholder_id is not None
+        placeholder = await _get_record(memory_session_factory, uid=uid, memory_id=placeholder_id)
+        assert placeholder is not None
+        assert placeholder.version == 0
+        assert placeholder.pending_mutation_job_id == retried.id
+
+        vector_backend.embedding_error = None
+        await _make_available_now(memory_session_factory, uid=uid, job_id=submission.job.id)
+        succeeded = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=submission.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert succeeded.memory_id == placeholder_id
+        published = await _get_record(memory_session_factory, uid=uid, memory_id=placeholder_id)
+        assert published is not None
+        assert published.version == 1
+        assert published.is_active is True
     finally:
         await consumer.stop()
 
