@@ -6,8 +6,10 @@ from app.core.constants import (
     ERR_INTERNAL_SERVER_ERROR,
     ERR_MEMORY_ENUM_INVALID,
     ERR_MEMORY_FIELD_REQUIRED,
+    ERR_MEMORY_FIELD_TYPE_INVALID,
     ERR_TOOL_RUNTIME_CONTEXT_MISSING,
     ERR_TOOL_UNSUPPORTED_ARGUMENTS,
+    ERR_VALUE_MUST_BE_BETWEEN,
     MEMORY_CHANGE_EVIDENCE_MAX_CHARS,
     MEMORY_CONTENT_MAX_CHARS,
     MEMORY_KEY_MAX_CHARS,
@@ -213,6 +215,12 @@ def validate_longterm_memory_arguments(arguments: dict[str, Any]) -> tuple[str |
         return operation, _field_error(", ".join(missing))
     if operation == "recall" and (not isinstance(arguments.get("query"), str) or not arguments["query"].strip()):
         return operation, _field_error("query")
+    if operation == "recall" and "top_k" in arguments:
+        top_k = arguments["top_k"]
+        if not isinstance(top_k, int) or isinstance(top_k, bool):
+            return operation, t(ERR_MEMORY_FIELD_TYPE_INVALID, field="top_k")
+        if not 1 <= top_k <= 50:
+            return operation, t(ERR_VALUE_MUST_BE_BETWEEN, field="top_k", minimum=1, maximum=50)
     return operation, None
 
 
