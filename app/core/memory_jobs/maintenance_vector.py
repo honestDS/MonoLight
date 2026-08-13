@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import struct
+from collections.abc import Iterable, Mapping, Sized
 from numbers import Real
 from typing import Any
 
@@ -143,28 +145,58 @@ async def ensure_collection(
             raise retryable(ERR_MEMORY_JOB_VECTOR_WRITE_FAILED) from exc
 
 
-async def collection_items(collection_name: str) -> dict[str, tuple[str, dict[str, Any]]]:
+async def collection_items(
+    collection_name: str,
+) -> dict[str, tuple[str, dict[str, Any], list[float]]]:
     try:
-        raw = await async_get_collection_items(collection_name, include=["documents", "metadatas"])
+        raw = await async_get_collection_items(
+            collection_name,
+            include=["documents", "metadatas", "embeddings"],
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("collection items must be a dictionary")
+        ids = raw.get("ids")
+        documents = raw.get("documents")
+        metadatas = raw.get("metadatas")
+        embeddings = raw.get("embeddings")
+        for values in (ids, documents, metadatas, embeddings):
+            if isinstance(values, (str, bytes, bytearray, Mapping)) or not isinstance(values, Iterable) or not isinstance(values, Sized):
+                raise ValueError("collection item fields must be sequences")
+        ids = list(ids)
+        documents = list(documents)
+        metadatas = list(metadatas)
+        embeddings = list(embeddings)
+        if len({len(ids), len(documents), len(metadatas), len(embeddings)}) != 1:
+            raise ValueError("collection item lengths must match")
+
+        items: dict[str, tuple[str, dict[str, Any], list[float]]] = {}
+        vector_dimension: int | None = None
+        for index, item_id in enumerate(ids):
+            if not isinstance(item_id, str) or not item_id or item_id in items:
+                raise ValueError("collection item ID is invalid")
+            document = documents[index]
+            metadata = metadatas[index]
+            vector = embeddings[index]
+            if not isinstance(document, str) or not isinstance(metadata, dict):
+                raise ValueError("collection item document or metadata is invalid")
+            if isinstance(vector, (str, bytes, bytearray, Mapping)) or not isinstance(vector, Iterable) or not isinstance(vector, Sized):
+                raise ValueError("collection item embedding is invalid")
+            vector = list(vector)
+            if not vector:
+                raise ValueError("collection item embedding is invalid")
+            if vector_dimension is None:
+                vector_dimension = len(vector)
+            elif len(vector) != vector_dimension:
+                raise ValueError("collection item embedding dimensions must match")
+            normalized_vector: list[float] = []
+            for value in vector:
+                if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+                    raise ValueError("collection item embedding value is invalid")
+                normalized_vector.append(float(value))
+            items[item_id] = (document, dict(metadata), normalized_vector)
+        return items
     except Exception as exc:
         raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED) from exc
-    ids = raw.get("ids") or []
-    documents = raw.get("documents") or []
-    metadatas = raw.get("metadatas") or []
-    if not isinstance(ids, list) or not isinstance(documents, list) or not isinstance(metadatas, list):
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-    items: dict[str, tuple[str, dict[str, Any]]] = {}
-    for index, item_id in enumerate(ids):
-        if not isinstance(item_id, str) or index >= len(documents) or index >= len(metadatas):
-            raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-        document = documents[index]
-        metadata = metadatas[index]
-        if not isinstance(document, str) or not isinstance(metadata, dict):
-            raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-        items[item_id] = (document, dict(metadata))
-    if len(documents) != len(ids) or len(metadatas) != len(ids):
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-    return items
 
 
 async def reconcile_collection(
@@ -211,7 +243,7 @@ async def reconcile_collection(
             )
         except Exception as exc:
             raise retryable(ERR_MEMORY_JOB_VECTOR_WRITE_FAILED) from exc
-        current_items: dict[str, tuple[str, dict[str, Any]]] = {}
+        current_items: dict[str, tuple[str, dict[str, Any], list[float]]] = {}
     else:
         current_items = await collection_items(collection_name)
 
@@ -227,7 +259,8 @@ async def reconcile_collection(
     mismatched: list[LongTermMemoryRecord] = []
     for record in records:
         expected = expected_items.get(record.vector_item_id)
-        if current_items.get(record.vector_item_id) != expected:
+        current = current_items.get(record.vector_item_id)
+        if current is None or current[:2] != expected:
             mismatched.append(record)
     for start in range(0, len(mismatched), BATCH_SIZE):
         await context.checkpoint()
@@ -252,8 +285,30 @@ async def reconcile_collection(
     if set(final_items) != set(expected_items):
         raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
     for item_id, expected in expected_items.items():
-        if final_items.get(item_id) != expected:
+        actual = final_items.get(item_id)
+        if actual is None or actual[:2] != expected:
             raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+
+    for start in range(0, len(records), BATCH_SIZE):
+        await context.checkpoint()
+        batch_records = records[start : start + BATCH_SIZE]
+        expected_vectors = await embed_records(context, batch_records, config)
+        for record, expected_vector in zip(batch_records, expected_vectors):
+            actual = final_items.get(record.vector_item_id)
+            if actual is None:
+                raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+            actual_vector = actual[2]
+            if len(actual_vector) != len(expected_vector):
+                raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+            for actual_value, expected_value in zip(actual_vector, expected_vector):
+                if actual_value == expected_value:
+                    continue
+                try:
+                    float32_round_trip = struct.unpack("!f", struct.pack("!f", expected_value))[0]
+                except OverflowError:
+                    float32_round_trip = None
+                if actual_value != float32_round_trip:
+                    raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
 
     snapshots: list[RecordSnapshot] = []
     for record in records:
