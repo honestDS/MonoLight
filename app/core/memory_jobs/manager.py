@@ -69,6 +69,9 @@ _NON_TARGET_OPERATIONS = frozenset(
 _ORGANIZE_OPERATIONS = frozenset({LongTermMemoryMutationOperation.ORGANIZE})
 _SUBMITTABLE_OPERATIONS = _TARGET_OPERATIONS | _NON_TARGET_OPERATIONS | _ORGANIZE_OPERATIONS
 _ACTIVE_MUTATION_KEY_CONSTRAINT = "uq_long_term_memory_mutation_job_active_key"
+_ORGANIZATION_RETRY_KEY_SEPARATOR = ":retry:"
+_ORGANIZATION_RETRY_ID_LENGTH = 32
+_ORGANIZATION_RETRY_KEY_MAX_LENGTH = 255
 
 
 class MemoryJobSubmissionError(ValueError):
@@ -212,7 +215,8 @@ def _validate_existing_organization_job(
     snapshot_digest: str,
     policy_version: int,
     active_mutation_key: str,
-) -> None:
+    expected_trigger: str | None = None,
+) -> LongTermMemoryMutationStatus:
     try:
         if job.uid != uid or job.dedupe_key != dedupe_key:
             raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
@@ -248,6 +252,9 @@ def _validate_existing_organization_job(
         restored = restore_organization_execution_payload(job.payload)
         if restored.snapshot.digest != snapshot_digest or restored.snapshot.policy_version != policy_version:
             raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        if expected_trigger is not None and restored.trigger != expected_trigger:
+            raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
+        return status
     except Exception as exc:
         raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT)) from exc
 
@@ -262,6 +269,69 @@ def _organization_interval_elapsed(last_run_at: datetime | None, now: datetime) 
         return value
 
     return as_utc_naive(now) - as_utc_naive(last_run_at) >= timedelta(seconds=MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS)
+
+
+def _build_organization_retry_dedupe_key(dedupe_key: str) -> str:
+    retry_suffix = f"{_ORGANIZATION_RETRY_KEY_SEPARATOR}{uuid4().hex}"
+    prefix_length = _ORGANIZATION_RETRY_KEY_MAX_LENGTH - len(retry_suffix)
+    return f"{dedupe_key[:prefix_length]}{retry_suffix}"
+
+
+def _organization_retry_prefix(stable_dedupe_key: str) -> str:
+    retry_suffix_length = len(_ORGANIZATION_RETRY_KEY_SEPARATOR) + _ORGANIZATION_RETRY_ID_LENGTH
+    return stable_dedupe_key[: _ORGANIZATION_RETRY_KEY_MAX_LENGTH - retry_suffix_length]
+
+
+def _organization_retry_key_claims_stable_key(
+    dedupe_key: str,
+    *,
+    stable_dedupe_key: str,
+) -> bool:
+    if not isinstance(dedupe_key, str) or not isinstance(stable_dedupe_key, str):
+        return False
+    return dedupe_key.startswith(f"{_organization_retry_prefix(stable_dedupe_key)}{_ORGANIZATION_RETRY_KEY_SEPARATOR}")
+
+
+def _is_organization_retry_dedupe_key(
+    dedupe_key: str,
+    *,
+    stable_dedupe_key: str,
+) -> bool:
+    if not isinstance(dedupe_key, str) or not isinstance(stable_dedupe_key, str):
+        return False
+    expected_prefix = _organization_retry_prefix(stable_dedupe_key)
+    retry_suffix = dedupe_key[len(expected_prefix) :]
+    retry_id = retry_suffix[len(_ORGANIZATION_RETRY_KEY_SEPARATOR) :]
+    return (
+        len(dedupe_key) <= _ORGANIZATION_RETRY_KEY_MAX_LENGTH
+        and dedupe_key.startswith(expected_prefix)
+        and len(retry_suffix) == len(_ORGANIZATION_RETRY_KEY_SEPARATOR) + _ORGANIZATION_RETRY_ID_LENGTH
+        and retry_suffix[: len(_ORGANIZATION_RETRY_KEY_SEPARATOR)] == _ORGANIZATION_RETRY_KEY_SEPARATOR
+        and len(retry_id) == _ORGANIZATION_RETRY_ID_LENGTH
+        and all(character in "0123456789abcdef" for character in retry_id)
+    )
+
+
+def _validate_existing_organization_retry_job(
+    job: LongTermMemoryMutationJob,
+    *,
+    uid: str,
+    stable_dedupe_key: str,
+    snapshot_digest: str,
+    policy_version: int,
+    active_mutation_key: str,
+) -> LongTermMemoryMutationStatus:
+    if not _is_organization_retry_dedupe_key(job.dedupe_key, stable_dedupe_key=stable_dedupe_key):
+        raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT))
+    return _validate_existing_organization_job(
+        job,
+        uid=uid,
+        dedupe_key=job.dedupe_key,
+        snapshot_digest=snapshot_digest,
+        policy_version=policy_version,
+        active_mutation_key=active_mutation_key,
+        expected_trigger="auto",
+    )
 
 
 def _safe_auto_organization_error(exc: Exception) -> tuple[str, str]:
@@ -482,7 +552,7 @@ class MemoryJobManager:
             dedupe_key=final_dedupe_key,
         )
         if existing_job is not None:
-            _validate_existing_organization_job(
+            existing_status = _validate_existing_organization_job(
                 existing_job,
                 uid=uid,
                 dedupe_key=final_dedupe_key,
@@ -490,7 +560,42 @@ class MemoryJobManager:
                 policy_version=store.organization_policy_version,
                 active_mutation_key=active_mutation_key,
             )
-            return MemoryJobSubmissionResult(job=existing_job, created=False)
+            if trigger != "auto" or existing_status not in {
+                LongTermMemoryMutationStatus.FAILED,
+                LongTermMemoryMutationStatus.CANCELLED,
+            }:
+                return MemoryJobSubmissionResult(job=existing_job, created=False)
+
+            latest_job_id = store.organization_last_job_id
+            if latest_job_id is not None and latest_job_id != existing_job.id:
+                latest_job = await memory_job_crud.get_by_id(
+                    db,
+                    uid=uid,
+                    job_id=latest_job_id,
+                )
+                if latest_job is not None and _organization_retry_key_claims_stable_key(
+                    latest_job.dedupe_key,
+                    stable_dedupe_key=final_dedupe_key,
+                ):
+                    if not _is_organization_retry_dedupe_key(
+                        latest_job.dedupe_key,
+                        stable_dedupe_key=final_dedupe_key,
+                    ):
+                        raise MemoryJobValidationError(t(ERR_MEMORY_JOB_DEDUPE_CONFLICT))
+                    latest_status = _validate_existing_organization_retry_job(
+                        latest_job,
+                        uid=uid,
+                        stable_dedupe_key=final_dedupe_key,
+                        snapshot_digest=snapshot.digest,
+                        policy_version=store.organization_policy_version,
+                        active_mutation_key=active_mutation_key,
+                    )
+                    if latest_status not in {
+                        LongTermMemoryMutationStatus.FAILED,
+                        LongTermMemoryMutationStatus.CANCELLED,
+                    }:
+                        return MemoryJobSubmissionResult(job=latest_job, created=False)
+            final_dedupe_key = _build_organization_retry_dedupe_key(final_dedupe_key)
 
         organization_model = await load_organization_model_config_for_store(
             db,
@@ -608,6 +713,13 @@ class MemoryJobManager:
                 trigger="auto",
                 caller_dedupe_key=None,
             )
+            if not submission.created:
+                try:
+                    submission_status = LongTermMemoryMutationStatus(submission.job.status)
+                except (TypeError, ValueError) as exc:
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID)) from exc
+                if submission_status != LongTermMemoryMutationStatus.SUCCEEDED:
+                    raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
             job_id = submission.job.id
             if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
                 raise MemoryJobValidationError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
