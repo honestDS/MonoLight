@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -30,8 +30,11 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         memory_store_crud,
     )
     from app.core.crud.memory_job import memory_job_crud
+    from app.core.crud.memory_maintenance import memory_maintenance_store_crud
     from app.core.memory_jobs import maintenance_vector, migration_handler
-    from app.core.memory_jobs.executor import MemoryJobExecutor, MemoryJobRetryableError
+    from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobLeaseLostError, MemoryJobRetryableError
+    from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
+    from app.core.memory_jobs.maintenance_state import ValidationSnapshot, record_snapshot
     from app.core.memory_jobs.manager import memory_job_manager
     from app.core.memory_jobs.migration_handler import handle_embedding_migration
     from app.models.memory import (
@@ -39,6 +42,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         LongTermMemoryEmbeddingDeltaStatus,
         LongTermMemoryEmbeddingRevisionStatus,
         LongTermMemoryMigrationStatus,
+        LongTermMemoryMutationJob,
         LongTermMemoryMutationOperation,
         LongTermMemoryMutationStatus,
         LongTermMemoryOldCollectionCleanupStatus,
@@ -531,3 +535,194 @@ async def test_embedding_migration_sample_query_failure_does_not_switch(
     assert target_collection in vector_backend.collections
     assert revision is not None
     assert revision.status == LongTermMemoryEmbeddingRevisionStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_embedding_migration_switch_is_fenced_after_expired_lease_recovery(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "stage5-migration-switch-fence-user"
+    old_collection = "stage5-migration-switch-fence-old"
+    target_collection = "stage5-migration-switch-fence-target"
+    owner = "stage5-migration-switch-fence-worker"
+    source = {
+        "channel_id": 11,
+        "model_id": "stage5-migration-switch-fence-source",
+        "dimensions": 3,
+        "signature": "stage5-migration-switch-fence-source-signature",
+        "collection": old_collection,
+        "revision": 1,
+    }
+    target = {
+        "channel_id": 12,
+        "model_id": "stage5-migration-switch-fence-target",
+        "dimensions": 4,
+        "signature": "stage5-migration-switch-fence-target-signature",
+        "collection": target_collection,
+        "revision": 2,
+    }
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=source["channel_id"],
+        model_id=source["model_id"],
+        dimensions=source["dimensions"],
+        signature=source["signature"],
+        active_revision=source["revision"],
+        index_revision=13,
+        collection_name=old_collection,
+    )
+    record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="switch-fence-record",
+    )
+    assert record.id is not None
+    job = await _prepare_embedding_migration(
+        memory_session_factory,
+        uid=uid,
+        dedupe_key="stage5-migration-switch-fence",
+        source=source,
+        target=target,
+    )
+    assert job.id is not None
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        updated_store = await memory_maintenance_store_crud.update_embedding_migration_progress(
+            db,
+            uid=uid,
+            migration_job_id=job.id,
+            migration_status=LongTermMemoryMigrationStatus.VALIDATING,
+            migration_snapshot_boundary=record.id,
+            migration_total_count=1,
+            migration_cursor=record.id,
+            migration_success_count=1,
+            migration_failure_count=0,
+            migration_delta_high_watermark=0,
+            migration_delta_applied_watermark=0,
+            commit=False,
+        )
+        assert updated_store is not None
+        updated_revision = await memory_embedding_revision_crud.update_by_revision(
+            db,
+            uid=uid,
+            revision=target["revision"],
+            status=LongTermMemoryEmbeddingRevisionStatus.RUNNING,
+            started_at=now,
+            commit=False,
+        )
+        assert updated_revision is not None
+        await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == job.id,
+            )
+            .values(max_attempts=1)
+        )
+        await db.commit()
+
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+        job_id=job.id,
+        owner=owner,
+    )
+    assert claimed is not None
+    async with memory_session_factory() as db:
+        initial_claim = await memory_job_crud.get_active_claim(
+            db,
+            uid=uid,
+            job_id=job.id,
+            owner=owner,
+        )
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert initial_claim is not None
+    assert store is not None
+
+    original_get_active_claim = memory_job_crud.get_active_claim
+    initial_claim_check = False
+    recovered = False
+
+    async def get_claim_for_switch(_db: Any, **kwargs: Any) -> Any:
+        nonlocal initial_claim_check
+        if not initial_claim_check:
+            initial_claim_check = True
+            return initial_claim
+        return await original_get_active_claim(_db, **kwargs)
+
+    async def recover_expired_claim() -> None:
+        nonlocal recovered
+        if recovered:
+            return
+        recovered = True
+        async with memory_session_factory() as recovery_db:
+            recovery_now = await get_database_time(recovery_db)
+            await recovery_db.execute(
+                update(LongTermMemoryMutationJob)
+                .where(
+                    LongTermMemoryMutationJob.uid == uid,
+                    LongTermMemoryMutationJob.id == job.id,
+                )
+                .values(lock_until=recovery_now - timedelta(seconds=1))
+            )
+            recovery = await memory_job_crud.recover_expired(
+                recovery_db,
+                max_attempts_error="stage5 lease expired",
+                commit=False,
+            )
+            for terminal in recovery.terminal_jobs:
+                await finalize_maintenance_terminal_state(
+                    recovery_db,
+                    job=terminal.job,
+                    status=terminal.status,
+                    error=terminal.error,
+                )
+            await recovery_db.commit()
+
+    async def return_store_without_write(_db: Any, *, uid: str, commit: bool = True) -> Any:
+        await recover_expired_claim()
+        return store
+
+    async def return_records_without_read(_db: Any, **_kwargs: Any) -> list[Any]:
+        return [record]
+
+    monkeypatch.setattr(memory_job_crud, "get_active_claim", get_claim_for_switch)
+    monkeypatch.setattr(memory_store_crud, "lock_for_mutation", return_store_without_write)
+    monkeypatch.setattr(migration_handler, "read_recallable_records", return_records_without_read)
+
+    context = MemoryJobExecutionContext(
+        job=claimed,
+        worker_id=owner,
+        session_factory=memory_session_factory,
+    )
+    validation = ValidationSnapshot(
+        records=(record_snapshot(record, target["revision"]),),
+        count=1,
+        success_count=1,
+    )
+    with pytest.raises(MemoryJobLeaseLostError):
+        await migration_handler._switch_migration(context, claimed.payload, validation)
+
+    assert recovered
+    async with memory_session_factory() as db:
+        recovered_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=job.id)
+        current_store = await memory_store_crud.get_by_uid(db, uid=uid)
+        recovered_revision = await memory_embedding_revision_crud.get_by_revision(
+            db,
+            uid=uid,
+            revision=target["revision"],
+        )
+    assert recovered_job is not None
+    assert recovered_job.status == LongTermMemoryMutationStatus.FAILED
+    assert current_store is not None
+    assert current_store.active_embedding_channel_id == source["channel_id"]
+    assert current_store.active_embedding_model_id == source["model_id"]
+    assert current_store.active_embedding_revision == source["revision"]
+    assert current_store.active_collection_name == old_collection
+    assert current_store.index_revision == 13
+    assert current_store.migration_status == LongTermMemoryMigrationStatus.FAILED
+    assert recovered_revision is not None
+    assert recovered_revision.status == LongTermMemoryEmbeddingRevisionStatus.FAILED
