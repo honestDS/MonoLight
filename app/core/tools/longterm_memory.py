@@ -36,11 +36,11 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
             "content, with optional truncated:true. Chat history is context only and must never be used for "
             "update or delete, and it never replaces or displaces an items result. Assistant-role content is "
             "not a user fact; historical user content may be stale and cannot alone trigger a memory mutation. "
-            "For update, use memory_id and expected_version as a pair only when they come from the same exact "
-            "recall item, are explicitly supplied by the user, or are supplied by other trusted context that "
-            "binds them to the exact topic. For delete, memory_id is required and expected_version is optional; "
-            "provide it only when known from that same source. Never infer or transfer identifiers from content, "
-            "similarity, memory_key, memory_type, or another item. Never mix identifiers across recall items. "
+            "For update and delete, use memory_id and expected_version as a pair only when they come from the same "
+            "exact recall item, are explicitly supplied by the user, or are supplied by other trusted context that "
+            "binds them to the exact topic. Both fields are required for update and delete. Never infer or transfer "
+            "identifiers from content, similarity, memory_key, memory_type, or another item. Never mix identifiers "
+            "across recall items. "
             "Never merge unrelated topics."
         ),
         "parameters": {
@@ -72,27 +72,22 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "The memory_id for the target concrete topic. Required for both update and delete. "
-                        "For update, it must be paired with expected_version, and both must come from the same exact "
+                        "The memory_id for the target concrete topic. Required for both update and delete and must be "
+                        "paired with expected_version. For both operations, the pair must come from the same exact "
                         "recall item, be explicitly supplied by the user, or be supplied by other trusted context "
-                        "that binds them to the exact topic. For delete, memory_id is required; expected_version is "
-                        "optional and may be supplied only when known from the same exact recall item, explicitly "
-                        "supplied by the user, or supplied by other trusted context. Never infer it from content, "
-                        "similarity, memory_key, memory_type, or another recall item, and never mix it with an "
-                        "expected_version from another item."
+                        "that binds them to the exact topic. Never infer either identifier from content, similarity, "
+                        "memory_key, memory_type, or another recall item, and never mix identifiers across recall items."
                     ),
                 },
                 "expected_version": {
                     "type": "integer",
                     "minimum": 0,
                     "description": (
-                        "The expected_version for the target topic. For update, it is required and must be paired "
-                        "with memory_id, and both must come from the same exact recall item, be explicitly supplied "
-                        "by the user, or be supplied by other trusted context that binds them to the exact topic. "
-                        "For delete, it is optional and may be supplied only when known from the same exact recall "
-                        "item, explicitly supplied by the user, or supplied by other trusted context. Never infer "
-                        "it from content, similarity, memory_key, memory_type, or another recall item, and never "
-                        "mix it with a memory_id from another item."
+                        "The expected_version for the target topic. Required for both update and delete and must be "
+                        "paired with memory_id. For both operations, the pair must come from the same exact recall "
+                        "item, be explicitly supplied by the user, or be supplied by other trusted context that "
+                        "binds them to the exact topic. Never infer either identifier from content, similarity, "
+                        "memory_key, memory_type, or another recall item, and never mix identifiers across recall items."
                     ),
                 },
                 "content": {
@@ -149,7 +144,7 @@ _REQUIRED_FIELDS = {
     "recall": ("query",),
     "create": ("content", "memory_key", "memory_type"),
     "update": ("memory_id", "expected_version", "content", "memory_key", "memory_type"),
-    "delete": ("memory_id",),
+    "delete": ("memory_id", "expected_version"),
 }
 
 
@@ -358,7 +353,7 @@ class LongTermMemoryExecutor(BaseExecutor):
                 db=self.db,
                 uid=self.uid,
                 memory_id=arguments["memory_id"],
-                expected_version=arguments.get("expected_version"),
+                expected_version=arguments["expected_version"],
                 **context,
             )
 

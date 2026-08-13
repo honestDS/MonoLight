@@ -416,7 +416,7 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
                     "memory_type": "fact",
                 },
             ),
-            client.post("/api/v1/memories/delete", json={"memory_id": record_id}),
+            client.post("/api/v1/memories/delete", json={"memory_id": record_id, "expected_version": 1}),
             client.get(f"/api/v1/memories/{record_id}/history"),
             client.post(
                 f"/api/v1/memories/{record_id}/restore",
@@ -428,6 +428,37 @@ async def test_memory_api_rejects_other_user_resources(api_app: tuple[FastAPI, S
         responses = [await request for request in requests]
     for response in responses:
         _assert_standard(response, 404)
+
+
+@pytest.mark.asyncio
+async def test_memory_api_delete_requires_expected_version_and_rejects_stale_version(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    await _create_store(db_session)
+    record = await _create_record(db_session, version=2, memory_key="delete-version", content="delete version content")
+    assert record.id is not None
+    memory_id = record.id
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        missing_version = await client.post(
+            "/api/v1/memories/delete",
+            json={"memory_id": memory_id},
+        )
+        _assert_standard(missing_version, 422)
+
+        stale_version = await client.post(
+            "/api/v1/memories/delete",
+            json={"memory_id": memory_id, "expected_version": 1},
+        )
+        _assert_standard(stale_version, 409)
+
+    current = await memory_record_crud.get_by_id(db_session, uid="user-a", memory_id=memory_id)
+    assert current is not None
+    assert current.version == 2
+    assert current.is_active is True
+    assert current.deleted_at is None
 
 
 @pytest.mark.asyncio

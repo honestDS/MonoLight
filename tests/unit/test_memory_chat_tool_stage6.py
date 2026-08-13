@@ -74,7 +74,7 @@ def _valid_arguments(operation: str) -> dict:
             "memory_key": "stable-fact",
             "memory_type": "fact",
         },
-        "delete": {"operation": "delete", "memory_id": 12},
+        "delete": {"operation": "delete", "memory_id": 12, "expected_version": 2},
     }
     return values[operation].copy()
 
@@ -127,10 +127,9 @@ def test_longterm_memory_tool_descriptions_require_atomic_memory_updates():
     assert "concrete topic" in memory_id_description
     assert "never infer" in memory_id_description
     assert "required for both update and delete" in memory_id_description
-    assert "for delete, memory_id is required" in memory_id_description
-    assert "expected_version is optional" in memory_id_description
-    assert "for delete, it is optional" in expected_version_description
-    assert "for update, it is required" in expected_version_description
+    assert "must be paired with expected_version" in memory_id_description
+    assert "required for both update and delete" in expected_version_description
+    assert "must be paired with memory_id" in expected_version_description
     for description in (function_description, memory_id_description, expected_version_description):
         assert "same exact recall item" in description
         assert "explicitly supplied by the user" in description
@@ -204,6 +203,7 @@ def test_prevalidate_tool_round_rejects_operation_specific_extra_fields(operatio
         ("create", "content"),
         ("update", "memory_id"),
         ("delete", "memory_id"),
+        ("delete", "expected_version"),
     ],
 )
 def test_prevalidate_tool_round_rejects_operation_specific_missing_fields(operation, missing_field):

@@ -11,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.constants import ERR_MEMORY_OVER_LIMIT
+from app.core.constants import ERR_MEMORY_OVER_LIMIT, ERR_MEMORY_VERSION_CONFLICT
 from app.core.crud.memory import (
     memory_embedding_delta_crud,
     memory_record_crud,
@@ -830,12 +830,14 @@ async def test_delete_new_dedupe_on_already_deleted_record_is_unchanged_and_uid_
             uid="deleted-owner",
             dedupe_key="delete-once",
             memory_id=memory_id,
+            expected_version=1,
         )
         unchanged = await memory_service.delete(
             db,
             uid="deleted-owner",
             dedupe_key="delete-again",
             memory_id=memory_id,
+            expected_version=1,
         )
         with pytest.raises(MemoryNotFoundError):
             await memory_service.delete(
@@ -843,6 +845,7 @@ async def test_delete_new_dedupe_on_already_deleted_record_is_unchanged_and_uid_
                 uid="other-delete-owner",
                 dedupe_key="other-user-delete",
                 memory_id=memory_id,
+                expected_version=1,
             )
 
     assert deleted.status == MemoryMutationStatus.ACCEPTED
@@ -851,6 +854,51 @@ async def test_delete_new_dedupe_on_already_deleted_record_is_unchanged_and_uid_
     assert current is not None
     assert current.is_active is False
     assert await _get_job(memory_database, uid="deleted-owner", job_id=unchanged.job_id or 0) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_requires_expected_version_before_read_and_rejects_stale_active_record(
+    memory_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "delete-version-user"
+    async with memory_database() as db:
+        await _create_store(db, uid=uid)
+        record = await _create_record(db, uid=uid, version=2, memory_key="version-key", content="version content")
+        await db.commit()
+        memory_id = record.id
+        assert memory_id is not None
+
+        async def unexpected_read(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("missing expected_version must fail before reading the record")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(memory_service_module.memory_job_manager, "get_job_by_dedupe_key", unexpected_read)
+            with pytest.raises(MemoryValidationError):
+                await memory_service.delete(
+                    db,
+                    uid=uid,
+                    dedupe_key="missing-version",
+                    memory_id=memory_id,
+                    expected_version=None,
+                )
+
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await memory_service.delete(
+                db,
+                uid=uid,
+                dedupe_key="stale-version",
+                memory_id=memory_id,
+                expected_version=1,
+            )
+
+    assert exc_info.value.message == ERR_MEMORY_VERSION_CONFLICT
+    current = await _get_record(memory_database, uid=uid, memory_id=memory_id)
+    assert current is not None
+    assert current.version == 2
+    assert current.is_active is True
+    assert current.deleted_at is None
+    assert current.pending_mutation_job_id is None
 
 
 @pytest.mark.asyncio
