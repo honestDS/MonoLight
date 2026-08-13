@@ -80,6 +80,31 @@ def _resolve_owner(owner: str | None, worker_id: str | None) -> str:
     return owner
 
 
+def _active_job_claim_condition(
+    *,
+    uid: str,
+    job_id: int,
+    operation: LongTermMemoryMutationOperation,
+    owner: str,
+    now: datetime,
+) -> Any:
+    return (
+        select(LongTermMemoryMutationJob.id)
+        .where(
+            LongTermMemoryMutationJob.uid == LongTermMemoryStore.uid,
+            LongTermMemoryMutationJob.uid == uid,
+            LongTermMemoryMutationJob.id == job_id,
+            LongTermMemoryMutationJob.operation == operation,
+            LongTermMemoryMutationJob.status == LongTermMemoryMutationStatus.RUNNING,
+            LongTermMemoryMutationJob.locked_by == owner,
+            LongTermMemoryMutationJob.lock_until >= now,
+            LongTermMemoryMutationJob.cancel_requested_at.is_(None),
+        )
+        .correlate(LongTermMemoryStore)
+        .exists()
+    )
+
+
 class CRUDLongTermMemoryMaintenanceStore:
     async def start_reindex(
         self,
@@ -208,8 +233,12 @@ class CRUDLongTermMemoryMaintenanceStore:
         target_collection_name: str,
         target_index_revision: int,
         old_collection_cleanup_job_id: int,
+        owner: str | None = None,
+        worker_id: str | None = None,
         commit: bool = True,
     ) -> LongTermMemoryStore | None:
+        owner = _resolve_owner(owner, worker_id)
+        now = await get_database_time(db)
         result = await db.execute(
             update(LongTermMemoryStore)
             .where(
@@ -218,6 +247,13 @@ class CRUDLongTermMemoryMaintenanceStore:
                 LongTermMemoryStore.active_collection_name == expected_active_collection_name,
                 LongTermMemoryStore.index_revision == expected_index_revision,
                 LongTermMemoryStore.index_status == LongTermMemoryIndexStatus.REINDEXING,
+                _active_job_claim_condition(
+                    uid=uid,
+                    job_id=old_collection_cleanup_job_id,
+                    operation=LongTermMemoryMutationOperation.REINDEX,
+                    owner=owner,
+                    now=now,
+                ),
             )
             .values(
                 active_collection_name=target_collection_name,
@@ -228,7 +264,7 @@ class CRUDLongTermMemoryMaintenanceStore:
                 old_collection_cleanup_job_id=old_collection_cleanup_job_id,
                 old_collection_cleanup_error=None,
                 old_collection_cleanup_at=None,
-                updated_at=get_local_time(),
+                updated_at=now,
             )
             .execution_options(synchronize_session=False)
         )
@@ -260,8 +296,12 @@ class CRUDLongTermMemoryMaintenanceStore:
         target_collection_name: str,
         old_collection_cleanup_job_id: int,
         finished_at: datetime,
+        owner: str | None = None,
+        worker_id: str | None = None,
         commit: bool = True,
     ) -> LongTermMemoryStore | None:
+        owner = _resolve_owner(owner, worker_id)
+        now = await get_database_time(db)
         result = await db.execute(
             update(LongTermMemoryStore)
             .where(
@@ -280,6 +320,13 @@ class CRUDLongTermMemoryMaintenanceStore:
                 LongTermMemoryStore.target_embedding_dimensions == target_dimensions,
                 LongTermMemoryStore.target_embedding_signature == target_signature,
                 LongTermMemoryStore.target_collection_name == target_collection_name,
+                _active_job_claim_condition(
+                    uid=uid,
+                    job_id=migration_job_id,
+                    operation=LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
+                    owner=owner,
+                    now=now,
+                ),
             )
             .values(
                 active_embedding_channel_id=target_channel_id,
@@ -303,7 +350,7 @@ class CRUDLongTermMemoryMaintenanceStore:
                 old_collection_cleanup_job_id=old_collection_cleanup_job_id,
                 old_collection_cleanup_error=None,
                 old_collection_cleanup_at=None,
-                updated_at=get_local_time(),
+                updated_at=now,
             )
             .execution_options(synchronize_session=False)
         )

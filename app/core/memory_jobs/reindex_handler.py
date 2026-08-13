@@ -242,9 +242,20 @@ async def _switch_reindex(
             target_collection_name=target["collection"],
             target_index_revision=target["index_revision"],
             old_collection_cleanup_job_id=job_id,
+            owner=context.worker_id,
             commit=False,
         )
         if switched is None:
+            current_claim = await memory_job_crud.get_active_claim(
+                db,
+                uid=context.job.uid,
+                job_id=job_id,
+                owner=context.worker_id,
+            )
+            if current_claim is None:
+                raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+            if current_claim.cancel_requested_at is not None:
+                raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
             raise retryable(ERR_MEMORY_MIGRATION_SWITCH_FAILED)
         await db.commit()
     return await cleanup_old_collection(context, operation=REINDEX_OPERATION)

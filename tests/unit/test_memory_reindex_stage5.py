@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -22,9 +23,12 @@ class _ImportSafePersistentClient:
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.crud.memory import memory_store_crud
     from app.core.crud.memory_job import memory_job_crud
+    from app.core.crud.memory_maintenance import memory_maintenance_job_crud
     from app.core.memory import submit_memory_reindex
     from app.core.memory_jobs import reindex_handler
-    from app.core.memory_jobs.executor import MemoryJobExecutor, MemoryJobLeaseLostError
+    from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobLeaseLostError
+    from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
+    from app.core.memory_jobs.maintenance_state import ValidationSnapshot, record_snapshot
     from app.models.memory import (
         LongTermMemoryIndexStatus,
         LongTermMemoryMutationJob,
@@ -32,6 +36,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         LongTermMemoryMutationStatus,
         LongTermMemoryOldCollectionCleanupStatus,
     )
+    from app.providers.database.time import get_database_time
 
 
 pytest_plugins = ("tests.unit.memory_stage5_fixture",)
@@ -323,3 +328,152 @@ async def test_memory_reindex_does_not_persist_progress_after_lease_loss(
     assert job.status == LongTermMemoryMutationStatus.RETRY
     assert job.payload["progress"]["cursor"] == 0
     assert job.payload["progress"]["success_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_memory_reindex_switch_is_fenced_after_expired_lease_recovery(
+    memory_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "stage5-reindex-switch-fence-user"
+    old_collection = "stage5-reindex-switch-fence-old"
+    channel_id = 6
+    model_id = "stage5-reindex-switch-fence-model"
+    dimensions = 3
+    signature = "stage5-reindex-switch-fence-signature"
+    embedding_revision = 4
+    index_revision = 10
+    owner = "stage5-reindex-switch-fence-worker"
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=channel_id,
+        model_id=model_id,
+        dimensions=dimensions,
+        signature=signature,
+        active_revision=embedding_revision,
+        index_revision=index_revision,
+        collection_name=old_collection,
+    )
+    record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="switch-fence-record",
+    )
+    assert record.id is not None
+
+    async with memory_session_factory() as db:
+        submission = await submit_memory_reindex(
+            db,
+            uid=uid,
+            dedupe_key="stage5-reindex-switch-fence",
+        )
+        assert submission.job.id is not None
+        await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == submission.job.id,
+            )
+            .values(max_attempts=1)
+        )
+        await db.commit()
+
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        job_id=submission.job.id,
+        owner=owner,
+    )
+    assert claimed is not None
+    assert claimed.id is not None
+    async with memory_session_factory() as db:
+        initial_claim = await memory_job_crud.get_active_claim(
+            db,
+            uid=uid,
+            job_id=claimed.id,
+            owner=owner,
+        )
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert initial_claim is not None
+    assert store is not None
+
+    original_get_active_claim = memory_job_crud.get_active_claim
+    initial_claim_check = False
+    recovered = False
+
+    async def get_claim_for_switch(_db: Any, **kwargs: Any) -> Any:
+        nonlocal initial_claim_check
+        if not initial_claim_check:
+            initial_claim_check = True
+            return initial_claim
+        return await original_get_active_claim(_db, **kwargs)
+
+    async def recover_expired_claim() -> None:
+        nonlocal recovered
+        if recovered:
+            return
+        recovered = True
+        async with memory_session_factory() as recovery_db:
+            now = await get_database_time(recovery_db)
+            await recovery_db.execute(
+                update(LongTermMemoryMutationJob)
+                .where(
+                    LongTermMemoryMutationJob.uid == uid,
+                    LongTermMemoryMutationJob.id == claimed.id,
+                )
+                .values(lock_until=now - timedelta(seconds=1))
+            )
+            recovery = await memory_job_crud.recover_expired(
+                recovery_db,
+                max_attempts_error="stage5 lease expired",
+                commit=False,
+            )
+            for terminal in recovery.terminal_jobs:
+                await finalize_maintenance_terminal_state(
+                    recovery_db,
+                    job=terminal.job,
+                    status=terminal.status,
+                    error=terminal.error,
+                )
+            await recovery_db.commit()
+
+    async def return_store_without_write(_db: Any, *, uid: str, commit: bool = True) -> Any:
+        await recover_expired_claim()
+        return store
+
+    async def return_records_without_read(_db: Any, **_kwargs: Any) -> list[Any]:
+        return [record]
+
+    async def persist_payload_without_write(_db: Any, **_kwargs: Any) -> Any:
+        return claimed
+
+    monkeypatch.setattr(memory_store_crud, "lock_for_mutation", return_store_without_write)
+    monkeypatch.setattr(memory_job_crud, "get_active_claim", get_claim_for_switch)
+    monkeypatch.setattr(reindex_handler, "read_recallable_records", return_records_without_read)
+    monkeypatch.setattr(memory_maintenance_job_crud, "update_running_payload", persist_payload_without_write)
+
+    context = MemoryJobExecutionContext(
+        job=claimed,
+        worker_id=owner,
+        session_factory=memory_session_factory,
+    )
+    validation = ValidationSnapshot(
+        records=(record_snapshot(record, embedding_revision),),
+        count=1,
+        success_count=1,
+    )
+    with pytest.raises(MemoryJobLeaseLostError):
+        await reindex_handler._switch_reindex(context, claimed.payload, validation)
+
+    assert recovered
+    async with memory_session_factory() as db:
+        job = await memory_job_crud.get_by_id(db, uid=uid, job_id=claimed.id)
+        current_store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert job is not None
+    assert job.status == LongTermMemoryMutationStatus.FAILED
+    assert current_store is not None
+    assert current_store.active_collection_name == old_collection
+    assert current_store.index_revision == index_revision
+    assert current_store.index_status == LongTermMemoryIndexStatus.FAILED

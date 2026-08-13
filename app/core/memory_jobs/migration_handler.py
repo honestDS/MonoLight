@@ -5,6 +5,7 @@ from typing import Any
 from app.core.constants import (
     ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED,
     ERR_MEMORY_JOB_CANCELLATION_REQUESTED,
+    ERR_MEMORY_JOB_LEASE_UNAVAILABLE,
     ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
     ERR_MEMORY_MIGRATION_SWITCH_FAILED,
     ERR_MEMORY_NOT_CONFIGURED,
@@ -16,6 +17,7 @@ from app.core.crud.memory import (
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.crud.memory_maintenance import (
+    memory_maintenance_job_crud,
     memory_maintenance_record_crud,
     memory_maintenance_store_crud,
 )
@@ -457,6 +459,24 @@ async def _switch_migration(
         current_snapshot = tuple(current_snapshot_items)
         if current_snapshot != validation.records:
             raise retryable(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+        updated_job = await memory_maintenance_job_crud.update_running_payload(
+            db,
+            uid=context.job.uid,
+            job_id=job_id,
+            payload=payload,
+            owner=context.worker_id,
+            commit=False,
+        )
+        if updated_job is None:
+            current_claim = await memory_job_crud.get_active_claim(
+                db,
+                uid=context.job.uid,
+                job_id=job_id,
+                owner=context.worker_id,
+            )
+            if current_claim is not None and current_claim.cancel_requested_at is not None:
+                raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
+            raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
         revision = await memory_embedding_revision_crud.get_by_revision(
             db,
             uid=context.job.uid,
@@ -511,9 +531,20 @@ async def _switch_migration(
             target_collection_name=target["collection"],
             old_collection_cleanup_job_id=job_id,
             finished_at=now,
+            owner=context.worker_id,
             commit=False,
         )
         if switched is None:
+            current_claim = await memory_job_crud.get_active_claim(
+                db,
+                uid=context.job.uid,
+                job_id=job_id,
+                owner=context.worker_id,
+            )
+            if current_claim is None:
+                raise MemoryJobLeaseLostError(t(ERR_MEMORY_JOB_LEASE_UNAVAILABLE))
+            if current_claim.cancel_requested_at is not None:
+                raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
             raise retryable(ERR_MEMORY_MIGRATION_SWITCH_FAILED)
         await db.commit()
     return await cleanup_old_collection(context, operation=MIGRATION_OPERATION)
