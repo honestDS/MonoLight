@@ -47,7 +47,7 @@ class MemoryUpdateRequest(_MemoryRequest):
 
 class MemoryDeleteRequest(_MemoryRequest):
     memory_id: StrictInt = Field(gt=0)
-    expected_version: StrictInt | None = Field(default=None, ge=0)
+    expected_version: StrictInt = Field(ge=0)
     dedupe_key: StrictStr | None = Field(default=None, min_length=1, max_length=MEMORY_KEY_MAX_CHARS)
     max_attempts: StrictInt = Field(default=3, ge=1)
 

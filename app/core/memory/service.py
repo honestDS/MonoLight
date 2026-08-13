@@ -737,7 +737,7 @@ class LongTermMemoryService:
         uid: str,
         dedupe_key: str,
         memory_id: int,
-        expected_version: int | None = None,
+        expected_version: int,
         source: LongTermMemorySource | str = LongTermMemorySource.USER_API,
         source_id: str | None = None,
         source_session_id: str | None = None,
@@ -751,7 +751,7 @@ class LongTermMemoryService:
             normalized_uid = _normalize_uid(uid)
             normalized_dedupe_key = _normalize_dedupe_key(dedupe_key)
             normalized_memory_id = _require_positive(memory_id, field="memory_id")
-            normalized_expected_version = _require_non_negative(expected_version, field="expected_version") if expected_version is not None else None
+            normalized_expected_version = _require_non_negative(expected_version, field="expected_version")
             attempts, normalized_source, normalized_source_id, normalized_session_id, normalized_profile_id, normalized_message_id = _validate_source_and_attempts(
                 max_attempts=max_attempts,
                 source=source,
@@ -766,7 +766,7 @@ class LongTermMemoryService:
                 existing_version = existing_job.expected_version
                 if isinstance(existing_version, bool) or not isinstance(existing_version, int) or existing_version < 0:
                     raise MemoryConflictError(ERR_MEMORY_PUBLICATION_CONFLICT)
-                if normalized_expected_version is not None and normalized_expected_version != existing_version:
+                if normalized_expected_version != existing_version:
                     raise MemoryConflictError(ERR_MEMORY_PUBLICATION_CONFLICT)
                 record_snapshot = normalize_memory_record_snapshot((existing_job.payload or {}).get("record_snapshot"))
                 payload = {
@@ -820,7 +820,7 @@ class LongTermMemoryService:
             if record.pending_mutation_job_id is not None:
                 raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
             current_version = record.version
-            if normalized_expected_version is not None and normalized_expected_version != current_version:
+            if normalized_expected_version != current_version:
                 raise MemoryConflictError(ERR_MEMORY_VERSION_CONFLICT)
             store = await _lock_active_store(db, normalized_uid)
             payload = {
