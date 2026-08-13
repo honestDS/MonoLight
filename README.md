@@ -1,6 +1,6 @@
 # MonoLight
 
-MonoLight 是一个旨在重塑人机交互形态的通用自主智能体（General Autonomous Agent）核心基座。
+MonoLight 是一个基于能力控制的自主 AI Agent 运行时，让智能体能够在可配置工具、模型能力适配、执行审计和人工监督机制下可靠运行。
 
 <p align="center">
   <img src="./docs/banner.webp" alt="MonoLight Banner" width="100%" />
