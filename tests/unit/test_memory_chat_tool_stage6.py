@@ -388,6 +388,10 @@ async def test_executor_recall_returns_chat_for_non_ok_status(monkeypatch, statu
         {"operation": "recall", "query": ""},
         {"operation": "recall", "query": 12},
         {"operation": "recall", "query": "private query", "content": "unexpected"},
+        {"operation": "recall", "query": "private query", "top_k": 0},
+        {"operation": "recall", "query": "private query", "top_k": 51},
+        {"operation": "recall", "query": "private query", "top_k": True},
+        {"operation": "recall", "query": "private query", "top_k": "3"},
     ],
 )
 async def test_executor_recall_argument_errors_return_empty_items(monkeypatch, arguments):

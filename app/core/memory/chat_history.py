@@ -7,6 +7,7 @@ from app.core.constants import (
     ERR_MEMORY_FIELD_REQUIRED,
     ERR_VALUE_MUST_BE_BETWEEN,
     ERR_VALUE_MUST_BE_POSITIVE,
+    MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
 )
 from app.core.crud.message import message_crud
 from app.core.i18n import t
@@ -14,8 +15,6 @@ from app.core.retrieval.schemas import RetrievalChunk, RetrievalHit
 from app.core.retrieval.sparse import bm25_search
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.message_parser import parse_db_messages_to_internal
-
-CHAT_HISTORY_RECALL_PAGE_SIZE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,23 +55,12 @@ class ChatHistoryRecallService:
         if before_message_id is not None and (isinstance(before_message_id, bool) or not isinstance(before_message_id, int) or before_message_id <= 0):
             raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="before_message_id"))
 
-        raw_messages = []
-        page_after_id = None
-        while True:
-            page = await message_crud.list_recallable_chat_page(
-                db,
-                uid=normalized_uid,
-                before_message_id=before_message_id,
-                page_after_id=page_after_id,
-                limit=CHAT_HISTORY_RECALL_PAGE_SIZE,
-            )
-            if not page:
-                break
-            raw_messages.extend(page)
-            last_message_id = page[-1].id
-            if last_message_id is None or len(page) < CHAT_HISTORY_RECALL_PAGE_SIZE:
-                break
-            page_after_id = last_message_id
+        raw_messages = await message_crud.list_recallable_chat_page(
+            db,
+            uid=normalized_uid,
+            before_message_id=before_message_id,
+            limit=MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
+        )
 
         candidates: list[tuple[int, str, str]] = []
         for internal_message in parse_db_messages_to_internal(raw_messages):

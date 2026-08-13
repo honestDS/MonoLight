@@ -99,7 +99,14 @@ def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(cont
         _assistant(content="assistant body"),
         _assistant(refusal="refused"),
         _assistant(),
-        _assistant(arguments={"operation": "create", "content": "mutation", "memory_key": "k", "memory_type": "fact"}),
+        _assistant(
+            arguments={
+                "operation": "create",
+                "content": "mutation",
+                "memory_key": "k",
+                "memory_type": "fact",
+            }
+        ),
         _assistant(arguments={"operation": "recall"}),
         _assistant(arguments={"operation": "recall", "query": "user context", "unexpected": True}),
         _assistant(name="unrelated_tool"),
@@ -109,6 +116,14 @@ def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(cont
 def test_recall_validators_reject_body_refusal_multiple_tools_mutation_and_bad_args(message):
     if message.content is None and message.refusal is None and message.tool_calls:
         message.tool_calls.append(_call("call-2"))
+
+    assert not precheck_module.response_is_valid(_response(message))
+    assert not persistence_module.is_valid_recall_call(message)
+
+
+@pytest.mark.parametrize("top_k", [0, 51, True, 3.5, "3"])
+def test_recall_validators_reject_invalid_explicit_top_k(top_k):
+    message = _assistant(arguments={"operation": "recall", "query": "user context", "top_k": top_k})
 
     assert not precheck_module.response_is_valid(_response(message))
     assert not persistence_module.is_valid_recall_call(message)

@@ -186,16 +186,20 @@ async def test_chat_history_recall_applies_top_k_and_character_budget(db_session
 
 
 @pytest.mark.asyncio
-async def test_chat_history_recall_reads_all_pages(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(chat_history_module, "CHAT_HISTORY_RECALL_PAGE_SIZE", 2)
+async def test_chat_history_recall_limits_candidates_to_recent_messages(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(chat_history_module, "MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT", 2)
     await _commit(
         db_session,
-        *[_message(message_id, content="page needle") for message_id in range(1, 6)],
+        _message(1, content="old needle"),
+        _message(2, content="older needle"),
+        _message(3, content="oldest needle"),
+        _message(4, content="recent message"),
+        _message(5, content="latest message"),
     )
 
     result = await chat_history_module.chat_history_recall_service.recall(db_session, "user-1", "needle", top_k=10)
 
-    assert [item.message_id for item in result.items] == [5, 4, 3, 2, 1]
+    assert result.items == ()
 
 
 @pytest.mark.asyncio
@@ -208,9 +212,8 @@ async def test_list_recallable_chat_page_applies_id_bounds_and_limit(db_session:
     page = await message_crud.list_recallable_chat_page(
         db_session,
         uid="user-1",
-        before_message_id=4,
-        page_after_id=1,
+        before_message_id=5,
         limit=2,
     )
 
-    assert [message.id for message in page] == [2, 3]
+    assert [message.id for message in page] == [4, 3]
