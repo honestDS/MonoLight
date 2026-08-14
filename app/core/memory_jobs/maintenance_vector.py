@@ -154,44 +154,44 @@ async def collection_items(
             include=["documents", "metadatas", "embeddings"],
         )
         if not isinstance(raw, dict):
-            raise ValueError("collection items must be a dictionary")
+            raise ValueError
         ids = raw.get("ids")
         documents = raw.get("documents")
         metadatas = raw.get("metadatas")
         embeddings = raw.get("embeddings")
         for values in (ids, documents, metadatas, embeddings):
             if isinstance(values, (str, bytes, bytearray, Mapping)) or not isinstance(values, Iterable) or not isinstance(values, Sized):
-                raise ValueError("collection item fields must be sequences")
+                raise ValueError
         ids = list(ids)
         documents = list(documents)
         metadatas = list(metadatas)
         embeddings = list(embeddings)
         if len({len(ids), len(documents), len(metadatas), len(embeddings)}) != 1:
-            raise ValueError("collection item lengths must match")
+            raise ValueError
 
         items: dict[str, tuple[str, dict[str, Any], list[float]]] = {}
         vector_dimension: int | None = None
         for index, item_id in enumerate(ids):
             if not isinstance(item_id, str) or not item_id or item_id in items:
-                raise ValueError("collection item ID is invalid")
+                raise ValueError
             document = documents[index]
             metadata = metadatas[index]
             vector = embeddings[index]
             if not isinstance(document, str) or not isinstance(metadata, dict):
-                raise ValueError("collection item document or metadata is invalid")
+                raise ValueError
             if isinstance(vector, (str, bytes, bytearray, Mapping)) or not isinstance(vector, Iterable) or not isinstance(vector, Sized):
-                raise ValueError("collection item embedding is invalid")
+                raise ValueError
             vector = list(vector)
             if not vector:
-                raise ValueError("collection item embedding is invalid")
+                raise ValueError
             if vector_dimension is None:
                 vector_dimension = len(vector)
             elif len(vector) != vector_dimension:
-                raise ValueError("collection item embedding dimensions must match")
+                raise ValueError
             normalized_vector: list[float] = []
             for value in vector:
                 if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
-                    raise ValueError("collection item embedding value is invalid")
+                    raise ValueError
                 normalized_vector.append(float(value))
             items[item_id] = (document, dict(metadata), normalized_vector)
         return items

@@ -39,6 +39,7 @@ from app.core.crud.memory import (
     memory_revision_crud,
     memory_store_crud,
 )
+from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -969,7 +970,17 @@ class LongTermMemoryService:
             if current_record is None or not current_record.is_active or current_record.deleted_at is not None:
                 raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
             if current_record.pending_mutation_job_id is not None:
-                raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                pending_job = await memory_job_crud.get_by_id(
+                    db,
+                    uid=normalized_uid,
+                    job_id=current_record.pending_mutation_job_id,
+                )
+                if pending_job is not None and pending_job.status in {
+                    LongTermMemoryMutationStatus.PENDING,
+                    LongTermMemoryMutationStatus.RUNNING,
+                    LongTermMemoryMutationStatus.RETRY,
+                }:
+                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
             if current_record.pinned == pinned:
                 await _finish(db, commit=commit)
                 return current_record
@@ -987,7 +998,17 @@ class LongTermMemoryService:
                     memory_id=normalized_memory_id,
                 )
                 if current_record is not None and current_record.is_active and current_record.deleted_at is None and current_record.pending_mutation_job_id is not None:
-                    raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
+                    pending_job = await memory_job_crud.get_by_id(
+                        db,
+                        uid=normalized_uid,
+                        job_id=current_record.pending_mutation_job_id,
+                    )
+                    if pending_job is not None and pending_job.status in {
+                        LongTermMemoryMutationStatus.PENDING,
+                        LongTermMemoryMutationStatus.RUNNING,
+                        LongTermMemoryMutationStatus.RETRY,
+                    }:
+                        raise MemoryConflictError(ERR_MEMORY_MUTATION_PENDING)
                 raise MemoryNotFoundError(ERR_MEMORY_RECORD_NOT_FOUND)
             return record
         except Exception:
