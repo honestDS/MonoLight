@@ -24,6 +24,8 @@ Please describe the issue you encountered.
 * Deployment Method / 部署方式:
 * Operating System / 操作系统:
 * Python Version / Python 版本:
+* API Provider / API 提供商类型: (e.g., openai / gemini / 硅基流动 / KIMI / 其他)
+* Database Type / 数据库类型: (e.g., mysql / sqlite / 其他)
 * Database Version / 数据库版本:
 
 ---
