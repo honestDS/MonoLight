@@ -366,6 +366,29 @@ def test_responses_to_provider_preserves_content_and_tool_order() -> None:
     ]
 
 
+def test_chat_completions_to_provider_fills_empty_tool_call_content_without_mutating_messages() -> None:
+    contents = [None, "", "  \n", [], "Keep this content"]
+    messages = [
+        InternalMessage(
+            role=MessageRole.ASSISTANT,
+            content=content,
+            tool_calls=[InternalToolCall(id=f"call_{index}", name="lookup", arguments={})],
+        )
+        for index, content in enumerate(contents)
+    ]
+
+    provider_messages = OpenAIChatCompletionsTransformer.to_provider(messages)
+
+    assert [message["content"] for message in provider_messages] == [
+        "[tool_call]",
+        "[tool_call]",
+        "[tool_call]",
+        "[tool_call]",
+        "Keep this content",
+    ]
+    assert [message.content for message in messages] == contents
+
+
 def test_responses_from_provider_parses_text_and_tool_calls() -> None:
     message = OpenAIResponsesTransformer.from_provider(
         {
