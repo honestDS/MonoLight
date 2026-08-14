@@ -310,6 +310,7 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         message_id=501,
         score=0.7,
         session_id="old-session",
+        created_at=datetime(2026, 8, 4, 12, 31, tzinfo=UTC),
     )
     second_chat_item = SimpleNamespace(
         role="assistant",
@@ -317,6 +318,8 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         truncated=True,
         message_id=502,
         updated_at=datetime(2026, 8, 4, 12, 32, tzinfo=UTC),
+        session_id="another-session",
+        created_at=datetime(2026, 8, 4, 12, 32, tzinfo=UTC),
     )
 
     class FakeChatHistoryRecallService:
@@ -345,14 +348,41 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "result_max_chars": 1234 - len("private recalled content") - len("second recalled content"),
         "before_message_id": context.source_message_id,
     }
-    assert result == (
-        '{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact",'
-        '"memory_type":"fact","content":"private recalled content"},{"memory_id":13,'
-        '"expected_version":1,"memory_key":"another-fact","memory_type":"fact",'
-        '"content":"second recalled content","truncated":true}],"chat_history":['
-        '{"role":"user","content":"historical user text"},{"role":"assistant",'
-        '"content":"historical assistant text","truncated":true}]}'
-    )
+    assert json.loads(result) == {
+        "items": [
+            {
+                "memory_id": 12,
+                "expected_version": 2,
+                "memory_key": "stable-fact",
+                "memory_type": "fact",
+                "content": "private recalled content",
+            },
+            {
+                "memory_id": 13,
+                "expected_version": 1,
+                "memory_key": "another-fact",
+                "memory_type": "fact",
+                "content": "second recalled content",
+                "truncated": True,
+            },
+        ],
+        "current_session_id": "session-1",
+        "chat_history": [
+            {
+                "role": "user",
+                "content": "historical user text",
+                "session_id": "old-session",
+                "created_at": "2026-08-04 12:31:00",
+            },
+            {
+                "role": "assistant",
+                "content": "historical assistant text",
+                "session_id": "another-session",
+                "created_at": "2026-08-04 12:32:00",
+                "truncated": True,
+            },
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -374,7 +404,7 @@ async def test_executor_recall_returns_chat_for_non_ok_status(monkeypatch, statu
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    expected_result = '{"items":[],"chat_history":[{"role":"user","content":"old user text"}]}'
+    expected_result = '{"items":[],"current_session_id":"session-1","chat_history":[{"role":"user","content":"old user text","session_id":null,"created_at":null}]}'
     result = await executor.execute(operation="recall", query="private query", top_k=3)
 
     assert result == expected_result
@@ -403,7 +433,7 @@ async def test_executor_recall_argument_errors_return_empty_items(monkeypatch, a
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
 
-    assert await executor.execute(**arguments) == '{"items":[]}'
+    assert await executor.execute(**arguments) == '{"items":[],"current_session_id":"session-1"}'
 
 
 @pytest.mark.asyncio
@@ -417,7 +447,7 @@ async def test_executor_recall_missing_runtime_context_returns_empty_items(monke
 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[]}'
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[],"current_session_id":null}'
 
 
 @pytest.mark.asyncio
@@ -436,7 +466,7 @@ async def test_executor_recall_memory_exceptions_still_return_chat(monkeypatch, 
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    expected_result = '{"items":[],"chat_history":[{"role":"assistant","content":"old assistant text"}]}'
+    expected_result = '{"items":[],"current_session_id":"session-1","chat_history":[{"role":"assistant","content":"old assistant text","session_id":null,"created_at":null}]}'
     result = await executor.execute(operation="recall", query="private query", top_k=3)
 
     assert result == expected_result
@@ -470,6 +500,7 @@ async def test_executor_recall_does_not_query_chat_when_active_content_consumes_
     payload = json.loads(await executor.execute(operation="recall", query="private query", top_k=3))
 
     assert payload["items"][0]["content"] == "x" * 1234
+    assert payload["current_session_id"] == "session-1"
     assert "chat_history" not in payload
 
 
@@ -498,7 +529,7 @@ async def test_executor_recall_keeps_active_items_when_chat_history_fails(monkey
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == ('{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact","memory_type":"fact","content":"private recalled content"}]}')
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == ('{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact","memory_type":"fact","content":"private recalled content"}],"current_session_id":"session-1"}')
 
 
 @pytest.mark.asyncio
@@ -516,7 +547,7 @@ async def test_executor_recall_without_any_result_returns_empty_items(monkeypatc
     monkeypatch.setattr(longterm_memory_module, "_get_memory_service", lambda: FakeMemoryService())
     monkeypatch.setattr(longterm_memory_module, "_get_chat_history_recall_service", lambda: FakeChatHistoryRecallService())
 
-    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[]}'
+    assert await executor.execute(operation="recall", query="private query", top_k=3) == '{"items":[],"current_session_id":"session-1"}'
 
 
 class _MutationMemoryService:
@@ -623,11 +654,14 @@ def test_longterm_memory_log_serializers_remove_sensitive_arguments_and_results(
         '{"items":[{"memory_id":12,"expected_version":2,"memory_key":"stable-fact",'
         '"memory_type":"fact","content":"private recalled item body"},{"memory_id":13,'
         '"expected_version":1,"memory_key":"another-fact","memory_type":"fact",'
-        '"content":"second recalled item body","truncated":true}],"chat_history":['
+        '"content":"second recalled item body","truncated":true}],"current_session_id":"session-1",'
+        '"chat_history":['
         '{"role":"user","content":"private chat body","truncated":true,"message_id":501,'
-        '"score":0.7,"session_id":"old-session"},{"role":"assistant",'
+        '"score":0.7,"session_id":"old-session","created_at":"2026-08-04 12:31:00"},'
+        '{"role":"assistant",'
         '"content":"private assistant body","message_id":502,'
-        '"updated_at":"2026-08-04T12:32:00Z"}]}'
+        '"updated_at":"2026-08-04T12:32:00Z","session_id":"another-session",'
+        '"created_at":"2026-08-04 12:32:00"}]}'
     )
 
     arguments_payload = json.loads(log_arguments)
@@ -655,6 +689,7 @@ def test_longterm_memory_log_serializers_remove_sensitive_arguments_and_results(
                 "truncated": True,
             },
         ],
+        "current_session_id": "session-1",
         "chat_history": [
             {"role": "user", "truncated": True},
             {"role": "assistant"},

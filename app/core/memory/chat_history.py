@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,8 @@ class ChatHistoryRecallItem:
     content: str
     truncated: bool = False
     message_id: int | None = field(default=None, repr=False, compare=False)
+    created_at: datetime | None = field(default=None, repr=False, compare=False)
+    session_id: str | None = field(default=None, repr=False, compare=False)
     sparse_score: float | None = field(default=None, repr=False, compare=False)
     sparse_rank: int | None = field(default=None, repr=False, compare=False)
 
@@ -62,7 +65,8 @@ class ChatHistoryRecallService:
             limit=MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
         )
 
-        candidates: list[tuple[int, str, str]] = []
+        raw_messages_by_id = {message.id: message for message in raw_messages if message.id is not None}
+        candidates: list[tuple[int, str, str, datetime | None, str | None]] = []
         for internal_message in parse_db_messages_to_internal(raw_messages):
             if internal_message.id is None:
                 continue
@@ -73,16 +77,30 @@ class ChatHistoryRecallService:
             if not content:
                 continue
             role = internal_message.role.value if hasattr(internal_message.role, "value") else str(internal_message.role)
-            candidates.append((internal_message.id, role, content))
+            raw_message = raw_messages_by_id.get(internal_message.id)
+            candidates.append(
+                (
+                    internal_message.id,
+                    role,
+                    content,
+                    raw_message.created_at if raw_message is not None else None,
+                    raw_message.session_id if raw_message is not None else None,
+                )
+            )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         chunks = [
             RetrievalChunk(
                 id=str(message_id),
                 content=content,
-                metadata={"message_id": message_id, "role": role},
+                metadata={
+                    "message_id": message_id,
+                    "role": role,
+                    "created_at": created_at,
+                    "session_id": session_id,
+                },
             )
-            for message_id, role, content in candidates
+            for message_id, role, content, created_at, session_id in candidates
         ]
         hits = await asyncio.to_thread(bm25_search, normalized_query, chunks, top_k)
         return ChatHistoryRecallResult(items=self._build_items(hits, result_max_chars))
@@ -97,6 +115,8 @@ class ChatHistoryRecallService:
             metadata = hit.metadata or {}
             message_id = metadata.get("message_id")
             role = metadata.get("role", "")
+            created_at = metadata.get("created_at")
+            session_id = metadata.get("session_id")
             if len(hit.content) > remaining_chars:
                 items.append(
                     ChatHistoryRecallItem(
@@ -104,6 +124,8 @@ class ChatHistoryRecallService:
                         content=hit.content[:remaining_chars],
                         truncated=True,
                         message_id=message_id,
+                        created_at=created_at,
+                        session_id=session_id,
                         sparse_score=hit.sparse_score,
                         sparse_rank=hit.sparse_rank,
                     )
@@ -114,6 +136,8 @@ class ChatHistoryRecallService:
                     role=role,
                     content=hit.content,
                     message_id=message_id,
+                    created_at=created_at,
+                    session_id=session_id,
                     sparse_score=hit.sparse_score,
                     sparse_rank=hit.sparse_rank,
                 )

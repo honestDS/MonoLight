@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime
 from typing import Any
 
 from app.core.constants import (
@@ -28,14 +29,21 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
         "name": MANAGE_LONGTERM_MEMORY_TOOL_NAME,
         "description": (
             "Recall and manage the user's long-term memories. "
+            "By default, write and query memories in the primary language of the current relevant user message; "
+            "do not translate into another language for consistency. For multilingual user messages, use the language "
+            "of the portion of the user's original wording most directly related to the fact being recorded. If the "
+            "language cannot be determined, preserve the user's original wording and do not guess or translate. "
             "Use a concise normalized retrieval expression for recall, and keep each memory to one "
             "independently maintainable concrete topic and property. "
             "Use separate create calls for different entities, topics, or unrelated facts. "
-            "Recall returns a compact JSON object whose items always contain all published long-term memory "
-            "results first, with only the exact memory identifiers, memory key, type, and content in final "
-            "ranking order. When available, chat_history follows as secondary BM25 matches from "
-            "the current user's ordinary USER/ASSISTANT TEXT records; each chat_history item contains only role and "
-            "content, with optional truncated:true. Chat history is context only and must never be used for "
+            "Recall returns a compact JSON object with top-level current_session_id for the current conversation, "
+            "whose items always contain all published long-term memory results first, with only the exact memory "
+            "identifiers, memory key, type, and content in final ranking order. When available, chat_history follows "
+            "as secondary BM25 matches from the current user's ordinary USER/ASSISTANT TEXT records; each item "
+            "contains role, content, session_id for the session owning that historical message, and created_at for "
+            "the server-saved message time in yyyy-mm-dd HH:mm:ss format, with optional truncated:true. "
+            "Chat history is cross-session historical context: always use session_id to distinguish its source, and "
+            "never treat a historical session_id as the current session. Chat history is context only and must never be used for "
             "update or delete, and it never replaces or displaces an items result. Assistant-role content is "
             "not a user fact; historical user content may be stale and cannot alone trigger a memory mutation. "
             "For update and delete, use memory_id and expected_version as a pair only when they come from the same "
@@ -61,7 +69,10 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                         "A concise, normalized long-term-memory retrieval expression containing only entities, topics, and "
                         "stable background relevant to the current request. Do not copy the user's full wording or include "
                         "request actions such as asking, answering, remembering, or saving; do not pile up keywords or invent "
-                        "uncertain facts."
+                        "uncertain facts. Use the language of the user's current request or the relevant fact, keeping it "
+                        "consistent with the language of the target memory. For multilingual messages, use the language of "
+                        "the portion of the user's original wording most directly related to the fact; if uncertain, preserve "
+                        "the user's original wording and do not guess or translate."
                     ),
                 },
                 "top_k": {
@@ -96,13 +107,28 @@ MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_CONTENT_MAX_CHARS,
-                    "description": "Complete content for exactly one independently maintainable concrete topic and property. Keep it atomic: do not combine different entities, topics, or unrelated facts. For update, replace only the same existing topic and do not add other topics.",
+                    "description": (
+                        "Complete content for exactly one independently maintainable concrete topic and property. "
+                        "Keep it atomic: do not combine different entities, topics, or unrelated facts. "
+                        "For create, use the language in which the user expressed the fact. "
+                        "For update, default to the language of the memory being updated and change language only when the user explicitly requests it. "
+                        "For multilingual messages, use the language of the portion of the user's original wording most directly related to the fact; "
+                        "if uncertain, preserve the user's original wording and do not guess or translate. "
+                        "Replace only the same existing topic and do not add other topics."
+                    ),
                 },
                 "memory_key": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MEMORY_KEY_MAX_CHARS,
-                    "description": "A narrow, stable semantic key for exactly one atomic memory topic and property. It must identify a single memory, not a broad category or bucket that accumulates multiple facts.",
+                    "description": (
+                        "A narrow, stable semantic key for exactly one atomic memory topic and property. "
+                        "It must identify a single memory, not a broad category or bucket that accumulates multiple facts. "
+                        "For create, use the language in which the user expressed the fact. "
+                        "For update, default to the language of the memory being updated and change language only when the user explicitly requests it. "
+                        "For multilingual messages, use the language of the portion of the user's original wording most directly related to the fact; "
+                        "if uncertain, preserve the user's original wording and do not guess or translate."
+                    ),
                 },
                 "memory_type": {
                     "type": "string",
@@ -158,11 +184,25 @@ def _json_result(operation: Any, status: str, **payload: Any) -> str:
     return json.dumps({"operation": operation, "status": status, **payload}, ensure_ascii=False)
 
 
-def _empty_recall_result() -> str:
-    return json.dumps({"items": []}, ensure_ascii=False, separators=(",", ":"))
+def _format_server_datetime(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return None
 
 
-def _format_recall_items(items: Any, chat_items: Any) -> str:
+def _empty_recall_result(current_session_id: str | None = None) -> str:
+    if not isinstance(current_session_id, str) or not current_session_id.strip():
+        current_session_id = None
+    return json.dumps(
+        {"items": [], "current_session_id": current_session_id},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _format_recall_items(items: Any, chat_items: Any, current_session_id: Any) -> str:
+    if not isinstance(current_session_id, str) or not current_session_id.strip():
+        current_session_id = None
     formatted_items = []
     for item in items:
         formatted_item = {
@@ -176,12 +216,14 @@ def _format_recall_items(items: Any, chat_items: Any) -> str:
             formatted_item["truncated"] = True
         formatted_items.append(formatted_item)
 
-    payload = {"items": formatted_items}
+    payload = {"items": formatted_items, "current_session_id": current_session_id}
     formatted_chat_items = []
     for item in chat_items:
         formatted_item = {
             "role": _value(item.role),
             "content": item.content,
+            "session_id": getattr(item, "session_id", None),
+            "created_at": _format_server_datetime(getattr(item, "created_at", None)),
         }
         if item.truncated:
             formatted_item["truncated"] = True
@@ -328,7 +370,7 @@ class LongTermMemoryExecutor(BaseExecutor):
             except Exception:
                 chat_items = ()
 
-        return _format_recall_items(memory_items, chat_items)
+        return _format_recall_items(memory_items, chat_items, self.session_id)
 
     async def _mutate(self, operation: str, arguments: dict[str, Any]) -> str:
         memory_service = _get_memory_service()
@@ -381,13 +423,13 @@ class LongTermMemoryExecutor(BaseExecutor):
         operation, validation_error = validate_longterm_memory_arguments(kwargs)
         if validation_error:
             if operation == "recall":
-                return _empty_recall_result()
+                return _empty_recall_result(self.session_id)
             return _json_result(operation, "failed", error=validation_error)
 
         memory_config = self._memory_config()
         if self.db is None or memory_config is None:
             if operation == "recall":
-                return _empty_recall_result()
+                return _empty_recall_result(self.session_id)
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
         if operation != "recall" and not self._has_mutation_runtime_context(memory_config):
             return _json_result(operation, "failed", error=t(ERR_TOOL_RUNTIME_CONTEXT_MISSING))
@@ -411,11 +453,11 @@ class LongTermMemoryExecutor(BaseExecutor):
             )
         except BaseBusinessException as exc:
             if operation == "recall":
-                return _empty_recall_result()
+                return _empty_recall_result(self.session_id)
             return _json_result(operation, "failed", error=exc.render_message())
         except Exception:
             if operation == "recall":
-                return _empty_recall_result()
+                return _empty_recall_result(self.session_id)
             return _json_result(operation, "failed", error=t(ERR_INTERNAL_SERVER_ERROR))
 
 

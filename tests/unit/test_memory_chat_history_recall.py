@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -37,8 +38,9 @@ def _message(
     role: MessageRole = MessageRole.USER,
     message_type: MessageType = MessageType.TEXT,
     content: str | None | object = _MISSING,
+    created_at: datetime | None = None,
 ) -> Message:
-    return Message(
+    message = Message(
         id=message_id,
         uid=uid,
         session_id=session_id,
@@ -48,6 +50,9 @@ def _message(
         content=f"message-{message_id}" if content is _MISSING else content,
         is_processed=True,
     )
+    if created_at is not None:
+        message.created_at = created_at
+    return message
 
 
 async def _commit(db_session: AsyncSession, *messages: Message) -> None:
@@ -111,15 +116,33 @@ async def test_chat_history_recall_excludes_current_message_with_before_message_
 
 @pytest.mark.asyncio
 async def test_chat_history_recall_spans_sessions_for_one_uid(db_session: AsyncSession):
+    first_created_at = datetime(2026, 8, 4, 12, 31, 0)
+    second_created_at = datetime(2026, 8, 4, 12, 32, 0)
     await _commit(
         db_session,
-        _message(1, session_id="session-1", content="cross session needle"),
-        _message(2, session_id="session-2", role=MessageRole.ASSISTANT, content="cross session needle"),
+        _message(
+            1,
+            session_id="session-1",
+            created_at=first_created_at,
+            content="cross session needle",
+        ),
+        _message(
+            2,
+            session_id="session-2",
+            role=MessageRole.ASSISTANT,
+            created_at=second_created_at,
+            content="cross session needle",
+        ),
     )
 
     result = await chat_history_module.chat_history_recall_service.recall(db_session, "user-1", "needle", top_k=10)
 
     assert {item.message_id for item in result.items} == {1, 2}
+    items_by_message_id = {item.message_id: item for item in result.items}
+    assert items_by_message_id[1].session_id == "session-1"
+    assert items_by_message_id[1].created_at == first_created_at
+    assert items_by_message_id[2].session_id == "session-2"
+    assert items_by_message_id[2].created_at == second_created_at
 
 
 @pytest.mark.asyncio
