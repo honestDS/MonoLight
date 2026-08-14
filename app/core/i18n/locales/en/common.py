@@ -108,6 +108,8 @@ MESSAGES = {
     "LOG_MEMORY_JOB_DATABASE_OPERATION_FAILED": "Memory job database operation failed",
     "LOG_MEMORY_JOB_LOOP_FAILED": "Memory job consumer loop failed",
     "LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED": "Automatic memory organization submission failed",
+    "LOG_MEMORY_ORGANIZATION_MODEL_RETRY": "Memory organization model call failed; a retry using the same frozen model has been scheduled according to backoff: {error}",
+    "LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK": "Memory organization model retries exhausted; stop organization and preserve existing memories: {error}",
     "LOG_MEMORY_RECALL_TOUCH_FAILED": "Failed to update long-term memory recall timestamps",
     "ERR_MEMORY_UID_REQUIRED": "Memory operations require a user ID",
     "ERR_MEMORY_EMBEDDING_SIGNATURE_REQUIRED": "Memory embedding signature is required",

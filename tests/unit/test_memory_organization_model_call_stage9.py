@@ -8,6 +8,8 @@ import pytest
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED,
+    LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK,
+    LOG_MEMORY_ORGANIZATION_MODEL_RETRY,
     MEMORY_CONTENT_MAX_TOKENS,
     MEMORY_ORGANIZE_CONTEXT_SAFETY_MARGIN_TOKENS,
     MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS,
@@ -146,6 +148,19 @@ class _FakeOrganizationContext:
     async def checkpoint(self) -> LongTermMemoryMutationJob:
         self.checkpoint_count += 1
         return self.job
+
+
+class _CaptureLogger:
+    def __init__(self) -> None:
+        self.bound: dict[str, Any] = {}
+        self.warnings: list[str] = []
+
+    def bind(self, **kwargs: Any) -> _CaptureLogger:
+        self.bound.update(kwargs)
+        return self
+
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
 
 
 async def _fake_submit_organization_plan(
@@ -571,6 +586,58 @@ async def test_handle_memory_organization_converts_ordinary_llm_error_to_safe_re
     assert exc_info.value.safe_message == t(ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED)
     assert exc_info.value.result is None
     assert "vendor private detail" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attempt_count", "max_attempts", "expected_log_key"),
+    [
+        (1, 3, LOG_MEMORY_ORGANIZATION_MODEL_RETRY),
+        (3, 3, LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK),
+    ],
+)
+async def test_handle_memory_organization_logs_model_failure_without_sensitive_bindings(
+    attempt_count: int,
+    max_attempts: int,
+    expected_log_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot()
+    request = _request_for_handler(snapshot, required_input_tokens=100, available_input_tokens=100)
+    captured_logger = _CaptureLogger()
+
+    async def fail_with_provider_error(_request: MemoryOrganizationExecutionRequest) -> InternalResponse:
+        raise LLMException(message="vendor private detail", detail={"code": "timeout"})
+
+    monkeypatch.setattr(organization_handler, "build_organization_execution_request", lambda _payload: request)
+    monkeypatch.setattr(organization_handler, "call_organization_model", fail_with_provider_error)
+    monkeypatch.setattr(organization_handler, "logger", captured_logger)
+
+    with pytest.raises(MemoryJobRetryableError):
+        await organization_handler.handle_memory_organization(_FakeOrganizationContext(_job(attempt_count=attempt_count, max_attempts=max_attempts)))
+
+    assert captured_logger.warnings == [t(expected_log_key, error="vendor private detail")]
+    assert captured_logger.bound == {
+        "uid": "organization-handler-user",
+        "job_id": 31,
+        "operation": LongTermMemoryMutationOperation.ORGANIZE.value,
+        "channel_id": 7,
+        "channel_name": "organization-channel / organization-model",
+        "model_id": "organization-model",
+        "model_name": "organization-model",
+        "attempt_count": attempt_count,
+        "max_attempts": max_attempts,
+        "exception_type": "LLMException",
+    }
+    assert not set(captured_logger.bound) & {
+        "api_key",
+        "base_url",
+        "http_proxy",
+        "custom_headers",
+        "snapshot",
+        "model_output",
+        "provider_metadata",
+    }
 
 
 @pytest.mark.asyncio

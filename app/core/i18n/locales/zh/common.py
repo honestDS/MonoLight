@@ -108,6 +108,8 @@ MESSAGES = {
     "LOG_MEMORY_JOB_DATABASE_OPERATION_FAILED": "记忆作业数据库操作失败",
     "LOG_MEMORY_JOB_LOOP_FAILED": "记忆作业消费者循环失败",
     "LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED": "自动记忆整理提交失败",
+    "LOG_MEMORY_ORGANIZATION_MODEL_RETRY": "记忆整理模型调用失败，已按退避策略安排使用同一冻结模型重试: {error}",
+    "LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK": "记忆整理模型调用重试已耗尽，停止整理并保留现有记忆: {error}",
     "LOG_MEMORY_RECALL_TOUCH_FAILED": "更新长期记忆召回时间失败",
     "ERR_MEMORY_UID_REQUIRED": "记忆操作必须提供用户 ID",
     "ERR_MEMORY_EMBEDDING_SIGNATURE_REQUIRED": "记忆嵌入签名不能为空",
