@@ -14,9 +14,13 @@ from app.core.constants import (
     ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
     ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED,
     ERR_MEMORY_ORGANIZATION_PLAN_INVALID,
+    LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK,
+    LOG_MEMORY_ORGANIZATION_MODEL_RETRY,
 )
 from app.core.crud.memory_job import memory_job_crud
+from app.core.exceptions import LLMException
 from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.memory.identifiers import build_memory_organization_active_mutation_key
 from app.core.memory.organization import (
     MemoryOrganizationContextExceededError,
@@ -40,6 +44,8 @@ from app.core.memory_jobs.executor import (
 )
 from app.core.memory_jobs.manager import memory_job_manager
 from app.models.memory import LongTermMemoryMutationJob, LongTermMemoryMutationOperation
+
+logger = get_logger(__name__)
 
 
 def _deterministic(message: str, *, result: dict[str, Any] | None = None) -> MemoryJobDeterministicError:
@@ -134,6 +140,30 @@ def _response_metadata(response: Any) -> tuple[dict[str, Any], str | None]:
     if not isinstance(usage, dict) or (finish_reason is not None and not isinstance(finish_reason, str)):
         raise ValueError(t(ERR_MEMORY_JOB_PAYLOAD_INVALID))
     return usage, finish_reason
+
+
+def _log_organization_model_call_failure(
+    request: MemoryOrganizationExecutionRequest,
+    claimed_job: LongTermMemoryMutationJob,
+    exc: Exception,
+) -> None:
+    organization_model = request.organization_model
+    log_message = LOG_MEMORY_ORGANIZATION_MODEL_RETRY if claimed_job.attempt_count < claimed_job.max_attempts else LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK
+    error = exc.render_message() if isinstance(exc, LLMException) else t(ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED)
+    logger.bind(
+        uid=claimed_job.uid,
+        job_id=claimed_job.id,
+        operation=claimed_job.operation,
+        channel_id=organization_model.channel_id,
+        channel_name=f"{organization_model.channel_name} / {organization_model.model_id}",
+        model_id=organization_model.model_id,
+        model_name=organization_model.model_id,
+        attempt_count=claimed_job.attempt_count,
+        max_attempts=claimed_job.max_attempts,
+        exception_type=type(exc).__name__,
+    ).warning(
+        t(log_message, error=error),
+    )
 
 
 def _organization_plan_invalid_result(
@@ -407,6 +437,7 @@ async def handle_memory_organization(context: MemoryJobExecutionContext) -> Memo
     except Exception as exc:
         if is_external_context_length_error(exc):
             raise _organization_context_exceeded(request, external_context_error=True) from exc
+        _log_organization_model_call_failure(request, claimed_job, exc)
         raise MemoryJobRetryableError(t(ERR_MEMORY_ORGANIZATION_MODEL_CALL_FAILED)) from exc
 
     await context.checkpoint()
