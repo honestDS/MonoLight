@@ -103,11 +103,10 @@ async def migrate(session: AsyncSession) -> None:
         return
 
     dialect_name = session.get_bind().dialect.name
-    if dialect_name == "postgresql":
-        await session.execute(text("ALTER TABLE terminal_session ALTER COLUMN audit_record_id DROP NOT NULL"))
-        await session.execute(text("ALTER TABLE terminal_session ALTER COLUMN audit_execution_record_id DROP NOT NULL"))
-    elif dialect_name == "mysql":
+    if dialect_name == "mysql":
         await session.execute(text("ALTER TABLE terminal_session MODIFY COLUMN audit_record_id INTEGER NULL"))
         await session.execute(text("ALTER TABLE terminal_session MODIFY COLUMN audit_execution_record_id INTEGER NULL"))
     elif dialect_name == "sqlite":
         await _rebuild_sqlite_table(session)
+    else:
+        raise RuntimeError("Unsupported SQL dialect for this migration")

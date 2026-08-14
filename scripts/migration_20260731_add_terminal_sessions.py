@@ -5,10 +5,10 @@ MIGRATION_ID = "20260731_add_terminal_sessions"
 
 
 def _column_types(dialect_name: str) -> dict[str, str]:
-    if dialect_name == "postgresql":
+    if dialect_name == "sqlite":
         return {
-            "datetime": "TIMESTAMP WITH TIME ZONE",
-            "json": "JSONB",
+            "datetime": "DATETIME",
+            "json": "JSON",
             "text": "TEXT",
         }
     if dialect_name == "mysql":
@@ -17,19 +17,15 @@ def _column_types(dialect_name: str) -> dict[str, str]:
             "json": "JSON",
             "text": "LONGTEXT",
         }
-    return {
-        "datetime": "DATETIME",
-        "json": "JSON",
-        "text": "TEXT",
-    }
+    raise RuntimeError("Unsupported database dialect")
 
 
 def _id_type(dialect_name: str) -> str:
-    if dialect_name == "postgresql":
-        return "SERIAL PRIMARY KEY"
+    if dialect_name == "sqlite":
+        return "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"
     if dialect_name == "mysql":
         return "INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY"
-    return "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"
+    raise RuntimeError("Unsupported database dialect")
 
 
 async def _existing_index_names(session: AsyncSession, table_name: str) -> set[str]:

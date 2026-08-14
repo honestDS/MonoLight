@@ -17,7 +17,6 @@ def _sequence_updater(dialect_name: str):
     return {
         "sqlite": _raise_sqlite_sequence,
         "mysql": _raise_mysql_sequence,
-        "postgresql": _raise_postgresql_sequence,
     }.get(dialect_name)
 
 
@@ -89,22 +88,6 @@ def _raise_sqlite_sequence(connection: Connection, next_id: int) -> None:
 
 def _raise_mysql_sequence(connection: Connection, next_id: int) -> None:
     connection.execute(text(f"ALTER TABLE {_quote(connection, 'long_term_memory_record')} AUTO_INCREMENT = {int(next_id)}"))
-
-
-def _raise_postgresql_sequence(connection: Connection, next_id: int) -> None:
-    sequence_name = connection.execute(text("SELECT pg_get_serial_sequence('long_term_memory_record', 'id')")).scalar_one_or_none()
-    if not sequence_name:
-        return
-    if next_id == 1:
-        connection.execute(
-            text("SELECT setval(CAST(:sequence_name AS regclass), :next_id, false)"),
-            {"sequence_name": sequence_name, "next_id": next_id},
-        )
-    else:
-        connection.execute(
-            text("SELECT setval(CAST(:sequence_name AS regclass), :last_id, true)"),
-            {"sequence_name": sequence_name, "last_id": next_id - 1},
-        )
 
 
 def _migrate_sync(connection: Connection) -> None:

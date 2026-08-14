@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import inspect, text, update
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
@@ -23,10 +23,9 @@ from scripts import migration_20260727_drop_channel_type as drop_channel_type_mi
     [
         ("sqlite", "AUTOINCREMENT", "DATETIME", "JSON"),
         ("mysql", "AUTO_INCREMENT", "DATETIME(6)", "JSON"),
-        ("postgresql", "SERIAL PRIMARY KEY", "TIMESTAMP WITH TIME ZONE", "JSONB"),
     ],
 )
-def test_audit_migration_has_database_specific_types(dialect_name, expected_id, expected_datetime, expected_json):
+def test_audit_migration_has_supported_database_types(dialect_name, expected_id, expected_datetime, expected_json):
     types = audit_migration._column_types(dialect_name)
 
     assert expected_id in types["id"]
@@ -40,10 +39,9 @@ def test_audit_migration_has_database_specific_types(dialect_name, expected_id, 
     [
         ("sqlite", "INTEGER PRIMARY KEY AUTOINCREMENT"),
         ("mysql", "INTEGER PRIMARY KEY AUTO_INCREMENT"),
-        ("postgresql", "SERIAL PRIMARY KEY"),
     ],
 )
-async def test_migration_record_table_uses_database_specific_identity(dialect_name, expected_id):
+async def test_migration_record_table_uses_supported_database_identity(dialect_name, expected_id):
     statements = []
 
     class FakeSession:
@@ -62,8 +60,8 @@ async def test_migration_record_table_uses_database_specific_identity(dialect_na
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dialect_name", ["sqlite", "mysql", "postgresql"])
-async def test_audit_migration_builds_all_tables_for_each_database(monkeypatch, dialect_name):
+@pytest.mark.parametrize("dialect_name", ["sqlite", "mysql"])
+async def test_audit_migration_builds_all_tables_for_supported_databases(monkeypatch, dialect_name):
     statements = []
 
     class FakeSession:
@@ -87,8 +85,8 @@ async def test_audit_migration_builds_all_tables_for_each_database(monkeypatch, 
     assert "CREATE TABLE IF NOT EXISTS audit_execution_record" in combined
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
-def test_audit_conditional_claim_update_compiles_for_each_database(dialect):
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
+def test_audit_conditional_claim_update_compiles_for_supported_databases(dialect):
     statement = (
         update(AuditRecord)
         .where(
@@ -106,7 +104,7 @@ def test_audit_conditional_claim_update_compiles_for_each_database(dialect):
     assert "RETURNING" not in compiled.upper()
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
 def test_all_audit_conditional_writes_compile_without_dialect_specific_syntax(dialect):
     now = get_local_time()
     statements = [
@@ -280,8 +278,8 @@ async def test_channel_http_proxy_migration_promotes_only_unambiguous_legacy_pro
         await engine.dispose()
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
-def test_background_task_binding_unique_index_sql_compiles_for_each_database(dialect):
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
+def test_background_task_binding_unique_index_sql_compiles_for_supported_databases(dialect):
     compiled = str(text("CREATE UNIQUE INDEX uq_background_task_audit_execution_record_id ON background_task (audit_execution_record_id)").compile(dialect=dialect))
 
     assert compiled.startswith("CREATE UNIQUE INDEX")

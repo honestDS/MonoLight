@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 import pytest_asyncio
 from sqlalchemy import inspect, text
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlmodel import SQLModel, select
@@ -331,7 +331,7 @@ async def test_selection_token_migration_is_idempotent_has_no_foreign_keys_and_p
         await engine.dispose()
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
 def test_selection_token_migration_table_and_indexes_compile_for_supported_dialects(dialect) -> None:
     table = selection_token_migration.long_term_memory_embedding_selection_token
 

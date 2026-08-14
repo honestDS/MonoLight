@@ -153,6 +153,7 @@ MESSAGES = {
     "ERR_EMBEDDING_VECTOR_EMPTY": "嵌入模型未返回向量",
     "ERR_VECTOR_ITEM_LENGTH_MISMATCH": "向量条目参数长度必须一致",
     "ERR_DATABASE_TIME_TYPE_INVALID": "数据库当前时间未返回 {expected_type}",
+    "ERR_DATABASE_TYPE_UNSUPPORTED": "不支持 {database_type} 数据库，当前仅支持 SQLite 和 MySQL",
     "ERR_MIGRATION_SCRIPT_INVALID": "迁移脚本无效: {script_name}",
     "ERR_MIGRATION_ID_INVALID": "{script_name} 中的 MIGRATION_ID 无效",
     "ERR_MIGRATION_FUNCTION_MISSING": "{script_name} 中缺少 migrate(session)",

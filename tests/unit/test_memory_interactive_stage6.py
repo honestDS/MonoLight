@@ -500,7 +500,7 @@ async def test_formal_non_stream_memory_content_too_long_retries_same_fact_witho
     execution_calls = []
     execution_depth = 0
     max_execution_depth = 0
-    factual_content = "MySQL compatibility is required and PostgreSQL support is optional."
+    factual_content = "SQLite and MySQL compatibility must be maintained."
     long_content = f"{factual_content} Keep this stable database compatibility requirement available across future sessions and do not add unrelated implementation explanation."
     first_call = InternalToolCall(
         id="memory-create-too-long",
@@ -600,7 +600,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
         name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
         arguments={
             "operation": "create",
-            "content": "MySQL compatibility is required and PostgreSQL support is optional.",
+            "content": "SQLite and MySQL compatibility must be maintained.",
             "memory_key": "database.compatibility",
             "memory_type": "fact",
         },
@@ -610,7 +610,7 @@ async def test_formal_non_stream_repeated_memory_content_too_long_ends_on_max_tu
         name=MANAGE_LONGTERM_MEMORY_TOOL_NAME,
         arguments={
             "operation": "create",
-            "content": "MySQL compatibility is required and PostgreSQL support is optional.",
+            "content": "SQLite and MySQL compatibility must be maintained.",
             "memory_key": "database.compatibility",
             "memory_type": "fact",
         },

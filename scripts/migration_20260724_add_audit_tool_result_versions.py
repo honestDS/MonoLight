@@ -5,10 +5,10 @@ MIGRATION_ID = "20260724_add_audit_tool_result_versions"
 
 
 def _column_types(dialect_name: str) -> dict[str, str]:
-    if dialect_name == "postgresql":
+    if dialect_name == "sqlite":
         return {
-            "id": "SERIAL PRIMARY KEY",
-            "datetime": "TIMESTAMP WITH TIME ZONE",
+            "id": "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT",
+            "datetime": "DATETIME",
             "text": "TEXT",
         }
     if dialect_name == "mysql":
@@ -17,11 +17,7 @@ def _column_types(dialect_name: str) -> dict[str, str]:
             "datetime": "DATETIME(6)",
             "text": "LONGTEXT",
         }
-    return {
-        "id": "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT",
-        "datetime": "DATETIME",
-        "text": "TEXT",
-    }
+    raise RuntimeError("Unsupported SQL dialect")
 
 
 async def _existing_columns(session: AsyncSession, table_name: str) -> set[str]:

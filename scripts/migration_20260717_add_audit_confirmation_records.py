@@ -5,11 +5,11 @@ MIGRATION_ID = "20260717_add_audit_confirmation_records"
 
 
 def _column_types(dialect_name: str) -> dict[str, str]:
-    if dialect_name == "postgresql":
+    if dialect_name == "sqlite":
         return {
-            "id": "SERIAL PRIMARY KEY",
-            "datetime": "TIMESTAMP WITH TIME ZONE",
-            "json": "JSONB",
+            "id": "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT",
+            "datetime": "DATETIME",
+            "json": "JSON",
             "text": "TEXT",
         }
     if dialect_name == "mysql":
@@ -19,12 +19,7 @@ def _column_types(dialect_name: str) -> dict[str, str]:
             "json": "JSON",
             "text": "LONGTEXT",
         }
-    return {
-        "id": "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT",
-        "datetime": "DATETIME",
-        "json": "JSON",
-        "text": "TEXT",
-    }
+    raise RuntimeError("Unsupported SQL dialect")
 
 
 async def _existing_index_names(session: AsyncSession, table_name: str) -> set[str]:

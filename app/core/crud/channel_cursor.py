@@ -16,7 +16,7 @@ class CRUDChannelCursor:
         """原子地取出当前轮询下标并推进游标。
 
         使用独立数据库会话，避免在调用方事务上执行 commit/rollback 破坏其事务边界。
-        通过 with_for_update 行锁（MySQL/PostgreSQL 生效，SQLite 写操作天然串行）
+        通过 with_for_update 行锁（MySQL 行锁生效，SQLite 写操作天然串行）
         使多 worker / 多协程并发下加权轮询全局有序推进；首次创建的并发冲突由
         IntegrityError 捕获后重读处理。
 

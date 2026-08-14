@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.sql import select
 
 from app.providers.database.time import build_database_timestamp_expression
@@ -10,7 +10,6 @@ from app.providers.database.time import build_database_timestamp_expression
     [
         ("sqlite", sqlite.dialect(), ["unixepoch()"], ["extract"]),
         ("mysql", mysql.dialect(), ["unix_timestamp", "current_timestamp"], ["extract"]),
-        ("postgresql", postgresql.dialect(), ["extract(epoch", "current_timestamp"], []),
     ],
 )
 def test_database_timestamp_expression_uses_dialect_specific_sql(
