@@ -10,7 +10,6 @@ from scripts import migration_20260801_terminal_process_identity as process_iden
 @pytest.mark.parametrize(
     ("dialect_name", "expected_json", "expected_datetime"),
     [
-        ("postgresql", "JSONB", "TIMESTAMP WITH TIME ZONE"),
         ("mysql", "JSON", "DATETIME(6)"),
         ("sqlite", "JSON", "DATETIME"),
     ],
@@ -25,7 +24,6 @@ def test_terminal_migration_uses_expected_json_and_datetime_types(dialect_name, 
 @pytest.mark.parametrize(
     ("dialect_name", "expected_id_type"),
     [
-        ("postgresql", "SERIAL PRIMARY KEY"),
         ("mysql", "INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY"),
         ("sqlite", "INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"),
     ],

@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import ERR_DATABASE_TIME_TYPE_INVALID
+from app.core.constants import ERR_DATABASE_TIME_TYPE_INVALID, ERR_DATABASE_TYPE_UNSUPPORTED
 from app.core.i18n import t
 
 
@@ -30,6 +30,4 @@ def build_database_timestamp_expression(dialect_name: str):
         return cast(func.unixepoch(), Integer)
     if dialect_name == "mysql":
         return cast(func.unix_timestamp(func.current_timestamp()), Integer)
-    if dialect_name == "postgresql":
-        return cast(func.extract("epoch", func.current_timestamp()), Integer)
-    return cast(func.extract("epoch", func.current_timestamp()), Integer)
+    raise ValueError(t(ERR_DATABASE_TYPE_UNSUPPORTED, database_type=dialect_name))

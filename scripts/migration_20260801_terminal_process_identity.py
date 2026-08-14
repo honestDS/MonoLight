@@ -19,5 +19,6 @@ async def migrate(session: AsyncSession) -> None:
         return
 
     dialect_name = session.get_bind().dialect.name
-    column_type = "JSONB" if dialect_name == "postgresql" else "JSON"
-    await session.execute(text(f"ALTER TABLE terminal_session ADD COLUMN process_identity {column_type} NULL"))
+    if dialect_name not in {"sqlite", "mysql"}:
+        raise RuntimeError("Unsupported SQL dialect")
+    await session.execute(text("ALTER TABLE terminal_session ADD COLUMN process_identity JSON NULL"))

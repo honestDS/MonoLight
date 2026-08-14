@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from pydantic import ValidationError
 from sqlalchemy import inspect, text
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -452,7 +452,7 @@ async def test_long_term_memory_migration_preserves_existing_database_tables_and
         await engine.dispose()
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
 def test_long_term_memory_migration_tables_and_indexes_compile_for_each_dialect(dialect):
     tables = list(memory_migration.metadata.tables.values())
 

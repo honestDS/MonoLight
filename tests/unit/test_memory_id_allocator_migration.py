@@ -3,7 +3,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 from sqlalchemy import inspect, text
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from scripts import migration_20260813_add_memory_id_allocator as migration
@@ -85,6 +85,6 @@ async def test_allocator_migration_rebuilds_legacy_sqlite_table_and_preserves_hi
     assert "ix_legacy_memory_uid" in indexes
 
 
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect(), postgresql.dialect()])
-def test_allocator_migration_exposes_cross_database_ddl_and_sequence_helpers(dialect):
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
+def test_sequence_updater_supports_sqlite_and_mysql(dialect):
     assert callable(migration._sequence_updater(dialect.name))

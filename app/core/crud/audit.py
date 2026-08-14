@@ -1041,7 +1041,7 @@ class CRUDAudit:
         session_id: str,
     ) -> int:
         now = get_local_time()
-        # MySQL 禁止删除目标表时在子查询读取同表；先物化 ID，让 SQLite、MySQL、PostgreSQL 共用一致逻辑。
+        # 先物化 ID，以规避 MySQL 同表删除限制并保持 SQLite、MySQL 一致逻辑。
         claim_record_ids_result = await db.execute(
             select(AuditConfirmationClaim.audit_record_id).where(
                 AuditConfirmationClaim.uid == uid,

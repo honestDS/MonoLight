@@ -10,6 +10,7 @@ from sqlmodel import SQLModel
 
 import app.models  # noqa
 from app.core.constants import (
+    ERR_DATABASE_TYPE_UNSUPPORTED,
     ERR_MIGRATION_FUNCTION_MISSING,
     ERR_MIGRATION_ID_INVALID,
     ERR_MIGRATION_SCRIPT_INVALID,
@@ -66,12 +67,12 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
 
 async def ensure_migration_record_table(session: AsyncSession) -> None:
     dialect_name = session.get_bind().dialect.name
-    if dialect_name == "postgresql":
-        id_definition = "SERIAL PRIMARY KEY"
-    elif dialect_name == "mysql":
+    if dialect_name == "mysql":
         id_definition = "INTEGER PRIMARY KEY AUTO_INCREMENT"
-    else:
+    elif dialect_name == "sqlite":
         id_definition = "INTEGER PRIMARY KEY AUTOINCREMENT"
+    else:
+        raise RuntimeError(t(ERR_DATABASE_TYPE_UNSUPPORTED, database_type=dialect_name))
     await session.execute(
         text(
             f"""

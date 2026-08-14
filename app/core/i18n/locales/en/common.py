@@ -153,6 +153,7 @@ MESSAGES = {
     "ERR_EMBEDDING_VECTOR_EMPTY": "The embedding model returned no vector",
     "ERR_VECTOR_ITEM_LENGTH_MISMATCH": "Vector item argument lengths must match",
     "ERR_DATABASE_TIME_TYPE_INVALID": "Database current timestamp did not return {expected_type}",
+    "ERR_DATABASE_TYPE_UNSUPPORTED": "{database_type} is not a supported database; only SQLite and MySQL are supported",
     "ERR_MIGRATION_SCRIPT_INVALID": "Invalid migration script: {script_name}",
     "ERR_MIGRATION_ID_INVALID": "Invalid MIGRATION_ID in {script_name}",
     "ERR_MIGRATION_FUNCTION_MISSING": "Missing migrate(session) in {script_name}",
