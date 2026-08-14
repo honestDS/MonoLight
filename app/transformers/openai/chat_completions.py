@@ -226,6 +226,13 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
                 item = {"role": msg.role.value, "content": msg.content}
 
             if msg.tool_calls:
+                # 兼容严格要求 assistant content 非空的提供商，仅修改发送给上游的副本。
+                if msg.role.value == "assistant" and (
+                    msg.content is None
+                    or (isinstance(msg.content, str) and not msg.content.strip())
+                    or (isinstance(msg.content, list) and not msg.content)
+                ):
+                    item["content"] = "[tool_call]"
                 tool_calls = []
                 for tool_call in msg.tool_calls:
                     provider_metadata = tool_call.provider_metadata or {}
