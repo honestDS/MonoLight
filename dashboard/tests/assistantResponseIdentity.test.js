@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   findAssistantResponseReplacementIndex,
+  isAssistantResponse,
   isPlainAssistantResponse,
   mergeAssistantResponseIntoList
 } from '../src/utils/assistantResponseIdentity.js'
@@ -389,4 +390,101 @@ test('confirmation cards and tool calls are excluded from plain response merging
 
   assert.equal(isPlainAssistantResponse(confirmation), false)
   assert.equal(isPlainAssistantResponse(toolCall), false)
+  assert.equal(isAssistantResponse(toolCall), true)
+})
+
+test('tool assistant merges terminal plain response while preserving serialized tool calls', () => {
+  const toolAssistant = liveResponse({
+    id: 'assistant-tool',
+    content: JSON.stringify({
+      role: 'assistant',
+      content: '调用前正文',
+      tool_calls: [{ id: 'call-1', type: 'function' }]
+    })
+  })
+  const terminalAssistant = liveResponse({
+    id: 'assistant-done',
+    db_id: 12,
+    content: '最终正文'
+  })
+
+  const merged = mergeAssistantResponseIntoList([toolAssistant], terminalAssistant)
+  const content = JSON.parse(merged[0].content)
+
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0].id, 'assistant-tool')
+  assert.equal(merged[0].db_id, '12')
+  assert.equal(content.role, 'assistant')
+  assert.equal(content.content, '最终正文')
+  assert.deepEqual(content.tool_calls, [{ id: 'call-1', type: 'function' }])
+})
+
+test('plain streamed assistant becomes serialized tool assistant when top-level tool calls arrive', () => {
+  const plainAssistant = liveResponse({
+    id: 'assistant-stream',
+    content: '流式正文'
+  })
+  const toolAssistant = liveResponse({
+    id: 'assistant-tool',
+    tool_calls: [{ id: 'call-2', type: 'function' }],
+    content: '流式正文'
+  })
+
+  const merged = mergeAssistantResponseIntoList([plainAssistant], toolAssistant)
+  const content = JSON.parse(merged[0].content)
+
+  assert.equal(merged.length, 1)
+  assert.equal(isPlainAssistantResponse(merged[0]), false)
+  assert.equal(isAssistantResponse(merged[0]), true)
+  assert.equal(content.role, 'assistant')
+  assert.equal(content.content, '流式正文')
+  assert.deepEqual(content.tool_calls, [{ id: 'call-2', type: 'function' }])
+})
+
+test('explicit tool assistant types remain assistant responses but not plain responses', () => {
+  const explicitMessageToolCall = liveResponse({ type: 'tool_call' })
+  const explicitContentToolCall = liveResponse({
+    content: JSON.stringify({
+      role: 'assistant',
+      type: 'tool_call',
+      content: '',
+      tool_calls: [{ id: 'call-3' }]
+    })
+  })
+  const confirmation = liveResponse({ type: 'audit_confirmation' })
+  const toolResult = liveResponse({ type: 'tool_result' })
+  const toolRole = liveResponse({ role: 'tool' })
+
+  assert.equal(isAssistantResponse(explicitMessageToolCall), true)
+  assert.equal(isPlainAssistantResponse(explicitMessageToolCall), false)
+  assert.equal(isAssistantResponse(explicitContentToolCall), true)
+  assert.equal(isPlainAssistantResponse(explicitContentToolCall), false)
+  assert.equal(isAssistantResponse(confirmation), false)
+  assert.equal(isAssistantResponse(toolResult), false)
+  assert.equal(isAssistantResponse(toolRole), false)
+})
+
+test('tool and plain assistant turns with the same work remain isolated by response identity', () => {
+  const toolAssistant = liveResponse({
+    id: 'assistant-tool-turn',
+    response_id: 'response-tool-turn',
+    content: JSON.stringify({
+      role: 'assistant',
+      content: '工具回合',
+      tool_calls: [{ id: 'call-4' }]
+    })
+  })
+  const plainAssistant = liveResponse({
+    id: 'assistant-plain-turn',
+    response_id: 'response-plain-turn',
+    content: '普通回合'
+  })
+
+  const merged = mergeAssistantResponseIntoList([toolAssistant], plainAssistant)
+
+  assert.equal(merged.length, 2)
+  assert.deepEqual(merged.map(message => message.response_id), [
+    'response-tool-turn',
+    'response-plain-turn'
+  ])
 })

@@ -9,7 +9,7 @@ import { createContextSummaryTracker } from './contextSummaryTracker.js'
 import { createHistoryMergeTracker } from './historyMergeTracker.js'
 import { createWorkLifecycleTracker, shouldApplyOwnProactiveReply } from './workLifecycleTracker.js'
 import { applyAuditConfirmationStatusToMessages, applyAuditToolResultsUpdateToMessages } from './auditConfirmationState.js'
-import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
+import { findAssistantResponseReplacementIndex, findMessageReplacementIndex, formatTimestamp, getMessageDedupeKeys, getMessageTimestamp, getToolCallArguments, getToolCallContent, getToolCallName, getToolCalls, getToolResultContent, getToolResultName, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, mergeRemoteMessage, normalizeMessageContent } from '../../utils'
 import { getNewSessionProfileOverrideId } from '../../utils/profileOptions'
 import { filterResponseHistoryToolOutput, filterToolOutputMessages } from '../../utils/toolOutputVisibility'
 import { chatApi } from '../../api'
@@ -276,7 +276,12 @@ export function useChatSession() {
     onInputQueued: event => applyLifecycleEvent(workLifecycleTracker.markInputQueued, event, isCurrentRequestSession),
     onInputDequeued: event => applyLifecycleEvent(workLifecycleTracker.markInputsDequeued, event, isCurrentRequestSession),
     onAgentLoopStart: event => applyLifecycleEvent(workLifecycleTracker.startAgentLoop, event, isCurrentRequestSession),
-    onAgentLoopOutput: event => applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, event, isCurrentRequestSession),
+    onAgentLoopOutput: event => {
+      // 跨过一次实际绘制，确保 agent_loop_start 创建的 thinking 已显示一帧。
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        applyLifecycleEvent(workLifecycleTracker.stopAgentLoop, event, isCurrentRequestSession)
+      }))
+    },
     onLlmRequestMetadata: event => updateLlmRequestMetadata(event, isCurrentRequestSession),
     onWorkFinished: event => applyLifecycleEvent(workLifecycleTracker.finishWorkLifecycle, event, isCurrentRequestSession)
   })
@@ -356,16 +361,20 @@ export function useChatSession() {
     let changed = false
     for (const item of historyData) {
       const message = normalizeHistoryMessage({ ...item, db_id: item.id })
-      if (isPlainAssistantResponse(message)) {
+      if (isAssistantResponse(message)) {
         const replacementIndex = findAssistantResponseReplacementIndex(mergedMessages, message)
         if (replacementIndex !== -1) {
           mergedMessages = mergeAssistantResponseIntoList(mergedMessages, message)
-        } else {
-          mergedMessages.push(message)
+          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+          changed = true
+          continue
         }
-        getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
-        changed = true
-        continue
+        if (isPlainAssistantResponse(message)) {
+          mergedMessages.push(message)
+          getMessageDedupeKeys(message).forEach(key => existingKeys.add(key))
+          changed = true
+          continue
+        }
       }
 
       const auditRecordId = getAuditConfirmationRecordId(message)
@@ -649,6 +658,10 @@ export function useChatSession() {
       const queuedMessage = chatState.messages.value.find(m => m.id === existingMsgId)
       if (queuedMessage) queuedMessage.request_id = requestId
     }
+    chatState.messages.value = workLifecycleTracker.startRequestLifecycle(
+      chatState.messages.value,
+      { request_id: requestId }
+    )
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 
@@ -684,7 +697,6 @@ export function useChatSession() {
         showToolCalls,
         callbacks: {
           ...createLifecycleCallbacks(isCurrentRequestSession),
-          deferAgentLoopOutput: true,
           completeBeforeWorkFinished: true,
           onAuditConfirmationStatus: applyAuditConfirmationStatus,
           onAuditToolResultsUpdate: applyAuditToolResultsUpdate,
@@ -825,6 +837,10 @@ export function useChatSession() {
         msg.request_id = requestId
       }
     }
+    chatState.messages.value = workLifecycleTracker.startRequestLifecycle(
+      chatState.messages.value,
+      { request_id: requestId }
+    )
     chatState.loading.value = true
     nextTick(() => chatState.scrollToBottom())
 

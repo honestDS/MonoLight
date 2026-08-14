@@ -14,6 +14,55 @@ const hasToolCalls = (message, content) => (
   || (Array.isArray(content?.tool_calls) && content.tool_calls.length > 0)
 )
 
+const getContentValue = (message, parsedContent = getParsedContent(message?.content)) => {
+  if (
+    parsedContent
+    && typeof parsedContent === 'object'
+    && !Array.isArray(parsedContent)
+    && ('content' in parsedContent || Array.isArray(parsedContent.tool_calls))
+  ) {
+    return parsedContent.content
+  }
+  return message?.content
+}
+
+const hasContentValue = (value) => (
+  typeof value === 'string' ? Boolean(value.trim()) : value !== undefined && value !== null
+)
+
+const getToolCallDetails = (message) => {
+  const parsedContent = getParsedContent(message?.content)
+  const messageToolCalls = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0
+    ? message.tool_calls
+    : null
+  const contentToolCalls = Array.isArray(parsedContent?.tool_calls) && parsedContent.tool_calls.length > 0
+    ? parsedContent.tool_calls
+    : null
+
+  return {
+    parsedContent,
+    messageToolCalls,
+    contentToolCalls,
+    toolCalls: messageToolCalls || contentToolCalls
+  }
+}
+
+const getMessageIdentity = (message, field) => {
+  if (hasIdentity(message?.[field])) return message[field]
+  const parsedContent = getParsedContent(message?.content)
+  return parsedContent?.[field]
+}
+
+const isSyntheticWorkResponseId = (responseId, workId) => (
+  hasIdentity(responseId)
+  && hasIdentity(workId)
+  && String(responseId) === `session-reply-work:${String(workId)}`
+)
+
+const isWeakResponseIdentity = (responseId, workId) => (
+  !hasIdentity(responseId) || isSyntheticWorkResponseId(responseId, workId)
+)
+
 const mergeRemoteMessage = (localMessage, remoteMessage) => ({
   ...localMessage,
   ...remoteMessage,
@@ -33,48 +82,87 @@ export const getMessageDbId = (message) => {
   return dbId === undefined ? null : String(dbId)
 }
 
-export const isPlainAssistantResponse = (message) => {
+export const isAssistantResponse = (message) => {
   const content = getParsedContent(message?.content)
   return message?.role === 'assistant'
     && message.type !== 'audit_confirmation'
-    && message.type !== 'tool_call'
     && message.type !== 'tool_result'
     && message.role !== 'tool'
     && content?.role !== 'tool'
     && content?.type !== 'audit_confirmation'
-    && content?.type !== 'tool_call'
     && content?.type !== 'tool_result'
+}
+
+// 保留现有导出，供只需无工具调用响应的调用方使用。
+export const isPlainAssistantResponse = (message) => {
+  const content = getParsedContent(message?.content)
+  return isAssistantResponse(message)
+    && message.type !== 'tool_call'
+    && content?.type !== 'tool_call'
     && !hasToolCalls(message, content)
 }
 
 export const findAssistantResponseReplacementIndex = (messages, incomingMessage) => {
-  if (!isPlainAssistantResponse(incomingMessage)) return -1
+  if (!isAssistantResponse(incomingMessage)) return -1
 
   const incomingDbId = getMessageDbId(incomingMessage)
-  const incomingResponseId = incomingMessage?.response_id
-  const incomingWorkId = incomingMessage?.work_id
-  const hasStrongerIdentity = hasIdentity(incomingResponseId) || hasIdentity(incomingWorkId)
-  const canUseWorkFallback = incomingDbId !== null || !hasIdentity(incomingResponseId)
-  const identities = [
-    ['db_id', incomingDbId],
-    ['response_id', incomingResponseId],
-    ...(canUseWorkFallback ? [['work_id', incomingWorkId]] : []),
-    ...(incomingDbId === null && !hasStrongerIdentity ? [['request_id', incomingMessage?.request_id]] : [])
-  ]
+  const incomingResponseId = getMessageIdentity(incomingMessage, 'response_id')
+  const incomingWorkId = getMessageIdentity(incomingMessage, 'work_id')
+  const incomingTurn = getMessageIdentity(incomingMessage, 'turn')
+  const incomingRequestId = getMessageIdentity(incomingMessage, 'request_id')
+  const syntheticWorkResponse = isSyntheticWorkResponseId(incomingResponseId, incomingWorkId)
 
-  for (const [field, value] of identities) {
-    if (!hasIdentity(value)) continue
-    const stableValue = String(value)
-    const findIndex = field === 'work_id' || field === 'request_id'
-      ? messages.findLastIndex.bind(messages)
-      : messages.findIndex.bind(messages)
-    const replacementIndex = findIndex(message => {
-      if (!isPlainAssistantResponse(message)) return false
-      const messageDbId = getMessageDbId(message)
-      if (incomingDbId !== null && field !== 'db_id' && messageDbId !== null && messageDbId !== incomingDbId) return false
-      const messageValue = field === 'db_id' ? messageDbId : message?.[field]
-      return hasIdentity(messageValue) && String(messageValue) === stableValue
+  const canUseCandidate = (message, allowDifferentDbId = false) => {
+    if (!isAssistantResponse(message)) return false
+    if (allowDifferentDbId || incomingDbId === null) return true
+    const messageDbId = getMessageDbId(message)
+    return messageDbId === null || messageDbId === incomingDbId
+  }
+
+  if (incomingDbId !== null) {
+    const replacementIndex = messages.findIndex(message => (
+      canUseCandidate(message, true) && getMessageDbId(message) === incomingDbId
+    ))
+    if (replacementIndex !== -1) return replacementIndex
+  }
+
+  if (hasIdentity(incomingResponseId) && !syntheticWorkResponse) {
+    const stableResponseId = String(incomingResponseId)
+    const replacementIndex = messages.findIndex(message => (
+      canUseCandidate(message)
+      && hasIdentity(getMessageIdentity(message, 'response_id'))
+      && String(getMessageIdentity(message, 'response_id')) === stableResponseId
+    ))
+    if (replacementIndex !== -1) return replacementIndex
+  }
+
+  // 合成会话回复曾复用 work id，只能回退到最后一个匹配回合；真实 response id 可
+  // 收敛同一回合较早的合成占位消息。
+  if (hasIdentity(incomingWorkId) && (isWeakResponseIdentity(incomingResponseId, incomingWorkId) || hasIdentity(incomingResponseId))) {
+    const stableWorkId = String(incomingWorkId)
+    const replacementIndex = messages.findLastIndex(message => {
+      if (!canUseCandidate(message)) return false
+      const messageWorkId = getMessageIdentity(message, 'work_id')
+      if (!hasIdentity(messageWorkId) || String(messageWorkId) !== stableWorkId) return false
+      if (hasIdentity(incomingTurn)) {
+        const messageTurn = getMessageIdentity(message, 'turn')
+        if (!hasIdentity(messageTurn) || String(messageTurn) !== String(incomingTurn)) return false
+      }
+      if (syntheticWorkResponse || !hasIdentity(incomingResponseId)) return true
+      const messageTurn = getMessageIdentity(message, 'turn')
+      return isWeakResponseIdentity(getMessageIdentity(message, 'response_id'), stableWorkId)
+        && (!hasIdentity(incomingTurn) || (hasIdentity(messageTurn) && String(messageTurn) === String(incomingTurn)))
     })
+    if (replacementIndex !== -1) return replacementIndex
+  }
+
+  if (incomingDbId === null && !hasIdentity(incomingResponseId) && !hasIdentity(incomingWorkId) && hasIdentity(incomingRequestId)) {
+    const stableRequestId = String(incomingRequestId)
+    const replacementIndex = messages.findLastIndex(message => (
+      canUseCandidate(message)
+      && hasIdentity(getMessageIdentity(message, 'request_id'))
+      && String(getMessageIdentity(message, 'request_id')) === stableRequestId
+    ))
     if (replacementIndex !== -1) return replacementIndex
   }
 
@@ -84,14 +172,48 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
 export const mergeAssistantResponse = (localMessage, remoteMessage) => {
   const remoteDbId = getMessageDbId(remoteMessage)
   const localDbId = getMessageDbId(localMessage)
-  const remoteHasContent = typeof remoteMessage?.content === 'string'
-    ? Boolean(remoteMessage.content.trim())
-    : remoteMessage?.content !== undefined && remoteMessage?.content !== null
+  const remoteToolDetails = getToolCallDetails(remoteMessage)
+  const localToolDetails = getToolCallDetails(localMessage)
+  const hasAnyToolCalls = Boolean(remoteToolDetails.toolCalls || localToolDetails.toolCalls)
+  const remoteContent = getContentValue(remoteMessage, remoteToolDetails.parsedContent)
+  const localContent = getContentValue(localMessage, localToolDetails.parsedContent)
+  const remoteHasContent = hasContentValue(remoteContent)
   const normalizedRemoteMessage = {
     ...remoteMessage,
     ...(remoteDbId ? { db_id: remoteDbId } : {})
   }
   const mergedMessage = mergeRemoteMessage(localMessage, normalizedRemoteMessage)
+
+  if (hasAnyToolCalls) {
+    const toolCalls = remoteToolDetails.toolCalls || localToolDetails.toolCalls
+    const finalContent = remoteHasContent ? remoteContent : localContent
+    const isAssistantToolContent = content => (
+      content
+      && typeof content === 'object'
+      && !Array.isArray(content)
+      && (content.role === 'assistant' || content.type === 'tool_call' || Array.isArray(content.tool_calls))
+    )
+    const sourceContent = remoteToolDetails.contentToolCalls
+      ? remoteToolDetails.parsedContent
+      : localToolDetails.contentToolCalls
+        ? localToolDetails.parsedContent
+        : isAssistantToolContent(remoteToolDetails.parsedContent)
+          ? remoteToolDetails.parsedContent
+          : isAssistantToolContent(localToolDetails.parsedContent)
+            ? localToolDetails.parsedContent
+            : null
+    const topLevelToolCalls = remoteToolDetails.messageToolCalls || localToolDetails.messageToolCalls
+    return {
+      ...mergedMessage,
+      ...(topLevelToolCalls ? { tool_calls: topLevelToolCalls } : {}),
+      content: JSON.stringify({
+        ...(sourceContent ? sourceContent : {}),
+        role: 'assistant',
+        tool_calls: toolCalls,
+        content: finalContent ?? ''
+      })
+    }
+  }
 
   return {
     ...mergedMessage,
