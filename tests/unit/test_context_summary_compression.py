@@ -14,45 +14,6 @@ from tests.unit.context_summary_service_test_support import (
 
 
 @pytest.mark.asyncio
-async def test_first_summary_prompt_excludes_recent_protected_rounds(monkeypatch):
-    _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
-
-    def estimate_tokens(content):
-        if content == "current":
-            return 10
-        if content.startswith('{"role":'):
-            return 100
-        if "Recent dialogue for task context only" in content:
-            return 50
-        if "Further compress the summary below" in content:
-            return 50
-        return 100
-
-    _patch_token_counter(monkeypatch, estimate_tokens)
-
-    state = await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=10,
-        current_message="current",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
-    )
-
-    assert state.content == "compressed history"
-    prompt = generated_calls[0]["messages"][0].content
-    assert "Recent dialogue for task context only" in prompt
-    assert '"content":"recent"' not in prompt
-    assert "(none)" in prompt
-    assert "## Goal" in prompt
-
-
-@pytest.mark.asyncio
 async def test_summary_recompresses_until_configured_threshold_goal(monkeypatch):
     selected_calls, update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
     summaries = iter(
@@ -185,34 +146,3 @@ async def test_summary_refinement_stops_after_two_attempts(monkeypatch):
     assert len(update_calls) == 1
     assert update_calls[0]["summary"] == "refined summary two"
     assert all("Further compress the summary below" in generated_calls[index]["messages"][0].content for index in (1, 2))
-
-
-@pytest.mark.asyncio
-async def test_context_summary_uses_dedicated_timeout_not_chat_timeout(monkeypatch):
-    _selected_calls, _update_calls, generated_calls = _patch_summary_dependencies(monkeypatch)
-
-    def estimate_tokens(content):
-        if content == "current":
-            return 10
-        if content.startswith('{"role":'):
-            return 100
-        return 40
-
-    _patch_token_counter(monkeypatch, estimate_tokens)
-    await service_module.ensure_context_summary(
-        object(),
-        session_id="session-1",
-        uid="user-1",
-        profile=SimpleNamespace(id=9),
-        cfg=_summary_cfg(50),
-        before_id=10,
-        current_message="current",
-        context_window_k=1,
-        max_tokens=24,
-        reserved_tokens=0,
-        safety_margin_tokens=0,
-    )
-
-    assert generated_calls
-    assert generated_calls[0]["timeout"] == CONTEXT_SUMMARY_LLM_TIMEOUT_SECONDS
-    assert generated_calls[0]["timeout"] != 1

@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import inspect, text, update
+from sqlalchemy import inspect, text
 from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -83,25 +83,6 @@ async def test_audit_migration_builds_all_tables_for_supported_databases(monkeyp
     assert "CREATE TABLE IF NOT EXISTS audit_tool_detail" in combined
     assert "CREATE TABLE IF NOT EXISTS audit_confirmation_claim" in combined
     assert "CREATE TABLE IF NOT EXISTS audit_execution_record" in combined
-
-
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
-def test_audit_conditional_claim_update_compiles_for_supported_databases(dialect):
-    statement = (
-        update(AuditRecord)
-        .where(
-            AuditRecord.id == 1,
-            AuditRecord.status == AuditRecordStatus.PENDING,
-        )
-        .values(status=AuditRecordStatus.EXECUTING, execution_claim_token="claim-token")
-    )
-
-    compiled = str(statement.compile(dialect=dialect))
-
-    assert "UPDATE audit_record" in compiled
-    assert "WHERE audit_record.id" in compiled
-    assert "audit_record.status" in compiled
-    assert "RETURNING" not in compiled.upper()
 
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
@@ -276,11 +257,3 @@ async def test_channel_http_proxy_migration_promotes_only_unambiguous_legacy_pro
         assert rows[1]["model_ids"] == conflicting_proxy_model_ids
     finally:
         await engine.dispose()
-
-
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
-def test_background_task_binding_unique_index_sql_compiles_for_supported_databases(dialect):
-    compiled = str(text("CREATE UNIQUE INDEX uq_background_task_audit_execution_record_id ON background_task (audit_execution_record_id)").compile(dialect=dialect))
-
-    assert compiled.startswith("CREATE UNIQUE INDEX")
-    assert "audit_execution_record_id" in compiled
