@@ -1,6 +1,8 @@
+import asyncio
 import importlib
 import re
 import sys
+import threading
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
@@ -655,3 +657,33 @@ async def test_hybrid_query_knowledge_base_preserves_legacy_dense_error(monkeypa
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == t(ERR_KB_DENSE_RETRIEVAL_FAILED)
+
+
+@pytest.mark.asyncio
+async def test_async_get_or_create_collection_waits_for_sync_thread_after_cancellation(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    sentinel = object()
+
+    def blocking_get_or_create_collection(*_args, **_kwargs):
+        started.set()
+        release.wait()
+        finished.set()
+        return sentinel
+
+    monkeypatch.setattr(chroma_module, "get_or_create_collection", blocking_get_or_create_collection)
+
+    task = asyncio.create_task(chroma_module.async_get_or_create_collection("memory-collection"))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+    finally:
+        release.set()

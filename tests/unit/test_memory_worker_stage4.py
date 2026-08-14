@@ -66,6 +66,7 @@ class _ImportSafePersistentClient:
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.memory_jobs import handlers as memory_handlers
+    from app.core.memory_jobs import vector_cleanup as memory_vector_cleanup
 
 
 MEMORY_TABLES = [
@@ -193,6 +194,8 @@ def vector_backend(monkeypatch: pytest.MonkeyPatch) -> _FakeVectorBackend:
     monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", backend.upsert)
     monkeypatch.setattr(memory_handlers, "async_validate_collection", backend.validate)
     monkeypatch.setattr(memory_handlers, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_vector_cleanup, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_vector_cleanup, "async_delete_collection_items", backend.delete)
     return backend
 
 
@@ -360,8 +363,20 @@ async def _run_job(
     job_id: int,
     status: LongTermMemoryMutationStatus,
 ) -> Any:
-    assert await consumer.run_once() == 1
-    return await _wait_for_job(session_factory, uid=uid, job_id=job_id, status=status)
+    deadline = asyncio.get_running_loop().time() + WAIT_TIMEOUT_SECONDS
+    while True:
+        async with session_factory() as db:
+            job = await memory_job_crud.get_by_id(db, uid=uid, job_id=job_id)
+        if job is not None and job.status == status:
+            return job
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise AssertionError(f"job {job_id} did not reach {status.value}")
+        await consumer.run_once()
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise AssertionError(f"job {job_id} did not reach {status.value}")
+        await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
 
 async def _make_direct_job(
@@ -625,6 +640,7 @@ async def test_default_stage4_executor_operations_and_factory_are_shared(
             LongTermMemoryMutationOperation.UPDATE,
             LongTermMemoryMutationOperation.CREATE_WITH_EVICTION,
             LongTermMemoryMutationOperation.DELETE_CLEANUP,
+            LongTermMemoryMutationOperation.VECTOR_CLEANUP,
             LongTermMemoryMutationOperation.REINDEX,
             LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
             LongTermMemoryMutationOperation.ORGANIZE,
@@ -985,6 +1001,71 @@ async def test_update_keeps_old_ready_version_during_embedding_then_publishes_v2
         assert finished.result["version"] == 2
     finally:
         release.set()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_update_persists_superseded_vector_cleanup_when_immediate_delete_fails(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "update-vector-cleanup-compensation-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid, version=1)
+    old_vector_item_id = build_memory_vector_item_id(memory_id, 1)
+    consumer = _consumer(memory_session_factory)
+    try:
+        result = await _update_service_memory(
+            memory_session_factory,
+            uid=uid,
+            dedupe_key="update-vector-cleanup-compensation",
+            memory_id=memory_id,
+            expected_version=1,
+            content="updated content",
+            memory_key="updated-key",
+        )
+        vector_backend.delete_error = RuntimeError("delete failed")
+        finished = await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=result.job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+
+        assert finished.result is not None
+        cleanup_job_id = finished.result["superseded_vector_cleanup_job_id"]
+        assert isinstance(cleanup_job_id, int) and cleanup_job_id > 0
+        new_vector_item_id = finished.result["vector_item_id"]
+        collection = vector_backend.collections["memory-collection-v1"]
+        assert old_vector_item_id in collection["items"]
+        assert new_vector_item_id in collection["items"]
+
+        cleanup_job = await _get_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=cleanup_job_id,
+        )
+        assert cleanup_job is not None
+        assert cleanup_job.parent_job_id == result.job.id
+        assert cleanup_job.operation == LongTermMemoryMutationOperation.VECTOR_CLEANUP
+        assert cleanup_job.status == LongTermMemoryMutationStatus.PENDING
+        assert cleanup_job.payload["reason"] == "superseded"
+        assert cleanup_job.payload["collection_name"] == "memory-collection-v1"
+        assert cleanup_job.payload["item_id"] == old_vector_item_id
+
+        vector_backend.delete_error = None
+        await _run_job(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            job_id=cleanup_job_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert old_vector_item_id not in collection["items"]
+        assert new_vector_item_id in collection["items"]
+    finally:
         await consumer.stop()
 
 
@@ -1573,6 +1654,7 @@ async def test_recovered_owner_cannot_delete_reclaimed_owner_vector_item(
         new_result = await memory_handlers._handle_update(new_context)
         assert new_result.finalized
         new_item_id = build_memory_staged_vector_item_id(memory_id, 2, job_id, "new-owner")
+        assert new_item_id == old_item_id
         assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
 
         release_old_upsert.set()
@@ -1582,7 +1664,6 @@ async def test_recovered_owner_cannot_delete_reclaimed_owner_vector_item(
         record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
         assert record is not None
         assert record.vector_item_id == new_item_id
-        assert old_item_id not in vector_backend.collections["memory-collection-v1"]["items"]
         assert new_item_id in vector_backend.collections["memory-collection-v1"]["items"]
     finally:
         release_old_upsert.set()
@@ -2565,4 +2646,113 @@ async def test_create_with_eviction_store_active_or_index_revision_change_during
             assert store.index_revision == 2
     finally:
         release.set()
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_expired_update_recovery_creates_staged_vector_cleanup_job(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "staged-vector-recovery-cleanup-user"
+    await _configure_store(memory_session_factory, uid=uid)
+    vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
+    memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid, version=1)
+    old_item_id = build_memory_vector_item_id(memory_id, 1)
+    submission = await _update_service_memory(
+        memory_session_factory,
+        uid=uid,
+        dedupe_key="staged-vector-recovery-cleanup",
+        memory_id=memory_id,
+        expected_version=1,
+        content="staged recovery content",
+        memory_key="staged-recovery-key",
+        max_attempts=1,
+    )
+    assert submission.job.id is not None
+    parent_job_id = submission.job.id
+
+    async with memory_session_factory() as db:
+        crashed_claim = await memory_job_crud.try_claim(
+            db,
+            uid=uid,
+            job_id=parent_job_id,
+            owner="crashed-owner",
+            lease_seconds=1,
+            enabled_operations=[LongTermMemoryMutationOperation.UPDATE],
+        )
+    assert crashed_claim is not None
+    staged_item_id = build_memory_staged_vector_item_id(memory_id, 2, parent_job_id, "crashed-owner")
+    context = MemoryJobExecutionContext(
+        job=crashed_claim,
+        worker_id="crashed-owner",
+        session_factory=memory_session_factory,
+    )
+    await memory_vector_cleanup.persist_staged_vector_reference(
+        context,
+        collection_name="memory-collection-v1",
+        item_id=staged_item_id,
+    )
+    vector_backend.add_item(
+        "memory-collection-v1",
+        staged_item_id,
+        document="staged recovery content",
+        metadata={
+            "memory_id": memory_id,
+            "uid": uid,
+            "memory_key": "staged-recovery-key",
+            "memory_type": LongTermMemoryType.FACT.value,
+            "version": 2,
+            "source": LongTermMemorySource.USER_API.value,
+            "embedding_revision": 1,
+        },
+    )
+    assert staged_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+
+    async with memory_session_factory() as db:
+        now = await get_database_time(db)
+        await db.execute(
+            update(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.uid == uid,
+                LongTermMemoryMutationJob.id == parent_job_id,
+            )
+            .values(lock_until=now - timedelta(seconds=1))
+        )
+        await db.commit()
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        await consumer._recover_expired()
+        assert await consumer.run_once() == 1
+        await _wait_for_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=parent_job_id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+
+        async with memory_session_factory() as db:
+            cleanup_jobs = await memory_job_crud.list_children_by_parent_job_id(
+                db,
+                uid=uid,
+                parent_job_id=parent_job_id,
+            )
+        assert len(cleanup_jobs) == 1
+        cleanup_job = cleanup_jobs[0]
+        assert cleanup_job.operation == LongTermMemoryMutationOperation.VECTOR_CLEANUP
+        assert cleanup_job.payload["reason"] == "staged"
+        assert cleanup_job.payload["item_id"] == staged_item_id
+        assert cleanup_job.payload["collection_name"] == "memory-collection-v1"
+        assert cleanup_job.id is not None
+
+        await _wait_for_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=cleanup_job.id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert staged_item_id not in vector_backend.collections["memory-collection-v1"]["items"]
+        assert old_item_id in vector_backend.collections["memory-collection-v1"]["items"]
+    finally:
         await consumer.stop()

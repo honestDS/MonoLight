@@ -53,8 +53,7 @@ def build_memory_staged_vector_item_id(memory_id: int, version: int, job_id: int
     if not isinstance(owner, str) or not owner:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="owner"))
     stable_id = build_memory_vector_item_id(memory_id, version)
-    owner_digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
-    return f"{stable_id}_job{job_id}_o{owner_digest}"
+    return f"{stable_id}_job{job_id}"
 
 
 def build_memory_active_mutation_key(

@@ -183,6 +183,7 @@ app/core/memory_jobs/
 ├── maintenance_lifecycle.py # 维护作业生命周期组件
 ├── maintenance_state.py    # 维护作业状态数据
 ├── maintenance_vector.py   # 维护作业向量组件
+├── vector_cleanup.py       # 记忆向量清理作业组件
 ├── migration_handler.py    # 嵌入模型迁移处理器
 └── reindex_handler.py      # 向量索引处理器
 ```

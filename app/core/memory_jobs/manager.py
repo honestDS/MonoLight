@@ -1442,7 +1442,20 @@ class MemoryJobManager:
             LongTermMemoryMutationOperation.REINDEX,
             LongTermMemoryMutationOperation.EMBEDDING_MIGRATION,
         }:
-            return await memory_job_crud.request_cancel(db, uid=uid, job_id=job_id, commit=commit)
+            cancellation = await memory_job_crud.request_cancel(db, uid=uid, job_id=job_id, commit=False)
+            if cancellation.changed and cancellation.job is not None and cancellation.job.status == LongTermMemoryMutationStatus.CANCELLED:
+                from app.core.memory_jobs.vector_cleanup import finalize_staged_vector_terminal_state
+
+                await finalize_staged_vector_terminal_state(
+                    db,
+                    job=cancellation.job,
+                    status=LongTermMemoryMutationStatus.CANCELLED,
+                )
+            if commit:
+                await db.commit()
+            else:
+                await db.flush()
+            return cancellation
 
         store = await memory_store_crud.lock_for_mutation(db, uid=uid, commit=False)
         if store is None:

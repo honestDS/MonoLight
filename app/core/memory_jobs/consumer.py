@@ -28,6 +28,7 @@ from app.core.memory_jobs.executor import (
 )
 from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state
 from app.core.memory_jobs.manager import best_effort_submit_auto_organization_after_publication
+from app.core.memory_jobs.vector_cleanup import finalize_staged_vector_terminal_state
 from app.models.memory import (
     LongTermMemoryMutationJob,
     LongTermMemoryMutationOperation,
@@ -211,6 +212,11 @@ class MemoryJobConsumer:
                         job=terminal.job,
                         status=terminal.status,
                         error=terminal.error,
+                    )
+                    await finalize_staged_vector_terminal_state(
+                        db,
+                        job=terminal.job,
+                        status=terminal.status,
                     )
                 await db.commit()
         except asyncio.CancelledError:
@@ -428,6 +434,11 @@ class MemoryJobConsumer:
                     status=LongTermMemoryMutationStatus.FAILED,
                     error=error,
                 )
+                await finalize_staged_vector_terminal_state(
+                    db,
+                    job=job,
+                    status=LongTermMemoryMutationStatus.FAILED,
+                )
             await db.commit()
             return changed
 
@@ -446,6 +457,11 @@ class MemoryJobConsumer:
                     job=job,
                     status=LongTermMemoryMutationStatus.CANCELLED,
                     error=t("ERR_MEMORY_JOB_CANCELLATION_REQUESTED"),
+                )
+                await finalize_staged_vector_terminal_state(
+                    db,
+                    job=job,
+                    status=LongTermMemoryMutationStatus.CANCELLED,
                 )
             await db.commit()
             return changed
@@ -505,6 +521,11 @@ class MemoryJobConsumer:
                         job=job,
                         status=current.status,
                         error=current.error,
+                    )
+                    await finalize_staged_vector_terminal_state(
+                        db,
+                        job=job,
+                        status=current.status,
                     )
             await db.commit()
 

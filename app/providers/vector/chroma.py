@@ -23,6 +23,23 @@ chroma_client = chromadb.PersistentClient(
 )
 
 
+async def _to_thread_and_wait(func, /, *args, **kwargs):
+    thread_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(thread_task)
+    except asyncio.CancelledError:
+        while True:
+            try:
+                await asyncio.shield(thread_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+            else:
+                break
+        raise
+
+
 @dataclass(frozen=True, slots=True)
 class CollectionValidationResult:
     exists: bool
@@ -124,19 +141,19 @@ def _upsert_collection_items_sync(
 
 
 async def async_create_collection(collection_name: str, metadata: dict[str, Any] | None = None, distance: str | None = None):
-    return await asyncio.to_thread(create_collection, collection_name, metadata, distance)
+    return await _to_thread_and_wait(create_collection, collection_name, metadata, distance)
 
 
 async def async_get_or_create_collection(collection_name: str, metadata: dict[str, Any] | None = None, distance: str | None = None):
-    return await asyncio.to_thread(get_or_create_collection, collection_name, metadata, distance)
+    return await _to_thread_and_wait(get_or_create_collection, collection_name, metadata, distance)
 
 
 async def async_get_collection(collection_name: str):
-    return await asyncio.to_thread(get_collection, collection_name)
+    return await _to_thread_and_wait(get_collection, collection_name)
 
 
 async def async_delete_collection(collection_name: str) -> None:
-    await asyncio.to_thread(delete_collection, collection_name)
+    await _to_thread_and_wait(delete_collection, collection_name)
 
 
 async def async_upsert_collection_items(
@@ -150,7 +167,7 @@ async def async_upsert_collection_items(
     _validate_item_lengths(item_ids, documents, embeddings, metadatas)
     if batch_size <= 0:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="batch_size"))
-    return await asyncio.to_thread(
+    return await _to_thread_and_wait(
         _upsert_collection_items_sync,
         collection_name,
         item_ids,
@@ -179,7 +196,7 @@ async def async_get_collection_items(
     limit: int | None = None,
     include: list[str] | None = None,
 ):
-    return await asyncio.to_thread(_get_collection_items_page_sync, collection_name, offset, limit, include)
+    return await _to_thread_and_wait(_get_collection_items_page_sync, collection_name, offset, limit, include)
 
 
 async def async_delete_collection_items(collection_name: str, ids: Sequence[str], batch_size: int = 100) -> int:
@@ -195,7 +212,7 @@ async def async_delete_collection_items(collection_name: str, ids: Sequence[str]
             collection.delete(ids=item_ids[start : start + batch_size])
         return len(item_ids)
 
-    return await asyncio.to_thread(delete_items)
+    return await _to_thread_and_wait(delete_items)
 
 
 def _validate_collection_sync(
@@ -263,7 +280,7 @@ async def async_validate_collection(
     expected_dimension: int | None = None,
     sample_size: int = 1,
 ) -> CollectionValidationResult:
-    return await asyncio.to_thread(
+    return await _to_thread_and_wait(
         _validate_collection_sync,
         collection_name,
         expected_count,
@@ -289,7 +306,7 @@ def _delete_orphan_items_sync(collection_name: str, valid_item_ids: set[str], ba
 
 
 async def async_delete_orphan_items(collection_name: str, valid_item_ids: set[str], batch_size: int = 100) -> int:
-    return await asyncio.to_thread(_delete_orphan_items_sync, collection_name, set(valid_item_ids), batch_size)
+    return await _to_thread_and_wait(_delete_orphan_items_sync, collection_name, set(valid_item_ids), batch_size)
 
 
 create_collection_async = async_create_collection
