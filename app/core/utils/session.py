@@ -9,7 +9,7 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.profile_selection import resolve_profile_for_session
 from app.core.prompts import SESSION_TITLE_PROMPT
 from app.core.session_source import is_web_session_source
-from app.core.utils.dispatcher.helpers import format_exception_message
+from app.core.utils.dispatcher.helpers import format_exception_message, resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, resolve_model_protocol
@@ -47,6 +47,8 @@ async def generate_session_title(
     raise_on_error: bool = False,
     http_proxy: str | None = None,
     custom_headers: dict[str, str] | None = None,
+    temperature: float = 0.7,
+    top_p: float | None = None,
 ) -> str | None:
     """
     异步生成会话标题并保存到数据库
@@ -69,7 +71,8 @@ async def generate_session_title(
             base_url=base_url,
             model_id=model_id,
             messages=messages,
-            temperature=0.3,  # 较低随机性以获得更准确的标题
+            temperature=temperature,
+            top_p=top_p,
             max_tokens=max_tokens,
             protocol=protocol,
             http_proxy=http_proxy,
@@ -142,6 +145,7 @@ async def generate_session_title_for_selected_profile(
         while selection:
             channel, model_entry, rule = selection
             try:
+                chat_params = resolve_chat_params(model_entry, chat_channel)
                 return await generate_session_title(
                     uid=uid,
                     session_id=session_id,
@@ -151,6 +155,8 @@ async def generate_session_title_for_selected_profile(
                     model_id=model_entry["model_id"],
                     protocol=resolve_model_protocol(model_entry),
                     max_tokens=model_entry.get("max_tokens") or 200,
+                    temperature=chat_params["temperature"],
+                    top_p=chat_params["top_p"],
                     raise_on_error=True,
                     http_proxy=get_channel_http_proxy(channel),
                     custom_headers=get_model_custom_headers(model_entry),

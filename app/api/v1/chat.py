@@ -61,6 +61,7 @@ from app.core.session_cleanup import delete_session_data
 from app.core.session_notifier import session_notifier
 from app.core.session_reply_queue.manager import build_input_queued_event, is_submission_queued, session_reply_queue_manager
 from app.core.session_source import default_show_tool_calls_for_source
+from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.session import ensure_web_session_writable, generate_session_title
@@ -496,6 +497,7 @@ async def generate_title(
         channel, model_entry, _rule = selection
         try:
             await db.commit()
+            chat_params = resolve_chat_params(model_entry, chat_channel)
             title = await generate_session_title(
                 uid=uid,
                 session_id=request.session_id,
@@ -505,6 +507,8 @@ async def generate_title(
                 model_id=model_entry["model_id"],
                 protocol=resolve_model_protocol(model_entry),
                 max_tokens=model_entry.get("max_tokens") or 200,
+                temperature=chat_params["temperature"],
+                top_p=chat_params["top_p"],
                 raise_on_error=True,
                 http_proxy=get_channel_http_proxy(channel),
                 custom_headers=get_model_custom_headers(model_entry),
