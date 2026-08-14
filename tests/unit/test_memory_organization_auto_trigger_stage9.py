@@ -23,6 +23,7 @@ from app.core.memory.normalization import build_memory_content_hash
 from app.core.memory.organization import (
     build_organization_dedupe_key,
     restore_organization_execution_payload,
+    update_organization_settings,
 )
 from app.core.memory_jobs.consumer import MemoryJobConsumer
 from app.core.memory_jobs.executor import (
@@ -297,6 +298,51 @@ async def test_auto_organization_submits_complete_snapshot_and_updates_store(
     assert persisted_store.organization_last_job_id == submission.job.id
     assert persisted_store.organization_last_run_at is not None
     assert persisted_store.organization_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_count", [45, 50])
+async def test_enabling_auto_organization_submits_snapshot_and_updates_store(
+    memory_database: async_sessionmaker[AsyncSession],
+    record_count: int,
+) -> None:
+    uid = f"auto-settings-threshold-{record_count}"
+    store, _ = await _setup_auto_user(
+        memory_database,
+        uid=uid,
+        record_count=record_count,
+        auto_organize_enabled=False,
+    )
+
+    async with memory_database() as db:
+        settings = await update_organization_settings(
+            db,
+            uid=uid,
+            auto_organize_enabled=True,
+            organization_channel_id=store.organization_channel_id,
+            organization_model_id=store.organization_model_id,
+            commit=False,
+        )
+        jobs = await memory_job_crud.list_by_uid(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.ORGANIZE,
+        )
+        assert len(jobs) == 1
+        job = jobs[0]
+        assert job.payload["trigger"] == "auto"
+        assert job.payload["snapshot"]["count"] == record_count
+        assert settings["last_job_id"] == job.id
+        await db.commit()
+
+    assert (
+        await _count_jobs(
+            memory_database,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.ORGANIZE,
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

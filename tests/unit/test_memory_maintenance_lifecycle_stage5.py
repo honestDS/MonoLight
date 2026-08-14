@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tests.unit.memory_stage5_test_support import claim_job, configure_store
+from tests.unit.memory_stage5_test_support import Stage5VectorBackend, claim_job, configure_store
 
 
 class _ImportSafePersistentClient:
@@ -233,6 +233,7 @@ async def test_corrupt_reindex_payload_does_not_rollback_generic_terminal_state(
 @pytest.mark.asyncio
 async def test_failed_reindex_finalization_marks_progress_and_store_failed(
     memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
 ) -> None:
     uid = "stage5-lifecycle-failed-reindex"
     source_collection = "stage5-failed-source"
@@ -254,6 +255,7 @@ async def test_failed_reindex_finalization_marks_progress_and_store_failed(
         target_collection=target_collection,
         index_revision=index_revision,
     )
+    await vector_backend.get_or_create_collection(target_collection)
     async with memory_session_factory() as db:
         started = await memory_maintenance_store_crud.start_reindex(
             db,
@@ -293,6 +295,8 @@ async def test_failed_reindex_finalization_marks_progress_and_store_failed(
     assert store.active_embedding_revision == 1
     assert store.index_revision == index_revision
     assert store.active_collection_name != target_collection
+    assert target_collection not in vector_backend.collections
+    assert target_collection in vector_backend.deleted_collections
 
 
 @pytest.mark.asyncio
@@ -425,6 +429,7 @@ async def test_switching_migration_rejects_cancellation(
 @pytest.mark.asyncio
 async def test_expired_max_attempt_migration_is_failed_and_not_switched(
     memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
 ) -> None:
     uid = "stage5-lifecycle-expired-migration"
     source_collection = "stage5-expired-source"
@@ -454,6 +459,7 @@ async def test_expired_max_attempt_migration_is_failed_and_not_switched(
         revision_status=LongTermMemoryEmbeddingRevisionStatus.RUNNING,
     )
     assert job.id is not None
+    await vector_backend.get_or_create_collection(target_collection)
     claimed = await claim_job(
         memory_session_factory,
         uid=uid,
@@ -502,6 +508,8 @@ async def test_expired_max_attempt_migration_is_failed_and_not_switched(
     assert store.active_embedding_revision == source["revision"]
     assert store.active_collection_name == source_collection
     assert store.active_collection_name != target_collection
+    assert target_collection not in vector_backend.collections
+    assert target_collection in vector_backend.deleted_collections
     assert revision is not None
     assert revision.status == LongTermMemoryEmbeddingRevisionStatus.FAILED
 
@@ -509,6 +517,7 @@ async def test_expired_max_attempt_migration_is_failed_and_not_switched(
 @pytest.mark.asyncio
 async def test_expired_max_attempt_reindex_after_switch_fails_cleanup_only(
     memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
 ) -> None:
     uid = "stage5-lifecycle-expired-switched-reindex"
     source_collection = "stage5-expired-switched-reindex-source"
@@ -531,6 +540,7 @@ async def test_expired_max_attempt_reindex_after_switch_fails_cleanup_only(
         target_collection=target_collection,
         index_revision=source_index_revision,
     )
+    await vector_backend.get_or_create_collection(target_collection)
     async with memory_session_factory() as db:
         started = await memory_maintenance_store_crud.start_reindex(
             db,
@@ -599,11 +609,14 @@ async def test_expired_max_attempt_reindex_after_switch_fails_cleanup_only(
     assert store.old_collection_cleanup_error is not None
     assert store.old_collection_cleanup_error == failed_job.error
     assert store.old_collection_cleanup_at is None
+    assert target_collection in vector_backend.collections
+    assert target_collection not in vector_backend.deleted_collections
 
 
 @pytest.mark.asyncio
 async def test_expired_max_attempt_migration_after_switch_fails_cleanup_only(
     memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: Stage5VectorBackend,
 ) -> None:
     uid = "stage5-lifecycle-expired-switched-migration"
     source_collection = "stage5-expired-switched-migration-source"
@@ -633,6 +646,7 @@ async def test_expired_max_attempt_migration_after_switch_fails_cleanup_only(
         revision_status=LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED,
     )
     assert job.id is not None
+    await vector_backend.get_or_create_collection(target_collection)
     claimed = await claim_job(
         memory_session_factory,
         uid=uid,
@@ -711,3 +725,5 @@ async def test_expired_max_attempt_migration_after_switch_fails_cleanup_only(
     assert store.old_collection_cleanup_at is None
     assert revision is not None
     assert revision.status == LongTermMemoryEmbeddingRevisionStatus.SUCCEEDED
+    assert target_collection in vector_backend.collections
+    assert target_collection not in vector_backend.deleted_collections
