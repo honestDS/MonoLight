@@ -326,6 +326,116 @@ async def test_memory_reindex_rejects_corrupted_nonfirst_target_embedding(
 
 
 @pytest.mark.asyncio
+async def test_memory_reindex_accepts_small_target_embedding_difference(
+    memory_session_factory,
+    vector_backend: Stage5VectorBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uid = "stage5-small-vector-difference-user"
+    old_collection = "stage5-small-vector-difference-old"
+    channel_id = 4
+    model_id = "stage5-small-vector-difference-model"
+    dimensions = 3
+    signature = "stage5-small-vector-difference-signature"
+    embedding_revision = 5
+    index_revision = 8
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=channel_id,
+        model_id=model_id,
+        dimensions=dimensions,
+        signature=signature,
+        active_revision=embedding_revision,
+        index_revision=index_revision,
+        collection_name=old_collection,
+    )
+    await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="first",
+        version=2,
+    )
+    second_record = await create_recallable_record(
+        memory_session_factory,
+        uid=uid,
+        memory_key="second",
+        version=4,
+    )
+    vector_backend.runtime_configs[(channel_id, model_id)] = runtime_config(
+        channel_id=channel_id,
+        model_id=model_id,
+        dimensions=dimensions,
+    )
+    await vector_backend.get_or_create_collection(old_collection, metadata={"legacy": True})
+
+    async with memory_session_factory() as db:
+        submission = await submit_memory_reindex(
+            db,
+            uid=uid,
+            dedupe_key="stage5-small-vector-difference-dedupe",
+        )
+    assert submission.job.id is not None
+    target_collection = submission.job.payload["target"]["collection"]
+
+    claimed = await claim_job(
+        memory_session_factory,
+        uid=uid,
+        operation=LongTermMemoryMutationOperation.REINDEX,
+        job_id=submission.job.id,
+    )
+    assert claimed is not None
+
+    original_reconcile_collection = reindex_handler.reconcile_collection
+    perturbed = False
+
+    async def perturb_target_embedding(
+        context: Any,
+        *,
+        records: list[Any],
+        config: dict[str, Any],
+        purpose: str,
+    ) -> Any:
+        nonlocal perturbed
+        assert len(records) >= 2
+        target = vector_backend.collections.get(config["collection"])
+        assert target is not None
+        target_item = target["items"].get(second_record.vector_item_id)
+        assert target_item is not None
+        target_item["embedding"][0] += 1e-7
+        perturbed = True
+        return await original_reconcile_collection(
+            context,
+            records=records,
+            config=config,
+            purpose=purpose,
+        )
+
+    monkeypatch.setattr(reindex_handler, "reconcile_collection", perturb_target_embedding)
+    executor = MemoryJobExecutor(
+        {LongTermMemoryMutationOperation.REINDEX: reindex_handler.handle_reindex},
+        session_factory=memory_session_factory,
+    )
+    result = await executor.execute_claimed(claimed, "stage5-worker")
+
+    assert perturbed
+    assert result.finalized
+    assert result.result["finalized"] is True
+    async with memory_session_factory() as db:
+        finished_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=submission.job.id)
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+    assert finished_job is not None
+    assert finished_job.status == LongTermMemoryMutationStatus.SUCCEEDED
+    assert store is not None
+    assert store.active_collection_name == target_collection
+    assert store.index_revision == index_revision + 1
+    assert store.index_status == LongTermMemoryIndexStatus.READY
+    assert store.old_collection_name == old_collection
+    assert store.old_collection_cleanup_status == LongTermMemoryOldCollectionCleanupStatus.SUCCEEDED
+    assert old_collection not in vector_backend.collections
+
+
+@pytest.mark.asyncio
 async def test_memory_reindex_does_not_persist_progress_after_lease_loss(
     memory_session_factory,
     vector_backend: Stage5VectorBackend,

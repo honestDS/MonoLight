@@ -21,6 +21,7 @@ from app.core.log import get_logger
 from app.core.memory_jobs.executor import (
     MemoryJobCancelledError,
     MemoryJobDeterministicError,
+    MemoryJobExecutionError,
     MemoryJobExecutor,
     MemoryJobLeaseLostError,
     MemoryJobRetryableError,
@@ -554,12 +555,18 @@ class MemoryJobConsumer:
         exc: BaseException,
         message: str,
     ) -> None:
-        logger.bind(
-            uid=job.uid,
-            job_id=job.id,
-            worker_id=worker_id,
-            exception_type=type(exc).__name__,
-        ).warning(message)
+        log_fields = {
+            "uid": job.uid,
+            "job_id": job.id,
+            "worker_id": worker_id,
+            "exception_type": type(exc).__name__,
+            "operation": job.operation,
+            "attempt_count": job.attempt_count,
+            "max_attempts": job.max_attempts,
+        }
+        if isinstance(exc, MemoryJobExecutionError):
+            log_fields["safe_message"] = exc.safe_message
+        logger.bind(**log_fields).warning(message)
 
     @staticmethod
     def _log_database_exception(
