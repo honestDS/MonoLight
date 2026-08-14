@@ -1540,6 +1540,10 @@ async def update_organization_settings(
         )
         if updated_store is None:
             raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+        if auto_organize_enabled and active_count >= updated_store.organize_trigger_records:
+            from app.core.memory_jobs.manager import memory_job_manager
+
+            await memory_job_manager.submit_auto_organization(db, uid=normalized_uid, commit=False)
         if normalized_commit:
             await db.commit()
         return await get_organization_settings(db, uid=normalized_uid, snapshot_count=active_count)

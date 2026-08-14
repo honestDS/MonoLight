@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_MEMORY_OLD_COLLECTION_CLEANUP_FAILED
@@ -106,6 +108,31 @@ async def cleanup_old_collection(
     return MemoryJobExecutionResult(result=result, finalized=True)
 
 
+async def _delete_target_collection(target_collection: str) -> None:
+    validation = await async_validate_collection(target_collection)
+    if getattr(validation, "exists", False):
+        await async_delete_collection(target_collection)
+
+
+async def _mark_target_collection_cleanup_failure(
+    db: AsyncSession,
+    *,
+    job: LongTermMemoryMutationJob,
+    operation: LongTermMemoryMutationOperation,
+    payload: dict[str, Any],
+) -> None:
+    await memory_maintenance_store_crud.mark_target_collection_cleanup_failed(
+        db,
+        uid=job.uid,
+        job_id=job.id,
+        operation=operation,
+        expected_active_collection_name=payload["from"]["collection"],
+        target_collection_name=payload["target"]["collection"],
+        error=t(ERR_MEMORY_OLD_COLLECTION_CLEANUP_FAILED),
+        commit=False,
+    )
+
+
 async def delete_cancelled_target_collection(
     context: MemoryJobExecutionContext,
     *,
@@ -120,9 +147,7 @@ async def delete_cancelled_target_collection(
     else:
         return
     try:
-        validation = await async_validate_collection(target_collection)
-        if getattr(validation, "exists", False):
-            await async_delete_collection(target_collection)
+        await _delete_target_collection(target_collection)
     except Exception:
         async with context.session_factory() as db:
             await mark_cancelled_target_cleanup_failure(db, job=context.job)
@@ -153,15 +178,11 @@ async def mark_cancelled_target_cleanup_failure(
             return
     else:
         return
-    await memory_maintenance_store_crud.mark_target_collection_cleanup_failed(
+    await _mark_target_collection_cleanup_failure(
         db,
-        uid=job.uid,
-        job_id=job.id,
+        job=job,
         operation=operation,
-        expected_active_collection_name=payload["from"]["collection"],
-        target_collection_name=payload["target"]["collection"],
-        error=t(ERR_MEMORY_OLD_COLLECTION_CLEANUP_FAILED),
-        commit=False,
+        payload=payload,
     )
 
 
@@ -273,6 +294,15 @@ async def finalize_maintenance_terminal_state(
             return
         if switched_matches:
             return
+        try:
+            await _delete_target_collection(payload["target"]["collection"])
+        except Exception:
+            await _mark_target_collection_cleanup_failure(
+                db,
+                job=job,
+                operation=operation,
+                payload=payload,
+            )
         if store.index_status == LongTermMemoryIndexStatus.REINDEXING:
             if status == LongTermMemoryMutationStatus.CANCELLED:
                 next_index_status = LongTermMemoryIndexStatus.READY
@@ -308,6 +338,17 @@ async def finalize_maintenance_terminal_state(
     )
     if revision is None or revision.job_id != job_id:
         return
+    if store.active_collection_name != payload["from"]["collection"]:
+        return
+    try:
+        await _delete_target_collection(payload["target"]["collection"])
+    except Exception:
+        await _mark_target_collection_cleanup_failure(
+            db,
+            job=job,
+            operation=operation,
+            payload=payload,
+        )
     if status == LongTermMemoryMutationStatus.CANCELLED:
         next_migration_status = LongTermMemoryMigrationStatus.CANCELLED
         next_revision_status = LongTermMemoryEmbeddingRevisionStatus.CANCELLED
