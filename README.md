@@ -152,6 +152,7 @@ PYTHONPATH=. pytest tests/
 
 MonoLight 的诞生离不开开源社区的滋养。在开发过程中，以下项目为我们提供了重要的设计灵感与思路参考：
 
+- **[LinuxDo](https://linux.do)** —— 新的理想型社区。作者本人从该社区获取了大量 AI 相关的知识与灵感。
 - **[New API](https://github.com/QuantumNous/new-api)** —— 新一代大模型网关与 AI 资产管理系统。MonoLight 的**模型渠道路由与多模型调度**设计深受其启发。
 - **[AstrBot](https://github.com/AstrBotDevs/AstrBot)** —— 开源一体化 Agentic 聊天机器人平台。MonoLight 的**知识库工具化与 IM 平台接入**思路借鉴了该项目的优秀实践。
 

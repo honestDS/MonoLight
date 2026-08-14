@@ -84,6 +84,7 @@ class _ImportSafePersistentClient:
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.memory_jobs import handlers as memory_handlers
+    from app.core.memory_jobs import vector_cleanup as memory_vector_cleanup
 
 
 MEMORY_TABLES = [
@@ -105,7 +106,8 @@ COLLECTION_NAME = "organization-merge-collection"
 
 def _staged_vector_id_prefix(memory_id: int, version: int, job_id: int) -> str:
     staged_id = build_memory_staged_vector_item_id(memory_id, version, job_id, "test-owner")
-    return staged_id.rsplit("_o", 1)[0] + "_o"
+    stable_id, _ = staged_id.rsplit("_job", 1)
+    return f"{stable_id}_job"
 
 
 class _FakeVectorBackend:
@@ -216,6 +218,8 @@ def vector_backend(monkeypatch: pytest.MonkeyPatch) -> _FakeVectorBackend:
     monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", backend.upsert)
     monkeypatch.setattr(memory_handlers, "async_validate_collection", backend.validate)
     monkeypatch.setattr(memory_handlers, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_vector_cleanup, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_vector_cleanup, "async_delete_collection_items", backend.delete)
     return backend
 
 
@@ -577,8 +581,19 @@ async def _run_child(
     child_id: int,
     status: LongTermMemoryMutationStatus,
 ) -> LongTermMemoryMutationJob:
-    assert await consumer.run_once() == 1
-    return await _wait_for_job(session_factory, uid=uid, job_id=child_id, status=status)
+    deadline = asyncio.get_running_loop().time() + WAIT_TIMEOUT_SECONDS
+    while True:
+        async with session_factory() as db:
+            job = await memory_job_crud.get_by_id(db, uid=uid, job_id=child_id)
+        if job is not None and job.status == status:
+            return job
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise AssertionError(f"job {child_id} did not reach {status.value}")
+        await consumer.run_once()
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining > 0:
+            await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
 
 async def _get_record(
@@ -955,7 +970,7 @@ async def test_organization_merge_update_retries_external_vector_failure_and_pub
         assert finished.result["vector_item_id"] == record.vector_item_id
         assert vector_backend.upsert_calls[-1]["ids"] == [record.vector_item_id]
         if failed_staged_vector_id is not None:
-            assert failed_staged_vector_id != record.vector_item_id
+            assert failed_staged_vector_id == record.vector_item_id
         assert (COLLECTION_NAME, [old_vector_id]) in vector_backend.delete_calls
     finally:
         await consumer.stop()
@@ -1020,6 +1035,17 @@ async def test_organization_merge_update_recovers_expired_lease_and_does_not_pub
         assert [revision.version for revision in await _get_revisions(memory_session_factory, uid=uid, memory_id=1)] == [2, 1]
         assert len(vector_backend.upsert_calls) == 1
         assert len(vector_backend.delete_calls) == 1
+        assert finished.result is not None
+        cleanup_job_id = finished.result["superseded_vector_cleanup_job_id"]
+        assert isinstance(cleanup_job_id, int) and cleanup_job_id > 0
+        assert await consumer.run_once() == 1
+        cleanup_job = await _wait_for_job(
+            memory_session_factory,
+            uid=uid,
+            job_id=cleanup_job_id,
+            status=LongTermMemoryMutationStatus.SUCCEEDED,
+        )
+        assert cleanup_job.operation == LongTermMemoryMutationOperation.VECTOR_CLEANUP
         assert await consumer.run_once() == 0
         persisted = await _get_job(memory_session_factory, uid=uid, job_id=child_id)
         assert persisted is not None
@@ -1210,13 +1236,17 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert primary_revisions[0].source_job_id == child_id
         assert primary_revisions[0].change_evidence is None
 
-        cleanup_jobs: list[LongTermMemoryMutationJob]
+        children: list[LongTermMemoryMutationJob]
         async with memory_session_factory() as db:
-            cleanup_jobs = await memory_job_crud.list_children_by_parent_job_id(
+            children = await memory_job_crud.list_children_by_parent_job_id(
                 db,
                 uid=uid,
                 parent_job_id=child_id,
             )
+        cleanup_jobs = [job for job in children if job.operation == LongTermMemoryMutationOperation.DELETE_CLEANUP]
+        vector_cleanup_jobs = [job for job in children if job.operation == LongTermMemoryMutationOperation.VECTOR_CLEANUP]
+        assert len(vector_cleanup_jobs) == 1
+        vector_cleanup_job = vector_cleanup_jobs[0]
         assert [job.operation for job in cleanup_jobs] == [
             LongTermMemoryMutationOperation.DELETE_CLEANUP,
             LongTermMemoryMutationOperation.DELETE_CLEANUP,
@@ -1270,6 +1300,15 @@ async def test_organization_merge_tombstones_non_primary_sources_and_creates_unc
         assert finished.result["tombstoned_memory_ids"] == [2, 3]
         assert "organized three record content" not in json.dumps(finished.result)
         assert finished.result["parent_job_id"] == parent_id
+        assert vector_cleanup_job.id == finished.result["superseded_vector_cleanup_job_id"]
+        assert vector_cleanup_job.parent_job_id == child_id
+        assert vector_cleanup_job.status == LongTermMemoryMutationStatus.PENDING
+        assert vector_cleanup_job.payload["reason"] == "superseded"
+        assert vector_cleanup_job.payload["item_id"] == build_memory_vector_item_id(1, 1)
+        async with memory_session_factory() as db:
+            cancellation = await MemoryJobManager().request_cancel(db, uid=uid, job_id=vector_cleanup_job.id)
+        assert cancellation.accepted is False
+        assert cancellation.changed is False
 
         parent = await _get_job(memory_session_factory, uid=uid, job_id=parent_id)
         merge = await _get_job(memory_session_factory, uid=uid, job_id=child_id)

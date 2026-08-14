@@ -51,7 +51,9 @@ from app.core.memory.management_helpers import (
 from app.core.memory.normalization import _normalize_uid, _require_positive, normalize_memory_publication_payload
 from app.core.memory.organization import get_organization_settings, update_organization_settings
 from app.core.memory.service import memory_service
+from app.core.memory_jobs.executor import MemoryJobExecutionError
 from app.core.memory_jobs.manager import MemoryJobSubmissionError, memory_job_manager
+from app.core.memory_jobs.vector_cleanup import retry_vector_cleanup_job
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryCapacityStatus,
@@ -353,6 +355,14 @@ async def retry_job(db: AsyncSession, *, uid: str, job_id: int) -> dict[str, Any
                     commit=False,
                 )
             except MemoryJobSubmissionError as exc:
+                raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
+            result = {"status": "accepted", **_submission_view(submission)}
+        elif operation == LongTermMemoryMutationOperation.VECTOR_CLEANUP:
+            if status != LongTermMemoryMutationStatus.FAILED:
+                raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+            try:
+                submission = await retry_vector_cleanup_job(db, failed_job=job)
+            except MemoryJobExecutionError as exc:
                 raise MemoryConflictError(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT) from exc
             result = {"status": "accepted", **_submission_view(submission)}
         elif operation == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION:

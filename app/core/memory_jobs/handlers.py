@@ -73,6 +73,11 @@ from app.core.memory_jobs.executor import (
 from app.core.memory_jobs.maintenance_handlers import create_memory_maintenance_job_handlers
 from app.core.memory_jobs.manager import memory_job_manager
 from app.core.memory_jobs.organization_handler import create_memory_organization_job_handlers
+from app.core.memory_jobs.vector_cleanup import (
+    create_superseded_vector_cleanup_job,
+    execute_vector_cleanup,
+    persist_staged_vector_reference,
+)
 from app.models.memory import (
     LongTermMemoryCapacityStatus,
     LongTermMemoryEmbeddingDeltaAction,
@@ -1534,8 +1539,26 @@ def _build_vector_metadata(snapshot: _MemoryPublicationSnapshot | _MemoryReplace
     return metadata
 
 
-async def _best_effort_delete_item(uid: str, job_id: int, collection_name: str, item_id: str, message_key: str) -> None:
+async def _best_effort_delete_item(
+    uid: str,
+    job_id: int,
+    collection_name: str,
+    item_id: str,
+    message_key: str,
+    *,
+    context: MemoryJobExecutionContext | None = None,
+) -> None:
     try:
+        if context is not None:
+            async with context.session_factory() as db:
+                claim = await memory_job_crud.get_active_claim(
+                    db,
+                    uid=uid,
+                    job_id=job_id,
+                    owner=context.worker_id,
+                )
+            if claim is None:
+                return
         validation = await async_validate_collection(collection_name)
         if not getattr(validation, "exists", False):
             return
@@ -1555,8 +1578,19 @@ async def _shield_best_effort_delete_item(
     collection_name: str,
     item_id: str,
     message_key: str,
+    *,
+    context: MemoryJobExecutionContext | None = None,
 ) -> None:
-    cleanup_task = asyncio.create_task(_best_effort_delete_item(uid, job_id, collection_name, item_id, message_key))
+    cleanup_task = asyncio.create_task(
+        _best_effort_delete_item(
+            uid,
+            job_id,
+            collection_name,
+            item_id,
+            message_key,
+            context=context,
+        )
+    )
     try:
         await asyncio.shield(cleanup_task)
     except asyncio.CancelledError:
@@ -1705,6 +1739,18 @@ async def _publish_version(
                 "vector_item_id": vector_item_id,
                 "operation": snapshot.operation.value,
             }
+            if snapshot.previous_vector_item_id and snapshot.previous_vector_item_id != vector_item_id:
+                superseded_cleanup_job = await create_superseded_vector_cleanup_job(
+                    db,
+                    source_job=claim,
+                    collection_name=snapshot.active_collection_name,
+                    item_id=snapshot.previous_vector_item_id,
+                )
+                superseded_cleanup_job_id = _require_positive_int(
+                    superseded_cleanup_job.id,
+                    message_key=ERR_MEMORY_JOB_PUBLICATION_FAILED,
+                )
+                result["superseded_vector_cleanup_job_id"] = superseded_cleanup_job_id
             if not await memory_job_crud.mark_succeeded(
                 db,
                 uid=snapshot.uid,
@@ -2148,6 +2194,18 @@ async def _publish_organization_merge(
                 "tombstoned_memory_ids": tombstoned_memory_ids,
                 "cleanup_job_ids": cleanup_job_ids,
             }
+            if snapshot.previous_vector_item_id and snapshot.previous_vector_item_id != vector_item_id:
+                superseded_cleanup_job = await create_superseded_vector_cleanup_job(
+                    db,
+                    source_job=claim,
+                    collection_name=snapshot.active_collection_name,
+                    item_id=snapshot.previous_vector_item_id,
+                )
+                superseded_cleanup_job_id = _require_positive_int(
+                    superseded_cleanup_job.id,
+                    message_key=ERR_MEMORY_JOB_PUBLICATION_FAILED,
+                )
+                result["superseded_vector_cleanup_job_id"] = superseded_cleanup_job_id
             if not await memory_job_crud.mark_succeeded(
                 db,
                 uid=snapshot.uid,
@@ -2214,6 +2272,11 @@ async def _execute_publication(
             snapshot.job_id,
             snapshot.owner,
         )
+        await persist_staged_vector_reference(
+            context,
+            collection_name=snapshot.active_collection_name,
+            item_id=item_id,
+        )
         metadata = _build_vector_metadata(snapshot, next_version)
         phase = "vector_write"
         item_written = True
@@ -2272,6 +2335,7 @@ async def _execute_publication(
                 snapshot.active_collection_name,
                 item_id,
                 ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+                context=context,
             )
 
 
@@ -2306,6 +2370,11 @@ async def _execute_replacement(context: MemoryJobExecutionContext) -> MemoryJobE
 
         await context.checkpoint()
         item_id = build_memory_staged_vector_item_id(snapshot.memory_id, 1, snapshot.job_id, snapshot.owner)
+        await persist_staged_vector_reference(
+            context,
+            collection_name=snapshot.active_collection_name,
+            item_id=item_id,
+        )
         metadata = _build_vector_metadata(snapshot, 1)
         phase = "vector_write"
         item_written = True
@@ -2356,6 +2425,7 @@ async def _execute_replacement(context: MemoryJobExecutionContext) -> MemoryJobE
                 snapshot.active_collection_name,
                 item_id,
                 ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+                context=context,
             )
 
 
@@ -2395,6 +2465,11 @@ async def _execute_organization_merge(context: MemoryJobExecutionContext) -> Mem
             next_version,
             snapshot.job_id,
             snapshot.owner,
+        )
+        await persist_staged_vector_reference(
+            context,
+            collection_name=snapshot.active_collection_name,
+            item_id=item_id,
         )
         metadata = {
             "memory_id": snapshot.primary_memory_id,
@@ -2463,6 +2538,7 @@ async def _execute_organization_merge(context: MemoryJobExecutionContext) -> Mem
                 snapshot.active_collection_name,
                 item_id,
                 ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
+                context=context,
             )
 
 
@@ -2648,6 +2724,7 @@ def create_memory_job_handlers() -> Mapping[LongTermMemoryMutationOperation, Han
         LongTermMemoryMutationOperation.UPDATE: _handle_update,
         LongTermMemoryMutationOperation.DELETE_CLEANUP: _handle_delete_cleanup,
         LongTermMemoryMutationOperation.ORGANIZE_MERGE: _handle_organization_merge,
+        LongTermMemoryMutationOperation.VECTOR_CLEANUP: execute_vector_cleanup,
     }
     return MappingProxyType(handlers)
 

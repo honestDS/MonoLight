@@ -115,6 +115,7 @@ class LongTermMemoryMutationOperation(StrEnum):
     RESTORE = "restore"
     REINDEX = "reindex"
     DELETE_CLEANUP = "delete_cleanup"
+    VECTOR_CLEANUP = "vector_cleanup"
     EMBEDDING_MIGRATION = "embedding_migration"
     EXTRACT = "extract"
     CREATE_WITH_EVICTION = "create_with_eviction"
