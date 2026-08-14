@@ -5,6 +5,7 @@ import { chatApi } from '../../api'
 import { useWebSocket } from '../useWebSocket'
 import i18n from '../../i18n'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
+import { getStreamEventIdentity } from './streamEventIdentity.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -33,9 +34,16 @@ const lifecycleEventTypes = new Set([
 
 const hasIdentity = value => value !== undefined && value !== null && value !== ''
 
-const getEventRequestIds = data => Array.isArray(data?.request_ids)
-  ? data.request_ids.filter(requestId => requestId !== undefined && requestId !== null && requestId !== '')
-  : []
+const getEventRequestIds = data => {
+  const requestIds = new Set()
+  if (Array.isArray(data?.request_ids)) {
+    data.request_ids.forEach(requestId => {
+      if (hasIdentity(requestId)) requestIds.add(requestId)
+    })
+  }
+  if (hasIdentity(data?.request_id)) requestIds.add(data.request_id)
+  return [...requestIds]
+}
 
 export function useChatTransport() {
   // ==================== 通信模式管理 ====================
@@ -154,7 +162,7 @@ export function useChatTransport() {
     // 1. 处理增量文本推送
     if (type === 'content') {
       if (onContent) {
-        onContent(data.content, data.turn, null, data.finish_reason, data.response_id, requestId, data.work_id, data.event_id)
+        onContent(data.content, data.turn, null, data.finish_reason, data.response_id, requestId, data.work_id, getStreamEventIdentity(data))
       }
       if (scrollToBottom) {
         scrollToBottom()
@@ -241,6 +249,7 @@ export function useChatTransport() {
       } else if (onComplete) {
         onComplete(data, null, requestId, 'proactive_reply')
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (scrollToBottom) {
         scrollToBottom()
       }
@@ -248,11 +257,13 @@ export function useChatTransport() {
     }
 
     if (type === 'proactive_reply_error') {
+      if (onWorkFinished) onWorkFinished(data)
       if (onProactiveReplyError) {
         onProactiveReplyError(data)
       } else if (onError) {
         onError(resolveErrorMessage(data, 'Background proactive reply failed'), null, requestId, data)
       }
+      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (scrollToBottom) {
         scrollToBottom()
       }
@@ -280,12 +291,16 @@ export function useChatTransport() {
     // 6. 处理异常通知
     if (type === 'error' || data.error || data.detail) {
       const errorMessage = resolveErrorMessage(data, t('chat.stream_error'))
+      const errorEvent = Object.freeze({
+        ...data,
+        ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
+      })
       console.error('WebSocket业务错误:', errorMessage)
-      if (onWorkFinished) onWorkFinished(data)
+      if (onWorkFinished) onWorkFinished(errorEvent)
       if (onError) {
-        onError(errorMessage, null, requestId, data)
+        onError(errorMessage, null, requestId, errorEvent)
       }
-      getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
+      getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
       if (setLoading) {
         setLoading(false)
       }
@@ -301,9 +316,13 @@ export function useChatTransport() {
       const finishReason = choice.finish_reason
 
       if (choice.message?.role === 'err') {
-        if (onWorkFinished) onWorkFinished(data)
-        if (onError) onError(content, null, requestId, data)
-        getEventRequestIds(data).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
+        const errorEvent = Object.freeze({
+          ...data,
+          ...(hasIdentity(data.request_id) || !hasIdentity(requestId) ? {} : { request_id: requestId })
+        })
+        if (onWorkFinished) onWorkFinished(errorEvent)
+        if (onError) onError(content, null, requestId, errorEvent)
+        getEventRequestIds(errorEvent).forEach(terminalRequestId => callbacksMap.delete(terminalRequestId))
         if (setLoading) setLoading(false)
         return
       }

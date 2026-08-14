@@ -2,7 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import i18n from '../../i18n'
-import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, normalizeMessageContent } from '../../utils'
+import { findAssistantResponseReplacementIndex, getMessageDedupeKeys, isAssistantResponse, isPlainAssistantResponse, isToolCall, isToolResult, mergeAssistantResponseIntoList, normalizeMessageContent } from '../../utils'
 import { truncateErrorMessage } from '../../utils/errorMessage.js'
 import { findThinkingIndex, insertMessageBeforeThinking, removeThinkingMessageByIdentity } from './thinkingTracker.js'
 
@@ -585,7 +585,7 @@ export function useMessageProcessor() {
     let dedupedMessages = []
 
     for (const message of aiMessages) {
-      if (isPlainAssistantResponse(message)) {
+      if (isAssistantResponse(message)) {
         const replacementIndex = findAssistantResponseReplacementIndex(messagesRef.value, message)
         if (replacementIndex !== -1) {
           messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, message)
@@ -598,19 +598,21 @@ export function useMessageProcessor() {
           continue
         }
 
-        const displayContent = resolveAssistantDisplayContent(
-          message.content,
-          message.refusal,
-          message.finish_reason
-        )
-        const hasDisplayContent = typeof displayContent === 'string'
-          ? Boolean(displayContent.trim())
-          : displayContent !== undefined && displayContent !== null
-        const hasFiles = Array.isArray(message.files) && message.files.length > 0
-        if (!hasDisplayContent && !hasFiles) continue
+        if (isPlainAssistantResponse(message)) {
+          const displayContent = resolveAssistantDisplayContent(
+            message.content,
+            message.refusal,
+            message.finish_reason
+          )
+          const hasDisplayContent = typeof displayContent === 'string'
+            ? Boolean(displayContent.trim())
+            : displayContent !== undefined && displayContent !== null
+          const hasFiles = Array.isArray(message.files) && message.files.length > 0
+          if (!hasDisplayContent && !hasFiles) continue
 
-        dedupedMessages.push(message)
-        continue
+          dedupedMessages.push(message)
+          continue
+        }
       }
 
       const messageKeys = getToolMessageDedupeKeys(message)

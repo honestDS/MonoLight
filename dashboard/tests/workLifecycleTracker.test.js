@@ -49,6 +49,150 @@ test('tracks queued inputs and agent loop markers independently', () => {
   assert.equal(messages.some(message => message.role === 'thinking'), false)
 })
 
+test('tracks pending request thinking through dequeue, agent loop, and output', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+  const repeatedStart = tracker.startRequestLifecycle(messages, { request_id: 'request-a' })
+
+  assert.equal(messages.length, 1)
+  assert.deepEqual(repeatedStart, messages)
+  assert.equal(messages[0].role, 'thinking')
+  assert.equal(messages[0].request_id, 'request-a')
+  assert.deepEqual(messages[0].request_ids, ['request-a'])
+
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-a'],
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].work_id, 'work-a')
+
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a',
+    turn: 1,
+    event_sequence_no: 2
+  })
+  assert.equal(messages.filter(message => message.role === 'thinking').length, 1)
+  assert.equal(messages[0].work_id, 'work-a')
+  assert.equal(messages[0].response_id, 'response-a')
+  assert.equal(messages[0].turn, 1)
+
+  messages = tracker.stopAgentLoop(messages, {
+    work_id: 'work-a',
+    response_id: 'response-a',
+    event_sequence_no: 3
+  })
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+})
+
+test('finishes pending non-streaming request thinking without a work id', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+
+  messages = tracker.finishWorkLifecycle(messages, { request_ids: ['request-a'] })
+
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+})
+
+test('queued input removes only its unbound pending thinking and updates the user message', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = [userMessage('request-a')]
+  messages = tracker.startRequestLifecycle(messages, { request_id: 'request-a' })
+  messages.push({
+    id: 'thinking-work-b',
+    role: 'thinking',
+    content: 'Thinking...',
+    work_id: 'work-b',
+    request_id: 'request-b'
+  })
+
+  messages = tracker.markInputQueued(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+
+  assert.equal(messages.some(message => message.request_id === 'request-a' && message.role === 'thinking'), false)
+  assert.equal(messages.find(message => message.role === 'user').status, 'queued')
+  assert.equal(messages.find(message => message.role === 'user').work_id, 'work-a')
+  assert.equal(messages.some(message => message.work_id === 'work-b' && message.role === 'thinking'), true)
+})
+
+test('single request id terminal cleanup prevents pending thinking resurrection', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+
+  messages = tracker.finishWorkLifecycle(messages, { request_id: 'request-a' })
+  const afterStaleStart = tracker.startRequestLifecycle(messages, { request_id: 'request-a' })
+
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+  assert.equal(afterStaleStart.some(message => message.role === 'thinking'), false)
+})
+
+test('keeps concurrent pending requests isolated during agent loop takeover', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+  messages = tracker.startRequestLifecycle(messages, { request_id: 'request-b' })
+
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-c',
+    work_id: 'work-c',
+    response_id: 'response-c',
+    turn: 1,
+    event_sequence_no: 1
+  })
+  assert.equal(messages.find(message => message.request_id === 'request-a').work_id, undefined)
+  assert.equal(messages.find(message => message.request_id === 'request-b').work_id, undefined)
+  assert.equal(messages.find(message => message.response_id === 'response-c').work_id, 'work-c')
+
+  messages = tracker.finishWorkLifecycle(messages, { request_ids: ['request-a'] })
+  assert.equal(messages.some(message => message.request_id === 'request-a'), false)
+  assert.equal(messages.some(message => message.request_id === 'request-b'), true)
+
+  messages = tracker.startAgentLoop(messages, {
+    work_id: 'work-b',
+    response_id: 'response-b',
+    turn: 1,
+    event_sequence_no: 1
+  })
+  const requestBThinking = messages.find(message => message.response_id === 'response-b')
+  assert.equal(requestBThinking.work_id, 'work-b')
+  assert.equal(requestBThinking.request_id, undefined)
+  assert.equal(messages.find(message => message.response_id === 'response-c').work_id, 'work-c')
+})
+
+test('does not resurrect pending thinking after dequeue or terminal lifecycle events', () => {
+  const dequeuedTracker = createWorkLifecycleTracker()
+  let dequeuedMessages = dequeuedTracker.startRequestLifecycle([], { request_id: 'request-a' })
+  dequeuedMessages = dequeuedTracker.markInputsDequeued(dequeuedMessages, {
+    request_ids: ['request-a'],
+    work_id: 'work-a',
+    event_sequence_no: 1
+  })
+  const afterDequeuedStart = dequeuedTracker.startRequestLifecycle(dequeuedMessages, {
+    request_id: 'request-a'
+  })
+
+  assert.deepEqual(afterDequeuedStart, dequeuedMessages)
+
+  const terminalTracker = createWorkLifecycleTracker()
+  let terminalMessages = terminalTracker.startRequestLifecycle([], { request_id: 'request-b' })
+  terminalMessages = terminalTracker.finishWorkLifecycle(terminalMessages, {
+    work_id: 'work-b',
+    request_ids: ['request-b'],
+    event_sequence_no: 1
+  })
+  const afterTerminalStart = terminalTracker.startRequestLifecycle(terminalMessages, {
+    request_id: 'request-b',
+    work_id: 'work-b'
+  })
+
+  assert.equal(afterTerminalStart.some(message => message.role === 'thinking'), false)
+})
+
 test('ignores incomplete or unrelated lifecycle events and is idempotent', () => {
   let messages = [userMessage('request-a'), userMessage('request-b')]
 
@@ -292,4 +436,87 @@ test('requires the current request id but accepts own proactive replies without 
   assert.equal(shouldApplyOwnProactiveReply(tracker, {
     request_ids: ['request-a']
   }, 'request-a'), true)
+})
+
+test('cleans up a migrated thinking marker by request id without a work id', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-a'],
+    work_id: 'work-a'
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a'
+  })
+
+  assert.deepEqual(messages[0].request_ids, ['request-a'])
+  messages = tracker.finishWorkLifecycle(messages, { request_id: 'request-a' })
+
+  assert.equal(messages.some(message => message.role === 'thinking'), false)
+})
+
+test('cleans up only the matching request marker without a work id', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+  messages = tracker.startRequestLifecycle(messages, { request_id: 'request-b' })
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-a'],
+    work_id: 'work-a'
+  })
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-b'],
+    work_id: 'work-b'
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a'
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-b',
+    work_id: 'work-b',
+    response_id: 'response-b'
+  })
+
+  assert.deepEqual(messages.find(message => message.response_id === 'response-a').request_ids, ['request-a'])
+  assert.deepEqual(messages.find(message => message.response_id === 'response-b').request_ids, ['request-b'])
+  messages = tracker.finishWorkLifecycle(messages, { request_id: 'request-a' })
+
+  assert.equal(messages.some(message => message.response_id === 'response-a'), false)
+  assert.equal(messages.some(message => message.response_id === 'response-b'), true)
+})
+
+test('cleans up only the matching work marker when the terminal event has a work id', () => {
+  const tracker = createWorkLifecycleTracker()
+  let messages = tracker.startRequestLifecycle([], { request_id: 'request-a' })
+  messages = tracker.startRequestLifecycle(messages, { request_id: 'request-b' })
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-a'],
+    work_id: 'work-a'
+  })
+  messages = tracker.markInputsDequeued(messages, {
+    request_ids: ['request-b'],
+    work_id: 'work-b'
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-a',
+    work_id: 'work-a',
+    response_id: 'response-a'
+  })
+  messages = tracker.startAgentLoop(messages, {
+    request_id: 'request-b',
+    work_id: 'work-b',
+    response_id: 'response-b'
+  })
+
+  messages = tracker.finishWorkLifecycle(messages, {
+    work_id: 'work-a',
+    request_id: 'request-a'
+  })
+
+  assert.equal(messages.some(message => message.response_id === 'response-a'), false)
+  assert.equal(messages.some(message => message.response_id === 'response-b'), true)
 })

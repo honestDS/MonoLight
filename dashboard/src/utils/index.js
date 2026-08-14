@@ -3,6 +3,7 @@ import i18n from '../i18n'
 import {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
+  isAssistantResponse,
   isPlainAssistantResponse,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
@@ -11,6 +12,7 @@ import {
 export {
   findAssistantResponseReplacementIndex,
   getMessageDbId,
+  isAssistantResponse,
   isPlainAssistantResponse,
   mergeAssistantResponse,
   mergeAssistantResponseIntoList
