@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 
 class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_chat_completions"
+    _TOOL_CALL_PLACEHOLDER = "[tool_call]"
 
     @classmethod
     def _normalize_usage(cls, usage: Any) -> dict[str, Any]:
@@ -227,12 +228,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
 
             if msg.tool_calls:
                 # 兼容严格要求 assistant content 非空的提供商，仅修改发送给上游的副本。
-                if msg.role.value == "assistant" and (
-                    msg.content is None
-                    or (isinstance(msg.content, str) and not msg.content.strip())
-                    or (isinstance(msg.content, list) and not msg.content)
-                ):
-                    item["content"] = "[tool_call]"
+                if msg.role.value == "assistant" and (msg.content is None or (isinstance(msg.content, str) and not msg.content.strip()) or (isinstance(msg.content, list) and not msg.content)):
+                    item["content"] = cls._TOOL_CALL_PLACEHOLDER
                 tool_calls = []
                 for tool_call in msg.tool_calls:
                     provider_metadata = tool_call.provider_metadata or {}
@@ -294,6 +291,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
 
         refusal = message.get("refusal") if isinstance(message.get("refusal"), str) else None
         content = message.get("content")
+        if tool_calls and isinstance(content, str) and content.strip() == cls._TOOL_CALL_PLACEHOLDER:
+            content = None
         if not content and refusal:
             content = refusal
 

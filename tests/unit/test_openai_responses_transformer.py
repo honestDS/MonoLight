@@ -389,6 +389,103 @@ def test_chat_completions_to_provider_fills_empty_tool_call_content_without_muta
     assert [message.content for message in messages] == contents
 
 
+def test_chat_completions_from_provider_clears_tool_call_placeholder() -> None:
+    message = OpenAIChatCompletionsTransformer.from_provider(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "[tool_call]",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": '{"query":"value"}'},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert message.role == MessageRole.ASSISTANT
+    assert message.content is None
+    assert message.tool_calls == [
+        InternalToolCall(
+            id="call_1",
+            name="lookup",
+            arguments={"query": "value"},
+            provider_metadata={
+                "protocol": "openai_chat_completions",
+                "tool_call": {"type": "function"},
+            },
+        )
+    ]
+
+
+def test_chat_completions_from_provider_preserves_text_around_tool_call_placeholder() -> None:
+    message = OpenAIChatCompletionsTransformer.from_provider(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "I will call [tool_call]",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert message.content == "I will call [tool_call]"
+    assert message.tool_calls == [
+        InternalToolCall(
+            id="call_1",
+            name="lookup",
+            arguments={},
+            provider_metadata={
+                "protocol": "openai_chat_completions",
+                "tool_call": {"type": "function"},
+            },
+        )
+    ]
+
+
+def test_chat_completions_from_provider_uses_refusal_for_tool_call_placeholder() -> None:
+    message = OpenAIChatCompletionsTransformer.from_provider(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "[tool_call]",
+                        "refusal": "I cannot help with that.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert message.content == "I cannot help with that."
+    assert message.refusal == "I cannot help with that."
+
+
 def test_responses_from_provider_parses_text_and_tool_calls() -> None:
     message = OpenAIResponsesTransformer.from_provider(
         {
