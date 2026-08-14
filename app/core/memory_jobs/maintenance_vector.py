@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import math
-import struct
 from collections.abc import Iterable, Mapping, Sized
 from numbers import Real
-from typing import Any
+from typing import Any, NoReturn
 
 from app.core.constants import (
     ERR_MEMORY_COLLECTION_VALIDATION_FAILED,
@@ -16,6 +15,8 @@ from app.core.constants import (
     ERR_MEMORY_JOB_VECTOR_WRITE_FAILED,
 )
 from app.core.embedding.common import embed_texts_with_config
+from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.memory_jobs.executor import (
     MemoryJobExecutionContext,
     MemoryJobExecutionError,
@@ -41,6 +42,34 @@ from app.providers.vector import (
     async_upsert_collection_items,
     async_validate_collection,
 )
+
+logger = get_logger(__name__)
+
+_VECTOR_COMPARISON_REL_TOL = 1e-5
+_VECTOR_COMPARISON_ABS_TOL = 1e-6
+
+
+def _raise_collection_validation_failure(
+    context: MemoryJobExecutionContext,
+    collection_name: str,
+    *,
+    stage: str,
+    category: str,
+    difference_summary: str,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    logger.bind(
+        uid=context.job.uid,
+        job_id=context.job.id,
+        collection_name=collection_name,
+        validation_stage=stage,
+        failure_category=category,
+        difference_summary=difference_summary,
+    ).warning(t(ERR_MEMORY_COLLECTION_VALIDATION_FAILED))
+    error = retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+    if cause is None:
+        raise error
+    raise error from cause
 
 
 async def embed_records(
@@ -218,9 +247,23 @@ async def reconcile_collection(
         try:
             validation = await async_validate_collection(collection_name)
         except Exception as exc:
-            raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED) from exc
+            _raise_collection_validation_failure(
+                context,
+                collection_name,
+                stage="initial_collection_validation_fallback",
+                category="validation_request_failed",
+                difference_summary="collection_validation_request_failed",
+                cause=exc,
+            )
     except Exception as exc:
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED) from exc
+        _raise_collection_validation_failure(
+            context,
+            collection_name,
+            stage="initial_collection_validation",
+            category="validation_request_failed",
+            difference_summary="collection_validation_request_failed",
+            cause=exc,
+        )
     exists = bool(getattr(validation, "exists", False))
     actual_metadata = getattr(validation, "metadata", None)
     metadata_matches = isinstance(actual_metadata, dict)
@@ -245,7 +288,16 @@ async def reconcile_collection(
             raise retryable(ERR_MEMORY_JOB_VECTOR_WRITE_FAILED) from exc
         current_items: dict[str, tuple[str, dict[str, Any], list[float]]] = {}
     else:
-        current_items = await collection_items(collection_name)
+        try:
+            current_items = await collection_items(collection_name)
+        except MemoryJobExecutionError:
+            _raise_collection_validation_failure(
+                context,
+                collection_name,
+                stage="current_collection_items",
+                category="collection_items_invalid",
+                difference_summary="current_collection_items_validation_failed",
+            )
 
     expected_items: dict[str, tuple[str, dict[str, Any]]] = {}
     for record in records:
@@ -278,16 +330,50 @@ async def reconcile_collection(
             expected_dimension=config["dimensions"] if records else None,
         )
     except Exception as exc:
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED) from exc
+        _raise_collection_validation_failure(
+            context,
+            collection_name,
+            stage="final_collection_validation",
+            category="validation_request_failed",
+            difference_summary="collection_validation_request_failed",
+            cause=exc,
+        )
     if not getattr(validation, "exists", False) or getattr(validation, "valid", True) is False:
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-    final_items = await collection_items(collection_name)
+        _raise_collection_validation_failure(
+            context,
+            collection_name,
+            stage="final_collection_validation",
+            category="collection_validation_result_invalid",
+            difference_summary="collection_missing_or_invalid",
+        )
+    try:
+        final_items = await collection_items(collection_name)
+    except MemoryJobExecutionError:
+        _raise_collection_validation_failure(
+            context,
+            collection_name,
+            stage="final_collection_items",
+            category="collection_items_invalid",
+            difference_summary="final_collection_items_validation_failed",
+        )
     if set(final_items) != set(expected_items):
-        raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+        _raise_collection_validation_failure(
+            context,
+            collection_name,
+            stage="final_item_set_validation",
+            category="item_set_mismatch",
+            difference_summary=f"expected_count={len(expected_items)},actual_count={len(final_items)}",
+        )
     for item_id, expected in expected_items.items():
         actual = final_items.get(item_id)
         if actual is None or actual[:2] != expected:
-            raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+            _raise_collection_validation_failure(
+                context,
+                collection_name,
+                stage="final_item_metadata_validation",
+                category="item_payload_mismatch",
+                difference_summary="item_document_or_metadata_mismatch",
+            )
 
     for start in range(0, len(records), BATCH_SIZE):
         await context.checkpoint()
@@ -296,19 +382,46 @@ async def reconcile_collection(
         for record, expected_vector in zip(batch_records, expected_vectors):
             actual = final_items.get(record.vector_item_id)
             if actual is None:
-                raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+                _raise_collection_validation_failure(
+                    context,
+                    collection_name,
+                    stage="final_vector_validation",
+                    category="vector_item_missing",
+                    difference_summary="expected_vector_item_missing",
+                )
             actual_vector = actual[2]
             if len(actual_vector) != len(expected_vector):
-                raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
-            for actual_value, expected_value in zip(actual_vector, expected_vector):
-                if actual_value == expected_value:
-                    continue
-                try:
-                    float32_round_trip = struct.unpack("!f", struct.pack("!f", expected_value))[0]
-                except OverflowError:
-                    float32_round_trip = None
-                if actual_value != float32_round_trip:
-                    raise retryable(ERR_MEMORY_COLLECTION_VALIDATION_FAILED)
+                _raise_collection_validation_failure(
+                    context,
+                    collection_name,
+                    stage="final_vector_validation",
+                    category="vector_dimension_mismatch",
+                    difference_summary=f"expected_dimension={len(expected_vector)},actual_dimension={len(actual_vector)}",
+                )
+            for coordinate, (actual_value, expected_value) in enumerate(zip(actual_vector, expected_vector)):
+                if not math.isclose(
+                    actual_value,
+                    expected_value,
+                    rel_tol=_VECTOR_COMPARISON_REL_TOL,
+                    abs_tol=_VECTOR_COMPARISON_ABS_TOL,
+                ):
+                    _raise_collection_validation_failure(
+                        context,
+                        collection_name,
+                        stage="final_vector_validation",
+                        category="vector_value_mismatch",
+                        difference_summary=f"coordinate={coordinate}",
+                    )
+
+    logger.bind(
+        uid=context.job.uid,
+        job_id=context.job.id,
+        collection_name=collection_name,
+        purpose=purpose,
+        expected_count=len(records),
+        expected_dimension=config["dimensions"] if records else None,
+        repaired_count=len(mismatched),
+    ).info("Memory vector collection reconciliation completed")
 
     snapshots: list[RecordSnapshot] = []
     for record in records:

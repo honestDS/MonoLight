@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
@@ -16,7 +17,8 @@ from app.core.session_reply_queue.manager import (
     build_foreground_message_dedupe_key,
 )
 from app.core.utils.dispatcher.helpers import dump_output_history
-from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole
+from app.core.utils.dispatcher.save_message import _to_storable_content
+from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
 from app.models.session_reply_work_item import SessionReplyWorkStatus
 from app.providers.llm import client as llm_client_module
 from app.providers.llm.client import LLMClient
@@ -249,6 +251,147 @@ async def test_generate_with_stream_callback_emits_content_and_rebuilds_tool_cal
     }
     assert response.model == "model-final"
     assert response.usage["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_hides_split_tool_call_placeholder(monkeypatch):
+    chunks = [
+        {"choices": [{"delta": {"content": "  [tool"}}]},
+        {"choices": [{"delta": {"content": "_call]  "}}]},
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": '{"query":"MonoLight"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    emitted: list[str] = []
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(content: str) -> None:
+        emitted.append(content)
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert emitted == []
+    assert response.message.content is None
+    assert response.message.tool_calls is not None
+    assert response.message.tool_calls[0].name == "search"
+    assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
+    stored_content = _to_storable_content(response.message, MessageType.TOOL_CALL)
+    assert "[tool_call]" not in stored_content
+    stored_payload = json.loads(stored_content)
+    assert "content" not in stored_payload
+    assert "tool_calls" in stored_payload
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_releases_placeholder_without_tool_call(monkeypatch):
+    chunks = [
+        {"choices": [{"delta": {"content": "  [tool"}}]},
+        {"choices": [{"delta": {"content": "_call]  "}}]},
+    ]
+    emitted: list[str] = []
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(content: str) -> None:
+        emitted.append(content)
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert emitted == ["  [tool", "_call]  "]
+    assert response.message.content == "  [tool_call]  "
+    assert response.message.tool_calls is None
+
+
+@pytest.mark.asyncio
+async def test_generate_with_stream_callback_keeps_tool_call_explanation_content(monkeypatch):
+    chunks = [
+        {"choices": [{"delta": {"content": "  [tool"}}]},
+        {"choices": [{"delta": {"content": "_call]  "}}]},
+        {"choices": [{"delta": {"content": " explanation"}}]},
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": '{"query":"MonoLight"}',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    emitted: list[str] = []
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def on_content(content: str) -> None:
+        emitted.append(content)
+
+    monkeypatch.setattr(LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    assert emitted == ["  [tool", "_call]  ", " explanation"]
+    assert response.message.content == "  [tool_call]   explanation"
+    assert response.message.tool_calls is not None
+    assert response.message.tool_calls[0].name == "search"
+    assert response.message.tool_calls[0].arguments == {"query": "MonoLight"}
 
 
 @pytest.mark.asyncio

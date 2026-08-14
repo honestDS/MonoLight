@@ -456,8 +456,10 @@ class LLMClient:
         **kwargs,
     ) -> InternalResponse:
         content_chunks: list[str] = []
+        deferred_content_chunks: list[str] = []
         refusal_chunks: list[str] = []
         normalized_protocol = protocol.lower()
+        content_callbacks_released = normalized_protocol != "openai"
         tool_call_assembler = _StreamToolCallAssembler(normalized_protocol)
         model = model_id
         usage: dict[str, Any] = {
@@ -521,7 +523,16 @@ class LLMClient:
             refusal = delta.get("refusal")
             if isinstance(content, str) and content:
                 content_chunks.append(content)
-                await on_content(content)
+                if normalized_protocol == "openai" and not content_callbacks_released:
+                    deferred_content_chunks.append(content)
+                    accumulated_content = "".join(content_chunks).strip()
+                    if not OpenAIChatCompletionsTransformer._TOOL_CALL_PLACEHOLDER.startswith(accumulated_content):
+                        for deferred_content in deferred_content_chunks:
+                            await on_content(deferred_content)
+                        deferred_content_chunks.clear()
+                        content_callbacks_released = True
+                else:
+                    await on_content(content)
             if isinstance(refusal, str) and refusal:
                 refusal_chunks.append(refusal)
                 if not content:
@@ -530,9 +541,15 @@ class LLMClient:
 
         tool_calls = tool_call_assembler.build()
         content = "".join(content_chunks)
+        is_tool_call_placeholder = normalized_protocol == "openai" and bool(tool_calls) and content.strip() == OpenAIChatCompletionsTransformer._TOOL_CALL_PLACEHOLDER
+        if deferred_content_chunks and not is_tool_call_placeholder:
+            for deferred_content in deferred_content_chunks:
+                await on_content(deferred_content)
         refusal = "".join(refusal_chunks) or None
         if refusal and finish_reason in {None, "stop"}:
             finish_reason = "refusal"
+        if is_tool_call_placeholder:
+            content = None
 
         return InternalResponse(
             message=InternalMessage(
