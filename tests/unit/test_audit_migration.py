@@ -9,7 +9,7 @@ from sqlmodel import SQLModel
 
 from app.core.crud.audit import build_audit_status_update, build_passed_execution_claim_update, build_pending_execution_claim_update
 from app.core.utils.time import get_local_time
-from app.models.audit import AuditRecord, AuditRecordStatus
+from app.models.audit import AuditRecordStatus
 from app.providers.database.bootstrap import ensure_migration_record_table
 from scripts import migration_20260717_add_audit_confirmation_records as audit_migration
 from scripts import migration_20260719_add_background_task_audit_binding as background_task_migration
