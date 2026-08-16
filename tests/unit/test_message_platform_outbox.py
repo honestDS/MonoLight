@@ -68,7 +68,7 @@ def _patch_outbound_text_message_persistence(monkeypatch):
                 "session_id": session_id,
                 "uid": uid,
                 "role": MessageRole.USER,
-                "msg_type": MessageType.TEXT,
+                "msg_type": MessageType.OUTBOUND_TEXT_REFINEMENT,
                 "content": content,
                 "profile_id": profile_id,
                 "is_processed": True,
@@ -290,7 +290,7 @@ async def test_outbound_text_refinement_stops_when_compressed_candidate_can_spli
     assert user_save_call["session_id"] == "session"
     assert user_save_call["uid"] == "uid"
     assert user_save_call["role"] == MessageRole.USER
-    assert user_save_call["msg_type"] == MessageType.TEXT
+    assert user_save_call["msg_type"] == MessageType.OUTBOUND_TEXT_REFINEMENT
     assert user_save_call["profile_id"] == 1
     assert user_save_call["is_processed"] is True
     assert len(user_save_call["dedupe_key"]) == 64

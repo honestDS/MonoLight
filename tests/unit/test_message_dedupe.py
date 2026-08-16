@@ -59,6 +59,25 @@ async def test_save_message_is_idempotent_by_dedupe_key():
 
 
 @pytest.mark.asyncio
+async def test_save_message_persists_outbound_text_refinement_as_plain_text():
+    async with AsyncSessionLocal() as db:
+        saved = await save_message(
+            db,
+            "session-1",
+            "user-1",
+            MessageRole.USER,
+            MessageType.OUTBOUND_TEXT_REFINEMENT,
+            InternalMessage(role=MessageRole.USER, content="refinement prompt"),
+            1,
+        )
+        persisted = await db.get(Message, saved.id)
+
+    assert persisted is not None
+    assert persisted.type == MessageType.OUTBOUND_TEXT_REFINEMENT
+    assert persisted.content == "refinement prompt"
+
+
+@pytest.mark.asyncio
 async def test_save_message_persists_explicit_created_at():
     created_at = datetime(2026, 7, 21, 6, 0, tzinfo=UTC)
 
