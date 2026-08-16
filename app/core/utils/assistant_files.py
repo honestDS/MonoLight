@@ -3,7 +3,7 @@ from typing import Any
 
 
 def build_assistant_files_content(text: Any, files: list[dict[str, Any]]) -> str:
-    safe_text, _untrusted_files = parse_assistant_files_content(text)
+    safe_text = parse_assistant_files_content(text)
     return json.dumps(
         {
             "type": "assistant_files",
@@ -14,17 +14,17 @@ def build_assistant_files_content(text: Any, files: list[dict[str, Any]]) -> str
     )
 
 
-def parse_assistant_files_content(content: Any) -> tuple[str, list[dict[str, Any]]]:
+def parse_assistant_files_content(content: Any) -> str:
     if not isinstance(content, str):
-        return str(content or "").strip(), []
+        return str(content or "").strip()
     try:
         parsed = json.loads(content)
     except Exception:
-        return content.strip(), []
+        return content.strip()
     if not isinstance(parsed, dict) or parsed.get("type") != "assistant_files":
-        return content.strip(), []
+        return content.strip()
     text = str(parsed.get("text") or "").strip()
-    return text, []
+    return text
 
 
 def merge_assistant_files(*file_groups: Any) -> list[dict[str, Any]]:

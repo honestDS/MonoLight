@@ -12,18 +12,16 @@ def test_assistant_files_content_only_restores_text():
     files = [{"id": "file-1", "name": "generated.png"}]
 
     content = build_assistant_files_content("图片已发送。", files)
-    text, parsed_files = parse_assistant_files_content(content)
+    text = parse_assistant_files_content(content)
 
     assert json.loads(content)["type"] == "assistant_files"
     assert text == "图片已发送。"
-    assert parsed_files == []
 
 
 def test_plain_text_content_is_not_treated_as_file_protocol():
-    text, files = parse_assistant_files_content("普通回复")
+    text = parse_assistant_files_content("普通回复")
 
     assert text == "普通回复"
-    assert files == []
 
 
 def test_build_assistant_files_content_unwraps_existing_protocol():

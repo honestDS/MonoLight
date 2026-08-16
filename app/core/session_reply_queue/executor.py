@@ -101,7 +101,7 @@ async def _get_persisted_result(db, work: SessionReplyWorkItem) -> Message | Non
 
 
 def _response_from_persisted_message(work: SessionReplyWorkItem, message: Message) -> dict[str, Any]:
-    content, files = parse_assistant_files_content(message.content)
+    content = parse_assistant_files_content(message.content)
     if work.work_type == SessionReplyWorkType.FOREGROUND_REPLY:
         return {
             "choices": [
@@ -115,12 +115,12 @@ def _response_from_persisted_message(work: SessionReplyWorkItem, message: Messag
                 }
             ],
             "history": [],
-            "files": files or None,
+            "files": None,
         }
     return {
         "content": content,
         "history": [],
-        "files": files,
+        "files": [],
     }
 
 
@@ -142,13 +142,14 @@ def _event_for_work(work: SessionReplyWorkItem, response: dict[str, Any], *, err
         SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY: "background_task",
         SessionReplyWorkType.SCHEDULED_TASK_SUMMARY: "scheduled_task",
     }[work.work_type]
+    content = parse_assistant_files_content(_response_content(response))
     event = {
         "event_id": build_session_reply_work_event_id(work, error=error),
         "type": "proactive_reply_error" if error else "proactive_reply",
         "source": source,
         "session_id": work.session_id,
         "work_id": work.id,
-        "content": _response_content(response),
+        "content": content,
         "history": response.get("history", []),
         "files": response.get("files", []),
         "request_ids": get_work_request_ids(work),
@@ -736,7 +737,7 @@ async def _execute_foreground(db, work: SessionReplyWorkItem, worker_id: str) ->
             reply_source="audit_decision",
             final_message_dedupe_key=_result_message_dedupe_key(work),
         )
-        content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+        content = parse_assistant_files_content(ai_msg.content)
         response = {
             "choices": [
                 {
@@ -806,7 +807,7 @@ async def _source_invalid_confirmed_tool_response(
         reply_source="confirmed_tool_execution",
         final_message_dedupe_key=_result_message_dedupe_key(work),
     )
-    content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+    content = parse_assistant_files_content(ai_msg.content)
     response = {"content": content, "history": dump_background_proactive_history(turn_messages), "files": files}
     if llm_request_metadata is not None:
         response["llm_request_metadata"] = llm_request_metadata
@@ -1012,7 +1013,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
                 reply_source="confirmed_tool_execution",
                 final_message_dedupe_key=_result_message_dedupe_key(work),
             )
-            content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+            content = parse_assistant_files_content(ai_msg.content)
             response = {
                 "content": content,
                 "history": dump_background_proactive_history([*turn_messages, *final_messages]),
@@ -1179,7 +1180,7 @@ async def _execute_confirmed_tools(db, work: SessionReplyWorkItem, worker_id: st
         allow_additional_user_messages=True,
         execution_resume_state=None,
     )
-    content, _untrusted_files = parse_assistant_files_content(_response_content(interactive_response))
+    content = parse_assistant_files_content(_response_content(interactive_response))
     history = interactive_response.get("history", [])
     files = interactive_response.get("files") or []
     response = {
@@ -1282,7 +1283,7 @@ async def _execute_background(db, work: SessionReplyWorkItem, worker_id: str = "
             worker_id=worker_id,
         ),
     )
-    content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+    content = parse_assistant_files_content(ai_msg.content)
     response = {
         "content": content,
         "history": dump_background_proactive_history(turn_messages),
@@ -1319,7 +1320,7 @@ async def _execute_scheduled(db, work: SessionReplyWorkItem, worker_id: str = ""
             worker_id=worker_id,
         ),
     )
-    content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+    content = parse_assistant_files_content(ai_msg.content)
     response = {
         "content": content,
         "history": [message.model_dump(mode="json") for message in turn_messages],

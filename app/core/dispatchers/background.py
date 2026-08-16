@@ -391,7 +391,7 @@ class BackgroundDispatcherMixin:
                     if not (ai_msg.content or "").strip():
                         raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
-        safe_content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+        safe_content = parse_assistant_files_content(ai_msg.content)
         ai_msg.content = safe_content
         logger.bind(uid=uid, session_id=session_id, reply_source=reply_source).info(t("LOG_DISPATCHER_LLM_RESPONSE", username=username, turn=0, content=ai_msg.content or "[工具调用]"))
         messages.append(ai_msg)
@@ -710,7 +710,7 @@ class BackgroundDispatcherMixin:
                 final_msg.tool_calls = []
                 fallback_message = MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITH_FILES if files_to_user else MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES
                 final_msg.content = t(fallback_message)
-        final_text, _untrusted_files = parse_assistant_files_content(final_msg.content)
+        final_text = parse_assistant_files_content(final_msg.content)
         final_msg.content = final_text
         if not final_text.strip() and not files_to_user:
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
@@ -759,7 +759,7 @@ class BackgroundDispatcherMixin:
                 allow_tools=True,
                 reply_source="background_task",
             )
-            content, _untrusted_files = parse_assistant_files_content(ai_msg.content)
+            content = parse_assistant_files_content(ai_msg.content)
             return {
                 "uid": task_uid,
                 "session_id": task_session_id,
