@@ -499,6 +499,45 @@ async def test_reply_text_rejects_oversized_text_without_sending_items(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_reply_text_parts_waits_for_each_reply_item_before_continuing(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    call_events = []
+
+    async def reply_items(_user_id, item_list, *, context_token=""):
+        text = item_list[0]["text_item"]["text"]
+        call_events.append(("start", text))
+        if text == "first part":
+            first_started.set()
+            await release_first.wait()
+        call_events.append(("complete", text))
+        return True
+
+    monkeypatch.setattr(adapter, "reply_items", reply_items)
+
+    reply_task = asyncio.create_task(
+        adapter.reply_text_parts(
+            "weixin-user",
+            ("first part", "second part"),
+            context_token="context-token",
+        )
+    )
+
+    await first_started.wait()
+    assert call_events == [("start", "first part")]
+
+    release_first.set()
+    assert await reply_task is True
+    assert call_events == [
+        ("start", "first part"),
+        ("complete", "first part"),
+        ("start", "second part"),
+        ("complete", "second part"),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("text", "expected_sent"),
     [
