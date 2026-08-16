@@ -654,6 +654,45 @@ def test_work_message_keys_do_not_depend_on_reusable_work_id():
     assert executor_module._event_for_work(first, {"content": "failed"}, error=True)["event_id"] == executor_module.build_session_reply_work_event_id(first, error=True)
 
 
+def test_event_for_work_normalizes_large_assistant_files_content_without_mutating_response():
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=1,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+    )
+    first_line = "前" * 900
+    second_line = "后" * 900
+    text = f"{first_line}\n{second_line}"
+    assistant_files_content = json.dumps(
+        {
+            "type": "assistant_files",
+            "text": text,
+            "files": [{"path": "old.txt", "content": "untrusted"}],
+        },
+        ensure_ascii=False,
+    )
+    response = {
+        "choices": [{"message": {"content": assistant_files_content}}],
+        "files": [{"path": "fresh.txt", "content": "structured"}],
+    }
+
+    event = executor_module._event_for_work(work, response)
+
+    assert len(text.encode("utf-8")) > 3000
+    assert all(len(line.encode("utf-8")) <= 3000 for line in text.split("\n"))
+    assert event["content"] == text
+    assert event["content"] != assistant_files_content
+    assert "\n" in event["content"]
+    assert event["files"] == response["files"]
+    assert response["choices"][0]["message"]["content"] == assistant_files_content
+
+
 def test_audit_execution_binding_supports_foreground_and_confirmed_work():
     """审计绑定应覆盖前台、后台、定时和已确认回复工作。"""
     foreground = SimpleNamespace(

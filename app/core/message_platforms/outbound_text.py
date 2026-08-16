@@ -259,7 +259,7 @@ async def _generate_refined_outbound_text(
             )
             persisted_assistant_message = await message_crud.get_by_dedupe_key(db, assistant_dedupe_key)
             if persisted_assistant_message is not None:
-                refined_text, _untrusted_files = parse_assistant_files_content(persisted_assistant_message.content)
+                refined_text = parse_assistant_files_content(persisted_assistant_message.content)
                 return refined_text, True
 
             from app.core.dispatcher import ChatDispatcher
@@ -293,7 +293,7 @@ async def _generate_refined_outbound_text(
         ).warning(t("LOG_MESSAGE_PLATFORM_OUTBOUND_TEXT_REFINEMENT_ATTEMPT_FAILED"), exc_info=True)
         return None, True
 
-    refined_text, _untrusted_files = parse_assistant_files_content(saved_msg.content)
+    refined_text = parse_assistant_files_content(saved_msg.content)
     return refined_text, True
 
 
