@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from pydantic import ConfigDict
+from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import Column, DateTime, Field, SQLModel
 
 from app.core.utils.time import get_local_time
@@ -16,7 +17,7 @@ class ScheduledTaskBase(SQLModel):
     name: str = Field(index=True, max_length=100)
     uid: str = Field(index=True, max_length=100)
     session_id: str = Field(index=True, max_length=100)
-    profile_id: int | None = Field(default=None, index=True)
+    profile_id: int | None = Field(default=None, index=True, foreign_key="profile.id", ondelete="RESTRICT")
     message: str
     interval_seconds: int = Field(ge=60)
     status: ScheduledTaskStatus = Field(default=ScheduledTaskStatus.ENABLED, index=True, max_length=20)
@@ -28,6 +29,14 @@ class ScheduledTaskBase(SQLModel):
 
 class ScheduledTask(ScheduledTaskBase, table=True):
     __tablename__ = "scheduled_task"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            name="fk_scheduled_task_session_owner",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True))

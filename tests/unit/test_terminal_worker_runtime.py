@@ -25,8 +25,10 @@ from app.core.terminal import (
 )
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
 from app.core.tools.terminal import TerminalWriteExecutor
-from app.models.audit import AuditExecutionRecord
+from app.models.audit import AuditExecutionRecord, AuditRecord, AuditToolDetail
 from app.models.profile import Profile, ProfileConfig
+from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
 from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 
@@ -44,9 +46,19 @@ async def isolated_terminal_database():
         await connection.run_sync(lambda sync_connection: AuditExecutionRecord.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.drop(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: AuditRecord.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: AuditToolDetail.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: AuditExecutionRecord.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == "terminal-runtime-session"))
+        db.add(ChatSession(session_id="terminal-runtime-session", uid="terminal-runtime-user"))
+        await db.commit()
 
     try:
         yield
@@ -55,6 +67,7 @@ async def isolated_terminal_database():
             await db.execute(delete(AuditExecutionRecord))
             await db.execute(delete(TerminalControlCommand))
             await db.execute(delete(TerminalSession))
+            await db.execute(delete(ChatSession).where(ChatSession.session_id == "terminal-runtime-session"))
             await db.commit()
 
 

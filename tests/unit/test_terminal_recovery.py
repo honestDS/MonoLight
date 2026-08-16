@@ -17,6 +17,9 @@ from app.core.terminal.recovery import (
     capture_terminal_process_identity,
     cleanup_terminal_process_identity,
 )
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.time import get_database_timestamp
@@ -86,8 +89,16 @@ async def isolated_terminal_database():
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.drop(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == "recovery-session"))
+        db.add(ChatSession(session_id="recovery-session", uid="recovery-user"))
+        await db.commit()
 
     try:
         yield
@@ -95,6 +106,7 @@ async def isolated_terminal_database():
         async with AsyncSessionLocal() as db:
             await db.execute(delete(TerminalControlCommand))
             await db.execute(delete(TerminalSession))
+            await db.execute(delete(ChatSession).where(ChatSession.session_id == "recovery-session"))
             await db.commit()
 
 

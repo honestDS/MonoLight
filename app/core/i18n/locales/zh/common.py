@@ -159,6 +159,7 @@ MESSAGES = {
     "ERR_MIGRATION_SCRIPT_INVALID": "迁移脚本无效: {script_name}",
     "ERR_MIGRATION_ID_INVALID": "{script_name} 中的 MIGRATION_ID 无效",
     "ERR_MIGRATION_FUNCTION_MISSING": "{script_name} 中缺少 migrate(session)",
+    "ERR_FOREIGN_KEY_MIGRATION_DATA_INVALID": "无法添加数据库关联约束：{relation} 存在 {count} 条不一致数据",
     "ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID": "size 和 quality 仅允许用于 IMAGE_GENERATION 模型",
     "ERR_INBOUND_MESSAGE_COLLECTOR_CLOSED": "入站消息收集器已关闭",
     "ERR_SESSION_REPLY_NO_FOREGROUND_INPUT": "没有可处理的前台消息",

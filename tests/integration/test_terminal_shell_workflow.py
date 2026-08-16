@@ -30,6 +30,8 @@ from app.core.tools.terminal import (
     TerminalWriteExecutor,
 )
 from app.models.profile import Profile, ProfileConfig
+from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
 from app.models.terminal_session import TerminalControlCommand, TerminalSession
 from app.providers.database import AsyncSessionLocal, engine
 
@@ -41,6 +43,8 @@ pytestmark = pytest.mark.skipif(
 STEP_TIMEOUT = 10.0
 TTY_MARKERS = ("TTY_STDIN=True", "TTY_STDOUT=True", "TTY_STDERR=True")
 ECHO_MARKER = "TERMINAL_WORKFLOW_ECHO_7D9A"
+TEST_UID = "terminal-shell-workflow-user"
+TEST_SESSION_ID = "terminal-shell-workflow-session"
 
 
 @pytest.fixture(autouse=True)
@@ -48,8 +52,16 @@ async def isolated_terminal_database():
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.drop(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: TerminalControlCommand.__table__.create(sync_connection, checkfirst=True))
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
+        db.add(ChatSession(session_id=TEST_SESSION_ID, uid=TEST_UID))
+        await db.commit()
 
     try:
         yield
@@ -57,6 +69,7 @@ async def isolated_terminal_database():
         async with AsyncSessionLocal() as db:
             await db.execute(delete(TerminalControlCommand))
             await db.execute(delete(TerminalSession))
+            await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
             await db.commit()
 
 
@@ -107,8 +120,8 @@ def _configure_executor(executor, db, *, uid: str, session_id: str, tool_call_id
 
 @pytest.mark.asyncio
 async def test_terminal_shell_workflow_uses_real_interactive_executors(tmp_path):
-    uid = "terminal-shell-workflow-user"
-    session_id = "terminal-shell-workflow-session"
+    uid = TEST_UID
+    session_id = TEST_SESSION_ID
     script_path = (tmp_path / "interactive_terminal.py").resolve()
     script_content = (
         "\n".join(

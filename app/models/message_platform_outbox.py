@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel
 
 from app.core.utils.time import get_local_time
@@ -16,6 +17,14 @@ class MessagePlatformOutboxStatus(StrEnum):
 
 class MessagePlatformOutbox(SQLModel, table=True):
     __tablename__ = "message_platform_outbox"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            name="fk_message_platform_outbox_session_owner",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     dedupe_key: str = Field(unique=True, index=True, max_length=64)

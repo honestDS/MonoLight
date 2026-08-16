@@ -323,7 +323,7 @@ class ProfileBase(SQLModel):
 
     uid: str | None = Field(default=None, index=True, max_length=50)
     name: str = Field(index=True, nullable=False, min_length=1, max_length=100)
-    prompt_id: int | None = Field(default=None, gt=0)
+    prompt_id: int | None = Field(default=None, gt=0, foreign_key="prompt.id", ondelete="RESTRICT")
     configs: dict[str, Any] = Field(
         default={},
         sa_column=Column(JSON),

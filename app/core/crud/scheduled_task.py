@@ -50,6 +50,11 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         result = await db.execute(stmt)
         return result.scalar() or 0
 
+    async def has_profile_assignment(self, db: AsyncSession, profile_id: int) -> bool:
+        stmt = select(ScheduledTask.id).where(ScheduledTask.profile_id == profile_id).limit(1)
+        result = await db.execute(stmt)
+        return result.scalar() is not None
+
     async def list_due(self, db: AsyncSession, *, limit: int = 100) -> list[ScheduledTask]:
         now = get_local_time()
         stmt = select(ScheduledTask).where(ScheduledTask.status == ScheduledTaskStatus.ENABLED).where(ScheduledTask.next_run_at <= now).order_by(ScheduledTask.next_run_at.asc()).limit(limit)

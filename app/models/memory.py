@@ -139,14 +139,24 @@ class LongTermMemoryStore(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: str = Field(index=True, max_length=100)
 
-    active_embedding_channel_id: int | None = Field(default=None, index=True)
+    active_embedding_channel_id: int | None = Field(
+        default=None,
+        index=True,
+        foreign_key="channel.id",
+        ondelete="RESTRICT",
+    )
     active_embedding_model_id: str | None = Field(default=None, index=True, max_length=255)
     active_embedding_dimensions: int | None = Field(default=None, ge=1)
     active_embedding_signature: str | None = Field(default=None, index=True, max_length=128)
     active_embedding_revision: int = Field(default=0, ge=0, index=True)
     active_collection_name: str | None = Field(default=None, index=True, max_length=255)
 
-    target_embedding_channel_id: int | None = Field(default=None, index=True)
+    target_embedding_channel_id: int | None = Field(
+        default=None,
+        index=True,
+        foreign_key="channel.id",
+        ondelete="RESTRICT",
+    )
     target_embedding_model_id: str | None = Field(default=None, index=True, max_length=255)
     target_embedding_dimensions: int | None = Field(default=None, ge=1)
     target_embedding_signature: str | None = Field(default=None, index=True, max_length=128)
@@ -186,7 +196,13 @@ class LongTermMemoryStore(SQLModel, table=True):
         le=MEMORY_ORGANIZE_TRIGGER_RECORDS,
     )
     auto_organize_enabled: bool = Field(default=False)
-    organization_channel_id: int | None = Field(default=None, index=True, gt=0)
+    organization_channel_id: int | None = Field(
+        default=None,
+        index=True,
+        gt=0,
+        foreign_key="channel.id",
+        ondelete="RESTRICT",
+    )
     organization_model_id: str | None = Field(default=None, index=True, max_length=255)
     organization_policy_version: int = Field(default=MEMORY_ORGANIZE_POLICY_VERSION, ge=1)
     organization_last_job_id: int | None = Field(default=None, index=True)
@@ -220,11 +236,16 @@ class LongTermMemoryEmbeddingSelectionToken(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: str = Field(index=True, max_length=100)
-    profile_id: int = Field(index=True)
+    profile_id: int = Field(index=True, foreign_key="profile.id", ondelete="CASCADE")
     token_digest: str = Field(max_length=64, nullable=False)
     profile_config_digest: str = Field(max_length=64, nullable=False)
     active_embedding_revision: int = Field(default=0, ge=0)
-    target_embedding_channel_id: int = Field(gt=0)
+    target_embedding_channel_id: int = Field(
+        gt=0,
+        index=True,
+        foreign_key="channel.id",
+        ondelete="CASCADE",
+    )
     target_embedding_model_id: str = Field(max_length=255)
     target_embedding_dimensions: int = Field(gt=0)
     target_embedding_signature: str = Field(max_length=128)

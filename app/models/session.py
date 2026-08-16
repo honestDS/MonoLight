@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import JSON
-from sqlmodel import Column, DateTime, Field, SQLModel
+from sqlmodel import Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.utils.time import get_local_time
 
@@ -10,15 +10,22 @@ from app.core.utils.time import get_local_time
 class ChatSession(SQLModel, table=True):
     """
     会话元数据表，用于存储 LLM 生成的标题等信息。
-    与 Message 表通过 session_id 逻辑关联。
+    Message 等会话子表通过 (session_id, uid) 复合外键关联。
     """
 
     __tablename__ = "chat_session"
+    __table_args__ = (UniqueConstraint("session_id", "uid", name="uq_chat_session_session_uid"),)
 
     session_id: str = Field(primary_key=True, max_length=100, index=True)
     uid: str = Field(index=True, max_length=100)
     profile_id: int | None = Field(default=None, index=True)
-    profile_override_id: int | None = Field(default=None, gt=0, index=True)
+    profile_override_id: int | None = Field(
+        default=None,
+        gt=0,
+        index=True,
+        foreign_key="profile.id",
+        ondelete="RESTRICT",
+    )
     source: str = Field(default="http", max_length=50, index=True)
     reply_target_source: str = Field(
         default="http",
