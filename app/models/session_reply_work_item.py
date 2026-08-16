@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.utils.time import get_local_time
@@ -42,7 +43,16 @@ SESSION_REPLY_TERMINAL_STATUSES = {
 
 class SessionReplyWorkItem(SQLModel, table=True):
     __tablename__ = "session_reply_work_item"
-    __table_args__ = (UniqueConstraint("session_id", "sequence_no", name="uq_session_reply_work_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence_no", name="uq_session_reply_work_sequence"),
+        UniqueConstraint("id", "session_id", "uid", name="uq_session_reply_work_item_id_session_uid"),
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            name="fk_session_reply_work_item_session_owner",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: str = Field(index=True, max_length=100)
@@ -72,6 +82,11 @@ class SessionReplyWorkItem(SQLModel, table=True):
 class SessionReplySequence(SQLModel, table=True):
     __tablename__ = "session_reply_sequence"
 
-    session_id: str = Field(primary_key=True, max_length=100)
+    session_id: str = Field(
+        primary_key=True,
+        max_length=100,
+        foreign_key="chat_session.session_id",
+        ondelete="CASCADE",
+    )
     next_sequence_no: int = Field(default=1, ge=1)
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True)))

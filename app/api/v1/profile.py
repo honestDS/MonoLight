@@ -35,6 +35,7 @@ from app.core.crud.memory import memory_store_crud
 from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
+from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
@@ -460,7 +461,8 @@ async def delete_profile(
         raise ParameterException(ERR_DELETE_DEFAULT_PROFILE)
     has_session_override = await session_crud.has_profile_override(db, profile_id)
     has_platform_assignment = await message_platform_crud.has_profile_assignment(db, profile_id)
-    if has_session_override or has_platform_assignment:
+    has_scheduled_assignment = await scheduled_task_crud.has_profile_assignment(db, profile_id)
+    if has_session_override or has_platform_assignment or has_scheduled_assignment:
         raise ParameterException(ERR_DELETE_BOUND_PROFILE)
 
     binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))

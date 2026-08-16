@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel, Text, UniqueConstraint
 
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
@@ -23,6 +24,14 @@ class TerminalControlCommandStatus(StrEnum):
 
 class TerminalSession(SQLModel, table=True):
     __tablename__ = "terminal_session"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("session_id", "uid"),
+            ("chat_session.session_id", "chat_session.uid"),
+            name="fk_terminal_session_chat_owner",
+            ondelete="CASCADE",
+        ),
+    )
 
     terminal_session_id: str = Field(primary_key=True, index=True, max_length=128)
     uid: str = Field(index=True, max_length=100)
@@ -66,7 +75,12 @@ class TerminalControlCommand(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    terminal_session_id: str = Field(index=True, max_length=128)
+    terminal_session_id: str = Field(
+        index=True,
+        max_length=128,
+        foreign_key="terminal_session.terminal_session_id",
+        ondelete="CASCADE",
+    )
     request_id: str = Field(index=True, max_length=128)
     action: TerminalAction = Field(index=True, max_length=20)
     payload: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))

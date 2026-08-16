@@ -8,19 +8,37 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import InternalMessage, Message, MessageRole, MessageType
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
+from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.client import CancellationSafeAsyncSession
+
+TEST_SESSION_ID = "message-dedupe-session"
+TEST_UID = "message-dedupe-user"
 
 
 @pytest.fixture(autouse=True)
 async def clean_message_table():
     async with engine.begin() as connection:
+        await connection.run_sync(lambda sync_connection: PromptLibrary.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: Profile.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(lambda sync_connection: ChatSession.__table__.create(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: Message.__table__.drop(sync_connection, checkfirst=True))
         await connection.run_sync(lambda sync_connection: Message.__table__.create(sync_connection))
-    yield
+
     async with AsyncSessionLocal() as db:
-        await db.execute(delete(Message))
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
+        db.add(ChatSession(session_id=TEST_SESSION_ID, uid=TEST_UID))
         await db.commit()
+
+    try:
+        yield
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(Message))
+            await db.execute(delete(ChatSession).where(ChatSession.session_id == TEST_SESSION_ID))
+            await db.commit()
 
 
 @pytest.mark.asyncio
@@ -31,8 +49,8 @@ async def test_save_message_is_idempotent_by_dedupe_key():
     async with AsyncSessionLocal() as db:
         first = await save_message(
             db,
-            "session-1",
-            "user-1",
+            TEST_SESSION_ID,
+            TEST_UID,
             MessageRole.ERR,
             MessageType.TEXT,
             message,
@@ -41,8 +59,8 @@ async def test_save_message_is_idempotent_by_dedupe_key():
         )
         repeated = await save_message(
             db,
-            "session-1",
-            "user-1",
+            TEST_SESSION_ID,
+            TEST_UID,
             MessageRole.ERR,
             MessageType.TEXT,
             message,
@@ -63,8 +81,8 @@ async def test_save_message_persists_outbound_text_refinement_as_plain_text():
     async with AsyncSessionLocal() as db:
         saved = await save_message(
             db,
-            "session-1",
-            "user-1",
+            TEST_SESSION_ID,
+            TEST_UID,
             MessageRole.USER,
             MessageType.OUTBOUND_TEXT_REFINEMENT,
             InternalMessage(role=MessageRole.USER, content="refinement prompt"),
@@ -84,8 +102,8 @@ async def test_save_message_persists_explicit_created_at():
     async with AsyncSessionLocal() as db:
         saved = await save_message(
             db,
-            "session-1",
-            "user-1",
+            TEST_SESSION_ID,
+            TEST_UID,
             MessageRole.ASSISTANT,
             MessageType.TEXT,
             InternalMessage(role=MessageRole.ASSISTANT, content="reply"),

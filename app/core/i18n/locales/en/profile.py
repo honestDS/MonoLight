@@ -21,7 +21,7 @@ MESSAGES = {
     "ERR_PROFILE_NO_CHAT_CHANNEL": "The profile has no chat channel configured and cannot be applied",
     "ERR_DELETE_LAST_PROFILE": "Cannot delete the last profile",
     "ERR_DELETE_DEFAULT_PROFILE": "Cannot delete the default profile",
-    "ERR_DELETE_BOUND_PROFILE": "Cannot delete a profile that is still referenced by a session or message platform",
+    "ERR_DELETE_BOUND_PROFILE": "Cannot delete a profile that is still referenced by a session, message platform, or scheduled task",
     "ERR_PROFILE_CHANNEL_MISMATCH": "The currently selected profile is not associated with a valid model channel, or the channel has become invalid. Please edit and save the profile.",
     "ERR_PROFILE_NO_EMBEDDING_CHANNEL": "The profile bound to this knowledge base has no embedding model channel configured",
     "ERR_PROFILE_NO_EMBEDDING_MODEL": "The profile bound to this knowledge base has no embedding model ID configured",

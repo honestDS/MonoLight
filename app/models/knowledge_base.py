@@ -9,6 +9,7 @@ from sqlmodel import (
     DateTime,
     Field,
     SQLModel,
+    UniqueConstraint,
 )
 
 from app.core.utils.time import get_local_time
@@ -18,7 +19,13 @@ class KnowledgeBaseCore(SQLModel):
     uid: str = Field(index=True, nullable=False, max_length=50, description="知识库所属用户ID")
     name: str = Field(index=True, nullable=False, min_length=1, max_length=100, description="知识库名称")
     description: str | None = Field(default=None, max_length=500, description="知识库描述")
-    embedding_channel_id: int = Field(nullable=False, index=True, description="向量化使用的渠道ID")
+    embedding_channel_id: int = Field(
+        nullable=False,
+        index=True,
+        foreign_key="channel.id",
+        ondelete="RESTRICT",
+        description="向量化使用的渠道ID",
+    )
     embedding_model_id: str = Field(nullable=False, max_length=255, description="向量化使用的模型ID")
     embedding_dimensions: int | None = Field(default=None, gt=0, description="向量输出维度")
     collection_name: str = Field(unique=True, index=True, nullable=False, max_length=100, description="ChromaDB 中的 collection 名称")
@@ -42,10 +49,23 @@ class KnowledgeBaseProfileBinding(SQLModel, table=True):
     """知识库与 Profile 的绑定关系。"""
 
     __tablename__ = "knowledge_base_profile_binding"
+    __table_args__ = (UniqueConstraint("knowledge_base_id", "profile_id", name="uq_knowledge_base_profile_binding_pair"),)
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    knowledge_base_id: int = Field(nullable=False, index=True, description="知识库ID")
-    profile_id: int = Field(nullable=False, index=True, description="配置文件ID")
+    knowledge_base_id: int = Field(
+        nullable=False,
+        index=True,
+        foreign_key="knowledge_base.id",
+        ondelete="CASCADE",
+        description="知识库ID",
+    )
+    profile_id: int = Field(
+        nullable=False,
+        index=True,
+        foreign_key="profile.id",
+        ondelete="CASCADE",
+        description="配置文件ID",
+    )
 
 
 class KnowledgeBaseDocument(SQLModel, table=True):
@@ -54,7 +74,13 @@ class KnowledgeBaseDocument(SQLModel, table=True):
     __tablename__ = "knowledge_base_document"
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    knowledge_base_id: int = Field(nullable=False, index=True, description="所属知识库ID")
+    knowledge_base_id: int = Field(
+        nullable=False,
+        index=True,
+        foreign_key="knowledge_base.id",
+        ondelete="CASCADE",
+        description="所属知识库ID",
+    )
     filename: str = Field(nullable=False, max_length=255, description="导入的文件名")
     content: str = Field(sa_column=Column(Text, nullable=False), description="文档原文")
     chunk_size: int = Field(nullable=False, description="分块大小")

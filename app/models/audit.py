@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import JSON, Column, DateTime, Field, SQLModel, Text, UniqueConstraint
 
 from app.core.utils.time import get_local_time
@@ -62,6 +63,7 @@ AUDIT_TERMINAL_STATUSES = {
 
 class AuditRecord(SQLModel, table=True):
     __tablename__ = "audit_record"
+    __table_args__ = (UniqueConstraint("id", "uid", "session_id", name="uq_audit_record_id_uid_session"),)
 
     id: int | None = Field(default=None, primary_key=True, index=True)
     uid: str = Field(index=True, max_length=100)
@@ -98,10 +100,11 @@ class AuditToolDetail(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("audit_record_id", "original_tool_call_id", name="uq_audit_tool_detail_record_call"),
         UniqueConstraint("audit_record_id", "turn_index", name="uq_audit_tool_detail_record_turn"),
+        UniqueConstraint("id", "audit_record_id", name="uq_audit_tool_detail_id_record"),
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    audit_record_id: int = Field(index=True)
+    audit_record_id: int = Field(index=True, foreign_key="audit_record.id", ondelete="CASCADE")
     original_tool_call_id: str = Field(index=True, max_length=100)
     turn_index: int = Field(ge=0)
     tool_name: str = Field(index=True, max_length=100)
@@ -142,6 +145,12 @@ class AuditConfirmationClaim(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("uid", "session_id", name="uq_audit_confirmation_claim_user_session"),
         UniqueConstraint("audit_record_id", name="uq_audit_confirmation_claim_record"),
+        ForeignKeyConstraint(
+            ["audit_record_id", "uid", "session_id"],
+            ["audit_record.id", "audit_record.uid", "audit_record.session_id"],
+            name="fk_audit_confirmation_claim_record_owner",
+            ondelete="CASCADE",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
@@ -153,10 +162,18 @@ class AuditConfirmationClaim(SQLModel, table=True):
 
 class AuditExecutionRecord(SQLModel, table=True):
     __tablename__ = "audit_execution_record"
-    __table_args__ = (UniqueConstraint("audit_tool_detail_id", "attempt_no", name="uq_audit_execution_detail_attempt"),)
+    __table_args__ = (
+        UniqueConstraint("audit_tool_detail_id", "attempt_no", name="uq_audit_execution_detail_attempt"),
+        ForeignKeyConstraint(
+            ["audit_tool_detail_id", "audit_record_id"],
+            ["audit_tool_detail.id", "audit_tool_detail.audit_record_id"],
+            name="fk_audit_execution_record_detail_record",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
-    audit_record_id: int = Field(index=True)
+    audit_record_id: int = Field(index=True, foreign_key="audit_record.id", ondelete="CASCADE")
     audit_tool_detail_id: int = Field(index=True)
     attempt_no: int = Field(default=1, ge=1)
     status: AuditExecutionStatus = Field(default=AuditExecutionStatus.RUNNING, index=True, max_length=30)

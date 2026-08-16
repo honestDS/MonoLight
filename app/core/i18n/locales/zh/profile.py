@@ -21,7 +21,7 @@ MESSAGES = {
     "ERR_PROFILE_NO_CHAT_CHANNEL": "配置缺少对话渠道，无法应用",
     "ERR_DELETE_LAST_PROFILE": "不能删除最后一个配置",
     "ERR_DELETE_DEFAULT_PROFILE": "不能删除默认配置",
-    "ERR_DELETE_BOUND_PROFILE": "配置仍被会话或消息平台引用，不能删除",
+    "ERR_DELETE_BOUND_PROFILE": "配置仍被会话、消息平台或定时任务引用，不能删除",
     "ERR_PROFILE_CHANNEL_MISMATCH": "所选配置未关联有效的模型渠道或渠道已失效。请重新编辑并保存配置。",
     "ERR_PROFILE_NO_EMBEDDING_CHANNEL": "该知识库绑定的配置文件未设置嵌入模型渠道",
     "ERR_PROFILE_NO_EMBEDDING_MODEL": "该知识库绑定的配置文件未设置嵌入模型ID",

@@ -9,7 +9,7 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from pydantic import Field as PyField
-from sqlalchemy import Text
+from sqlalchemy import ForeignKeyConstraint, Text
 from sqlmodel import (
     JSON,
     Column,
@@ -108,6 +108,14 @@ class MessageBase(SQLModel):
 
 class Message(MessageBase, table=True):
     __tablename__ = "message"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "uid"],
+            ["chat_session.session_id", "chat_session.uid"],
+            name="fk_message_session_owner",
+            ondelete="CASCADE",
+        ),
+    )
     id: int | None = Field(default=None, primary_key=True, index=True)
     profile_id: int = Field()
     environment_prompt: str | None = Field(default=None, sa_column=Column(Text))

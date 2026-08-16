@@ -53,7 +53,7 @@ class MessagePlatformBase(SQLModel):
     status: MessagePlatformStatus = Field(default=MessagePlatformStatus.DISCONNECTED, nullable=False, index=True)
     account_id: str | None = Field(default=None, max_length=255)
     uid: str | None = Field(default=None, index=True, max_length=100)
-    profile_id: int | None = Field(default=None, gt=0, index=True)
+    profile_id: int | None = Field(default=None, gt=0, index=True, foreign_key="profile.id", ondelete="RESTRICT")
     config: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON), description="Platform private config such as secrets and runtime settings")
     state: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON), description="Platform runtime state such as sync_buf and qrcode status")
     last_error: str | None = Field(default=None, max_length=1000)
