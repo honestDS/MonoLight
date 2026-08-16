@@ -158,7 +158,16 @@ async def test_permanent_guidance_is_visible_in_web_history_but_excluded_from_mo
         content="普通消息",
         is_processed=False,
     )
-    db_session.add(text_message)
+    refinement_message = Message(
+        session_id="session-1",
+        uid="user-1",
+        profile_id=1,
+        role=MessageRole.USER,
+        type=MessageType.OUTBOUND_TEXT_REFINEMENT,
+        content="[系统提示,此处不是用户说的话]上一条助手回复超过渠道文本限制。... [系统提示结束]",
+        is_processed=False,
+    )
+    db_session.add_all([text_message, refinement_message])
     await db_session.commit()
 
     model_history = await message_crud.get_history_backward_by_id(
@@ -180,6 +189,11 @@ async def test_permanent_guidance_is_visible_in_web_history_but_excluded_from_mo
     assert [message.id for message in model_history] == [text_message.id]
     assert [message.id for message in unprocessed] == [text_message.id]
     assert {message.id for message in web_history} == {guidance.id, text_message.id}
+    assert refinement_message.id not in {message.id for message in model_history}
+    assert refinement_message.id not in {message.id for message in unprocessed}
+    assert refinement_message.id not in {message.id for message in web_history}
+    assert guidance.id in {message.id for message in web_history}
+    assert text_message.id in {message.id for message in web_history}
 
 
 @pytest.mark.asyncio

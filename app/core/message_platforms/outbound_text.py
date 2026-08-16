@@ -109,7 +109,7 @@ async def _save_outbound_text_refinement_prompt(
         session_id,
         uid,
         MessageRole.USER,
-        MessageType.TEXT,
+        MessageType.OUTBOUND_TEXT_REFINEMENT,
         InternalMessage(role=MessageRole.USER, content=refinement_prompt),
         profile_id,
         is_processed=True,

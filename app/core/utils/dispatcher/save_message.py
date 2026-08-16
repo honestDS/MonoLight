@@ -25,7 +25,7 @@ def _to_storable_content(content: Any, msg_type: MessageType) -> str:
             content = content.model_dump(mode="json", exclude_none=True)
         return canonical_json_dumps(content)
 
-    if msg_type in {MessageType.TEXT, MessageType.AUDIT_DECISION, MessageType.BACKGROUND_TASK_RESULT} and hasattr(content, "content"):
+    if msg_type in {MessageType.TEXT, MessageType.AUDIT_DECISION, MessageType.BACKGROUND_TASK_RESULT, MessageType.OUTBOUND_TEXT_REFINEMENT} and hasattr(content, "content"):
         payload = content.content
         if isinstance(payload, str) or payload is None:
             return payload or ""

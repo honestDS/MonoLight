@@ -38,6 +38,7 @@ class MessageType(StrEnum):
     AUDIT_DECISION = "audit_decision"
     BACKGROUND_TASK_RESULT = "background_result"
     SCHEDULED_TASK_TRIGGER = "scheduled_task_trigger"
+    OUTBOUND_TEXT_REFINEMENT = "outbound_text_refinement"
 
 
 class MessagePart(BaseModel):

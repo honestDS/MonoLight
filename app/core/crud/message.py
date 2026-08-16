@@ -223,7 +223,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         用于内部上下文管理器获取对话上下文；按时间倒序排列以便 ContextManager 进行 Token 窗口截断
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if before_id is not None:
             stmt = stmt.where(Message.id < before_id)
         if after_id is not None:
@@ -254,7 +254,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_after_id is not None:
             lower_bound = page_after_id if lower_bound is None else max(lower_bound, page_after_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if lower_bound is not None:
             stmt = stmt.where(Message.id > lower_bound)
         if before_id is not None:
@@ -302,7 +302,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         if page_before_id is not None:
             upper_bound = page_before_id if upper_bound is None else min(upper_bound, page_before_id)
 
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if after_id is not None:
             stmt = stmt.where(Message.id > after_id)
         if upper_bound is not None:
@@ -322,6 +322,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             .where(Message.is_processed == False)  # noqa: E712
             .where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
             .where(Message.type != MessageType.GUIDANCE)
+            .where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
             .order_by(Message.created_at.asc())
         )
         return result.scalars().all()
@@ -339,7 +340,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         """
         用于前端分页加载会话历史记录
         """
-        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER)
+        stmt = select(Message).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT)
         if not include_tool_messages:
             stmt = stmt.where(Message.type.notin_((MessageType.TOOL_CALL, MessageType.TOOL_RESULT)))
         stmt = stmt.order_by(Message.created_at.desc()).limit(limit).offset(offset)
@@ -389,7 +390,7 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
         return result.all()
 
     async def get_latest_session_profile_id(self, db: AsyncSession, *, session_id: str, uid: str) -> int | None:
-        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.GUIDANCE).order_by(Message.created_at.desc()).limit(1)
+        stmt = select(Message.profile_id).where(Message.session_id == session_id).where(Message.uid == uid).where(Message.type != MessageType.SCHEDULED_TASK_TRIGGER).where(Message.type != MessageType.GUIDANCE).where(Message.type != MessageType.OUTBOUND_TEXT_REFINEMENT).order_by(Message.created_at.desc()).limit(1)
         result = await db.execute(stmt)
         return result.scalars().first()
 
