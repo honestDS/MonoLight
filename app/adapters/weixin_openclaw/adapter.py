@@ -265,7 +265,10 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             return False
         if any(not isinstance(text, str) or not text or len(text.encode("utf-8")) > WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT for text in text_parts):
             return False
-        return await self.reply_items(user_id, [text_item(text) for text in text_parts], context_token=context_token)
+        for text in text_parts:
+            if not await self.reply_items(user_id, [text_item(text)], context_token=context_token):
+                return False
+        return True
 
     async def reply_items(self, user_id: str, item_list: list[dict[str, Any]], *, context_token: str = "") -> bool:
         token = context_token or self.context_tokens.get(user_id, "")

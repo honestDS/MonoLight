@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
+from app.adapters.weixin_openclaw.client import WeixinOpenClawClient
 from app.adapters.weixin_openclaw.constants import (
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_ASCII_CHAR_LIMIT,
     WEIXIN_OPENCLAW_OUTBOUND_TEXT_CHINESE_CHAR_LIMIT,
@@ -432,17 +433,19 @@ async def test_send_session_event_sends_normal_short_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_session_event_sends_oversized_newline_text_as_two_items(monkeypatch):
+async def test_send_session_event_sends_oversized_newline_text_as_separate_requests(monkeypatch):
     adapter = object.__new__(WeixinOpenClawAdapter)
-    reply_calls = []
+    adapter.context_tokens = {"weixin-user": "context-token"}
+    adapter.config = SimpleNamespace(channel_version="1", account_id="bot-account")
+    request_calls = []
     first_part = "测" * 1000
     second_part = "a" * 3000
 
-    async def reply_items(user_id, item_list, *, context_token=""):
-        reply_calls.append((user_id, item_list, context_token))
-        return True
+    async def request_json(*args, **kwargs):
+        request_calls.append((args, kwargs))
+        return {}
 
-    monkeypatch.setattr(adapter, "reply_items", reply_items)
+    monkeypatch.setattr(adapter, "request_json", request_json)
 
     sent = await adapter.send_session_event(
         "owner",
@@ -451,11 +454,16 @@ async def test_send_session_event_sends_oversized_newline_text_as_two_items(monk
     )
 
     assert sent is True
-    assert len(reply_calls) == 1
-    assert reply_calls[0][0] == "weixin-user"
-    assert reply_calls[0][2] == ""
-    assert [item["text_item"]["text"] for item in reply_calls[0][1]] == [first_part, second_part]
-    assert all(len(item["text_item"]["text"].encode("utf-8")) <= WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT for item in reply_calls[0][1])
+    assert len(request_calls) == 2
+    assert all(args == ("POST", "ilink/bot/sendmessage") for args, _ in request_calls)
+    payloads = [kwargs["payload"] for _, kwargs in request_calls]
+    assert [payload["msg"]["item_list"] for payload in payloads] == [
+        [{"type": 1, "text_item": {"text": first_part}}],
+        [{"type": 1, "text_item": {"text": second_part}}],
+    ]
+    assert all(len(payload["msg"]["item_list"][0]["text_item"]["text"].encode("utf-8")) <= WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT for payload in payloads)
+    assert payloads[0]["msg"]["client_id"] != payloads[1]["msg"]["client_id"]
+    assert all(payload["msg"]["context_token"] == "context-token" for payload in payloads)
 
 
 @pytest.mark.asyncio
@@ -524,3 +532,65 @@ async def test_reply_text_enforces_utf8_byte_limit(monkeypatch, text, expected_s
 
     assert sent is expected_sent
     assert bool(reply_calls) is expected_sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_text", "expected_result", "expected_error"),
+    [
+        ('{"ret":1,"errcode":0,"errmsg":"业务失败"}', None, True),
+        ('{"ret":0,"errcode":9,"errmsg":"业务失败"}', None, True),
+        ('{"ret":0,"errcode":0,"data":{"ok":true}}', {"ret": 0, "errcode": 0, "data": {"ok": True}}, False),
+        ('{"ret":"0","errcode":"0","data":{"ok":true}}', {"ret": "0", "errcode": "0", "data": {"ok": True}}, False),
+        ('{"ret":"","errcode":"","data":{"ok":true}}', {"ret": "", "errcode": "", "data": {"ok": True}}, False),
+    ],
+)
+async def test_request_json_handles_client_business_codes(monkeypatch, response_text, expected_result, expected_error):
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, text):
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            return False
+
+        async def text(self):
+            return self._text
+
+    class FakeSession:
+        closed = False
+
+        def __init__(self, text):
+            self.response = FakeResponse(text)
+
+        def request(self, *_args, **_kwargs):
+            return self.response
+
+    class FakeLogger:
+        def __init__(self):
+            self.error_messages = []
+
+        def bind(self, **_kwargs):
+            return self
+
+        def error(self, message):
+            self.error_messages.append(message)
+
+    fake_logger = FakeLogger()
+    monkeypatch.setattr("app.adapters.weixin_openclaw.client.logger", fake_logger)
+    client = WeixinOpenClawClient(SimpleNamespace(base_url="https://example.test", cdn_base_url="https://example.test", token="", api_timeout_ms=1000))
+    client.session = FakeSession(response_text)
+
+    if expected_error:
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.request_json("POST", "ilink/bot/test", token_required=False)
+
+        assert response_text in str(exc_info.value)
+        assert fake_logger.error_messages == [response_text]
+    else:
+        assert await client.request_json("POST", "ilink/bot/test", token_required=False) == expected_result
+        assert fake_logger.error_messages == []

@@ -102,8 +102,8 @@ export const isPlainAssistantResponse = (message) => {
     && !hasToolCalls(message, content)
 }
 
-export const findAssistantResponseReplacementIndex = (messages, incomingMessage) => {
-  if (!isAssistantResponse(incomingMessage)) return -1
+const getAssistantResponseReplacementIndices = (messages, incomingMessage) => {
+  if (!isAssistantResponse(incomingMessage)) return []
 
   const incomingDbId = getMessageDbId(incomingMessage)
   const incomingResponseId = getMessageIdentity(incomingMessage, 'response_id')
@@ -111,6 +111,12 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
   const incomingTurn = getMessageIdentity(incomingMessage, 'turn')
   const incomingRequestId = getMessageIdentity(incomingMessage, 'request_id')
   const syntheticWorkResponse = isSyntheticWorkResponseId(incomingResponseId, incomingWorkId)
+  const replacementIndices = []
+  const addReplacementIndex = (replacementIndex) => {
+    if (replacementIndex !== -1 && !replacementIndices.includes(replacementIndex)) {
+      replacementIndices.push(replacementIndex)
+    }
+  }
 
   const canUseCandidate = (message, allowDifferentDbId = false) => {
     if (!isAssistantResponse(message)) return false
@@ -123,7 +129,7 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
     const replacementIndex = messages.findIndex(message => (
       canUseCandidate(message, true) && getMessageDbId(message) === incomingDbId
     ))
-    if (replacementIndex !== -1) return replacementIndex
+    addReplacementIndex(replacementIndex)
   }
 
   if (hasIdentity(incomingResponseId) && !syntheticWorkResponse) {
@@ -133,7 +139,7 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
       && hasIdentity(getMessageIdentity(message, 'response_id'))
       && String(getMessageIdentity(message, 'response_id')) === stableResponseId
     ))
-    if (replacementIndex !== -1) return replacementIndex
+    addReplacementIndex(replacementIndex)
   }
 
   // 合成会话回复曾复用 work id，只能回退到最后一个匹配回合；真实 response id 可
@@ -153,7 +159,7 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
       return isWeakResponseIdentity(getMessageIdentity(message, 'response_id'), stableWorkId)
         && (!hasIdentity(incomingTurn) || (hasIdentity(messageTurn) && String(messageTurn) === String(incomingTurn)))
     })
-    if (replacementIndex !== -1) return replacementIndex
+    addReplacementIndex(replacementIndex)
   }
 
   if (incomingDbId === null && !hasIdentity(incomingResponseId) && !hasIdentity(incomingWorkId) && hasIdentity(incomingRequestId)) {
@@ -163,11 +169,15 @@ export const findAssistantResponseReplacementIndex = (messages, incomingMessage)
       && hasIdentity(getMessageIdentity(message, 'request_id'))
       && String(getMessageIdentity(message, 'request_id')) === stableRequestId
     ))
-    if (replacementIndex !== -1) return replacementIndex
+    addReplacementIndex(replacementIndex)
   }
 
-  return -1
+  return replacementIndices
 }
+
+export const findAssistantResponseReplacementIndex = (messages, incomingMessage) => (
+  getAssistantResponseReplacementIndices(messages, incomingMessage)[0] ?? -1
+)
 
 export const mergeAssistantResponse = (localMessage, remoteMessage) => {
   const remoteDbId = getMessageDbId(remoteMessage)
@@ -226,9 +236,41 @@ export const mergeAssistantResponse = (localMessage, remoteMessage) => {
 }
 
 export const mergeAssistantResponseIntoList = (messages, remoteMessage) => {
-  const replacementIndex = findAssistantResponseReplacementIndex(messages, remoteMessage)
-  if (replacementIndex === -1) return [...messages, remoteMessage]
+  const replacementIndices = getAssistantResponseReplacementIndices(messages, remoteMessage)
+  if (replacementIndices.length === 0) return [...messages, remoteMessage]
+
+  const replacementIndex = replacementIndices[0]
+  const mergedMessage = replacementIndices
+    .slice(1)
+    .reduce((primary, index) => {
+      const merged = mergeAssistantResponse(messages[index], primary)
+      const getPreferredField = field => {
+        const primaryValue = getMessageIdentity(primary, field)
+        return hasIdentity(primaryValue) ? primaryValue : getMessageIdentity(merged, field)
+      }
+      const id = hasIdentity(primary?.id) ? primary.id : merged?.id
+      const dbId = hasIdentity(primary?.db_id) ? primary.db_id : merged?.db_id
+      const messageId = hasIdentity(primary?.message_id) ? primary.message_id : merged?.message_id
+      const responseId = getPreferredField('response_id')
+      const requestId = getPreferredField('request_id')
+      const workId = getPreferredField('work_id')
+      const turn = getPreferredField('turn')
+
+      return {
+        ...merged,
+        ...(hasIdentity(id) ? { id } : {}),
+        ...(hasIdentity(dbId) ? { db_id: dbId } : {}),
+        ...(hasIdentity(messageId) ? { message_id: messageId } : {}),
+        ...(hasIdentity(responseId) ? { response_id: responseId } : {}),
+        ...(hasIdentity(requestId) ? { request_id: requestId } : {}),
+        ...(hasIdentity(workId) ? { work_id: workId } : {}),
+        ...(hasIdentity(turn) ? { turn } : {})
+      }
+    }, messages[replacementIndex])
+  const finalMessage = mergeAssistantResponse(mergedMessage, remoteMessage)
+  const mergedIndices = new Set(replacementIndices.slice(1))
+
   return messages.map((message, index) => (
-    index === replacementIndex ? mergeAssistantResponse(message, remoteMessage) : message
-  ))
+    index === replacementIndex ? finalMessage : message
+  )).filter((message, index) => index === replacementIndex || !mergedIndices.has(index))
 }
