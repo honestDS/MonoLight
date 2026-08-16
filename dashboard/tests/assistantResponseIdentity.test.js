@@ -488,3 +488,210 @@ test('tool and plain assistant turns with the same work remain isolated by respo
     'response-plain-turn'
   ])
 })
+
+test('stream and identity-less history converge through a real turn_end in either arrival order', () => {
+  const streamResponse = liveResponse({
+    id: 'assistant-stream-bridge',
+    db_id: undefined,
+    response_id: 'response-bridge',
+    work_id: 7,
+    content: 'stream body'
+  })
+  const historyResponse = liveResponse({
+    id: 'assistant-history-bridge',
+    db_id: 9,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'persisted body'
+  })
+  const turnEnd = liveResponse({
+    id: 'assistant-turn-end-bridge',
+    type: 'turn_end',
+    db_id: 9,
+    response_id: 'response-bridge',
+    work_id: 7,
+    content: 'final body'
+  })
+
+  for (const [first, second] of [[streamResponse, historyResponse], [historyResponse, streamResponse]]) {
+    const merged = [first, second, turnEnd].reduce(
+      (messages, incoming) => mergeAssistantResponseIntoList(messages, incoming),
+      []
+    )
+    const replayed = mergeAssistantResponseIntoList(merged, {
+      ...turnEnd,
+      id: 'assistant-turn-end-bridge-replayed'
+    })
+
+    assert.equal(replayed.length, 1)
+    assert.equal(replayed[0].db_id, '9')
+    assert.equal(replayed[0].response_id, 'response-bridge')
+    assert.equal(replayed[0].content, 'final body')
+  }
+})
+
+test('persisted history content wins over partial stream content when turn_end is empty', () => {
+  const streamResponse = liveResponse({
+    id: 'assistant-partial-bridge',
+    db_id: undefined,
+    response_id: 'response-content-bridge',
+    work_id: 7,
+    content: 'partial'
+  })
+  const historyResponse = liveResponse({
+    id: 'assistant-persisted-final',
+    db_id: 9,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'persisted final'
+  })
+  const emptyTurnEnd = liveResponse({
+    id: 'assistant-empty-turn-end',
+    type: 'turn_end',
+    db_id: 9,
+    response_id: 'response-content-bridge',
+    work_id: 7,
+    content: ''
+  })
+
+  for (const [first, second] of [[streamResponse, historyResponse], [historyResponse, streamResponse]]) {
+    const merged = [first, second, emptyTurnEnd].reduce(
+      (messages, incoming) => mergeAssistantResponseIntoList(messages, incoming),
+      []
+    )
+
+    assert.equal(merged.length, 1)
+    assert.equal(merged[0].content, 'persisted final')
+    assert.equal(merged[0].db_id, '9')
+    assert.equal(merged[0].response_id, 'response-content-bridge')
+  }
+})
+
+test('proactive and synthetic done bridges fold history into only the final same-work turn', () => {
+  const firstResponse = liveResponse({
+    id: 'assistant-work-first',
+    response_id: 'response-work-first',
+    content: 'first body'
+  })
+  const finalResponse = liveResponse({
+    id: 'assistant-work-final',
+    response_id: 'response-work-final',
+    content: 'final streamed body'
+  })
+  const historyResponse = liveResponse({
+    id: 'assistant-work-history',
+    db_id: 9,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'history body'
+  })
+  const bridgeCases = [
+    {
+      type: 'proactive_reply',
+      response_id: undefined,
+      content: 'proactive final body'
+    },
+    {
+      type: 'done',
+      response_id: 'session-reply-work:7',
+      content: 'synthetic final body'
+    }
+  ]
+
+  for (const bridge of bridgeCases) {
+    const merged = mergeAssistantResponseIntoList(
+      [firstResponse, finalResponse, historyResponse],
+      liveResponse({
+        id: `assistant-${bridge.type}-bridge`,
+        type: bridge.type,
+        db_id: 9,
+        work_id: 7,
+        response_id: bridge.response_id,
+        content: bridge.content
+      })
+    )
+
+    assert.equal(merged.length, 2)
+    assert.equal(merged[0].response_id, 'response-work-first')
+    assert.equal(merged[0].content, 'first body')
+    assert.equal(merged[1].response_id, 'response-work-final')
+    assert.equal(merged[1].content, bridge.content)
+    assert.equal(merged[1].db_id, '9')
+  }
+})
+
+test('a db identity prevents a bridge from merging a different database message with the same response and work', () => {
+  const historyResponse = liveResponse({
+    id: 'assistant-db-9-history',
+    db_id: 9,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'db 9 history'
+  })
+  const otherDatabaseResponse = liveResponse({
+    id: 'assistant-db-10',
+    db_id: 10,
+    response_id: 'response-shared',
+    work_id: 7,
+    content: 'db 10 body'
+  })
+  const bridge = liveResponse({
+    id: 'assistant-db-9-bridge',
+    type: 'turn_end',
+    db_id: 9,
+    response_id: 'response-shared',
+    work_id: 7,
+    content: 'db 9 final'
+  })
+
+  const merged = mergeAssistantResponseIntoList([historyResponse, otherDatabaseResponse], bridge)
+
+  assert.equal(merged.length, 2)
+  assert.equal(merged[0].db_id, '9')
+  assert.equal(merged[0].response_id, 'response-shared')
+  assert.equal(merged[0].content, 'db 9 final')
+  assert.equal(merged[1].db_id, 10)
+  assert.equal(merged[1].response_id, 'response-shared')
+  assert.equal(merged[1].work_id, 7)
+  assert.equal(merged[1].content, 'db 10 body')
+})
+
+test('tool-call stream and persisted history converge through turn_end while retaining tool calls and final content', () => {
+  const toolCalls = [{ id: 'call-bridge', type: 'function', function: { name: 'lookup' } }]
+  const toolStream = liveResponse({
+    id: 'assistant-tool-bridge',
+    db_id: undefined,
+    response_id: 'response-tool-bridge',
+    work_id: 7,
+    tool_calls: toolCalls,
+    content: 'partial tool response'
+  })
+  const historyResponse = liveResponse({
+    id: 'assistant-tool-history',
+    db_id: 9,
+    response_id: undefined,
+    work_id: undefined,
+    content: 'persisted final'
+  })
+  const turnEnd = liveResponse({
+    id: 'assistant-tool-turn-end',
+    type: 'turn_end',
+    db_id: 9,
+    response_id: 'response-tool-bridge',
+    work_id: 7,
+    content: ''
+  })
+
+  const merged = [toolStream, historyResponse, turnEnd].reduce(
+    (messages, incoming) => mergeAssistantResponseIntoList(messages, incoming),
+    []
+  )
+  const content = JSON.parse(merged[0].content)
+
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0].db_id, '9')
+  assert.equal(merged[0].response_id, 'response-tool-bridge')
+  assert.deepEqual(merged[0].tool_calls, toolCalls)
+  assert.equal(content.content, 'persisted final')
+  assert.deepEqual(content.tool_calls, toolCalls)
+})

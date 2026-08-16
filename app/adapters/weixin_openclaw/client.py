@@ -19,6 +19,9 @@ from app.core.constants import (
 )
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
+from app.core.log import get_logger
+
+logger = get_logger(__name__)
 
 
 class WeixinOpenClawClient:
@@ -84,7 +87,19 @@ class WeixinOpenClawClient:
                 )
             if not text:
                 return {}
-            return json.loads(text)
+            result = json.loads(text)
+            if isinstance(result, dict) and any(result.get(key) not in (None, "", 0, "0") for key in ("ret", "errcode")):
+                logger.bind(method=method, endpoint=endpoint, status=response.status).error(text)
+                raise RuntimeError(
+                    t(
+                        ERR_WEIXIN_OPENCLAW_REQUEST_FAILED,
+                        method=method,
+                        endpoint=endpoint,
+                        status=response.status,
+                        detail=text,
+                    )
+                )
+            return result
 
     async def download_cdn_bytes(self, encrypted_query_param: str) -> bytes:
         await self.ensure_session()
