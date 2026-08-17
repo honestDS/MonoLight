@@ -8,6 +8,8 @@ MESSAGES = {
     "ERR_VALIDATION_FAILED": "Parameter validation failed",
     "ERR_SETUP_CONFLICT": "Setup is already completed or in progress",
     "ERR_SETUP_STATE_UPDATE_FAILED": "Failed to update setup state",
+    "ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT": "Internal integrity error: system setting {setting_key!r} was not found after insertion",
+    "ERR_SETUP_STATUS_NOT_INITIALIZED": "Internal integrity error: setup status was not initialized",
     "missing": "Missing required field",
     "value_error.missing": "Missing required field",
     "string_too_short": "Input is too short",
