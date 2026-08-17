@@ -1,7 +1,7 @@
 <template>
   <el-config-provider :locale="locale">
     <div id="app">
-      <router-view v-if="isLoginPage"></router-view>
+      <router-view v-if="isStandalonePage"></router-view>
     <el-container v-else class="app-wrapper">
       <el-aside width="220px" class="sidebar">
         <div class="logo-container">
@@ -117,8 +117,8 @@ export default {
   },
 
   computed: {
-    isLoginPage() {
-      return this.$route.path === '/login'
+    isStandalonePage() {
+      return ['/login', '/setup'].includes(this.$route.path)
     },
     currentRouteName() {
       const path = this.$route.path
