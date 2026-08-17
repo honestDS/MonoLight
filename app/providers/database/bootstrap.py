@@ -1,6 +1,5 @@
 import importlib.util
 import logging
-import os
 from pathlib import Path
 from types import ModuleType
 
@@ -14,6 +13,7 @@ from app.core.constants import (
     ERR_MIGRATION_FUNCTION_MISSING,
     ERR_MIGRATION_ID_INVALID,
     ERR_MIGRATION_SCRIPT_INVALID,
+    SETUP_STATUS_COMPLETED,
 )
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
@@ -63,6 +63,19 @@ async def ensure_default_profile_for_user(session: AsyncSession, uid: str | None
             "is_default": True,
         },
     )
+
+
+async def _initialize_setup_state_and_get_admin_uid(session: AsyncSession) -> str | None:
+    superuser = await user_crud.get_superuser(session)
+    admin_uid = superuser.uid if superuser else None
+    status, confirmed_admin_uid = await system_setting_crud.initialize_setup_state(session, admin_uid=admin_uid)
+    if status != SETUP_STATUS_COMPLETED or not confirmed_admin_uid:
+        return None
+
+    admin_user = await user_crud.get_by_uid(session, confirmed_admin_uid)
+    if admin_user and admin_user.is_superuser:
+        return admin_user.uid
+    return None
 
 
 async def ensure_migration_record_table(session: AsyncSession) -> None:
@@ -157,6 +170,7 @@ async def init_database_schema(session: AsyncSession) -> None:
 async def init_system_data(session: AsyncSession):
     # 1. 基础表初始化与迁移
     await init_database_schema(session)
+    confirmed_admin_uid = await _initialize_setup_state_and_get_admin_uid(session)
 
     # 2. 业务配置初始化
     await system_setting_crud.ensure_defaults(session)
@@ -165,10 +179,6 @@ async def init_system_data(session: AsyncSession):
     if not prompt_obj:
         prompt_obj = await prompt_crud.create(session, obj_in={"name": "default", "content": "", "uid": None})
 
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
-    admin_user = await user_crud.get_by_username(session, admin_username)
-    admin_uid = admin_user.uid if admin_user else None
-
-    await ensure_default_profile_for_user(session, admin_uid)
+    await ensure_default_profile_for_user(session, confirmed_admin_uid)
 
     await session.commit()
