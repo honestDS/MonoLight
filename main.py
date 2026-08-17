@@ -15,6 +15,7 @@ from app.api.v1.message_platforms import router as message_platform_router
 from app.api.v1.profile import router as profile_router
 from app.api.v1.prompts import router as prompt_router
 from app.api.v1.scheduled_tasks import router as scheduled_task_router
+from app.api.v1.setup import router as setup_router
 from app.api.v1.system import router as system_router
 from app.api.v1.users import router as user_router
 from app.core.event_loop import get_uvicorn_loop
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
 def register_routers(app: FastAPI) -> None:
     # 使用 APIRouter 内部定义的 tags，避免在 include_router 时重复或冲突定义
     app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
+    app.include_router(setup_router, prefix="/api/v1")
     app.include_router(user_router, prefix="/api/v1/admin")
     app.include_router(channel_router, prefix="/api/v1")
     app.include_router(system_router, prefix="/api/v1")

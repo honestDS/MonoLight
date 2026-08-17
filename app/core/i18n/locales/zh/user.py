@@ -14,6 +14,4 @@ MESSAGES = {
     "ERR_USER_NOT_FOUND": "用户不存在",
     "ERR_USER_SUPER_PROTECTED": "超级管理员账户受核心保护，严禁执行禁用或改名操作。",
     "ERR_USER_SUPER_DELETE_FORBIDDEN": "禁止删除超级管理员账户。",
-    "MSG_ADMIN_RESET_SUCCESS": "超级管理员账户信息已成功重置，请及时登录并修改默认密码。",
-    "ERR_AUTH_RESET_TOKEN_INVALID": "管理员重置令牌无效",
 }

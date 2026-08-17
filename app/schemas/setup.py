@@ -1,6 +1,9 @@
+from typing import Annotated
+
 from pydantic import (
     BaseModel,
     Field,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -9,7 +12,7 @@ from app.core.validation import (
     validate_base_url,
     validate_chat_model,
 )
-from app.models.channel import ModelProtocol
+from app.models.channel import MODEL_PROTOCOLS_BY_USAGE, ModelProtocol, ModelUsage
 from app.models.user import UserCreate
 
 
@@ -24,7 +27,15 @@ class SetupChannelInput(BaseModel):
     base_url: str = Field(..., max_length=2048, description="渠道 API 基础地址")
     api_key: str = Field(..., min_length=1, description="渠道 API 密钥")
     model_id: str = Field(..., min_length=1, max_length=255, description="聊天模型标识符")
-    protocol: ModelProtocol = Field(..., description="聊天模型调用协议")
+    protocol: Annotated[
+        ModelProtocol,
+        WithJsonSchema(
+            {
+                "type": "string",
+                "enum": [protocol.value for protocol in MODEL_PROTOCOLS_BY_USAGE[ModelUsage.CHAT]],
+            }
+        ),
+    ] = Field(..., description="聊天模型调用协议")
 
     @field_validator("base_url")
     @classmethod
