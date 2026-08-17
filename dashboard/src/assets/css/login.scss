@@ -178,10 +178,6 @@
       }
     }
 
-    .form-footer {
-      margin-top: 20px;
-      .forgot-pwd { color: var(--color-login-text-muted); text-decoration: none; font-size: 14px; font-weight: 500; }
-    }
   }
 
   .login-copyright {
@@ -200,15 +196,4 @@
 @media (max-width: 900px) {
   .login-left { display: none; }
   .login-box { width: 450px; }
-}
-
-/* 重置对话框样式 */
-.reset-hint {
-  margin-bottom: 15px;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-}
-
-.dialog-footer {
-  text-align: right;
 }

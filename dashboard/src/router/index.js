@@ -1,7 +1,10 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { setupApi } from '../api'
+import { createSetupGuard, setupStatusState } from './setupGuard.js'
 
 const routes = [
   { path: '/login', component: () => import('../views/LoginView.vue') },
+  { path: '/setup', component: () => import('../views/SetupView.vue') },
   { path: '/', component: () => import('../views/ChatView.vue') },
   { path: '/profiles', component: () => import('../views/ProfilesView.vue') },
   { path: '/prompts', component: () => import('../views/PromptsView.vue') },
@@ -20,13 +23,11 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
-  const token = localStorage.getItem('token')
-  if (to.path !== '/login' && !token) {
-    next('/login')
-  } else {
-    next()
-  }
+const setupGuard = createSetupGuard({
+  statusRequest: () => setupApi.status(),
+  getToken: () => localStorage.getItem('token'),
+  state: setupStatusState
 })
+router.beforeEach(setupGuard)
 
 export default router

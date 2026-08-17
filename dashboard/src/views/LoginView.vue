@@ -21,17 +21,6 @@
           <p>{{ $t('login.subtitle') }}</p>
         </div>
 
-        <el-dialog :title="$t('login.reset_admin')" v-model="resetDialog" width="400px" append-to-body center align-center>
-          <div class="reset-hint">{{ $t('login.reset_hint') }}</div>
-          <el-input v-model="resetToken" :placeholder="$t('login.reset_token_placeholder')" show-password class="custom-input"></el-input>
-          <template #footer>
-            <div class="dialog-footer">
-              <el-button @click="resetDialog = false" size="default">{{ $t('login.cancel') }}</el-button>
-              <el-button type="primary" :loading="resetLoading" @click="handleResetAdmin" size="default">{{ $t('login.reset_confirm') }}</el-button>
-            </div>
-          </template>
-        </el-dialog>
-        
         <el-form :model="form" class="login-form" @keyup.enter="handleLogin">
           <el-form-item>
             <el-input v-model="form.username" :placeholder="$t('login.username')" class="custom-input"></el-input>
@@ -43,10 +32,6 @@
           <div class="form-actions">
             <el-button type="primary" class="btn-login" :loading="loading" @click="handleLogin">{{ $t('login.submit') }}</el-button>
             <el-button plain class="btn-signup" disabled>{{ $t('login.signup') }}</el-button>
-          </div>
-          
-          <div class="form-footer">
-            <a href="javascript:;" class="forgot-pwd" @click="resetDialog = true">{{ $t('login.reset_admin') }}?</a>
           </div>
         </el-form>
 
@@ -65,37 +50,15 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { authApi } from '../api'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
-
-
 const { t } = useI18n()
 const router = useRouter()
 
 const loading = ref(false)
-const resetLoading = ref(false)
-const resetDialog = ref(false)
-const resetToken = ref('')
 const form = reactive({ username: '', password: '' })
-
-const pickFirstValue = (...values) => {
-  const value = values.find(item => item !== undefined && item !== null && item !== '')
-  return value ?? ''
-}
-
-const normalizeResetAdminData = (response) => {
-  let data = response?.data ?? response ?? {}
-  while (data && typeof data === 'object' && data.data && typeof data.data === 'object') {
-    data = data.data
-  }
-
-  return {
-    username: pickFirstValue(data.username, data.account, data.login_account, data.loginAccount),
-    initialPassword: pickFirstValue(data.initial_password, data.initialPassword, data.default_password, data.defaultPassword, data.password)
-  }
-}
 
 const handleLogin = async () => {
   if (!form.username || !form.password) return
@@ -112,24 +75,6 @@ const handleLogin = async () => {
   }
 }
 
-const handleResetAdmin = async () => {
-  if (!resetToken.value) return ElMessage.warning(t('login.reset_token_placeholder'))
-  resetLoading.value = true
-  try {
-    const data = await authApi.resetAdmin(resetToken.value)
-    const { username, initialPassword } = normalizeResetAdminData(data)
-    ElMessageBox.alert(t('login.account') + username + '<br>' + t('login.initial_password') + initialPassword, t('login.reset_admin'), {
-      dangerouslyUseHTMLString: true,
-      confirmButtonText: t('common.confirm'), center: true
-    })
-    resetDialog.value = false
-    resetToken.value = ''
-  } catch (err) {
-    ElMessage.error(err.message || t('login.reset_failed'))
-  } finally {
-    resetLoading.value = false
-  }
-}
 </script>
 
 <style lang="scss">@import "@/assets/css/login.scss";</style>

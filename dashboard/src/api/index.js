@@ -39,7 +39,7 @@ request.interceptors.response.use(
       // 业务报错，直接抛出，让 catch 块处理
       const errorMessage = truncateErrorMessage(message || t('common.unknown_error'))
       const error = new Error(errorMessage);
-      error.response = { data: { message: errorMessage, data } };
+      error.response = { data: { code, message: errorMessage, data } };
       return Promise.reject(error);
     }
     return res;
@@ -64,11 +64,12 @@ export const adminApi = {
 }
 
 export const authApi = {
-  login: (data) => request.post('/auth/login', data),
-  resetAdmin: async (token) => {
-    const res = await request.post('/auth/reset_admin', { reset_token: token })
-    return res.data?.data || res.data || {}
-  }
+  login: (data) => request.post('/auth/login', data)
+}
+
+export const setupApi = {
+  status: () => request.get('/setup/status'),
+  complete: (data) => request.post('/setup/complete', data)
 }
 
 export const chatApi = {
