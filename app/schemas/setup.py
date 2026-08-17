@@ -1,0 +1,68 @@
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from app.core.validation import (
+    validate_base_url,
+    validate_chat_model,
+)
+from app.models.channel import ModelProtocol
+from app.models.user import UserCreate
+
+
+class SetupAdminInput(UserCreate):
+    """初始化管理员输入。"""
+
+
+class SetupChannelInput(BaseModel):
+    """初始化聊天渠道输入。"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="渠道名称")
+    base_url: str = Field(..., max_length=2048, description="渠道 API 基础地址")
+    api_key: str = Field(..., min_length=1, description="渠道 API 密钥")
+    model_id: str = Field(..., min_length=1, max_length=255, description="聊天模型标识符")
+    protocol: ModelProtocol = Field(..., description="聊天模型调用协议")
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url_field(cls, value: str) -> str:
+        return validate_base_url(value, model_ids=[{"model_id": "setup"}])
+
+    @model_validator(mode="after")
+    def validate_chat_model_fields(self) -> "SetupChannelInput":
+        self.model_id, self.protocol = validate_chat_model(self.model_id, self.protocol)
+        return self
+
+
+class SetupProfileInput(BaseModel):
+    """初始化 Profile 输入。"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="Profile 名称")
+
+
+class SetupCompleteRequest(BaseModel):
+    """完成初始化所需的管理员、渠道和 Profile 配置。"""
+
+    admin: SetupAdminInput = Field(..., description="管理员配置")
+    channel: SetupChannelInput = Field(..., description="聊天渠道配置")
+    profile: SetupProfileInput = Field(..., description="Profile 配置")
+
+
+class SetupStatusData(BaseModel):
+    """初始化状态响应数据。"""
+
+    required: bool = Field(..., description="是否需要完成初始化")
+
+
+class SetupTokenData(BaseModel):
+    """初始化完成后返回的认证令牌数据。"""
+
+    access_token: str = Field(..., min_length=1, description="访问令牌")
+    token_type: str = Field(..., min_length=1, description="令牌类型")
+
+
+class SetupCompleteResult(SetupTokenData):
+    """初始化完成结果。"""

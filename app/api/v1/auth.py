@@ -25,6 +25,7 @@ from app.core.security import (
     get_password_hash,
     verify_password,
 )
+from app.core.validation import validate_password
 from app.models.user import UserCreate
 from app.providers.database import get_db
 from app.providers.database.bootstrap import ensure_default_profile_for_user
@@ -39,7 +40,9 @@ router = APIRouter()
 
 @router.post("/login", response_model=StandardResponse)
 async def login(request: LoginRequest = Body(...), db: AsyncSession = Depends(get_db)):
-    if len(request.password.encode("utf-8")) > 72:
+    try:
+        validate_password(request.password, require_non_empty=True, minimum_length=1)
+    except ValueError:
         return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
 
     user = await user_crud.get_by_username(db, request.username)

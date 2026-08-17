@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.constants import ERR_DB_OPERATION_FAILED, ERR_FAVICON_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_VALIDATION_FAILED
+from app.core.constants import ERR_DB_OPERATION_FAILED, ERR_FAVICON_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_PASSWORD_TOO_LONG_BYTES, ERR_VALIDATION_FAILED
 from app.core.crud.system_setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ServerException
 from app.core.i18n import t
@@ -48,15 +48,18 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     error_msgs = []
+    message_key = ERR_VALIDATION_FAILED
     for error in exc.errors():
         field = error.get("loc")[-1]
         err_type = error.get("type")
+        if err_type == ERR_PASSWORD_TOO_LONG_BYTES:
+            message_key = ERR_PASSWORD_TOO_LONG_BYTES
         msg = t(err_type, default=err_type)
         if msg == err_type:
             msg = error.get("msg")
         error_msgs.append(f"[{field}] {msg}")
 
-    validation_exc = ParameterException(ERR_VALIDATION_FAILED, code=422, detail=" | ".join(error_msgs))
+    validation_exc = ParameterException(message_key, code=422, detail=" | ".join(error_msgs))
     return JSONResponse(status_code=422, content=StandardResponse.error(code=422, message=validation_exc.message, detail=" | ".join(error_msgs)).model_dump())
 
 

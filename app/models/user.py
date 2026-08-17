@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import (
     ConfigDict,
+    field_validator,
 )
 from pydantic import (
     Field as PydanticField,
@@ -56,6 +57,20 @@ class UserCreate(SQLModel):
         json_schema_extra={"example": "secure_pass_123"},
     )
 
+    @field_validator("username")
+    @classmethod
+    def validate_username_field(cls, value: str) -> str:
+        from app.core.validation import validate_username
+
+        return validate_username(value)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_field(cls, value: str) -> str:
+        from app.core.validation import validate_password
+
+        return validate_password(value, require_non_empty=True)
+
     model_config = ConfigDict(json_schema_extra={"example": {"username": "new_user_01", "password": "secure_pass_123"}})
 
 
@@ -75,6 +90,26 @@ class UserUpdate(SQLModel):
         json_schema_extra={"example": "new_secure_password"},
     )
     is_active: bool | None = PydanticField(None, json_schema_extra={"example": True})
+
+    @field_validator("username")
+    @classmethod
+    def validate_username_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        from app.core.validation import validate_username
+
+        return validate_username(value)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        from app.core.validation import validate_password
+
+        return validate_password(value, require_non_empty=True)
 
     model_config = ConfigDict(
         json_schema_extra={

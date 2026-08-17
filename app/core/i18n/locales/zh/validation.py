@@ -6,6 +6,8 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] 校验失败: {error}",
     "ERR_CHANNEL_MODEL_IDS_DUPLICATED": "同一用途下模型 ID 不能重复: {usage}/{model_id}",
     "ERR_VALIDATION_FAILED": "参数验证失败",
+    "ERR_SETUP_CONFLICT": "初始化已完成或正在进行，无法重复执行",
+    "ERR_SETUP_STATE_UPDATE_FAILED": "初始化状态更新失败",
     "missing": "缺失必填字段",
     "value_error.missing": "缺失必填字段",
     "string_too_short": "输入内容太短",

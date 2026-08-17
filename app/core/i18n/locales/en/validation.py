@@ -6,6 +6,8 @@ MESSAGES = {
     "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] validation failed: {error}",
     "ERR_CHANNEL_MODEL_IDS_DUPLICATED": "Model ID cannot be duplicated within the same usage: {usage}/{model_id}",
     "ERR_VALIDATION_FAILED": "Parameter validation failed",
+    "ERR_SETUP_CONFLICT": "Setup is already completed or in progress",
+    "ERR_SETUP_STATE_UPDATE_FAILED": "Failed to update setup state",
     "missing": "Missing required field",
     "value_error.missing": "Missing required field",
     "string_too_short": "Input is too short",

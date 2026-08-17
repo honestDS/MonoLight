@@ -14,12 +14,21 @@ class CRUDChannel(CRUDBase[ModelChannel, ChannelCreate, ChannelUpdate]):
         result = await db.execute(select(ModelChannel).where(ModelChannel.name == name))
         return result.scalars().first()
 
-    async def create_with_plain_api_key(self, db: AsyncSession, *, obj_in: ChannelCreate) -> ModelChannel:
+    async def create_with_plain_api_key(
+        self,
+        db: AsyncSession,
+        *,
+        obj_in: ChannelCreate,
+        commit: bool = True,
+    ) -> ModelChannel:
         obj_in_data = obj_in.model_dump()
         db_obj = self.model.model_validate(obj_in_data)
         db_obj.set_api_key_plaintext(obj_in.api_key)
         db.add(db_obj)
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(db_obj)
         return db_obj
 

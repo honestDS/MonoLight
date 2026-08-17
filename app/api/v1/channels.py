@@ -5,7 +5,6 @@ CRUD 支持 model_ids 字段；移除 usage 字段
 
 import copy
 import json
-import re
 from enum import StrEnum
 from time import perf_counter
 
@@ -19,8 +18,6 @@ from app.core.channel_model_protection import (
     assert_channel_not_referenced,
 )
 from app.core.constants import (
-    ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS,
-    ERR_CHANNEL_BASE_URL_SCHEME,
     ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_CHAT_TEST_NO_MODEL_ID,
     ERR_CHANNEL_CHAT_TEST_PROMPT_REQUIRED,
@@ -63,6 +60,7 @@ from app.core.utils.channel_profile_sync import (
 )
 from app.core.utils.http_proxy import get_channel_http_proxy, normalize_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
+from app.core.validation import validate_base_url
 from app.models.channel import (
     MODEL_PROTOCOLS_BY_USAGE,
     ChannelCreate,
@@ -175,11 +173,10 @@ async def create_channel(
     if validation_error:
         return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
-    if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
-        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_SCHEME)
-
-    if channel_in.model_ids and not channel_in.base_url:
-        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
+    try:
+        validate_base_url(channel_in.base_url, model_ids=channel_in.model_ids)
+    except ValueError as exc:
+        return StandardResponse.error(code=422, message=str(exc))
 
     if await channel_crud.get_by_name(db, channel_in.name):
         raise ParameterException(ERR_CHANNEL_NAME_EXISTS)
@@ -428,14 +425,13 @@ async def update_channel(
         if validation_error:
             return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
-    if channel_in.base_url and not re.match(r"^https?://", channel_in.base_url):
-        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_SCHEME)
-
     # 跨字段校验：所有可调用模型类型都依赖 base_url 拼接供应商接口路径。
     final_model_ids = channel_in.model_ids if channel_in.model_ids is not None else db_obj.model_ids
     final_base_url = channel_in.base_url if "base_url" in channel_in.model_fields_set else db_obj.base_url
-    if final_model_ids and not final_base_url:
-        return StandardResponse.error(code=422, message=ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS)
+    try:
+        validate_base_url(final_base_url, model_ids=final_model_ids)
+    except ValueError as exc:
+        return StandardResponse.error(code=422, message=str(exc))
 
     # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
     old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
