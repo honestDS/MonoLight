@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from app.core import security
 from app.core.constants import ERR_UNAUTHORIZED
 
+_TEST_JWT_SECRET_KEY = "test-secret-key"
+
 
 class _AsyncSessionContext:
     async def __aenter__(self):
@@ -17,8 +19,8 @@ class _AsyncSessionContext:
 
 @pytest.fixture(autouse=True)
 def _patch_jwt_environment(monkeypatch):
-    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key")
-    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+    monkeypatch.setattr(security, "get_jwt_secret_key", lambda: _TEST_JWT_SECRET_KEY)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS512")
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")
 
 
@@ -35,6 +37,12 @@ def _token_for(username):
     return security.create_access_token(data={"sub": username})
 
 
+def test_create_access_token_uses_fixed_algorithm():
+    token = _token_for("alice")
+
+    assert security.jwt.get_unverified_header(token)["alg"] == "HS256"
+
+
 @pytest.mark.asyncio
 async def test_get_current_user_returns_active_user(monkeypatch):
     user = SimpleNamespace(username="alice", is_active=True)
@@ -43,6 +51,35 @@ async def test_get_current_user_returns_active_user(monkeypatch):
     result = await security.get_current_user(_token_for(user.username))
 
     assert result is user
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_accepts_legacy_hs256_token(monkeypatch):
+    user = SimpleNamespace(username="alice", is_active=True)
+    _patch_user_lookup(monkeypatch, user)
+    token = security.jwt.encode(
+        {"sub": user.username},
+        _TEST_JWT_SECRET_KEY,
+        algorithm="HS256",
+    )
+
+    result = await security.get_current_user(token)
+
+    assert result is user
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_rejects_hs512_token(monkeypatch):
+    token = security.jwt.encode(
+        {"sub": "alice"},
+        _TEST_JWT_SECRET_KEY,
+        algorithm="HS512",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await security.get_current_user(token)
+
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.asyncio

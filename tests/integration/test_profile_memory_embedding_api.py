@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
+import app.core.crypto as crypto_module
 from app.api.v1.profile import router
 from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_store_crud
@@ -50,7 +51,7 @@ API_TABLES = [
 
 @pytest.fixture(autouse=True)
 def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MONOLIGH_ENCRYPTION_KEY", "00" * 32)
+    monkeypatch.setattr(crypto_module, "get_channel_encryption_key", lambda: b"\x00" * 32)
 
 
 def _assert_standard(response: httpx.Response, code: int) -> dict:
