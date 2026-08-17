@@ -6,6 +6,8 @@ from sqlmodel import select
 
 from app.core.constants import (
     ERR_DATABASE_TYPE_UNSUPPORTED,
+    ERR_SETUP_STATUS_NOT_INITIALIZED,
+    ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT,
     SETUP_ADMIN_UID_KEY,
     SETUP_STATUS_COMPLETED,
     SETUP_STATUS_CONFIGURING,
@@ -42,7 +44,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
         await db.execute(statement)
         db_obj = await self.get_by_key(db, key)
         if db_obj is None:
-            raise RuntimeError(f"Internal integrity error: system setting {key!r} was not found after insertion")
+            raise RuntimeError(t(ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT, setting_key=key))
         return db_obj
 
     async def get_setup_status(self, db: AsyncSession) -> str | None:
@@ -64,7 +66,7 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
             await db.execute(update(SystemSetting).where(SystemSetting.key == SETUP_ADMIN_UID_KEY, SystemSetting.value == "").values(value=admin_uid).execution_options(synchronize_session=False))
         status = await self.get_setup_status(db)
         if status is None:
-            raise RuntimeError("Internal integrity error: setup status was not initialized")
+            raise RuntimeError(t(ERR_SETUP_STATUS_NOT_INITIALIZED))
         return status, await self.get_setup_admin_uid(db)
 
     async def claim_setup(self, db: AsyncSession) -> bool:

@@ -8,6 +8,7 @@ from sqlmodel import select
 from app.core.crud.session_event import session_event_crud
 from app.core.session_notifier import SessionNotifier, build_session_event_dedupe_key
 from app.core.utils.time import get_local_time
+from app.models.session import ChatSession
 from app.models.session_event import SessionEvent
 from app.providers.database import AsyncSessionLocal, engine
 
@@ -19,11 +20,32 @@ async def clean_session_event_table():
         await connection.run_sync(lambda sync_connection: SessionEvent.__table__.create(sync_connection))
     async with AsyncSessionLocal() as db:
         await db.execute(delete(SessionEvent))
+        await db.execute(
+            delete(ChatSession).where(
+                ChatSession.uid == "uid",
+                ChatSession.session_id.in_(["session", "old", "new"]),
+            )
+        )
+        db.add_all(
+            [
+                ChatSession(session_id="session", uid="uid"),
+                ChatSession(session_id="old", uid="uid"),
+                ChatSession(session_id="new", uid="uid"),
+            ]
+        )
         await db.commit()
-    yield
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(SessionEvent))
-        await db.commit()
+    try:
+        yield
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(SessionEvent))
+            await db.execute(
+                delete(ChatSession).where(
+                    ChatSession.uid == "uid",
+                    ChatSession.session_id.in_(["session", "old", "new"]),
+                )
+            )
+            await db.commit()
 
 
 @pytest.mark.asyncio

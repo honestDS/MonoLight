@@ -8,6 +8,8 @@ MESSAGES = {
     "ERR_VALIDATION_FAILED": "参数验证失败",
     "ERR_SETUP_CONFLICT": "初始化已完成或正在进行，无法重复执行",
     "ERR_SETUP_STATE_UPDATE_FAILED": "初始化状态更新失败",
+    "ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT": "内部一致性错误：插入后未找到系统设置 {setting_key!r}",
+    "ERR_SETUP_STATUS_NOT_INITIALIZED": "内部一致性错误：初始化状态未初始化",
     "missing": "缺失必填字段",
     "value_error.missing": "缺失必填字段",
     "string_too_short": "输入内容太短",
