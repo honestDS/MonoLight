@@ -18,6 +18,10 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         result = await db.execute(select(User).where(User.uid == uid))
         return result.scalars().first()
 
+    async def get_superuser(self, db: AsyncSession) -> User | None:
+        result = await db.execute(select(User).where(User.is_superuser.is_(True)).order_by(User.id.asc()))
+        return result.scalars().first()
+
     async def get_multi_by_uids(self, db: AsyncSession, uids: list[str]) -> list[User]:
         if not uids:
             return []
