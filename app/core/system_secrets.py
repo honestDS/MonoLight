@@ -231,9 +231,8 @@ def _system_secrets_lock(lock_path: Path) -> Iterator[None]:
     lock_file: Any | None = None
     lock_acquired = False
     try:
-        file_descriptor = os.open(lock_path, _open_flags(os.O_CREAT | os.O_RDWR), 0o600)
+        file_descriptor = os.open(lock_path, _open_flags(os.O_CREAT | os.O_RDWR), 0o666)
         _ensure_open_path_is_unchanged(lock_path, file_descriptor)
-        os.chmod(lock_path, 0o600)
         lock_file = os.fdopen(file_descriptor, "r+b", closefd=True)
         file_descriptor = None
 
@@ -292,7 +291,7 @@ def _write_system_secrets(secrets_path: Path, system_secrets: SystemSecrets) -> 
                 file_descriptor = os.open(
                     candidate_path,
                     _open_flags(os.O_CREAT | os.O_EXCL | os.O_WRONLY),
-                    0o600,
+                    0o666,
                 )
             except FileExistsError:
                 continue
@@ -304,13 +303,11 @@ def _write_system_secrets(secrets_path: Path, system_secrets: SystemSecrets) -> 
             temp_file.write(payload)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        os.chmod(temp_path, 0o600)
 
         if _path_exists_without_following_symlink(secrets_path):
             return False
         os.replace(temp_path, secrets_path)
         temp_path = None
-        os.chmod(secrets_path, 0o600)
         _fsync_parent_directory(secrets_path)
         return True
     finally:
@@ -332,8 +329,6 @@ def initialize_system_secrets(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with _system_secrets_lock(lock_path):
-        if _path_exists_without_following_symlink(secrets_path):
-            os.chmod(secrets_path, 0o600)
         try:
             return load_system_secrets(secrets_path)
         except SystemSecretsError as error:

@@ -75,7 +75,7 @@ MonoLight 不只是一个对话界面或单次工具调用封装，而是一套�
 > [!IMPORTANT]
 新部署首次启动时会自动生成 `data/system_secrets.json`。已有部署在该文件不存在时，会从有效的 `JWT_SECRET_KEY` 与 `MONOLIGH_ENCRYPTION_KEY` 一次性迁移系统密钥；首次成功启动后，请从部署配置中移除这两个旧变量。JWT 算法已在代码中固定为 HS256，无需也不要配置 `JWT_ALGORITHM`。
 
-`data/system_secrets.json` 和 `data/system_secrets.lock` 都必须位于持久化卷中，并限制为仅服务账户可读写。日志和 Setup 流程不会暴露系统密钥。
+`data/system_secrets.json` 和 `data/system_secrets.lock` 都必须位于持久化卷中并持续持久化。应用不会修改这两个文件的操作系统级权限：已有文件保持原权限，新建文件遵循系统默认权限、umask 和 ACL 继承。日志和 Setup 流程不会暴露系统密钥。
 
 项目包含 Web 服务和四个独立 Worker：消息平台 Worker、后台任务 Worker、终端 Worker 和会话最终回复 Worker。Web 服务支持多个 Worker，四个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
 
