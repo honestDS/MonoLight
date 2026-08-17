@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
     ERR_ONLY_ADMIN_ALLOWED,
-    ERR_PASSWORD_TOO_LONG_BYTES,
     ERR_USER_NAME_EXISTS,
     ERR_USER_NOT_FOUND,
     ERR_USER_SUPER_DELETE_FORBIDDEN,
@@ -57,9 +56,6 @@ async def add_new_user(
 ):
     if await user_crud.get_by_username(db, user_in.username):
         raise ParameterException(ERR_USER_NAME_EXISTS)
-
-    if user_in.password and len(user_in.password.encode("utf-8")) > 72:
-        return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
 
     generated_uid = uuid.uuid4().hex
     new_user = await user_crud.create(
@@ -117,8 +113,6 @@ async def update_user(
 
     update_dict = {}
     if user_in.password:
-        if len(user_in.password.encode("utf-8")) > 72:
-            return StandardResponse.error(code=422, message=ERR_PASSWORD_TOO_LONG_BYTES)
         update_dict["hashed_password"] = get_password_hash(user_in.password)
 
     if user_in.is_active is not None:
