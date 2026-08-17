@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from app.core.event_loop import get_uvicorn_loop
+from app.core.system_secrets import initialize_system_secrets
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
@@ -99,6 +100,9 @@ def report_process_started(process_name: str, process: subprocess.Popen) -> None
 
 
 async def initialize_system() -> None:
+    load_dotenv()
+    await asyncio.to_thread(initialize_system_secrets)
+
     from app.core.audit.startup import recover_and_cleanup_audit_data
     from app.core.crud.system_setting import system_setting_crud
     from app.providers.database import AsyncSessionLocal

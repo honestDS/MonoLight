@@ -10,6 +10,8 @@ DASHBOARD_PUBLIC_DIR = DASHBOARD_DIR / "public"
 FAVICON_PATH = DASHBOARD_PUBLIC_DIR / "favicon.ico"
 
 DATA_DIR = ROOT_DIR / "data"
+SYSTEM_SECRETS_PATH = DATA_DIR / "system_secrets.json"
+SYSTEM_SECRETS_LOCK_PATH = DATA_DIR / "system_secrets.lock"
 LOGS_DIR = DATA_DIR / "logs"
 AUDIT_DIR = DATA_DIR / "audit"
 TEMP_DIR = ROOT_DIR / "temp"

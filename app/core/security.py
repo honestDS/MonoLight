@@ -1,3 +1,8 @@
+"""
+负责密码哈希与校验、JWT 签发与解析、OAuth2 Token 提取和当前用户认证。
+系统密钥的生成、迁移和持久化由 app.core.system_secrets 负责。
+"""
+
 import os
 from datetime import (
     UTC,
@@ -18,8 +23,12 @@ from jose import (
 )
 from starlette.requests import HTTPConnection
 
-from app.core.constants import ERR_UNAUTHORIZED
+from app.core.constants import (
+    ERR_UNAUTHORIZED,
+    JWT_ALGORITHM,
+)
 from app.core.crud.user import user_crud
+from app.core.system_secrets import get_jwt_secret_key
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal
 
@@ -74,7 +83,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     else:
         expire = datetime.now(UTC) + timedelta(minutes=float(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60)))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, os.getenv("JWT_SECRET_KEY"), algorithm=os.getenv("JWT_ALGORITHM"))
+    encoded_jwt = jwt.encode(to_encode, get_jwt_secret_key(), algorithm=JWT_ALGORITHM)
     return encoded_jwt
 
 
@@ -85,7 +94,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, os.getenv("JWT_SECRET_KEY"), algorithms=[os.getenv("JWT_ALGORITHM")])
+        payload = jwt.decode(token, get_jwt_secret_key(), algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception

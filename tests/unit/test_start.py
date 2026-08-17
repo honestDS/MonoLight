@@ -64,6 +64,8 @@ async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
             file_cleanup=AuditCleanupResult(),
         )
 
+    monkeypatch.setattr(start, "load_dotenv", lambda: events.append("dotenv"))
+    monkeypatch.setattr(start, "initialize_system_secrets", lambda: events.append("system_secrets"))
     monkeypatch.setattr(database_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(bootstrap_module, "init_system_data", init_system_data)
     monkeypatch.setattr(system_setting_module.system_setting_crud, "get_runtime_settings", get_runtime_settings)
@@ -71,7 +73,13 @@ async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
 
     await start.initialize_system()
 
-    assert events == [("initialize", session), ("settings", session), ("cleanup", session, 45)]
+    assert events == [
+        "dotenv",
+        "system_secrets",
+        ("initialize", session),
+        ("settings", session),
+        ("cleanup", session, 45),
+    ]
 
 
 def test_load_start_config_reads_worker_count_from_environment(monkeypatch):
@@ -184,6 +192,26 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
 
     assert return_code == 1
     assert events == ["initialize", "process", "process", "process", "process", "process", "process"]
+
+
+def test_run_propagates_system_secret_initialization_error_before_starting_processes(monkeypatch):
+    popen_calls = []
+
+    def initialize_system_secrets():
+        raise RuntimeError("system secrets are invalid")
+
+    def start_process(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setattr(start, "initialize_system_secrets", initialize_system_secrets)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+
+    with pytest.raises(RuntimeError, match="system secrets are invalid"):
+        start.run()
+
+    assert popen_calls == []
 
 
 @pytest.mark.parametrize(

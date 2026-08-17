@@ -6,6 +6,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+import app.core.crypto as crypto_module
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_FIELD_TYPE_INVALID,
@@ -39,7 +40,7 @@ ORGANIZATION_TABLES = [
 
 @pytest.fixture(autouse=True)
 def encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MONOLIGH_ENCRYPTION_KEY", "00" * 32)
+    monkeypatch.setattr(crypto_module, "get_channel_encryption_key", lambda: b"\x00" * 32)
 
 
 @pytest_asyncio.fixture

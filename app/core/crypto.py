@@ -1,12 +1,11 @@
 """轻量级加密工具：使用标准库实现API密钥加密存储
 
-采用XOR+Base64方案，无需额外依赖。密钥存储在环境变量中。
+采用XOR+Base64方案，无需额外依赖。渠道/API Key 加密密钥来自持久化系统密钥文件。
 虽不如AES-256强度高，但足以防止数据库文件泄露时的明文暴露。
 """
 
 import base64
 import binascii
-import os
 
 from app.core.constants import (
     ERR_API_KEY_CRYPTO_KEY_INVALID,
@@ -15,9 +14,11 @@ from app.core.constants import (
     ERR_API_KEY_DECRYPT_FAILED,
     ERR_API_KEY_DECRYPT_INPUT_EMPTY,
     ERR_API_KEY_ENCRYPT_INPUT_EMPTY,
+    ERR_SYSTEM_SECRETS_FILE_MISSING,
 )
 from app.core.exceptions import ApiKeyException
 from app.core.log import get_logger
+from app.core.system_secrets import SystemSecretsError, get_channel_encryption_key
 
 logger = get_logger(__name__)
 
@@ -28,20 +29,13 @@ def _raise_crypto_error(message: str, **kwargs) -> None:
 
 
 def _get_encryption_key() -> bytes:
-    """获取加密密钥，优先从环境变量读取。"""
-    key_hex = (os.getenv("MONOLIGH_ENCRYPTION_KEY") or "").strip()
-    if not key_hex:
-        _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_MISSING)
-
+    """获取持久化系统密钥文件中的渠道/API Key 加密密钥。"""
     try:
-        key = bytes.fromhex(key_hex)
-    except ValueError:
+        return get_channel_encryption_key()
+    except SystemSecretsError as error:
+        if error.message_key == ERR_SYSTEM_SECRETS_FILE_MISSING:
+            _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_MISSING)
         _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_INVALID)
-
-    if len(key) != 32:
-        _raise_crypto_error(ERR_API_KEY_CRYPTO_KEY_INVALID)
-
-    return key
 
 
 def encrypt_api_key(plain_text: str) -> str:
