@@ -5,13 +5,13 @@ import json
 import logging
 import multiprocessing
 import os
-import stat
 import time
 from pathlib import Path
 from queue import Empty
 from typing import Any
 
 import pytest
+from dotenv import dotenv_values
 from jose import jwt
 
 import app.core.system_secrets as system_secrets_module
@@ -115,6 +115,13 @@ def test_system_secrets_default_paths_are_in_data_directory() -> None:
     assert SYSTEM_SECRETS_LOCK_PATH.relative_to(ROOT_DIR) == Path("data/system_secrets.lock")
 
 
+def test_default_environment_does_not_define_legacy_system_secrets() -> None:
+    default_environment = dotenv_values(ROOT_DIR / ".env")
+
+    assert "JWT_SECRET_KEY" not in default_environment
+    assert "MONOLIGH_ENCRYPTION_KEY" not in default_environment
+
+
 def test_first_initialization_generates_valid_jwt_key_and_channel_key(tmp_path: Path) -> None:
     secrets_path = tmp_path / "data" / "system_secrets.json"
     lock_path = tmp_path / "data" / "system_secrets.lock"
@@ -132,10 +139,6 @@ def test_first_initialization_generates_valid_jwt_key_and_channel_key(tmp_path: 
     assert document["channel_encryption_key"] == system_secrets.channel_encryption_key.hex()
     assert lock_path.is_file()
     assert not list(secrets_path.parent.glob(".system-secrets-*.tmp"))
-
-    if os.name == "posix":
-        assert stat.S_IMODE(secrets_path.stat().st_mode) & 0o077 == 0
-        assert stat.S_IMODE(lock_path.stat().st_mode) & 0o077 == 0
 
 
 def test_initialization_atomically_replaces_secret_file_from_same_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,20 +166,52 @@ def test_initialization_atomically_replaces_secret_file_from_same_directory(tmp_
     assert not source_path.exists()
 
 
-def test_posix_initialization_clears_existing_secret_file_group_and_other_permissions(tmp_path: Path) -> None:
-    if os.name != "posix":
-        pytest.skip("POSIX-only test")
-
+def test_restart_initialization_preserves_existing_permissions_and_secret_bytes(tmp_path: Path) -> None:
     secrets_path = tmp_path / "system_secrets.json"
     lock_path = tmp_path / "system_secrets.lock"
     initialize_system_secrets(secrets_path, lock_path, environment={})
     original_file_bytes = secrets_path.read_bytes()
-    os.chmod(secrets_path, 0o666)
+    os.chmod(secrets_path, 0o640)
+    os.chmod(lock_path, 0o640)
+    original_secrets_mode = secrets_path.stat().st_mode
+    original_lock_mode = lock_path.stat().st_mode
 
     initialize_system_secrets(secrets_path, lock_path, environment={})
 
     assert secrets_path.read_bytes() == original_file_bytes
-    assert stat.S_IMODE(secrets_path.stat().st_mode) & 0o077 == 0
+    assert secrets_path.stat().st_mode == original_secrets_mode
+    assert lock_path.stat().st_mode == original_lock_mode
+
+
+def test_initialization_does_not_call_os_chmod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_chmod(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("system secret initialization must not call os.chmod")
+
+    monkeypatch.setattr(system_secrets_module.os, "chmod", fail_chmod)
+
+    initialize_system_secrets(
+        tmp_path / "system_secrets.json",
+        tmp_path / "system_secrets.lock",
+        environment={},
+    )
+
+
+def test_posix_new_file_permissions_are_decided_by_process_umask(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX-only test")
+
+    process_umask = 0o027
+    previous_umask = os.umask(process_umask)
+    try:
+        secrets_path = tmp_path / "system_secrets.json"
+        lock_path = tmp_path / "system_secrets.lock"
+        initialize_system_secrets(secrets_path, lock_path, environment={})
+    finally:
+        os.umask(previous_umask)
+
+    expected_mode = 0o666 & ~process_umask
+    assert secrets_path.stat().st_mode & 0o777 == expected_mode
+    assert lock_path.stat().st_mode & 0o777 == expected_mode
 
 
 def test_restart_reuses_existing_bytes_and_ignores_conflicting_environment(tmp_path: Path) -> None:
