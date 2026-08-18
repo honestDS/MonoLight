@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,10 +21,15 @@ from app.core.constants import (
     ERR_SETUP_ALREADY_COMPLETED,
     ERR_SETUP_CONFLICT,
     ERR_SETUP_NOT_ALLOWED,
+    ERR_SETUP_SESSION_INVALID,
     ERR_SETUP_STATUS_INVALID,
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SECRETS_FILE_INVALID,
     MSG_SETUP_STATUS_SUCCESS,
+    SETUP_SESSION_COOKIE_NAME,
+    SETUP_SESSION_RECORD_KEY,
+    SETUP_SESSION_RECORD_VERSION,
+    SETUP_SESSION_TTL_SECONDS,
     SETUP_STATUS_COMPLETED,
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
@@ -109,9 +117,54 @@ async def _request(
     path: str,
     *,
     json: dict[str, Any] | None = None,
+    bootstrap: bool = True,
+    cookies: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    base_url: str = "http://test",
 ) -> httpx.Response:
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url=base_url,
+        cookies=cookies,
+        headers=headers,
+    ) as client:
+        if bootstrap and path != "/api/v1/setup/status":
+            await client.get("/api/v1/setup/status")
         return await client.request(method, path, json=json)
+
+
+def _setup_cookie_value(response: httpx.Response) -> str:
+    token = response.cookies.get(SETUP_SESSION_COOKIE_NAME)
+    assert token
+    return token
+
+
+def _setup_session_record(token: str, expires_at: int) -> str:
+    return json.dumps(
+        {
+            "expires_at": expires_at,
+            "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "version": SETUP_SESSION_RECORD_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+async def _set_setup_session_record(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    token: str,
+    expires_at: int,
+) -> None:
+    async with session_factory() as session:
+        session.add(
+            SystemSetting(
+                key=SETUP_SESSION_RECORD_KEY,
+                value=_setup_session_record(token, expires_at),
+            )
+        )
+        await session.commit()
 
 
 async def _set_setup_status(
@@ -168,6 +221,97 @@ async def test_setup_status_pending_and_completed_returns_required_flag(
     assert completed_payload["message"] == t(MSG_SETUP_STATUS_SUCCESS)
     assert completed_payload["data"] == {"required": False}
     assert set(completed_payload["data"]) == {"required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_url", ["http://127.0.0.1", "https://setup.example.test"])
+async def test_setup_status_bootstraps_hardened_session_cookie(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    base_url: str,
+) -> None:
+    response = await _request(setup_app, "GET", "/api/v1/setup/status", base_url=base_url)
+    payload = _assert_standard_response(response, 200)
+    assert payload["data"] == {"required": True}
+
+    set_cookie = response.headers["set-cookie"]
+    set_cookie_lower = set_cookie.lower()
+    assert f"{SETUP_SESSION_COOKIE_NAME}=" in set_cookie
+    assert "; path=/api/v1/setup" in set_cookie_lower
+    assert "; httponly" in set_cookie_lower
+    assert "samesite=strict" in set_cookie_lower
+    assert f"max-age={SETUP_SESSION_TTL_SECONDS}" in set_cookie_lower
+    assert "; domain=" not in set_cookie_lower
+    if base_url.startswith("https://"):
+        assert "; secure" in set_cookie_lower
+    else:
+        assert "; secure" not in set_cookie_lower
+
+    token = _setup_cookie_value(response)
+    database = await _read_setup_data(setup_session_factory)
+    record = json.loads(database["settings"][SETUP_SESSION_RECORD_KEY])
+    assert set(record) == {"token_hash", "version", "expires_at"}
+    assert record["version"] == SETUP_SESSION_RECORD_VERSION
+    assert record["token_hash"] == hashlib.sha256(token.encode("utf-8")).hexdigest()
+    assert record["expires_at"] >= int(time.time())
+    assert record["expires_at"] <= int(time.time()) + SETUP_SESSION_TTL_SECONDS
+    assert token not in database["settings"][SETUP_SESSION_RECORD_KEY]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_setup_status_bootstrap_allows_one_session_establishment(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    responses = await asyncio.gather(
+        _request(setup_app, "GET", "/api/v1/setup/status", bootstrap=False),
+        _request(setup_app, "GET", "/api/v1/setup/status", bootstrap=False),
+    )
+
+    assert sorted(response.status_code for response in responses) == [200, 403]
+    successful_response = next(response for response in responses if response.status_code == 200)
+    failed_response = next(response for response in responses if response.status_code == 403)
+    token = _setup_cookie_value(successful_response)
+    failed_body = _assert_standard_response(failed_response, 403)
+    assert failed_body["message"] == t(ERR_SETUP_SESSION_INVALID)
+    assert failed_body["data"] is None
+
+    async with setup_session_factory() as session:
+        result = await session.execute(select(SystemSetting).where(SystemSetting.key == SETUP_SESSION_RECORD_KEY))
+        records = list(result.scalars().all())
+
+    assert len(records) == 1
+    stored_value = records[0].value
+    record = json.loads(stored_value)
+    assert set(record) == {"token_hash", "version", "expires_at"}
+    assert record["version"] == SETUP_SESSION_RECORD_VERSION
+    assert record["token_hash"] == hashlib.sha256(token.encode("utf-8")).hexdigest()
+    assert record["expires_at"] > int(time.time())
+    assert record["expires_at"] <= int(time.time()) + SETUP_SESSION_TTL_SECONDS
+    assert token not in stored_value
+
+
+@pytest.mark.asyncio
+async def test_setup_session_is_not_bound_to_user_agent_or_forwarded_ip(
+    setup_app: FastAPI,
+) -> None:
+    initial_response = await _request(
+        setup_app,
+        "GET",
+        "/api/v1/setup/status",
+        headers={"User-Agent": "setup-client/1", "X-Forwarded-For": "192.0.2.10"},
+    )
+    token = _setup_cookie_value(initial_response)
+
+    changed_client_response = await _request(
+        setup_app,
+        "GET",
+        "/api/v1/setup/status",
+        cookies={SETUP_SESSION_COOKIE_NAME: token},
+        headers={"User-Agent": "setup-client/2", "X-Forwarded-For": "198.51.100.20"},
+    )
+    payload = _assert_standard_response(changed_client_response, 200)
+    assert payload["data"] == {"required": True}
 
 
 @pytest.mark.asyncio
@@ -277,6 +421,125 @@ async def test_setup_chat_pending_forwards_payload_and_returns_standard_response
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cookie_value", [None, "invalid-setup-session"])
+@pytest.mark.parametrize(
+    ("method", "path", "payload", "delegate_name"),
+    [
+        ("GET", "/api/v1/setup/status", None, None),
+        (
+            "POST",
+            "/api/v1/setup/models",
+            {"api_key": "setup-models-api-key", "base_url": "https://models.example.test/v1"},
+            "list_channel_models",
+        ),
+        (
+            "POST",
+            "/api/v1/setup/test-chat",
+            {
+                "prompt": "ping",
+                "protocol": "OPENAI",
+                "api_key": "setup-chat-api-key",
+                "base_url": "https://chat.example.test/v1",
+                "model_id": "setup-chat-model",
+            },
+            "test_channel_chat",
+        ),
+        ("POST", "/api/v1/setup/complete", _setup_payload(), "complete_setup"),
+    ],
+)
+async def test_setup_pending_routes_reject_missing_or_invalid_cookie_without_writes(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None,
+    delegate_name: str | None,
+    cookie_value: str | None,
+) -> None:
+    bootstrap_response = await _request(setup_app, "GET", "/api/v1/setup/status")
+    _setup_cookie_value(bootstrap_response)
+    before = await _read_setup_data(setup_session_factory)
+
+    if delegate_name is not None:
+
+        async def fail_delegate(**_kwargs: Any) -> Any:
+            pytest.fail(f"{delegate_name} should not be called without a valid setup cookie")
+
+        monkeypatch.setattr(setup_api, delegate_name, fail_delegate)
+
+    cookies = {} if cookie_value is None else {SETUP_SESSION_COOKIE_NAME: cookie_value}
+    response = await _request(
+        setup_app,
+        method,
+        path,
+        json=payload,
+        bootstrap=False,
+        cookies=cookies,
+    )
+    body = _assert_standard_response(response, 403)
+    assert body["message"] == t(ERR_SETUP_SESSION_INVALID)
+    assert body["data"] is None
+
+    after = await _read_setup_data(setup_session_factory)
+    assert after["settings"] == before["settings"]
+    assert _business_record_counts(after) == _business_record_counts(before)
+
+
+@pytest.mark.asyncio
+async def test_expired_setup_session_is_rotated_by_status_and_old_cookie_is_rejected(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    old_token = "expired-setup-session"
+    expired_at = int(time.time()) - 1
+    await _set_setup_session_record(
+        setup_session_factory,
+        token=old_token,
+        expires_at=expired_at,
+    )
+
+    stored_before = await _read_setup_data(setup_session_factory)
+    old_record = json.loads(stored_before["settings"][SETUP_SESSION_RECORD_KEY])
+    assert old_record == {
+        "expires_at": expired_at,
+        "token_hash": hashlib.sha256(old_token.encode("utf-8")).hexdigest(),
+        "version": SETUP_SESSION_RECORD_VERSION,
+    }
+    assert old_token not in stored_before["settings"][SETUP_SESSION_RECORD_KEY]
+
+    rotated_response = await _request(
+        setup_app,
+        "GET",
+        "/api/v1/setup/status",
+        bootstrap=False,
+        cookies={SETUP_SESSION_COOKIE_NAME: old_token},
+    )
+    rotated_payload = _assert_standard_response(rotated_response, 200)
+    assert rotated_payload["data"] == {"required": True}
+    new_token = _setup_cookie_value(rotated_response)
+    assert new_token != old_token
+
+    stored_after = await _read_setup_data(setup_session_factory)
+    new_record = json.loads(stored_after["settings"][SETUP_SESSION_RECORD_KEY])
+    assert new_record["version"] == SETUP_SESSION_RECORD_VERSION
+    assert new_record["token_hash"] == hashlib.sha256(new_token.encode("utf-8")).hexdigest()
+    assert new_record["expires_at"] > int(time.time())
+    assert new_record["expires_at"] <= int(time.time()) + SETUP_SESSION_TTL_SECONDS
+    assert old_token not in stored_after["settings"][SETUP_SESSION_RECORD_KEY]
+
+    old_cookie_response = await _request(
+        setup_app,
+        "GET",
+        "/api/v1/setup/status",
+        bootstrap=False,
+        cookies={SETUP_SESSION_COOKIE_NAME: old_token},
+    )
+    old_cookie_body = _assert_standard_response(old_cookie_response, 403)
+    assert old_cookie_body["message"] == t(ERR_SETUP_SESSION_INVALID)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "expected_error"),
     [
@@ -339,6 +602,13 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
     payload = _setup_payload()
     response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
     body = _assert_standard_response(response, 200)
+    clear_cookie = response.headers["set-cookie"]
+    clear_cookie_lower = clear_cookie.lower()
+    assert f'{SETUP_SESSION_COOKIE_NAME}=""' in clear_cookie
+    assert "; max-age=0" in clear_cookie_lower
+    assert "; path=/api/v1/setup" in clear_cookie_lower
+    assert "; httponly" in clear_cookie_lower
+    assert "samesite=strict" in clear_cookie_lower
 
     assert set(body["data"]) == {"access_token", "token_type", "profile_id", "channel_id"}
     assert body["data"]["access_token"] == FIXED_ACCESS_TOKEN
@@ -351,6 +621,7 @@ async def test_setup_complete_returns_token_data_and_creates_initial_records(
 
     database = await _read_setup_data(setup_session_factory)
     assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_COMPLETED
+    assert SETUP_SESSION_RECORD_KEY not in database["settings"]
 
     users = database["users"]
     assert len(users) == 1
@@ -441,21 +712,30 @@ async def test_concurrent_setup_completion_has_one_success_and_one_conflict(
     setup_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_get_valid_setup_status = setup_api._get_valid_setup_status
-    status_barrier = asyncio.Barrier(2)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup_app), base_url="http://test") as client:
+        session_response = await client.get("/api/v1/setup/status")
+        _assert_standard_response(session_response, 200)
+        session_token = _setup_cookie_value(session_response)
 
-    async def synchronized_get_valid_setup_status(db: AsyncSession) -> str:
-        status = await original_get_valid_setup_status(db)
-        assert status == SETUP_STATUS_PENDING
-        await status_barrier.wait()
-        return status
+        original_get_valid_setup_status = setup_api._get_valid_setup_status
+        status_barrier = asyncio.Barrier(2)
 
-    monkeypatch.setattr(setup_api, "_get_valid_setup_status", synchronized_get_valid_setup_status)
+        async def synchronized_get_valid_setup_status(db: AsyncSession) -> str:
+            status = await original_get_valid_setup_status(db)
+            assert status == SETUP_STATUS_PENDING
+            await status_barrier.wait()
+            return status
 
-    async def submit_setup() -> httpx.Response:
-        return await _request(setup_app, "POST", "/api/v1/setup/complete", json=_setup_payload())
+        monkeypatch.setattr(setup_api, "_get_valid_setup_status", synchronized_get_valid_setup_status)
 
-    responses = await asyncio.gather(submit_setup(), submit_setup())
+        async def submit_setup() -> httpx.Response:
+            return await client.post(
+                "/api/v1/setup/complete",
+                json=_setup_payload(),
+                cookies={SETUP_SESSION_COOKIE_NAME: session_token},
+            )
+
+        responses = await asyncio.gather(submit_setup(), submit_setup())
     bodies = [response.json() for response in responses]
     assert sorted(response.status_code for response in responses) == [200, 409]
     assert sum(body["code"] == 200 for body in bodies) == 1
@@ -679,17 +959,41 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
     complete_operation = paths["/api/v1/setup/complete"]["post"]
     _assert_generic_response_schema(openapi, status_operation, "SetupStatusData")
     _assert_generic_response_schema(openapi, complete_operation, "SetupTokenData")
-    _assert_error_response_models(status_operation, ("409", "500"))
+    _assert_error_response_models(status_operation, ("403", "409", "500"))
     for operation, request_schema_name in (
         (models_operation, "ChannelModelListRequest"),
         (chat_operation, "ChannelChatTestRequest"),
     ):
         assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": f"#/components/schemas/{request_schema_name}"}
         assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/StandardResponse"}
-        _assert_error_response_models(operation, ("409", "500"))
-    _assert_error_response_models(complete_operation, ("409", "422", "500"))
+        _assert_error_response_models(operation, ("403", "409", "500"))
+    _assert_error_response_models(complete_operation, ("403", "409", "422", "500"))
 
     status_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupStatusData"])
     token_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupTokenData"])
     assert set(status_data_schema["properties"]) == {"required"}
     assert set(token_data_schema["properties"]) == {"access_token", "token_type", "profile_id", "channel_id"}
+
+
+@pytest.mark.asyncio
+async def test_setup_complete_rejects_blank_api_key_without_creating_records(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    response = await _request(
+        setup_app,
+        "POST",
+        "/api/v1/setup/complete",
+        json=_setup_payload(api_key="   "),
+    )
+    body = _assert_standard_response(response, 422)
+    assert body["data"] is None
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert _business_record_counts(database) == {
+        "users": 0,
+        "channels": 0,
+        "prompts": 0,
+        "profiles": 0,
+    }

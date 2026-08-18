@@ -819,6 +819,10 @@ const submitForm = async () => {
     return ElMessage.warning(t('channels.fill_required'))
   }
 
+  if (!form.api_key || !form.api_key.trim()) {
+    return ElMessage.warning(t('channels.model_list_api_key_required'))
+  }
+
   const parsedCustomHeaders = validateAdvancedSettings()
   if (!parsedCustomHeaders) return
   form.model_ids.forEach((entry, idx) => {

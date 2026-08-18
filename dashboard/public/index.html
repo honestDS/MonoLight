@@ -5,8 +5,83 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <title>MonoLight Dashboard</title>
+    <style>
+      html {
+        box-sizing: border-box;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: inherit;
+      }
+
+      html,
+      body,
+      #app {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: #f4f5f6;
+        color: #20252b;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      #app-loading {
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 24px;
+        background: #f4f5f6;
+        color: #20252b;
+        text-align: center;
+      }
+
+      .app-loading__brand {
+        font-size: 2rem;
+        font-weight: 600;
+      }
+
+      .app-loading__spinner {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border: 3px solid #d2d6da;
+        border-top-color: #59636d;
+        animation: app-loading-spin 0.8s linear infinite;
+      }
+
+      .app-loading__text {
+        font-size: 0.9375rem;
+        color: #59636d;
+      }
+
+      @keyframes app-loading-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .app-loading__spinner {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div id="app-loading" role="status" aria-live="polite">
+        <div class="app-loading__brand">MonoLight</div>
+        <div class="app-loading__spinner" aria-hidden="true"></div>
+        <div class="app-loading__text">Loading...</div>
+      </div>
+    </div>
   </body>
 </html>

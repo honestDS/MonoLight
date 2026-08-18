@@ -18,6 +18,7 @@ from app.models.channel import (
     ChannelModelAdvancedSettings,
     ModelProtocol,
     ModelUsage,
+    validate_channel_api_key,
 )
 from app.models.user import UserCreate
 
@@ -60,6 +61,11 @@ class SetupChannelInput(BaseModel):
     @classmethod
     def validate_base_url_field(cls, value: str) -> str:
         return validate_base_url(value, model_ids=[{"model_id": "setup"}])
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key_field(cls, value: str) -> str:
+        return validate_channel_api_key(value)
 
     @field_validator("http_proxy")
     @classmethod
