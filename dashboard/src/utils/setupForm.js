@@ -124,7 +124,7 @@ export function validateSetupHttpProxy(value) {
 }
 
 export function validateSetupApiKey(value) {
-  if (typeof value !== 'string' || !value) {
+  if (typeof value !== 'string' || !value || !value.trim()) {
     return validationError('required')
   }
 

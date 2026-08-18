@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.api.v1 import channels
 from app.models.channel import ModelProtocol
@@ -9,6 +10,19 @@ def test_channel_chat_request_defaults_to_non_stream() -> None:
     payload = channels.ChannelChatTestRequest(prompt="Test prompt")
 
     assert payload.test_mode is channels.ChannelChatTestMode.NON_STREAM
+
+
+@pytest.mark.parametrize(
+    ("request_type", "request_kwargs"),
+    [
+        (channels.ChannelModelListRequest, {}),
+        (channels.ChannelChatTestRequest, {"prompt": "Test prompt"}),
+        (channels.ChannelImageGenerationTestRequest, {}),
+    ],
+)
+def test_channel_test_requests_reject_whitespace_api_key(request_type, request_kwargs) -> None:
+    with pytest.raises(ValidationError):
+        request_type(api_key=" \t\n ", **request_kwargs)
 
 
 @pytest.mark.asyncio

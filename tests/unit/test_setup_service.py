@@ -169,6 +169,25 @@ def test_setup_schema_accepts_valid_username_and_utf8_password_limit() -> None:
         make_setup_request(password="中" * 25)
 
 
+@pytest.mark.parametrize("api_key", ["", " ", "\t\n"])
+def test_setup_schema_rejects_blank_api_key(api_key: str) -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["api_key"] = api_key
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_preserves_non_blank_api_key_whitespace() -> None:
+    api_key = "  setup-api-key  "
+    payload = make_setup_request().model_dump(mode="json")
+    payload["channel"]["api_key"] = api_key
+
+    request = SetupCompleteRequest.model_validate(payload)
+
+    assert request.channel.api_key == api_key
+
+
 def test_user_update_password_uses_utf8_byte_limit() -> None:
     update = UserUpdate(uid="existing-user", password="中" * 24)
 

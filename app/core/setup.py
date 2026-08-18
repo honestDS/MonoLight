@@ -132,6 +132,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             raise ServerException(ERR_SETUP_STATE_UPDATE_FAILED)
         if not await system_setting_crud.complete_setup(db):
             raise ServerException(ERR_SETUP_STATE_UPDATE_FAILED)
+        await system_setting_crud.clear_setup_session_record(db)
 
         await db.commit()
         access_token = create_access_token({"sub": admin.username})

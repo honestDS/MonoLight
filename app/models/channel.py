@@ -21,6 +21,7 @@ from sqlmodel import (
 )
 
 from app.core.constants import (
+    ERR_API_KEY_ENCRYPT_INPUT_EMPTY,
     ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID,
     ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED,
     ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID,
@@ -198,6 +199,17 @@ def normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
     return normalized_model_ids
 
 
+def validate_channel_api_key(value: object, *, required: bool = True) -> str | None:
+    """校验渠道 API Key，并保留原始非空字符串。"""
+    if value is None:
+        if required:
+            raise ValueError(t(ERR_API_KEY_ENCRYPT_INPUT_EMPTY))
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(t(ERR_API_KEY_ENCRYPT_INPUT_EMPTY))
+    return value
+
+
 class ChannelBase(SQLModel):
     name: str = Field(index=True, unique=True, nullable=False, min_length=1, max_length=100)
     api_key: str = Field(nullable=False, min_length=1)
@@ -209,6 +221,11 @@ class ChannelBase(SQLModel):
         sa_column=Column(JSON),
         description="模型条目列表，每项符合 ChannelModelItem 结构",
     )
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def validate_api_key_field(cls, value: object) -> str | None:
+        return validate_channel_api_key(value)
 
     @field_validator("http_proxy", mode="before")
     @classmethod
@@ -282,6 +299,11 @@ class ChannelUpdate(SQLModel):
     http_proxy: str | None = None
     is_active: bool | None = None
     model_ids: list[dict] | None = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def validate_api_key_field(cls, value: object) -> str | None:
+        return validate_channel_api_key(value, required=False)
 
     @field_validator("http_proxy", mode="before")
     @classmethod

@@ -165,6 +165,8 @@ MESSAGES = {
     "ERR_SETUP_ALREADY_COMPLETED": "Setup is already completed and cannot run again",
     "ERR_SETUP_NOT_ALLOWED": "The current setup status does not allow this operation",
     "ERR_SETUP_STATUS_INVALID": "Internal integrity error: setup status is invalid",
+    "ERR_SETUP_SESSION_INVALID": "The setup session is invalid or expired. Reopen the setup page",
+    "ERR_SETUP_SESSION_STATE_INVALID": "Internal integrity error: the setup session state is invalid",
     "ERR_FOREIGN_KEY_MIGRATION_DATA_INVALID": "Cannot add database relationship constraints: {relation} has {count} inconsistent rows",
     "ERR_MIGRATION_SCRIPT_INVALID": "Invalid migration script: {script_name}",
     "ERR_MIGRATION_ID_INVALID": "Invalid MIGRATION_ID in {script_name}",

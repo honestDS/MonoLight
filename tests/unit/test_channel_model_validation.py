@@ -21,6 +21,33 @@ from app.models.channel import (
 HTTP_PROXY_FORMAT_HINT = "仅支持 http://host:port 或 http://username:password@host:port"
 
 
+@pytest.mark.parametrize("api_key", ["", " ", "\t\n"])
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (ChannelCreate, {"name": "channel"}),
+        (ChannelUpdate, {}),
+    ],
+)
+def test_channel_payload_rejects_blank_api_key(schema, payload: dict, api_key: str) -> None:
+    with pytest.raises(ValidationError):
+        schema.model_validate({**payload, "api_key": api_key})
+
+
+@pytest.mark.parametrize("api_key", [" key ", "\tkey\n"])
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        (ChannelCreate, {"name": "channel"}),
+        (ChannelUpdate, {}),
+    ],
+)
+def test_channel_payload_preserves_non_blank_api_key(schema, payload: dict, api_key: str) -> None:
+    channel = schema.model_validate({**payload, "api_key": api_key})
+
+    assert channel.api_key == api_key
+
+
 @pytest.mark.parametrize("usage", list(ModelUsage))
 def test_model_requires_protocol(usage: ModelUsage) -> None:
     with pytest.raises(ValidationError):

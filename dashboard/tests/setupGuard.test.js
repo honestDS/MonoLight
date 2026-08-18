@@ -21,12 +21,14 @@ import {
 
 const source = relativePath => readFileSync(fileURLToPath(new URL(`../src/${relativePath}`, import.meta.url)), 'utf8')
 const apiSource = source('api/index.js')
+const mainSource = source('main.js')
 const routerSource = source('router/index.js')
 const loginSource = source('views/LoginView.vue')
 const appSource = source('App.vue')
 const setupSource = source('views/SetupView.vue')
 const profileGuideSource = source('components/SetupProfileGuide.vue')
 const setupStyleSource = source('assets/css/setup.scss')
+const publicIndexSource = readFileSync(fileURLToPath(new URL('../public/index.html', import.meta.url)), 'utf8')
 const localeKeys = value => Object.keys(value).sort()
 
 test('readSetupRequired accepts only boolean status values', () => {
@@ -192,10 +194,11 @@ test('a failed page retry preserves the latest setup error and leaves setup rend
 })
 
 test('API and routing sources retain setup endpoints and setup error codes while removing reset flows', () => {
-  assert.match(apiSource, /status:\s*\(\)\s*=>\s*request\.get\('\/setup\/status'\)/)
-  assert.match(apiSource, /complete:\s*\(data\)\s*=>\s*request\.post\('\/setup\/complete',\s*data\)/)
-  assert.match(apiSource, /models:\s*\(data\)\s*=>\s*request\.post\('\/setup\/models',\s*data\)/)
-  assert.match(apiSource, /testChat:\s*\(data,\s*config\s*=\s*\{\}\)\s*=>\s*request\.post\('\/setup\/test-chat',\s*data,\s*config\)/)
+  assert.match(apiSource, /status:\s*\(\)\s*=>\s*request\.get\('\/setup\/status',\s*withSetupCredentials\(\)\)/)
+  assert.match(apiSource, /complete:\s*\(data\)\s*=>\s*request\.post\('\/setup\/complete',\s*data,\s*withSetupCredentials\(\)\)/)
+  assert.match(apiSource, /models:\s*\(data\)\s*=>\s*request\.post\('\/setup\/models',\s*data,\s*withSetupCredentials\(\)\)/)
+  assert.match(apiSource, /testChat:\s*\(data,\s*config\s*=\s*\{\}\)\s*=>\s*request\.post\('\/setup\/test-chat',\s*data,\s*withSetupCredentials\(config\)\)/)
+  assert.match(apiSource, /const withSetupCredentials = \(config = \{\}\) => \(\{\s*\.\.\.config,\s*withCredentials:\s*true\s*\}\)/)
   assert.match(apiSource, /list:\s*\(params\)\s*=>\s*request\.get\('\/profiles\/list',\s*\{\s*params\s*\}\)/)
   assert.match(apiSource, /update:\s*\(id,\s*data\)\s*=>\s*request\.post\(`\/profiles\/update\?profile_id=\$\{id\}`,\s*data\)/)
   assert.match(apiSource, /error\.response\s*=\s*\{\s*data:\s*\{\s*code,\s*message:/)
@@ -204,6 +207,27 @@ test('API and routing sources retain setup endpoints and setup error codes while
   }
   assert.match(routerSource, /path:\s*'\/setup'/)
   assert.match(routerSource, /createSetupGuard\(/)
+})
+
+test('startup waits for router readiness and the public loading page stays self-contained', () => {
+  const routerReadyStart = mainSource.indexOf('router.isReady()')
+  const mountStart = mainSource.indexOf("app.mount('#app')")
+  assert.ok(routerReadyStart >= 0)
+  assert.ok(mountStart > routerReadyStart)
+  assert.match(mainSource, /router\.isReady\(\)\.then\(\(\)\s*=>\s*\{\s*app\.mount\('#app'\)\s*\}\)/)
+
+  assert.match(publicIndexSource, /id="app-loading"/)
+  assert.match(publicIndexSource, /role="status"/)
+  assert.match(publicIndexSource, /Loading\.\.\./)
+  assert.match(
+    publicIndexSource,
+    /\.app-loading__spinner\s*\{[\s\S]*width:\s*24px\s*;[\s\S]*height:\s*24px\s*;[\s\S]*border-radius:\s*50%\s*;[\s\S]*border:\s*3px solid[\s\S]*border-top-color:[\s\S]*animation:\s*app-loading-spin/,
+  )
+  assert.match(publicIndexSource, /@keyframes\s+app-loading-spin[\s\S]*transform:\s*rotate\(360deg\)/)
+  assert.match(publicIndexSource, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.app-loading__spinner[\s\S]*animation:\s*none\s*;/)
+  assert.doesNotMatch(publicIndexSource, /<link\b/i)
+  assert.doesNotMatch(publicIndexSource, /\burl\s*\(/i)
+  assert.doesNotMatch(publicIndexSource, /<img\b/i)
 })
 
 test('App keeps login and setup as independent standalone pages', () => {

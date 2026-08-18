@@ -168,6 +168,8 @@ MESSAGES = {
     "ERR_SETUP_ALREADY_COMPLETED": "初始化已完成，不能再次执行",
     "ERR_SETUP_NOT_ALLOWED": "当前初始化状态不允许执行此操作",
     "ERR_SETUP_STATUS_INVALID": "内部一致性错误：初始化状态无效",
+    "ERR_SETUP_SESSION_INVALID": "初始化会话无效或已过期，请重新打开初始化页面",
+    "ERR_SETUP_SESSION_STATE_INVALID": "内部一致性错误：初始化会话状态无效",
     "ERR_FOREIGN_KEY_MIGRATION_DATA_INVALID": "无法添加数据库关联约束：{relation} 存在 {count} 条不一致数据",
     "ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID": "size 和 quality 仅允许用于 IMAGE_GENERATION 模型",
     "ERR_INBOUND_MESSAGE_COLLECTOR_CLOSED": "入站消息收集器已关闭",
