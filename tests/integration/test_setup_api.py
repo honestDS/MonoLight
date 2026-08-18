@@ -332,7 +332,7 @@ async def test_setup_probe_routes_reject_completed_or_configuring_state(
 
 
 @pytest.mark.asyncio
-async def test_setup_complete_returns_only_token_data_and_creates_initial_records(
+async def test_setup_complete_returns_token_data_and_creates_initial_records(
     setup_app: FastAPI,
     setup_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -340,8 +340,9 @@ async def test_setup_complete_returns_only_token_data_and_creates_initial_record
     response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
     body = _assert_standard_response(response, 200)
 
-    assert set(body["data"]) == {"access_token", "token_type"}
-    assert body["data"] == {"access_token": FIXED_ACCESS_TOKEN, "token_type": "bearer"}
+    assert set(body["data"]) == {"access_token", "token_type", "profile_id", "channel_id"}
+    assert body["data"]["access_token"] == FIXED_ACCESS_TOKEN
+    assert body["data"]["token_type"] == "bearer"
     assert TEST_PASSWORD not in response.text
     assert TEST_API_KEY not in response.text
     assert FIXED_JWT_SECRET not in response.text
@@ -361,6 +362,7 @@ async def test_setup_complete_returns_only_token_data_and_creates_initial_record
     assert channel.api_key.startswith(ENCRYPTED_API_KEY_PREFIX)
     assert channel.api_key != TEST_API_KEY
     assert channel.get_decrypted_api_key() == TEST_API_KEY
+    assert body["data"]["channel_id"] == channel.id
 
     prompts = database["prompts"]
     assert len(prompts) == 1
@@ -370,6 +372,7 @@ async def test_setup_complete_returns_only_token_data_and_creates_initial_record
     assert len(profiles) == 1
     assert profiles[0].uid == users[0].uid
     assert profiles[0].prompt_id == prompts[0].id
+    assert body["data"]["profile_id"] == profiles[0].id
 
 
 @pytest.mark.asyncio
@@ -681,16 +684,12 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
         (models_operation, "ChannelModelListRequest"),
         (chat_operation, "ChannelChatTestRequest"),
     ):
-        assert operation["requestBody"]["content"]["application/json"]["schema"] == {
-            "$ref": f"#/components/schemas/{request_schema_name}"
-        }
-        assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
-            "$ref": "#/components/schemas/StandardResponse"
-        }
+        assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": f"#/components/schemas/{request_schema_name}"}
+        assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/StandardResponse"}
         _assert_error_response_models(operation, ("409", "500"))
     _assert_error_response_models(complete_operation, ("409", "422", "500"))
 
     status_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupStatusData"])
     token_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupTokenData"])
     assert set(status_data_schema["properties"]) == {"required"}
-    assert set(token_data_schema["properties"]) == {"access_token", "token_type"}
+    assert set(token_data_schema["properties"]) == {"access_token", "token_type", "profile_id", "channel_id"}

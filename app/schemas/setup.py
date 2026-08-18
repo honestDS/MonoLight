@@ -97,6 +97,8 @@ class SetupTokenData(BaseModel):
 
     access_token: str = Field(..., min_length=1, description="访问令牌")
     token_type: str = Field(..., min_length=1, description="令牌类型")
+    profile_id: int = Field(..., gt=0, description="Profile 标识符")
+    channel_id: int = Field(..., gt=0, description="渠道标识符")
 
 
 class SetupCompleteResult(SetupTokenData):

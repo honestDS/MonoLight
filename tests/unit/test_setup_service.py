@@ -278,9 +278,11 @@ async def test_complete_setup_creates_consistent_initial_data_and_commits_once(
         assert session.commit_count == 1
 
     assert token_commit_counts == [1]
-    assert set(result.model_dump()) == {"access_token", "token_type"}
+    assert set(result.model_dump()) == {"access_token", "token_type", "profile_id", "channel_id"}
     assert result.access_token == FIXED_ACCESS_TOKEN
     assert result.token_type == "bearer"
+    assert isinstance(result.profile_id, int) and result.profile_id > 0
+    assert isinstance(result.channel_id, int) and result.channel_id > 0
     assert not {"redirect", "password", "api_key"}.intersection(result.model_dump())
 
     database = await read_database(setup_session_factory)
@@ -303,6 +305,7 @@ async def test_complete_setup_creates_consistent_initial_data_and_commits_once(
 
     assert len(channels) == 1
     channel = channels[0]
+    assert result.channel_id == channel.id
     assert channel.api_key.startswith(ENCRYPTED_API_KEY_PREFIX)
     assert channel.get_decrypted_api_key() == TEST_API_KEY
     assert channel.api_key != TEST_API_KEY
@@ -319,6 +322,7 @@ async def test_complete_setup_creates_consistent_initial_data_and_commits_once(
 
     assert len(profiles) == 1
     profile = profiles[0]
+    assert result.profile_id == profile.id
     assert profile.uid == admin.uid
     assert profile.prompt_id == prompt.id
     assert profile.is_default is True

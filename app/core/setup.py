@@ -116,7 +116,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
         )
         await validate_channel_configs(db, profile_config.channel.model_dump())
 
-        await profile_crud.create(
+        profile = await profile_crud.create(
             db,
             obj_in={
                 "name": request.profile.name,
@@ -135,7 +135,12 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
 
         await db.commit()
         access_token = create_access_token({"sub": admin.username})
-        return SetupCompleteResult(access_token=access_token, token_type="bearer")
+        return SetupCompleteResult(
+            access_token=access_token,
+            token_type="bearer",
+            profile_id=profile.id,
+            channel_id=channel.id,
+        )
     except Exception:
         await db.rollback()
         raise

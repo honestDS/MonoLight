@@ -136,6 +136,8 @@ async def complete_setup_request(
         data=SetupTokenData(
             access_token=result.access_token,
             token_type=result.token_type,
+            profile_id=result.profile_id,
+            channel_id=result.channel_id,
         ),
         message=MSG_SETUP_COMPLETE_SUCCESS,
     )
