@@ -1,10 +1,10 @@
 <template>
   <div class="setup-page">
-    <div class="setup-language">
-      <LanguageSwitcher />
-    </div>
-
     <main class="setup-shell">
+      <div class="setup-language">
+        <LanguageSwitcher />
+      </div>
+
       <header class="setup-brand">
         <el-icon class="setup-brand-mark"><Setting /></el-icon>
         <span class="setup-brand-name">MonoLight</span>
