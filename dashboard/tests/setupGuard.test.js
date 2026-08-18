@@ -307,6 +307,44 @@ test('SetupView keeps step transition boundaries and reduced-motion styles in th
   assert.match(reducedMotionSource, /transform\s*:\s*none\s*;/)
 })
 
+test('Setup language control stays inside the shell with responsive card-relative positioning', () => {
+  const shellStart = setupSource.indexOf('<main class="setup-shell">')
+  const languageStart = setupSource.indexOf('<div class="setup-language">')
+  const brandStart = setupSource.indexOf('<header class="setup-brand">')
+  const shellEnd = setupSource.indexOf('</main>', shellStart)
+  assert.ok(shellStart >= 0)
+  assert.ok(languageStart > shellStart)
+  assert.ok(brandStart > languageStart)
+  assert.ok(brandStart < shellEnd)
+
+  assert.match(setupStyleSource, /\.setup-shell\s*\{[^}]*position\s*:\s*relative\s*;/)
+  assert.match(
+    setupStyleSource,
+    /\.setup-language\s*\{[^}]*position\s*:\s*absolute\s*;[^}]*top\s*:\s*20px\s*;[^}]*right\s*:\s*24px\s*;/,
+  )
+
+  const pageStyleStart = setupStyleSource.indexOf('.setup-page {')
+  const pageStyleEnd = setupStyleSource.indexOf('}', pageStyleStart)
+  assert.ok(pageStyleStart >= 0)
+  assert.ok(pageStyleEnd > pageStyleStart)
+  assert.doesNotMatch(setupStyleSource.slice(pageStyleStart, pageStyleEnd), /padding(?:-top)?\s*:\s*76px/)
+
+  const mediumMediaStart = setupStyleSource.indexOf('@media (max-width: 720px)')
+  const narrowMediaStart = setupStyleSource.indexOf('@media (max-width: 420px)')
+  const reducedMotionStart = setupStyleSource.indexOf('@media (prefers-reduced-motion: reduce)')
+  assert.ok(mediumMediaStart >= 0)
+  assert.ok(narrowMediaStart > mediumMediaStart)
+  assert.ok(reducedMotionStart > narrowMediaStart)
+  assert.match(
+    setupStyleSource.slice(mediumMediaStart, narrowMediaStart),
+    /\.setup-language\s*\{[^}]*top\s*:\s*16px\s*;[^}]*right\s*:\s*16px\s*;/,
+  )
+  assert.match(
+    setupStyleSource.slice(narrowMediaStart, reducedMotionStart),
+    /\.setup-language\s*\{[^}]*top\s*:\s*12px\s*;[^}]*right\s*:\s*12px\s*;/,
+  )
+})
+
 test('Chinese and English setup locales have identical complete key sets and non-empty critical copy', () => {
   assert.deepEqual(localeKeys(zhSetup), localeKeys(enSetup))
   const criticalKeys = [
