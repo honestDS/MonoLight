@@ -97,6 +97,7 @@ app/api/v1/
 ├── profile.py              # Profile 配置接口
 ├── prompts.py              # Prompt 管理接口
 ├── scheduled_tasks.py      # 定时任务接口
+├── setup.py                # 系统初始化接口
 ├── system.py               # 系统设置、日志与语言接口
 └── users.py                # 用户管理接口
 ```
@@ -140,7 +141,10 @@ app/core/
 ├── security.py             # 认证与安全辅助
 ├── session_cleanup.py      # 会话清理服务
 ├── session_notifier.py     # 会话事件通知
-└── session_source.py       # 会话来源信息
+├── session_source.py       # 会话来源信息
+├── setup.py                # 系统初始化应用服务
+├── system_secrets.py       # 系统密钥管理
+└── validation.py           # 通用输入校验
 ```
 
 ### 审计：`app/core/audit/`
@@ -447,7 +451,8 @@ app/schemas/
 ├── background_task.py      # 后台任务接口数据结构
 ├── memory.py               # 长期记忆接口数据结构
 ├── response.py             # 通用响应和分页结构
-└── scheduled_task.py       # 定时任务接口数据结构
+├── scheduled_task.py       # 定时任务接口数据结构
+└── setup.py                # 系统初始化接口数据结构
 
 app/transformers/
 ├── base.py                 # 模型协议转换抽象
@@ -505,6 +510,7 @@ dashboard/src/views/
 ├── PromptsView.vue         # Prompt 管理页面
 ├── RealTimeLogs.vue        # 实时日志页面
 ├── ScheduledTasksView.vue  # 定时任务管理页面
+├── SetupView.vue           # 系统初始化页面
 └── UsersView.vue           # 用户管理页面
 ```
 
@@ -527,6 +533,8 @@ scripts/                    # 数据库迁移和运行维护脚本
 ```text
 data/                       # SQLite、Chroma、日志与审计等持久化数据
 ├── audit/                  # 审计文件
+├── system_secrets.json     # 系统密钥持久化文件
+└── system_secrets.lock     # 系统密钥初始化锁文件
 
 temp/                       # 上传文件、工具结果和其他临时数据
 ```
