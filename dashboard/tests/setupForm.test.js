@@ -4,7 +4,9 @@ import test from 'node:test'
 import {
   SETUP_PROTOCOLS,
   buildSetupRequest,
+  cloneSetupProfileConfigs,
   readSetupTokenData,
+  readSetupProfileGuideData,
   unicodeLength,
   utf8ByteLength,
   validateSetupApiKey,
@@ -23,6 +25,41 @@ const GRINNING_FACE = String.fromCodePoint(0x1f600)
 
 function assertValidationError(result, key, params = {}) {
   assert.deepEqual(result, { key, params })
+}
+
+function validSetupProfileConfigs() {
+  return {
+    channel: {
+      base_url: 'https://api.example.test'
+    },
+    security: {
+      enabled: true
+    },
+    tool: {
+      enabled_tools: ['read_file'],
+      allowed_operation_dirs: ['/workspace'],
+      file_send_blocked_extensions: ['.env']
+    },
+    other: {
+      locale: 'en-US'
+    },
+    memory: {
+      enabled: true
+    }
+  }
+}
+
+function validSetupProfileGuideResponse(configs = validSetupProfileConfigs(), toolOptions = [
+  { value: 'read_file', label: 'Read file' }
+]) {
+  return {
+    data: {
+      data: {
+        items: [{ id: 7, configs }],
+        meta: { tool_options: toolOptions }
+      }
+    }
+  }
 }
 
 test('unicodeLength counts ASCII, Chinese, and emoji by Unicode code point', () => {
@@ -239,6 +276,8 @@ test('readSetupTokenData returns only the nested nonempty token fields', () => {
         data: {
           access_token: 'nested access token',
           token_type: 'Bearer',
+          profile_id: 7,
+          channel_id: 11,
           expires_in: 3600,
           ignored: 'ignored'
         }
@@ -246,12 +285,14 @@ test('readSetupTokenData returns only the nested nonempty token fields', () => {
     }),
     {
       access_token: 'nested access token',
-      token_type: 'Bearer'
+      token_type: 'Bearer',
+      profile_id: 7,
+      channel_id: 11
     }
   )
 })
 
-test('readSetupTokenData rejects missing, non-string, empty, and top-level token fields', () => {
+test('readSetupTokenData rejects missing, non-string, empty, top-level token fields, and invalid IDs', () => {
   assert.equal(readSetupTokenData(), null)
   assert.equal(readSetupTokenData({ data: {} }), null)
   assert.equal(readSetupTokenData({ data: { data: { token_type: 'Bearer' } } }), null)
@@ -261,4 +302,109 @@ test('readSetupTokenData rejects missing, non-string, empty, and top-level token
   assert.equal(readSetupTokenData({ data: { data: { access_token: '', token_type: 'Bearer' } } }), null)
   assert.equal(readSetupTokenData({ data: { data: { access_token: 'token', token_type: '' } } }), null)
   assert.equal(readSetupTokenData({ access_token: 'top-level token', token_type: 'Bearer' }), null)
+
+  const validTokenData = {
+    access_token: 'token',
+    token_type: 'Bearer',
+    profile_id: 7,
+    channel_id: 11
+  }
+  const missingProfileId = { ...validTokenData }
+  const missingChannelId = { ...validTokenData }
+  delete missingProfileId.profile_id
+  delete missingChannelId.channel_id
+
+  assert.equal(readSetupTokenData({ data: { data: missingProfileId } }), null)
+  assert.equal(readSetupTokenData({ data: { data: missingChannelId } }), null)
+
+  for (const profileId of [0, -1, 1.5, '7']) {
+    assert.equal(
+      readSetupTokenData({ data: { data: { ...validTokenData, profile_id: profileId } } }),
+      null
+    )
+  }
+
+  for (const channelId of [0, -1, 1.5, '11']) {
+    assert.equal(
+      readSetupTokenData({ data: { data: { ...validTokenData, channel_id: channelId } } }),
+      null
+    )
+  }
+})
+
+test('cloneSetupProfileConfigs returns a deep copy of valid profile configs', () => {
+  const configs = validSetupProfileConfigs()
+  const clonedConfigs = cloneSetupProfileConfigs(configs)
+
+  assert.deepEqual(clonedConfigs, configs)
+  assert.notStrictEqual(clonedConfigs, configs)
+  assert.notStrictEqual(clonedConfigs.tool, configs.tool)
+
+  clonedConfigs.tool.enabled_tools.push('web_search')
+  assert.deepEqual(configs.tool.enabled_tools, ['read_file'])
+})
+
+test('readSetupProfileGuideData returns cloned configs and tool options for a valid profile', () => {
+  const configs = validSetupProfileConfigs()
+  const expectedConfigs = validSetupProfileConfigs()
+  const toolOptions = [{ value: 'read_file', label: 'Read file' }]
+  const response = validSetupProfileGuideResponse(configs, toolOptions)
+  const result = readSetupProfileGuideData(response, 7)
+
+  assert.deepEqual(result, {
+    configs: expectedConfigs,
+    toolOptions: [{ value: 'read_file', label: 'Read file' }]
+  })
+  assert.notStrictEqual(result.configs, configs)
+  assert.notStrictEqual(result.toolOptions, toolOptions)
+
+  result.configs.tool.enabled_tools.push('web_search')
+  result.configs.channel.base_url = 'https://changed.example.test'
+  result.toolOptions[0].label = 'Changed label'
+
+  assert.deepEqual(configs, expectedConfigs)
+  assert.deepEqual(toolOptions, [{ value: 'read_file', label: 'Read file' }])
+})
+
+test('readSetupProfileGuideData returns null when the target profile is missing', () => {
+  assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(), 99), null)
+})
+
+test('readSetupProfileGuideData returns null when required config groups are missing', () => {
+  for (const group of ['channel', 'security', 'tool', 'other', 'memory']) {
+    const configs = validSetupProfileConfigs()
+    delete configs[group]
+
+    assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(configs), 7), null)
+  }
+})
+
+test('readSetupProfileGuideData returns null when required tool arrays are missing', () => {
+  for (const arrayName of [
+    'enabled_tools',
+    'allowed_operation_dirs',
+    'file_send_blocked_extensions'
+  ]) {
+    const configs = validSetupProfileConfigs()
+    delete configs.tool[arrayName]
+
+    assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(configs), 7), null)
+  }
+})
+
+test('readSetupProfileGuideData returns null for malformed tool options', () => {
+  for (const toolOption of [
+    null,
+    {},
+    { value: '', label: 'Read file' },
+    { value: 'read_file', label: '' },
+    { value: 1, label: 'Read file' },
+    { value: 'read_file', label: 1 },
+    ['read_file', 'Read file']
+  ]) {
+    assert.equal(
+      readSetupProfileGuideData(validSetupProfileGuideResponse(undefined, [toolOption]), 7),
+      null
+    )
+  }
 })

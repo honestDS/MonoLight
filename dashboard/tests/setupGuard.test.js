@@ -25,6 +25,7 @@ const routerSource = source('router/index.js')
 const loginSource = source('views/LoginView.vue')
 const appSource = source('App.vue')
 const setupSource = source('views/SetupView.vue')
+const profileGuideSource = source('components/SetupProfileGuide.vue')
 const setupStyleSource = source('assets/css/setup.scss')
 const localeKeys = value => Object.keys(value).sort()
 
@@ -195,6 +196,8 @@ test('API and routing sources retain setup endpoints and setup error codes while
   assert.match(apiSource, /complete:\s*\(data\)\s*=>\s*request\.post\('\/setup\/complete',\s*data\)/)
   assert.match(apiSource, /models:\s*\(data\)\s*=>\s*request\.post\('\/setup\/models',\s*data\)/)
   assert.match(apiSource, /testChat:\s*\(data,\s*config\s*=\s*\{\}\)\s*=>\s*request\.post\('\/setup\/test-chat',\s*data,\s*config\)/)
+  assert.match(apiSource, /list:\s*\(params\)\s*=>\s*request\.get\('\/profiles\/list',\s*\{\s*params\s*\}\)/)
+  assert.match(apiSource, /update:\s*\(id,\s*data\)\s*=>\s*request\.post\(`\/profiles\/update\?profile_id=\$\{id\}`,\s*data\)/)
   assert.match(apiSource, /error\.response\s*=\s*\{\s*data:\s*\{\s*code,\s*message:/)
   for (const text of [apiSource, loginSource, source('i18n/locales/zh/login.js'), source('i18n/locales/en/login.js')]) {
     assert.doesNotMatch(text, /reset_admin|resetAdmin|reset_token/)
@@ -214,6 +217,67 @@ test('SetupView has only the approved token persistence and submission contract'
   assert.match(setupSource, /localStorage\.setItem\('token',\s*access_token\)/)
   assert.doesNotMatch(setupSource, /sessionStorage\.setItem\(/)
   for (const forbidden of ['redirect', 'jwt_secret', 'encryption_key']) assert.doesNotMatch(setupSource, new RegExp(forbidden))
+
+  assert.match(setupSource, /import\s+\{\s*openRouterApi,\s*profileApi,\s*setupApi\s*\}\s+from\s+'@\/api'/)
+  assert.match(setupSource, /import\s+SetupProfileGuide\s+from\s+'@\/components\/SetupProfileGuide\.vue'/)
+  assert.match(setupSource, /readSetupProfileGuideData/)
+  assert.match(setupSource, /const profileGuideActive = ref\(false\)/)
+  assert.match(setupSource, /const profileGuideStarted = ref\(false\)/)
+  assert.match(setupSource, /const profileGuideStep = ref\(0\)/)
+  assert.match(setupSource, /profileGuideActive\.value\s*=\s*true/)
+  assert.match(setupSource, /profileGuideActive\.value\s*=\s*false/)
+  assert.match(
+    setupSource,
+    /<SetupProfileGuide[\s\S]*ref="profileGuideRef"[\s\S]*:active-section="profileGuideStep"[\s\S]*:transition-name="profileGuideTransitionName"[\s\S]*:show-steps="false"/,
+  )
+
+  const setupSteps = [...setupSource.matchAll(/<el-steps\b[\s\S]*?<\/el-steps>/g)].map(match => match[0])
+  assert.equal(setupSteps.length, 2)
+  assert.match(setupSteps[0], /<el-steps\b[^>]*\bv-if="!profileGuideStarted"[^>]*>/)
+  assert.match(setupSteps[1], /<el-steps\b[^>]*\bv-else\b[^>]*>/)
+  assert.match(setupSteps[1], /:active="profileGuideStep"/)
+  for (const titleKey of ['context_summary_threshold', 'security_settings', 'tool_settings']) {
+    assert.match(setupSteps[1], new RegExp(`profiles\\.${titleKey}`))
+  }
+
+  const entryStart = setupSource.indexOf('<div v-if="profileGuideActive && !profileGuideStarted" class="setup-profile-guide-entry">')
+  const entryEnd = setupSource.indexOf('<template v-else>', entryStart)
+  assert.ok(entryStart >= 0)
+  assert.ok(entryEnd > entryStart)
+  const entrySource = setupSource.slice(entryStart, entryEnd)
+  assert.equal((entrySource.match(/<el-button\b/g) || []).length, 2)
+  assert.match(entrySource, /<el-button\b[^>]*@click="finishProfileGuide"/)
+  assert.match(entrySource, /<el-button\b[^>]*@click="startProfileGuide"/)
+  assert.match(entrySource, /t\('setup\.skip_step'\)/)
+  assert.match(entrySource, /t\('setup\.continue_configuration'\)/)
+  assert.match(entrySource, /class="setup-profile-guide-entry-description"/)
+  assert.match(entrySource, /t\('setup\.profile_guide_description'\)/)
+  assert.doesNotMatch(entrySource, /<SetupProfileGuide\b/)
+  assert.doesNotMatch(entrySource, /(?:loadProfileGuide|profileApi\.(?:list|update))\s*\(/)
+
+  const completeSetupStart = setupSource.indexOf('async function completeSetup()')
+  const startProfileGuideStart = setupSource.indexOf('function startProfileGuide()', completeSetupStart)
+  const loadProfileGuideStart = setupSource.indexOf('async function loadProfileGuide()', startProfileGuideStart)
+  assert.ok(completeSetupStart >= 0)
+  assert.ok(startProfileGuideStart > completeSetupStart)
+  assert.ok(loadProfileGuideStart > startProfileGuideStart)
+  const completeSetupSource = setupSource.slice(completeSetupStart, startProfileGuideStart)
+  const startProfileGuideSource = setupSource.slice(startProfileGuideStart, loadProfileGuideStart)
+  const startedAssignment = startProfileGuideSource.indexOf('profileGuideStarted.value = true')
+  const loadProfileGuideCall = startProfileGuideSource.indexOf('void loadProfileGuide()')
+  assert.ok(startedAssignment >= 0)
+  assert.ok(loadProfileGuideCall > startedAssignment)
+  assert.doesNotMatch(completeSetupSource, /\bloadProfileGuide\s*\(/)
+
+  assert.match(setupSource, /profileApi\.list\(\{\s*page:\s*1,\s*size:\s*1000\s*\}\)/)
+  assert.match(setupSource, /readSetupProfileGuideData\(response,\s*profileGuideResource\.profile_id\)/)
+  assert.match(setupSource, /profileApi\.update\(profileGuideResource\.profile_id,\s*\{\s*configs\s*\}\)/)
+  assert.match(setupSource, /profileGuideRef\.value\?\.commitPendingInputs\(\)/)
+  assert.match(setupSource, /setupStatus\.required\s*\|\|\s*profileGuideActive/)
+  assert.match(setupSource, /setupStatus\.required\s*===\s*false\s*&&\s*!profileGuideActive/)
+  for (const forbidden of [/\bprofileFormRef\b/, /setup\.profile_name/, /profile_name_placeholder/]) {
+    assert.doesNotMatch(setupSource, forbidden)
+  }
 
   assert.match(setupSource, /buildSetupRequest\(form\)/)
   assert.match(setupSource, /setupApi\.complete\(buildSetupRequest\(form\)\)/)
@@ -266,7 +330,7 @@ test('SetupView keeps model test results in the shared dialog and preserves meta
 
 test('SetupView keeps step transition boundaries and reduced-motion styles in the source contract', () => {
   const stepsStart = setupSource.indexOf('<el-steps')
-  const sectionHeaderStart = setupSource.indexOf('<div class="setup-section-header">')
+  const sectionHeaderStart = setupSource.indexOf('class="setup-section-header"')
   const viewportStart = setupSource.indexOf('<div class="setup-content-viewport">')
   const transitionStart = setupSource.indexOf('<Transition')
   const transitionEnd = setupSource.indexOf('</Transition>', transitionStart)
@@ -305,6 +369,51 @@ test('SetupView keeps step transition boundaries and reduced-motion styles in th
   const reducedMotionSource = setupStyleSource.slice(reducedMotionStart)
   assert.match(reducedMotionSource, /transition\s*:\s*none\s*;/)
   assert.match(reducedMotionSource, /transform\s*:\s*none\s*;/)
+})
+
+test('SetupProfileGuide keeps the three optional configuration groups and source contract', () => {
+  assert.match(profileGuideSource, /<el-steps\b[^>]*\bv-if="showSteps"[^>]*>/)
+  assert.match(profileGuideSource, /<el-steps[\s\S]*:active="activeSection"[\s\S]*class="setup-profile-guide__steps"/)
+  assert.match(profileGuideSource, /showSteps:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/)
+  assert.equal((profileGuideSource.match(/<el-step\b/g) || []).length, 3)
+  assert.match(profileGuideSource, /<section v-if="activeSection === 0" class="setup-profile-guide__section">/)
+  assert.match(profileGuideSource, /<section v-else-if="activeSection === 1" class="setup-profile-guide__section">/)
+  assert.match(profileGuideSource, /<section v-else class="setup-profile-guide__section">/)
+
+  for (const field of [
+    /form\.configs\.other\.context_summary_threshold_percent/,
+    /security\.audit_channel_id/,
+    /security\.audit_model_id/,
+    /form\.configs\.security\.audit_report_language/,
+    /form\.configs\.security\.audit_confirmation_timeout_seconds/,
+    /form\.configs\.tool\.tool_timeout/,
+    /form\.configs\.tool\.enabled_tools/,
+    /form\.configs\.tool\.file_send_max_count/,
+    /form\.configs\.tool\.file_send_max_single_size_mb/,
+    /form\.configs\.tool\.file_send_max_total_size_mb/,
+    /form\.configs\.tool\.file_send_blocked_extensions/,
+    /form\.configs\.tool\.firecrawl_api_key/,
+  ]) {
+    assert.match(profileGuideSource, field)
+  }
+
+  assert.match(
+    profileGuideSource,
+    /<Transition\s+:name="transitionName"\s+mode="out-in">[\s\S]*<div\s+:key="activeSection"\s+class="setup-profile-guide__content">/,
+  )
+  assert.match(profileGuideSource, /const commitPendingInputs = \(\) => \{/)
+  assert.match(profileGuideSource, /const discardPendingInputs = \(\) => \{/)
+  assert.match(profileGuideSource, /commitPendingInputs[\s\S]*addAllowedOperationDir\(\)[\s\S]*addFileSendBlockedExtension\(\)/)
+  assert.match(profileGuideSource, /defineExpose\(\{\s*commitPendingInputs\s*,\s*discardPendingInputs\s*\}\)/)
+
+  const reducedMotionStart = profileGuideSource.indexOf('@media (prefers-reduced-motion: reduce)')
+  assert.ok(reducedMotionStart >= 0)
+  const reducedMotionSource = profileGuideSource.slice(reducedMotionStart)
+  assert.match(reducedMotionSource, /transition\s*:\s*none\s*;/)
+  assert.match(reducedMotionSource, /transform\s*:\s*none\s*;/)
+
+  assert.doesNotMatch(profileGuideSource, /\bmemory\b/i)
+  assert.doesNotMatch(profileGuideSource, /profile[_-]?name/i)
 })
 
 test('Setup language control stays inside the shell with responsive card-relative positioning', () => {
@@ -351,6 +460,8 @@ test('Chinese and English setup locales have identical complete key sets and non
     'required', 'username_length', 'username_format', 'password_length', 'password_bytes',
     'password_mismatch', 'url_format', 'max_length', 'status_checking', 'status_error_title',
     'status_error_description', 'status_retry', 'complete_failed', 'invalid_token_response',
+    'skip_step', 'continue_configuration', 'skip_and_finish', 'save_and_continue', 'save_and_finish', 'guide_load_failed',
+    'profile_guide_description',
   ]
   for (const key of criticalKeys) {
     assert.equal(typeof zhSetup[key], 'string')

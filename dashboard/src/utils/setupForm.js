@@ -196,13 +196,79 @@ export function readSetupTokenData(response) {
     typeof data?.access_token !== 'string' ||
     !data.access_token ||
     typeof data.token_type !== 'string' ||
-    !data.token_type
+    !data.token_type ||
+    !Number.isInteger(data.profile_id) ||
+    data.profile_id <= 0 ||
+    !Number.isInteger(data.channel_id) ||
+    data.channel_id <= 0
   ) {
     return null
   }
 
   return {
     access_token: data.access_token,
-    token_type: data.token_type
+    token_type: data.token_type,
+    profile_id: data.profile_id,
+    channel_id: data.channel_id
+  }
+}
+
+export function cloneSetupProfileConfigs(configs) {
+  try {
+    if (
+      !isPlainObject(configs) ||
+      !isPlainObject(configs.channel) ||
+      !isPlainObject(configs.security) ||
+      !isPlainObject(configs.tool) ||
+      !isPlainObject(configs.other) ||
+      !isPlainObject(configs.memory) ||
+      !Array.isArray(configs.tool.enabled_tools) ||
+      !Array.isArray(configs.tool.allowed_operation_dirs) ||
+      !Array.isArray(configs.tool.file_send_blocked_extensions)
+    ) {
+      return null
+    }
+
+    return JSON.parse(JSON.stringify(configs))
+  } catch {
+    return null
+  }
+}
+
+export function readSetupProfileGuideData(response, profileId) {
+  try {
+    if (!Number.isInteger(profileId) || profileId <= 0) {
+      return null
+    }
+
+    const data = response?.data?.data
+    if (!Array.isArray(data?.items) || !Array.isArray(data?.meta?.tool_options)) {
+      return null
+    }
+
+    const profile = data.items.find(item => item?.id === profileId)
+    const configs = cloneSetupProfileConfigs(profile?.configs)
+    if (!configs) {
+      return null
+    }
+
+    const toolOptions = []
+    for (const option of data.meta.tool_options) {
+      if (
+        !isPlainObject(option) ||
+        typeof option.value !== 'string' ||
+        !option.value ||
+        typeof option.label !== 'string' ||
+        !option.label
+      ) {
+        return null
+      }
+
+      toolOptions.push({ value: option.value, label: option.label })
+    }
+
+    return { configs, toolOptions }
+  } catch {
+    return null
   }
 }
