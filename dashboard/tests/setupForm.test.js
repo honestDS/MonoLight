@@ -9,6 +9,7 @@ import {
   utf8ByteLength,
   validateSetupApiKey,
   validateSetupBaseUrl,
+  validateSetupHttpProxy,
   validateSetupModelId,
   validateSetupName,
   validateSetupPassword,
@@ -98,6 +99,13 @@ test('setup base URLs trim whitespace and only allow HTTP(S) within the limit', 
   assertValidationError(validateSetupBaseUrl(overLengthUrl), 'max_length', { max: 2048 })
 })
 
+test('setup HTTP proxies accept empty values and valid HTTP proxy URLs', () => {
+  assert.equal(validateSetupHttpProxy(''), null)
+  assert.equal(validateSetupHttpProxy('http://proxy.example.test:8080'), null)
+  assertValidationError(validateSetupHttpProxy('https://proxy.example.test:8080'), 'proxy_format')
+  assertValidationError(validateSetupHttpProxy('http://proxy.example.test'), 'proxy_format')
+})
+
 test('setup API keys accept any nonempty string, including whitespace', () => {
   assert.equal(validateSetupApiKey('   '), null)
   assertValidationError(validateSetupApiKey(''), 'required')
@@ -119,7 +127,7 @@ test('setup protocol accepts only its frozen whitelist', () => {
   assertValidationError(validateSetupProtocol('openai'), 'required')
 })
 
-test('buildSetupRequest returns the exact minimal setup payload', () => {
+test('buildSetupRequest preserves extended channel fields and normalizes its HTTP proxy', () => {
   const password = '  password is preserved  '
   const apiKey = '  api key is preserved  '
 
@@ -137,6 +145,19 @@ test('buildSetupRequest returns the exact minimal setup payload', () => {
         api_key: apiKey,
         model_id: '  model-id  ',
         protocol: 'OPENAI',
+        http_proxy: '  http://proxy.example.test:8080  ',
+        image_understanding: true,
+        audio_understanding: false,
+        video_understanding: true,
+        context_window_k: 128,
+        temperature: 0.7,
+        top_p: 0.95,
+        max_tokens: 4096,
+        description: 'Vision model',
+        advanced_settings: {
+          reasoning_effort: 'high',
+          request_timeout_ms: 30000
+        },
         ignored: 'ignored'
       },
       profile: {
@@ -155,7 +176,20 @@ test('buildSetupRequest returns the exact minimal setup payload', () => {
         base_url: 'https://api.example.test/v1',
         api_key: apiKey,
         model_id: 'model-id',
-        protocol: 'OPENAI'
+        protocol: 'OPENAI',
+        http_proxy: 'http://proxy.example.test:8080',
+        image_understanding: true,
+        audio_understanding: false,
+        video_understanding: true,
+        context_window_k: 128,
+        temperature: 0.7,
+        top_p: 0.95,
+        max_tokens: 4096,
+        description: 'Vision model',
+        advanced_settings: {
+          reasoning_effort: 'high',
+          request_timeout_ms: 30000
+        }
       },
       profile: {
         name: 'Administrator'
@@ -175,7 +209,17 @@ test('buildSetupRequest safely normalizes missing nested objects', () => {
       base_url: '',
       api_key: '',
       model_id: '',
-      protocol: ''
+      protocol: '',
+      http_proxy: null,
+      image_understanding: false,
+      audio_understanding: false,
+      video_understanding: false,
+      context_window_k: undefined,
+      temperature: undefined,
+      top_p: undefined,
+      max_tokens: undefined,
+      description: '',
+      advanced_settings: {}
     },
     profile: {
       name: ''

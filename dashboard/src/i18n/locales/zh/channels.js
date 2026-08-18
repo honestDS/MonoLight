@@ -73,6 +73,7 @@ export default {
   chat_test_result_title: '对话测试结果',
   image_generation_test_result_title: '图像生成测试结果',
   model_test_result: '测试结果',
+  model_test_view_result: '查看测试结果',
   model_test_no_result: '尚未进行测试',
   chat_test_non_stream: '非流式测试',
   chat_test_stream: '流式测试',

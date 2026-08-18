@@ -8,11 +8,17 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.utils.http_proxy import normalize_http_proxy
 from app.core.validation import (
     validate_base_url,
     validate_chat_model,
 )
-from app.models.channel import MODEL_PROTOCOLS_BY_USAGE, ModelProtocol, ModelUsage
+from app.models.channel import (
+    MODEL_PROTOCOLS_BY_USAGE,
+    ChannelModelAdvancedSettings,
+    ModelProtocol,
+    ModelUsage,
+)
 from app.models.user import UserCreate
 
 
@@ -26,6 +32,7 @@ class SetupChannelInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="渠道名称")
     base_url: str = Field(..., max_length=2048, description="渠道 API 基础地址")
     api_key: str = Field(..., min_length=1, description="渠道 API 密钥")
+    http_proxy: str | None = Field(None, description="渠道 HTTP 代理地址")
     model_id: str = Field(..., min_length=1, max_length=255, description="聊天模型标识符")
     protocol: Annotated[
         ModelProtocol,
@@ -36,11 +43,28 @@ class SetupChannelInput(BaseModel):
             }
         ),
     ] = Field(..., description="聊天模型调用协议")
+    image_understanding: bool = Field(False, description="是否支持图像理解")
+    audio_understanding: bool = Field(False, description="是否支持音频理解")
+    video_understanding: bool = Field(False, description="是否支持视频理解")
+    context_window_k: int | None = Field(None, ge=1, description="上下文窗口大小（K）")
+    temperature: float | None = Field(None, ge=0, le=2, description="采样温度")
+    top_p: float | None = Field(None, ge=0, le=1, description="核采样概率")
+    max_tokens: int | None = Field(None, ge=0, description="最大生成 Token 数")
+    description: str | None = Field(None, description="模型描述")
+    advanced_settings: ChannelModelAdvancedSettings = Field(
+        default_factory=ChannelModelAdvancedSettings,
+        description="模型高级设置",
+    )
 
     @field_validator("base_url")
     @classmethod
     def validate_base_url_field(cls, value: str) -> str:
         return validate_base_url(value, model_ids=[{"model_id": "setup"}])
+
+    @field_validator("http_proxy")
+    @classmethod
+    def normalize_http_proxy_field(cls, value: str | None) -> str | None:
+        return normalize_http_proxy(value)
 
     @model_validator(mode="after")
     def validate_chat_model_fields(self) -> "SetupChannelInput":

@@ -25,6 +25,7 @@ const routerSource = source('router/index.js')
 const loginSource = source('views/LoginView.vue')
 const appSource = source('App.vue')
 const setupSource = source('views/SetupView.vue')
+const setupStyleSource = source('assets/css/setup.scss')
 const localeKeys = value => Object.keys(value).sort()
 
 test('readSetupRequired accepts only boolean status values', () => {
@@ -192,6 +193,8 @@ test('a failed page retry preserves the latest setup error and leaves setup rend
 test('API and routing sources retain setup endpoints and setup error codes while removing reset flows', () => {
   assert.match(apiSource, /status:\s*\(\)\s*=>\s*request\.get\('\/setup\/status'\)/)
   assert.match(apiSource, /complete:\s*\(data\)\s*=>\s*request\.post\('\/setup\/complete',\s*data\)/)
+  assert.match(apiSource, /models:\s*\(data\)\s*=>\s*request\.post\('\/setup\/models',\s*data\)/)
+  assert.match(apiSource, /testChat:\s*\(data,\s*config\s*=\s*\{\}\)\s*=>\s*request\.post\('\/setup\/test-chat',\s*data,\s*config\)/)
   assert.match(apiSource, /error\.response\s*=\s*\{\s*data:\s*\{\s*code,\s*message:/)
   for (const text of [apiSource, loginSource, source('i18n/locales/zh/login.js'), source('i18n/locales/en/login.js')]) {
     assert.doesNotMatch(text, /reset_admin|resetAdmin|reset_token/)
@@ -214,11 +217,94 @@ test('SetupView has only the approved token persistence and submission contract'
 
   assert.match(setupSource, /buildSetupRequest\(form\)/)
   assert.match(setupSource, /setupApi\.complete\(buildSetupRequest\(form\)\)/)
+  assert.match(setupSource, /setupApi\.models\(/)
+  assert.match(setupSource, /setupApi\.testChat\(/)
+  assert.match(setupSource, /import\s+ChannelModelEntry\s+from\s+'@\/components\/ChannelModelEntry\.vue'/)
+  assert.match(setupSource, /<ChannelModelEntry[\s\S]*:show-remove="false"[\s\S]*:show-enabled="false"/)
   assert.match(setupSource, /readSetupTokenData\(response\)/)
   const submitStart = setupSource.indexOf('setupApi.complete(')
   const submitEnd = setupSource.indexOf('\n', submitStart)
   assert.ok(submitStart >= 0)
   assert.doesNotMatch(setupSource.slice(submitStart, submitEnd), /password_confirm/)
+})
+
+test('SetupView keeps model test results in the shared dialog and preserves metadata autofill', () => {
+  assert.match(setupSource, /import\s+ModelTestResultDialog\s+from\s+'@\/components\/ModelTestResultDialog\.vue'/)
+
+  const dialogStart = setupSource.indexOf('<ModelTestResultDialog')
+  const dialogEnd = setupSource.indexOf('/>', dialogStart)
+  assert.ok(dialogStart >= 0)
+  assert.ok(dialogEnd > dialogStart)
+  const dialogSource = setupSource.slice(dialogStart, dialogEnd)
+  assert.match(dialogSource, /v-model:visible="modelTestResultDialogVisible"/)
+  assert.match(dialogSource, /:results="modelTestResults"/)
+  assert.match(dialogSource, /@update:active-id="activeModelTestResultId = \$event"/)
+
+  const channelEntryStart = setupSource.indexOf('<ChannelModelEntry')
+  const channelEntryEnd = setupSource.indexOf('/>', channelEntryStart)
+  assert.ok(channelEntryStart >= 0)
+  assert.ok(channelEntryEnd > channelEntryStart)
+  assert.match(
+    setupSource.slice(channelEntryStart, channelEntryEnd),
+    /@view-test-result="openModelTestResult"/,
+  )
+  assert.doesNotMatch(setupSource, /\btestResultExpanded\b/)
+  assert.doesNotMatch(setupSource, /update:test-result-expanded/)
+
+  assert.match(setupSource, /@detect-metadata="detectModelMetadata"/)
+  assert.match(setupSource, /import\s+\{\s*getOpenRouterModelMatches,\s*applyOpenRouterModelMetadata\s*\}\s+from\s+'@\/utils\/channelModelMetadata\.js'/)
+  const metadataStart = setupSource.indexOf('async function detectModelMetadata()')
+  const metadataEnd = setupSource.indexOf('\nfunction openChatTestDialog', metadataStart)
+  assert.ok(metadataStart >= 0)
+  assert.ok(metadataEnd > metadataStart)
+  const metadataSource = setupSource.slice(metadataStart, metadataEnd)
+  assert.match(metadataSource, /openRouterApi\.models\(\)/)
+  assert.match(metadataSource, /getOpenRouterModelMatches\(/)
+  assert.match(metadataSource, /applyOpenRouterModelMetadata\(entry,\s*matches\[0\]\)/)
+  assert.doesNotMatch(metadataSource, /modelTestResultDialogVisible/)
+})
+
+test('SetupView keeps step transition boundaries and reduced-motion styles in the source contract', () => {
+  const stepsStart = setupSource.indexOf('<el-steps')
+  const sectionHeaderStart = setupSource.indexOf('<div class="setup-section-header">')
+  const viewportStart = setupSource.indexOf('<div class="setup-content-viewport">')
+  const transitionStart = setupSource.indexOf('<Transition')
+  const transitionEnd = setupSource.indexOf('</Transition>', transitionStart)
+  const viewportEnd = setupSource.indexOf('</div>', transitionEnd)
+
+  assert.ok(stepsStart >= 0)
+  assert.ok(sectionHeaderStart >= 0)
+  assert.ok(viewportStart > sectionHeaderStart)
+  assert.ok(stepsStart < viewportStart)
+  assert.ok(transitionStart > viewportStart)
+  assert.ok(transitionEnd > transitionStart)
+  assert.ok(viewportEnd > transitionEnd)
+
+  const viewportSource = setupSource.slice(viewportStart, viewportEnd)
+  const transitionSource = setupSource.slice(transitionStart, transitionEnd)
+  assert.doesNotMatch(viewportSource, /<el-steps\b/)
+  assert.match(transitionSource, /<Transition\b[^>]*\bmode="out-in"[^>]*>\s*<div\b[^>]*:key="activeStep"[^>]*class="setup-step-content"/)
+
+  assert.match(setupSource, /const stepTransitionName = ref\('step-forward'\)/)
+  const nextStepStart = setupSource.indexOf('async function nextStep()')
+  const previousStepStart = setupSource.indexOf('function previousStep()', nextStepStart)
+  const completeSetupStart = setupSource.indexOf('async function completeSetup()', previousStepStart)
+  assert.ok(nextStepStart >= 0)
+  assert.ok(previousStepStart > nextStepStart)
+  assert.ok(completeSetupStart > previousStepStart)
+  assert.match(setupSource.slice(nextStepStart, previousStepStart), /stepTransitionName\.value\s*=\s*'step-forward'/)
+  assert.match(setupSource.slice(previousStepStart, completeSetupStart), /stepTransitionName\.value\s*=\s*'step-backward'/)
+
+  assert.match(setupStyleSource, /\.setup-content-viewport\s*\{[\s\S]*?overflow-x\s*:\s*clip\s*;/)
+  assert.match(setupStyleSource, /\.step-forward-enter-from\s*\{[\s\S]*?transform\s*:\s*translateX\(24px\)/)
+  assert.match(setupStyleSource, /\.step-forward-leave-to\s*\{[\s\S]*?transform\s*:\s*translateX\(-24px\)/)
+  assert.match(setupStyleSource, /\.step-backward-enter-from\s*\{[\s\S]*?transform\s*:\s*translateX\(-24px\)/)
+  assert.match(setupStyleSource, /\.step-backward-leave-to\s*\{[\s\S]*?transform\s*:\s*translateX\(24px\)/)
+  const reducedMotionStart = setupStyleSource.indexOf('@media (prefers-reduced-motion: reduce)')
+  assert.ok(reducedMotionStart >= 0)
+  const reducedMotionSource = setupStyleSource.slice(reducedMotionStart)
+  assert.match(reducedMotionSource, /transition\s*:\s*none\s*;/)
+  assert.match(reducedMotionSource, /transform\s*:\s*none\s*;/)
 })
 
 test('Chinese and English setup locales have identical complete key sets and non-empty critical copy', () => {

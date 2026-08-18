@@ -90,9 +90,30 @@ export const defaultModelEntry = () => ({
   top_p: 1,
   max_tokens: 2048,
   embedding_dimensions: null,
+  embedding_timeout: 30,
+  rerank_timeout: 15,
+  is_enabled: true,
+  size: '1024x1024',
+  quality: 'auto',
   advanced_settings: {},
   description: '',
 })
+
+export const normalizeModelEntry = (entry) => {
+  const defaults = defaultModelEntry()
+
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return defaults
+  }
+
+  return {
+    ...defaults,
+    ...entry,
+    advanced_settings: entry.advanced_settings && typeof entry.advanced_settings === 'object' && !Array.isArray(entry.advanced_settings)
+      ? { ...entry.advanced_settings }
+      : {}
+  }
+}
 
 // 默认渠道表单
 export const defaultChannelForm = () => ({

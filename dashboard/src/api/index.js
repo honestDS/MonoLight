@@ -69,7 +69,9 @@ export const authApi = {
 
 export const setupApi = {
   status: () => request.get('/setup/status'),
-  complete: (data) => request.post('/setup/complete', data)
+  complete: (data) => request.post('/setup/complete', data),
+  models: (data) => request.post('/setup/models', data),
+  testChat: (data, config = {}) => request.post('/setup/test-chat', data, config)
 }
 
 export const chatApi = {
