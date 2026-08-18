@@ -1,4 +1,4 @@
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,7 @@ from app.core.constants import (
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SETTING_NOT_FOUND_AFTER_INSERT,
     SETUP_ADMIN_UID_KEY,
+    SETUP_SESSION_RECORD_KEY,
     SETUP_STATUS_COMPLETED,
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
@@ -50,6 +51,21 @@ class CRUDSystemSetting(CRUDBase[SystemSetting, SystemSetting, SystemSetting]):
     async def get_setup_status(self, db: AsyncSession) -> str | None:
         db_obj = await self.get_by_key(db, SETUP_STATUS_KEY)
         return db_obj.value if db_obj else None
+
+    async def get_setup_session_record(self, db: AsyncSession) -> str | None:
+        db_obj = await self.get_by_key(db, SETUP_SESSION_RECORD_KEY)
+        return db_obj.value if db_obj else None
+
+    async def initialize_setup_session_record(self, db: AsyncSession, *, value: str) -> str:
+        db_obj = await self._insert_if_missing(db, key=SETUP_SESSION_RECORD_KEY, value=value)
+        return db_obj.value
+
+    async def replace_setup_session_record(self, db: AsyncSession, *, expected_value: str, new_value: str) -> bool:
+        result = await db.execute(update(SystemSetting).where(SystemSetting.key == SETUP_SESSION_RECORD_KEY, SystemSetting.value == expected_value).values(value=new_value).execution_options(synchronize_session=False))
+        return (result.rowcount or 0) == 1
+
+    async def clear_setup_session_record(self, db: AsyncSession) -> None:
+        await db.execute(delete(SystemSetting).where(SystemSetting.key == SETUP_SESSION_RECORD_KEY))
 
     async def get_setup_admin_uid(self, db: AsyncSession) -> str | None:
         db_obj = await self.get_by_key(db, SETUP_ADMIN_UID_KEY)

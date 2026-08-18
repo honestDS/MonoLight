@@ -13,6 +13,8 @@ const request = axios.create({
   timeout: 120000
 })
 
+const withSetupCredentials = (config = {}) => ({ ...config, withCredentials: true })
+
 const WS_BASE_URL = process.env.VUE_APP_WS_BASE_URL || API_ORIGIN.replace(/^http/, 'ws')
 
 const getCurrentLocale = () => localStorage.getItem('locale') || 'zh'
@@ -68,10 +70,10 @@ export const authApi = {
 }
 
 export const setupApi = {
-  status: () => request.get('/setup/status'),
-  complete: (data) => request.post('/setup/complete', data),
-  models: (data) => request.post('/setup/models', data),
-  testChat: (data, config = {}) => request.post('/setup/test-chat', data, config)
+  status: () => request.get('/setup/status', withSetupCredentials()),
+  complete: (data) => request.post('/setup/complete', data, withSetupCredentials()),
+  models: (data) => request.post('/setup/models', data, withSetupCredentials()),
+  testChat: (data, config = {}) => request.post('/setup/test-chat', data, withSetupCredentials(config))
 }
 
 export const chatApi = {

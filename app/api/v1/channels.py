@@ -75,6 +75,7 @@ from app.models.channel import (
     ModelUsage,
     normalize_channel_model_ids,
     resolve_model_protocol,
+    validate_channel_api_key,
     validate_channel_model_ids,
 )
 from app.models.message import InternalMessage, MessageRole
@@ -97,8 +98,16 @@ class ChannelHTTPProxyRequest(BaseModel):
         return normalize_http_proxy(value)
 
 
-class ChannelModelListRequest(ChannelHTTPProxyRequest):
+class ChannelAPIKeyRequest(ChannelHTTPProxyRequest):
     api_key: str | None = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def validate_api_key(cls, value: object) -> str | None:
+        return validate_channel_api_key(value, required=False)
+
+
+class ChannelModelListRequest(ChannelAPIKeyRequest):
     base_url: str | None = None
     timeout: float = PydanticField(30.0, gt=0, le=120)
 
@@ -108,10 +117,9 @@ class ChannelChatTestMode(StrEnum):
     STREAM = "stream"
 
 
-class ChannelChatTestRequest(ChannelHTTPProxyRequest):
+class ChannelChatTestRequest(ChannelAPIKeyRequest):
     prompt: str
     protocol: ModelProtocol | None = None
-    api_key: str | None = None
     base_url: str | None = None
     model_id: str | None = None
     temperature: float | None = PydanticField(None, ge=0, le=2.0)
@@ -122,9 +130,8 @@ class ChannelChatTestRequest(ChannelHTTPProxyRequest):
     test_mode: ChannelChatTestMode = ChannelChatTestMode.NON_STREAM
 
 
-class ChannelImageGenerationTestRequest(ChannelHTTPProxyRequest):
+class ChannelImageGenerationTestRequest(ChannelAPIKeyRequest):
     protocol: ModelProtocol | None = None
-    api_key: str | None = None
     base_url: str | None = None
     model_id: str | None = None
     size: ImageGenerationSize = ImageGenerationSize.SIZE_1024X1024

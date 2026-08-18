@@ -143,11 +143,12 @@ test('setup HTTP proxies accept empty values and valid HTTP proxy URLs', () => {
   assertValidationError(validateSetupHttpProxy('http://proxy.example.test'), 'proxy_format')
 })
 
-test('setup API keys accept any nonempty string, including whitespace', () => {
-  assert.equal(validateSetupApiKey('   '), null)
+test('setup API keys require a non-whitespace string', () => {
   assertValidationError(validateSetupApiKey(''), 'required')
+  assertValidationError(validateSetupApiKey('   '), 'required')
   assertValidationError(validateSetupApiKey(null), 'required')
   assertValidationError(validateSetupApiKey(42), 'required')
+  assert.equal(validateSetupApiKey('  api-key  '), null)
 })
 
 test('setup model IDs trim whitespace and enforce Unicode character boundaries', () => {
