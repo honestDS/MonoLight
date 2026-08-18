@@ -195,6 +195,143 @@ async def test_setup_status_rejects_non_readable_states(
 
 
 @pytest.mark.asyncio
+async def test_setup_models_pending_forwards_payload_and_returns_standard_response(
+    setup_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_payload = {
+        "api_key": "setup-models-api-key",
+        "base_url": "https://models.example.test/v1",
+        "http_proxy": "http://proxy.example.test:8080",
+        "timeout": 12,
+    }
+    forwarded: dict[str, Any] = {}
+
+    async def fake_list_channel_models(*, payload: Any, _admin: dict[str, Any]) -> Any:
+        forwarded["payload"] = payload
+        forwarded["admin"] = _admin
+        return setup_api.StandardResponse.success(data={"models": [{"id": "setup-model"}]})
+
+    monkeypatch.setattr(setup_api, "list_channel_models", fake_list_channel_models)
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/models", json=request_payload)
+    body = _assert_standard_response(response, 200)
+
+    assert forwarded["payload"].model_dump(mode="json") == {
+        "api_key": "setup-models-api-key",
+        "base_url": "https://models.example.test/v1",
+        "http_proxy": "http://proxy.example.test:8080",
+        "timeout": 12.0,
+    }
+    assert forwarded["admin"] == {}
+    assert body["data"] == {"models": [{"id": "setup-model"}]}
+
+
+@pytest.mark.asyncio
+async def test_setup_chat_pending_forwards_payload_and_returns_standard_response(
+    setup_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_payload = {
+        "prompt": "ping",
+        "protocol": "OPENAI",
+        "api_key": "setup-chat-api-key",
+        "base_url": "https://chat.example.test/v1",
+        "model_id": "setup-chat-model",
+        "temperature": 0.4,
+        "top_p": 0.8,
+        "max_tokens": 128,
+        "timeout": 45,
+        "http_proxy": "http://proxy.example.test:8080",
+        "advanced_settings": {"custom_headers": {"X-Setup-Test": "enabled"}},
+        "test_mode": "non_stream",
+    }
+    forwarded: dict[str, Any] = {}
+
+    async def fake_test_channel_chat(*, payload: Any, _admin: dict[str, Any]) -> Any:
+        forwarded["payload"] = payload
+        forwarded["admin"] = _admin
+        return setup_api.StandardResponse.success(data={"model": "setup-chat-model", "reply": "pong"})
+
+    monkeypatch.setattr(setup_api, "test_channel_chat", fake_test_channel_chat)
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/test-chat", json=request_payload)
+    body = _assert_standard_response(response, 200)
+
+    assert forwarded["payload"].model_dump(mode="json") == {
+        "advanced_settings": {"custom_headers": {"x-setup-test": "enabled"}},
+        "api_key": "setup-chat-api-key",
+        "base_url": "https://chat.example.test/v1",
+        "http_proxy": "http://proxy.example.test:8080",
+        "max_tokens": 128,
+        "model_id": "setup-chat-model",
+        "prompt": "ping",
+        "protocol": "OPENAI",
+        "temperature": 0.4,
+        "test_mode": "non_stream",
+        "timeout": 45.0,
+        "top_p": 0.8,
+    }
+    assert forwarded["admin"] == {}
+    assert body["data"] == {"model": "setup-chat-model", "reply": "pong"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [
+        (SETUP_STATUS_COMPLETED, ERR_SETUP_ALREADY_COMPLETED),
+        (SETUP_STATUS_CONFIGURING, ERR_SETUP_NOT_ALLOWED),
+    ],
+)
+@pytest.mark.parametrize(
+    ("path", "payload", "delegate_name"),
+    [
+        (
+            "/api/v1/setup/models",
+            {
+                "api_key": "setup-models-api-key",
+                "base_url": "https://models.example.test/v1",
+            },
+            "list_channel_models",
+        ),
+        (
+            "/api/v1/setup/test-chat",
+            {
+                "prompt": "ping",
+                "protocol": "OPENAI",
+                "api_key": "setup-chat-api-key",
+                "base_url": "https://chat.example.test/v1",
+                "model_id": "setup-chat-model",
+            },
+            "test_channel_chat",
+        ),
+    ],
+)
+async def test_setup_probe_routes_reject_completed_or_configuring_state(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    expected_error: str,
+    path: str,
+    payload: dict[str, Any],
+    delegate_name: str,
+) -> None:
+    await _set_setup_status(setup_session_factory, status)
+
+    async def fail_delegate(**_kwargs: Any) -> Any:
+        pytest.fail(f"{delegate_name} should not be called for setup status {status}")
+
+    monkeypatch.setattr(setup_api, delegate_name, fail_delegate)
+
+    response = await _request(setup_app, "POST", path, json=payload)
+    body = _assert_standard_response(response, 409)
+    assert body["message"] == t(expected_error)
+    assert body["data"] is None
+
+
+@pytest.mark.asyncio
 async def test_setup_complete_returns_only_token_data_and_creates_initial_records(
     setup_app: FastAPI,
     setup_session_factory: async_sessionmaker[AsyncSession],
@@ -487,7 +624,12 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
     openapi = create_app().openapi()
     paths = openapi["paths"]
     setup_paths = {path for path in paths if path.startswith("/api/v1/setup/")}
-    assert setup_paths == {"/api/v1/setup/status", "/api/v1/setup/complete"}
+    assert setup_paths == {
+        "/api/v1/setup/status",
+        "/api/v1/setup/models",
+        "/api/v1/setup/test-chat",
+        "/api/v1/setup/complete",
+    }
     assert "/api/v1/auth/reset_admin" not in paths
     assert "ResetAdminRequest" not in openapi["components"]["schemas"]
 
@@ -509,8 +651,18 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
             "name",
             "base_url",
             "api_key",
+            "http_proxy",
             "model_id",
             "protocol",
+            "image_understanding",
+            "audio_understanding",
+            "video_understanding",
+            "context_window_k",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "description",
+            "advanced_settings",
         }
     )
     protocol_schema = _resolve_schema(openapi, channel_schema["properties"]["protocol"])
@@ -519,10 +671,23 @@ def test_main_openapi_exposes_setup_contract_without_reset_admin() -> None:
     assert set(SetupCompleteRequest.model_fields) == {"admin", "channel", "profile"}
 
     status_operation = paths["/api/v1/setup/status"]["get"]
+    models_operation = paths["/api/v1/setup/models"]["post"]
+    chat_operation = paths["/api/v1/setup/test-chat"]["post"]
     complete_operation = paths["/api/v1/setup/complete"]["post"]
     _assert_generic_response_schema(openapi, status_operation, "SetupStatusData")
     _assert_generic_response_schema(openapi, complete_operation, "SetupTokenData")
     _assert_error_response_models(status_operation, ("409", "500"))
+    for operation, request_schema_name in (
+        (models_operation, "ChannelModelListRequest"),
+        (chat_operation, "ChannelChatTestRequest"),
+    ):
+        assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": f"#/components/schemas/{request_schema_name}"
+        }
+        assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/StandardResponse"
+        }
+        _assert_error_response_models(operation, ("409", "500"))
     _assert_error_response_models(complete_operation, ("409", "422", "500"))
 
     status_data_schema = _object_schema(openapi, openapi["components"]["schemas"]["SetupStatusData"])

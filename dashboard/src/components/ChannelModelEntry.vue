@@ -15,15 +15,23 @@
         <el-button type="text" :loading="props.detectingMetadata" :disabled="props.entry.usage !== 'CHAT' || props.metadataDetectionDisabled" @click="emit('detect-metadata')">
           {{ $t('channels.model_metadata_detect') }}
         </el-button>
-        <el-button type="text" class="remove" @click="emit('remove')">
+        <el-button v-if="props.showRemove" type="text" class="remove" @click="emit('remove')">
           {{ $t('channels.remove') }}
         </el-button>
+        <template v-if="props.testState">
+          <el-button type="text" @click="emit('view-test-result')">
+            {{ $t('channels.model_test_view_result') }}
+          </el-button>
+          <el-tag :type="getTestStatusType(props.testState.status)" size="small">
+            {{ getTestStatusLabel(props.testState.status) }}
+          </el-tag>
+        </template>
       </div>
     </div>
 
     <div class="model-entry-fields">
       <div class="model-entry-field model-entry-field-half">
-        <el-form-item :label="$t('channels.model_id_label')" :error="props.modelIdError">
+        <el-form-item :label="$t('channels.model_id_label')" :error="props.modelIdError" :prop="props.modelIdProp || undefined">
           <el-input v-model="props.entry.model_id" :placeholder="$t('channels.model_id_placeholder')" @input="handleModelIdInput" />
         </el-form-item>
       </div>
@@ -35,10 +43,15 @@
         </el-form-item>
       </div>
       <div class="model-entry-field model-entry-field-half">
-        <el-form-item :label="$t('channels.model_protocol')" :error="props.protocolError">
+        <el-form-item :label="$t('channels.model_protocol')" :error="props.protocolError" :prop="props.protocolProp || undefined">
           <el-select v-model="props.entry.protocol" class="full-width-input" @change="handleProtocolChange">
             <el-option v-for="item in props.modelProtocols" :key="item" :label="getModelProtocolLabel(item)" :value="item" />
           </el-select>
+        </el-form-item>
+      </div>
+      <div v-if="props.showEnabled" class="model-entry-field model-entry-field-half">
+        <el-form-item :label="$t('channels.is_enabled')">
+          <el-switch v-model="props.entry.is_enabled" @change="emit('test-config-change')" />
         </el-form-item>
       </div>
 
@@ -86,11 +99,24 @@
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.embedding_dimensions')">
             <div class="embedding-dimension-row">
-              <el-input-number v-model="props.entry.embedding_dimensions" :min="1" controls-position="right" />
+              <el-input-number v-model="props.entry.embedding_dimensions" :min="1" controls-position="right" @change="emit('test-config-change')" />
               <el-button type="primary" plain :loading="props.detectingDimension" @click="emit('detect-dimension')">
                 {{ $t('channels.auto_detect') }}
               </el-button>
             </div>
+          </el-form-item>
+        </div>
+        <div class="model-entry-field model-entry-field-half">
+          <el-form-item :label="$t('channels.embedding_timeout')">
+            <el-input-number v-model="props.entry.embedding_timeout" :min="0.1" :max="600" :step="0.1" controls-position="right" @change="emit('test-config-change')" />
+          </el-form-item>
+        </div>
+      </template>
+
+      <template v-if="props.entry.usage === 'RERANK'">
+        <div class="model-entry-field model-entry-field-half">
+          <el-form-item :label="$t('channels.rerank_timeout')">
+            <el-input-number v-model="props.entry.rerank_timeout" :min="0.1" :max="120" :step="0.1" controls-position="right" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
       </template>
@@ -152,81 +178,6 @@
       </el-collapse-item>
     </el-collapse>
 
-    <el-collapse
-      :model-value="props.testResultExpanded"
-      class="model-entry-collapse model-entry-collapse--test"
-      @update:model-value="value => emit('update:test-result-expanded', value)">
-      <el-collapse-item name="result">
-        <template #title>
-          <div class="model-collapse-title">
-            <span>{{ $t('channels.model_test_result') }}</span>
-            <el-tag
-              v-if="props.testState"
-              :type="getTestStatusType(props.testState.status)"
-              size="small"
-              @click.stop>
-              {{ getTestStatusLabel(props.testState.status) }}
-            </el-tag>
-          </div>
-        </template>
-
-        <div v-if="!props.testState" class="model-test-result-empty">
-          {{ $t('channels.model_test_no_result') }}
-        </div>
-
-        <div v-else class="model-test-result">
-          <div v-if="props.testState.status === 'running' && props.testState.kind === 'CHAT'" class="model-test-result-status">
-            {{ $t('channels.chat_test_mode') }}: {{ getTestModeLabel(props.testState.testMode) }}
-          </div>
-
-          <div v-else-if="props.testState.status === 'error'" class="model-test-result-error">
-            {{ props.testState.error }}
-          </div>
-
-          <div v-else-if="props.testState.status === 'success'" class="model-test-result-stats">
-            <div class="model-test-result-item">
-              <span class="model-test-result-label">{{ $t('channels.chat_test_model') }}</span>
-              <span class="model-test-result-value">{{ props.testState.data?.model || '-' }}</span>
-            </div>
-            <template v-if="props.testState.kind === 'CHAT'">
-              <div class="model-test-result-item model-test-result-item-wide">
-                <span class="model-test-result-label">{{ $t('channels.chat_test_reply') }}</span>
-                <span class="model-test-result-value model-test-result-reply">{{ props.testState.data?.reply || '-' }}</span>
-              </div>
-              <div class="model-test-result-item">
-                <span class="model-test-result-label">{{ $t('channels.chat_test_usage') }}</span>
-                <span class="model-test-result-value">{{ formatUsage(props.testState.data?.usage) }}</span>
-              </div>
-              <div class="model-test-result-item">
-                <span class="model-test-result-label">{{ $t('channels.chat_test_mode') }}</span>
-                <span class="model-test-result-value">{{ getTestModeLabel(props.testState.testMode) }}</span>
-              </div>
-              <div class="model-test-result-item">
-                <span class="model-test-result-label">
-                  {{ props.testState.testMode === 'stream' ? $t('channels.chat_test_first_char_latency') : $t('channels.chat_test_latency') }}
-                </span>
-                <span class="model-test-result-value">
-                  {{ formatLatency(props.testState.testMode === 'stream' ? props.testState.data?.first_char_latency_ms : props.testState.data?.latency_ms) }}
-                </span>
-              </div>
-              <div v-if="props.testState.testMode === 'stream'" class="model-test-result-item">
-                <span class="model-test-result-label">{{ $t('channels.chat_test_total_latency') }}</span>
-                <span class="model-test-result-value">{{ formatLatency(props.testState.data?.total_latency_ms) }}</span>
-              </div>
-            </template>
-            <template v-else-if="props.testState.kind === 'IMAGE_GENERATION'">
-              <div class="model-test-result-item">
-                <span class="model-test-result-label">{{ $t('channels.chat_test_latency') }}</span>
-                <span class="model-test-result-value">{{ formatLatency(props.testState.data?.latency_ms) }}</span>
-              </div>
-              <div v-if="getTestImageUrl(props.testState.data)" class="model-test-result-item model-test-result-item-wide">
-                <img class="model-test-result-image" :src="getTestImageUrl(props.testState.data)" alt="image generation test result" />
-              </div>
-            </template>
-          </div>
-        </div>
-      </el-collapse-item>
-    </el-collapse>
   </div>
 </template>
 
@@ -249,6 +200,22 @@ const props = defineProps({
   modelProtocols: {
     type: Array,
     default: () => []
+  },
+  showRemove: {
+    type: Boolean,
+    default: true
+  },
+  showEnabled: {
+    type: Boolean,
+    default: true
+  },
+  modelIdProp: {
+    type: String,
+    default: ''
+  },
+  protocolProp: {
+    type: String,
+    default: ''
   },
   modelIdError: {
     type: String,
@@ -281,10 +248,6 @@ const props = defineProps({
   testState: {
     type: Object,
     default: null
-  },
-  testResultExpanded: {
-    type: Array,
-    default: () => []
   }
 })
 
@@ -300,7 +263,7 @@ const emit = defineEmits([
   'fill-headers-template',
   'advanced-settings-input',
   'test-config-change',
-  'update:test-result-expanded',
+  'view-test-result',
   'update:advanced-settings-draft',
   'update:advanced-settings-expanded'
 ])
@@ -343,36 +306,6 @@ const getTestStatusLabel = (status) => {
     error: t('channels.model_test_failed')
   }
   return labels[status] || t('channels.model_test_running')
-}
-
-const getTestModeLabel = (testMode) => (
-  testMode === 'stream' ? t('channels.chat_test_stream') : t('channels.chat_test_non_stream')
-)
-
-const formatUsage = (usage) => {
-  if (!usage) return '-'
-  if (typeof usage === 'string') return usage
-  try {
-    const keys = ['prompt_tokens', 'completion_tokens', 'total_tokens']
-    const parts = keys
-      .filter(key => usage[key] !== undefined && usage[key] !== null)
-      .map(key => `${key}: ${usage[key]}`)
-    if (parts.length > 0) return parts.join(', ')
-    return JSON.stringify(usage)
-  } catch {
-    return String(usage)
-  }
-}
-
-const formatLatency = (value) => {
-  if (value === null || value === undefined || value === '') return '-'
-  const latency = Number(value)
-  return Number.isFinite(latency) ? `${latency.toFixed(2)} ms` : '-'
-}
-
-const getTestImageUrl = (data) => {
-  const image = data?.image || {}
-  return image.url || (image.b64_json ? `data:image/png;base64,${image.b64_json}` : '')
 }
 
 const getModelProtocolLabel = (value) => {

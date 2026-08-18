@@ -3,6 +3,12 @@ import asyncio
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.channels import (
+    ChannelChatTestRequest,
+    ChannelModelListRequest,
+    list_channel_models,
+    test_channel_chat,
+)
 from app.core.constants import (
     ERR_SETUP_ALREADY_COMPLETED,
     ERR_SETUP_NOT_ALLOWED,
@@ -41,6 +47,16 @@ async def _get_valid_setup_status(db: AsyncSession) -> str:
     return status
 
 
+async def _check_setup_pending(db: AsyncSession) -> None:
+    await _check_startup_integrity()
+    status = await _get_valid_setup_status(db)
+
+    if status == SETUP_STATUS_COMPLETED:
+        raise ParameterException(ERR_SETUP_ALREADY_COMPLETED, code=409)
+    if status == SETUP_STATUS_CONFIGURING:
+        raise ParameterException(ERR_SETUP_NOT_ALLOWED, code=409)
+
+
 @router.get(
     "/status",
     response_model=StandardResponse[SetupStatusData],
@@ -60,6 +76,38 @@ async def get_setup_status(db: AsyncSession = Depends(get_db)) -> StandardRespon
         data=SetupStatusData(required=status == SETUP_STATUS_PENDING),
         message=MSG_SETUP_STATUS_SUCCESS,
     )
+
+
+@router.post(
+    "/models",
+    response_model=StandardResponse,
+    responses={
+        409: {"model": StandardResponse},
+        500: {"model": StandardResponse},
+    },
+)
+async def list_setup_models(
+    payload: ChannelModelListRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StandardResponse:
+    await _check_setup_pending(db)
+    return await list_channel_models(payload=payload, _admin={})
+
+
+@router.post(
+    "/test-chat",
+    response_model=StandardResponse,
+    responses={
+        409: {"model": StandardResponse},
+        500: {"model": StandardResponse},
+    },
+)
+async def test_setup_chat(
+    payload: ChannelChatTestRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StandardResponse:
+    await _check_setup_pending(db)
+    return await test_channel_chat(payload=payload, _admin={})
 
 
 @router.post(

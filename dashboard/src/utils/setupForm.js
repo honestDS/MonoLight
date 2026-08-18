@@ -1,3 +1,5 @@
+import { isValidHttpProxy, normalizeHttpProxy } from './channelHttpProxy.js'
+
 export const SETUP_PROTOCOLS = Object.freeze(['OPENAI', 'OPENAI_RESPONSES'])
 
 function stringValue(value) {
@@ -10,6 +12,15 @@ function trimmedString(value) {
 
 function validationError(key, params = {}) {
   return { key, params }
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 export function unicodeLength(value) {
@@ -104,6 +115,14 @@ export function validateSetupBaseUrl(value) {
   return null
 }
 
+export function validateSetupHttpProxy(value) {
+  if (!isValidHttpProxy(value)) {
+    return validationError('proxy_format')
+  }
+
+  return null
+}
+
 export function validateSetupApiKey(value) {
   if (typeof value !== 'string' || !value) {
     return validationError('required')
@@ -150,7 +169,19 @@ export function buildSetupRequest(form) {
       base_url: trimmedString(channel.base_url),
       api_key: stringValue(channel.api_key),
       model_id: trimmedString(channel.model_id),
-      protocol: stringValue(channel.protocol)
+      protocol: stringValue(channel.protocol),
+      http_proxy: normalizeHttpProxy(channel.http_proxy) || null,
+      image_understanding: Boolean(channel.image_understanding),
+      audio_understanding: Boolean(channel.audio_understanding),
+      video_understanding: Boolean(channel.video_understanding),
+      context_window_k: channel.context_window_k,
+      temperature: channel.temperature,
+      top_p: channel.top_p,
+      max_tokens: channel.max_tokens,
+      description: stringValue(channel.description),
+      advanced_settings: isPlainObject(channel.advanced_settings)
+        ? { ...channel.advanced_settings }
+        : {}
     },
     profile: {
       name: trimmedString(profile.name)

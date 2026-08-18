@@ -55,6 +55,15 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
             model_id=request.channel.model_id,
             usage=ModelUsage.CHAT,
             protocol=request.channel.protocol,
+            image_understanding=request.channel.image_understanding,
+            audio_understanding=request.channel.audio_understanding,
+            video_understanding=request.channel.video_understanding,
+            context_window_k=request.channel.context_window_k,
+            temperature=request.channel.temperature,
+            top_p=request.channel.top_p,
+            max_tokens=request.channel.max_tokens,
+            description=request.channel.description,
+            advanced_settings=request.channel.advanced_settings,
         )
         channel = await channel_crud.create_with_plain_api_key(
             db,
@@ -62,6 +71,7 @@ async def complete_setup(db: AsyncSession, request: SetupCompleteRequest) -> Set
                 name=request.channel.name,
                 api_key=request.channel.api_key,
                 base_url=request.channel.base_url,
+                http_proxy=request.channel.http_proxy,
                 model_ids=[model_item.model_dump(mode="json")],
             ),
             commit=False,

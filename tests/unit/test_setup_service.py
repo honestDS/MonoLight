@@ -329,6 +329,62 @@ async def test_complete_setup_creates_consistent_initial_data_and_commits_once(
 
 
 @pytest.mark.asyncio
+async def test_complete_setup_persists_full_chat_model_configuration(
+    setup_session_factory: async_sessionmaker[CountingAsyncSession],
+) -> None:
+    normalized_proxy = "http://user%40name:password%3Awith%2Fslash@proxy.example.test:8080"
+    request = SetupCompleteRequest.model_validate(
+        {
+            "admin": {"username": "full_chat_admin", "password": TEST_PASSWORD},
+            "channel": {
+                "name": "full-chat-channel",
+                "base_url": "https://api.example.test/v1",
+                "api_key": TEST_API_KEY,
+                "http_proxy": "http://user%40name:password%3Awith%2Fslash@PROXY.EXAMPLE.TEST:8080/",
+                "model_id": "full-chat-model",
+                "protocol": ModelProtocol.OPENAI,
+                "image_understanding": True,
+                "audio_understanding": True,
+                "video_understanding": True,
+                "context_window_k": 128,
+                "temperature": 0.35,
+                "top_p": 0.85,
+                "max_tokens": 2048,
+                "description": "Full chat setup model",
+                "advanced_settings": {"custom_headers": {"X-Setup-Trace": "setup-test"}},
+            },
+            "profile": {"name": "full-chat-profile"},
+        }
+    )
+
+    assert request.channel.http_proxy == normalized_proxy
+
+    async with setup_session_factory() as session:
+        await setup_service.complete_setup(session, request)
+
+    database = await read_database(setup_session_factory)
+    channels = database["channels"]
+    assert len(channels) == 1
+    channel = channels[0]
+    assert channel.http_proxy == normalized_proxy
+    assert len(channel.model_ids) == 1
+
+    model = channel.model_ids[0]
+    assert model["model_id"] == "full-chat-model"
+    assert model["usage"] == ModelUsage.CHAT.value
+    assert model["protocol"] == ModelProtocol.OPENAI.value
+    assert model["image_understanding"] is True
+    assert model["audio_understanding"] is True
+    assert model["video_understanding"] is True
+    assert model["context_window_k"] == 128
+    assert model["temperature"] == 0.35
+    assert model["top_p"] == 0.85
+    assert model["max_tokens"] == 2048
+    assert model["description"] == "Full chat setup model"
+    assert model["advanced_settings"] == {"custom_headers": {"x-setup-trace": "setup-test"}}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("conflict", "expected_error"),
     [

@@ -73,6 +73,7 @@ export default {
   chat_test_result_title: 'Chat Test Result',
   image_generation_test_result_title: 'Image Generation Test Result',
   model_test_result: 'Test Result',
+  model_test_view_result: 'View Test Result',
   model_test_no_result: 'No test has been run',
   chat_test_non_stream: 'Non-streaming Test',
   chat_test_stream: 'Streaming Test',

@@ -55,14 +55,48 @@
 
 .model-entry-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 4px 12px;
   padding: 8px 14px;
   color: var(--color-text-primary);
   font-size: 13px;
   font-weight: 600;
   background: var(--color-bg-page);
   border-bottom: 1px solid var(--el-border-color-lighter);
+
+  > span {
+    flex: 1 1 12rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+.model-entry-actions {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 8px;
+  min-width: 0;
+
+  > .el-button,
+  > .el-tag {
+    flex: 0 0 auto;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  > .el-button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  > .el-button + .el-button {
+    margin-left: 0;
+  }
 }
 
 .model-entry-fields {
@@ -337,6 +371,14 @@
 }
 
 @media (max-width: 768px) {
+  .model-entry-header {
+    align-items: flex-start;
+  }
+
+  .model-entry-actions {
+    justify-content: flex-start;
+  }
+
   .channel-settings-row--fields {
     grid-template-columns: minmax(0, 1fr);
   }

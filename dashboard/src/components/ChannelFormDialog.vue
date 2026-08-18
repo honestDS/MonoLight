@@ -78,7 +78,6 @@
           :custom-headers-placeholder="customHeadersPlaceholder"
           :testing="modelTestStates.get(entry)?.status === 'running'"
           :test-state="modelTestStates.get(entry) || null"
-          :test-result-expanded="modelTestResultExpanded.get(entry) || []"
           :detecting-metadata="detectingMetadataIndex === idx"
           :detecting-dimension="detectingDimensionIndex === idx"
           :metadata-detection-disabled="detectingMetadataIndex !== null && detectingMetadataIndex !== idx"
@@ -93,7 +92,7 @@
           @fill-headers-template="fillCustomHeadersTemplate(idx)"
           @advanced-settings-input="handleAdvancedSettingsInput(idx)"
           @test-config-change="clearModelTest(entry)"
-          @update:test-result-expanded="value => modelTestResultExpanded.set(entry, value)"
+          @view-test-result="openModelTestResult(entry)"
           @update:advanced-settings-draft="value => advancedSettingsDrafts[idx] = value"
           @update:advanced-settings-expanded="value => advancedSettingsExpanded[idx] = value" />
 
@@ -106,6 +105,12 @@
       <el-button type="primary" @click="submitForm" :loading="submitting">{{ $t('channels.confirm') }}</el-button>
     </template>
   </el-dialog>
+
+  <ModelTestResultDialog
+    v-model:visible="modelTestResultDialogVisible"
+    :results="modelTestResults"
+    :active-id="activeModelTestResultId"
+    @update:active-id="activeModelTestResultId = $event" />
 
   <el-dialog
     v-model="chatTestDialogVisible"
@@ -143,10 +148,14 @@ import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { channelApi, openRouterApi } from '../api'
-import { defaultChannelForm, defaultModelEntry } from '../constants'
+import { defaultChannelForm, defaultModelEntry, normalizeModelEntry } from '../constants'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
 import { createChannelTestManager } from '../utils/channelTestManager.js'
+import { normalizeHttpProxy, isValidHttpProxy } from '../utils/channelHttpProxy.js'
+import { customHeadersTemplate, customHeadersPlaceholder, ensureAdvancedSettings, formatAdvancedSettings, parseAdvancedSettingsDraft, mergeCustomHeaders } from '../utils/channelAdvancedSettings.js'
+import { getOpenRouterModelMatches, applyOpenRouterModelMetadata } from '../utils/channelModelMetadata.js'
 import ChannelModelEntry from './ChannelModelEntry.vue'
+import ModelTestResultDialog from './ModelTestResultDialog.vue'
 
 const props = defineProps({
   visible: {
@@ -187,7 +196,10 @@ const detectingMetadataIndex = ref(null)
 const form = reactive(defaultChannelForm())
 const channelTestManager = createChannelTestManager()
 const modelTestStates = reactive(new Map())
-const modelTestResultExpanded = reactive(new Map())
+const modelTestResultDialogVisible = ref(false)
+const activeModelTestResultId = ref('')
+const modelTestEntryIds = new WeakMap()
+let nextModelTestEntryId = 0
 const chatTestDialogVisible = ref(false)
 const chatTestEntry = ref(null)
 const chatTestIndex = ref(null)
@@ -218,126 +230,50 @@ const getDefaultModelProtocol = (usage) => {
   return getModelProtocols(usage)[0] || defaultModelProtocols[usage] || ''
 }
 
-const customHeadersTemplate = {
-  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-  accept: 'application/json, text/plain, */*',
-  'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-  'cache-control': 'no-cache'
-}
-const customHeadersPlaceholder = JSON.stringify({ 'user-agent': customHeadersTemplate['user-agent'] })
-const httpHeaderNamePattern = /^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$/
-const reservedCustomHeaderNames = new Set([
-  'authorization',
-  'content-type',
-  'content-length',
-  'host',
-  'connection',
-  'transfer-encoding',
-  'proxy-authorization',
-  'proxy-connection'
-])
-
-const isPlainJsonObject = (value) => (
-  value !== null &&
-  typeof value === 'object' &&
-  !Array.isArray(value) &&
-  Object.getPrototypeOf(value) === Object.prototype
-)
-
-const ensureAdvancedSettings = (entry) => {
-  if (!isPlainJsonObject(entry.advanced_settings)) {
-    entry.advanced_settings = {}
+const getModelTestEntryId = (entry) => {
+  let id = modelTestEntryIds.get(entry)
+  if (!id) {
+    id = `model-test-result-${++nextModelTestEntryId}`
+    modelTestEntryIds.set(entry, id)
   }
+  return id
 }
 
-const getCustomHeaders = (settings) => {
-  if (!isPlainJsonObject(settings)) return {}
-  if (isPlainJsonObject(settings.custom_headers)) return settings.custom_headers
-  if (settings.custom_headers === undefined && typeof settings.user_agent === 'string') {
-    return { 'user-agent': settings.user_agent }
+const modelTestResults = computed(() => form.model_ids
+  .map((entry, idx) => {
+    const state = modelTestStates.get(entry)
+    if (!state) return null
+
+    const modelId = typeof entry.model_id === 'string' ? entry.model_id.trim() : ''
+    return {
+      id: getModelTestEntryId(entry),
+      label: modelId || `${t('channels.model_entry')} #${idx + 1}`,
+      state
+    }
+  })
+  .filter(Boolean))
+
+const syncModelTestResultDialog = () => {
+  const results = modelTestResults.value
+  if (results.length === 0) {
+    modelTestResultDialogVisible.value = false
+    activeModelTestResultId.value = ''
+    return
   }
-  return {}
+
+  if (!results.some(result => result.id === activeModelTestResultId.value)) {
+    activeModelTestResultId.value = results[0].id
+  }
 }
 
-const formatAdvancedSettings = (settings) => {
-  const customHeaders = getCustomHeaders(settings)
-  if (Object.keys(customHeaders).length === 0) return ''
-  return JSON.stringify(customHeaders, null, 2)
-}
-
-const parseAdvancedSettingsDraft = (draft) => {
-  const text = typeof draft === 'string' ? draft.trim() : ''
-  if (!text) return { value: {}, error: '' }
-
-  let settings
-  try {
-    settings = JSON.parse(text)
-  } catch {
-    return { value: null, error: t('channels.custom_headers_json_object_error') }
-  }
-
-  if (!isPlainJsonObject(settings)) {
-    return { value: null, error: t('channels.custom_headers_json_object_error') }
-  }
-
-  const headerEntries = Object.entries(settings)
-  if (headerEntries.length > 32) {
-    return { value: null, error: t('channels.custom_headers_max_items_error') }
-  }
-
-  const normalizedHeaders = {}
-  const headerNames = new Set()
-  for (const [headerName, headerValue] of headerEntries) {
-    if (!httpHeaderNamePattern.test(headerName)) {
-      return { value: null, error: t('channels.custom_headers_name_error') }
-    }
-
-    const normalizedName = headerName.toLowerCase()
-    if (headerNames.has(normalizedName)) {
-      return { value: null, error: t('channels.custom_headers_name_error') }
-    }
-    if (reservedCustomHeaderNames.has(normalizedName)) {
-      return {
-        value: null,
-        error: t('channels.custom_headers_reserved_header_error', { header: normalizedName })
-      }
-    }
-    if (typeof headerValue !== 'string') {
-      return { value: null, error: t('channels.custom_headers_value_error') }
-    }
-
-    const normalizedValue = headerValue.trim()
-    if (!normalizedValue || normalizedValue.length > 4096 || /[^\x20-\x7E]/.test(normalizedValue)) {
-      return { value: null, error: t('channels.custom_headers_value_error') }
-    }
-    Object.defineProperty(normalizedHeaders, normalizedName, {
-      configurable: true,
-      enumerable: true,
-      value: normalizedValue,
-      writable: true
-    })
-    headerNames.add(normalizedName)
-  }
-
-  return { value: normalizedHeaders, error: '' }
-}
-
-const mergeCustomHeaders = (entry, customHeaders) => {
-  const advancedSettings = isPlainJsonObject(entry.advanced_settings)
-    ? { ...entry.advanced_settings }
-    : {}
-  delete advancedSettings.user_agent
-  if (Object.keys(customHeaders).length === 0) {
-    delete advancedSettings.custom_headers
-  } else {
-    advancedSettings.custom_headers = { ...customHeaders }
-  }
-  entry.advanced_settings = advancedSettings
-  return advancedSettings
+const openModelTestResult = (entry) => {
+  if (!modelTestStates.has(entry)) return
+  activeModelTestResultId.value = getModelTestEntryId(entry)
+  modelTestResultDialogVisible.value = true
 }
 
 const validateAdvancedSettings = () => {
-  const results = form.model_ids.map((_, idx) => parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx]))
+  const results = form.model_ids.map((_, idx) => parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx], t))
   advancedSettingsErrors.value = results.map(result => result.error)
   if (advancedSettingsErrors.value.some(Boolean)) {
     advancedSettingsExpanded.value = results.map((result, idx) => (
@@ -350,7 +286,7 @@ const validateAdvancedSettings = () => {
 }
 
 const validateModelAdvancedSettings = (idx) => {
-  const result = parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx])
+  const result = parseAdvancedSettingsDraft(advancedSettingsDrafts.value[idx], t)
   advancedSettingsErrors.value[idx] = result.error
   if (result.error) {
     advancedSettingsExpanded.value[idx] = [idx]
@@ -381,20 +317,22 @@ const addModelEntry = () => {
 const clearModelTest = (entry) => {
   channelTestManager.cancel(entry)
   modelTestStates.delete(entry)
-  modelTestResultExpanded.delete(entry)
+  syncModelTestResultDialog()
 }
 
 const invalidateModelTests = () => {
   channelTestManager.invalidate()
   modelTestStates.clear()
-  modelTestResultExpanded.clear()
+  modelTestResultDialogVisible.value = false
+  activeModelTestResultId.value = ''
 }
 
 const beginModelTest = (entry, state) => {
   const token = channelTestManager.begin(entry)
   if (!token) return null
   modelTestStates.set(entry, state)
-  modelTestResultExpanded.set(entry, ['result'])
+  activeModelTestResultId.value = getModelTestEntryId(entry)
+  modelTestResultDialogVisible.value = true
   return token
 }
 
@@ -556,32 +494,6 @@ const formatErrorDetail = (err) => {
   return truncateErrorMessage(message)
 }
 
-const getOpenRouterModelMatches = (models, modelId) => {
-  const query = modelId.trim().toLowerCase()
-  const matchByIdentifiers = (candidateQuery) => models.filter(model => {
-    const identifiers = [model.id, model.canonical_slug]
-    return identifiers.some(identifier => typeof identifier === 'string' && identifier.toLowerCase() === candidateQuery)
-  })
-  const uniqueMatches = (matches) => [...new Map(matches.map(model => [model.id, model])).values()]
-  const exactMatches = uniqueMatches(matchByIdentifiers(query))
-  if (exactMatches.length > 0) return exactMatches
-
-  const removeProviderPrefix = (identifier) => {
-    const separator = identifier.indexOf('/')
-    return separator >= 0 ? identifier.slice(separator + 1) : identifier
-  }
-  const strippedQuery = removeProviderPrefix(query)
-  return uniqueMatches(models.filter(model => {
-    const identifiers = [model.id, model.canonical_slug]
-    return identifiers.some(identifier => typeof identifier === 'string' && removeProviderPrefix(identifier.toLowerCase()) === strippedQuery)
-  }))
-}
-
-const toPositiveInteger = (value) => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null
-  return Math.floor(value)
-}
-
 const detectModelMetadata = async (entry, idx) => {
   if (entry.usage !== 'CHAT') {
     return ElMessage.warning(t('channels.model_metadata_chat_only'))
@@ -610,37 +522,14 @@ const detectModelMetadata = async (entry, idx) => {
       throw new Error(t('channels.model_metadata_ambiguous', { models: matches.map(model => model.id).join(', ') }))
     }
 
-    const model = matches[0]
-    const filledFields = []
-    const contextLength = toPositiveInteger(model.top_provider?.context_length) || toPositiveInteger(model.context_length)
-    if (contextLength) {
-      entry.context_window_k = Math.max(1, Math.floor(contextLength / 1000))
-      filledFields.push(t('channels.context_window_k'))
-    }
-    if (Array.isArray(model.architecture?.input_modalities)) {
-      const modalities = new Set(model.architecture.input_modalities
-        .filter(modality => typeof modality === 'string')
-        .map(modality => modality.toLowerCase()))
-      entry.image_understanding = modalities.has('image')
-      entry.audio_understanding = modalities.has('audio')
-      entry.video_understanding = modalities.has('video')
-      filledFields.push(
-        t('channels.image_understanding'),
-        t('channels.audio_understanding'),
-        t('channels.video_understanding')
-      )
-    }
-    if (typeof model.description === 'string' && model.description.trim() && (!entry.description || !entry.description.trim())) {
-      entry.description = model.description.trim()
-      filledFields.push(t('channels.description'))
-    }
+    const { fields: filledFields, model } = applyOpenRouterModelMetadata(entry, matches[0])
     if (filledFields.length === 0) {
       throw new Error(t('channels.model_metadata_no_mappable_fields'))
     }
 
     ElMessage.success(t('channels.model_metadata_detect_success', {
       model: typeof model.id === 'string' && model.id.trim() ? model.id : entry.model_id.trim(),
-      fields: filledFields.join(', ')
+      fields: filledFields.map(field => t('channels.' + field)).join(', ')
     }))
   } catch (err) {
     ElMessage.error(err.message || t('channels.model_metadata_detect_failed'))
@@ -875,29 +764,6 @@ const buildModelEntryPayload = (entry) => {
   return payload
 }
 
-const httpProxyPattern = /^http:\/\/(?:(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+:(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+@)?(?:\[[^\]\s/@?#]+\]|[^:\/\s@?#]+):(\d+)\/?$/
-
-const normalizeHttpProxy = (value) => typeof value === 'string' ? value.trim() : ''
-
-const isValidHttpProxy = (value) => {
-  const proxy = typeof value === 'string' ? value : ''
-  if (!proxy.trim()) return true
-
-  const match = proxy.match(httpProxyPattern)
-  if (/\s/.test(proxy) || !match) return false
-
-  try {
-    const url = new URL(proxy)
-    const port = Number(match[1])
-    return url.protocol === 'http:' && Boolean(url.hostname) &&
-      Number.isInteger(port) && port >= 1 && port <= 65535 &&
-      Boolean(url.username) === Boolean(url.password) && url.pathname === '/' &&
-      !url.search && !url.hash
-  } catch {
-    return false
-  }
-}
-
 const validateChannelHttpProxy = () => {
   const isValid = isValidHttpProxy(form.http_proxy)
   proxyError.value = isValid ? '' : t('channels.http_proxy_format_error')
@@ -936,7 +802,7 @@ const initializeForm = () => {
     form.http_proxy = props.channel.http_proxy || ''
     form.is_active = props.channel.is_active
     form.model_ids = props.channel.model_ids && props.channel.model_ids.length > 0
-      ? JSON.parse(JSON.stringify(props.channel.model_ids))
+      ? JSON.parse(JSON.stringify(props.channel.model_ids)).map(entry => normalizeModelEntry(entry))
       : []
   }
   if (props.channel) syncModelEntryStates()
