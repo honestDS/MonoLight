@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import SQLModel, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlmodel import select
 
 import app.api.v1.setup as setup_api
 import app.core.crypto as crypto_module
@@ -24,7 +22,6 @@ from app.core.constants import (
     ERR_SETUP_STATUS_NOT_INITIALIZED,
     ERR_SYSTEM_SECRETS_FILE_INVALID,
     MSG_SETUP_STATUS_SUCCESS,
-    SETUP_ADMIN_UID_KEY,
     SETUP_STATUS_COMPLETED,
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_KEY,
@@ -47,14 +44,6 @@ TEST_USERNAME = "setup_admin"
 TEST_PASSWORD = "setup-password-123"
 TEST_API_KEY = "setup-api-key"
 TEST_MODEL_ID = "setup-chat-model"
-
-SETUP_TABLES = [
-    SystemSetting.__table__,
-    User.__table__,
-    ModelChannel.__table__,
-    PromptLibrary.__table__,
-    Profile.__table__,
-]
 
 
 def _successful_system_secrets() -> SystemSecrets:
@@ -81,47 +70,6 @@ def _setup_payload(
         },
         "profile": {"name": profile_name},
     }
-
-
-@pytest_asyncio.fixture
-async def setup_session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    database_path = tmp_path / "setup-api.sqlite3"
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{database_path.as_posix()}",
-        connect_args={"timeout": 30},
-    )
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=30000")
-        finally:
-            cursor.close()
-
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                tables=SETUP_TABLES,
-            )
-        )
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        session.add_all(
-            [
-                SystemSetting(key=SETUP_STATUS_KEY, value=SETUP_STATUS_PENDING),
-                SystemSetting(key=SETUP_ADMIN_UID_KEY, value=""),
-            ]
-        )
-        await session.commit()
-
-    try:
-        yield session_factory
-    finally:
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -440,6 +388,38 @@ async def test_setup_complete_validation_error_is_standard_and_does_not_echo_sec
     assert body["data"] is None
     assert invalid_password not in response.text
     assert sensitive_api_key not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("section", "field", "invalid_value"),
+    [
+        ("admin", "password", "中" * 25),
+        ("channel", "base_url", "ftp://api.example.test"),
+        ("channel", "model_id", "   "),
+        ("channel", "protocol", "OPENAI_EMBEDDING"),
+    ],
+)
+async def test_setup_complete_rejects_common_validation_errors_without_writes(
+    setup_app: FastAPI,
+    setup_session_factory: async_sessionmaker[AsyncSession],
+    section: str,
+    field: str,
+    invalid_value: str,
+) -> None:
+    payload = _setup_payload()
+    payload[section][field] = invalid_value
+
+    response = await _request(setup_app, "POST", "/api/v1/setup/complete", json=payload)
+    body = _assert_standard_response(response, 422)
+    assert body["data"] is None
+    assert TEST_API_KEY not in response.text
+    if section == "admin" and field == "password":
+        assert invalid_value not in response.text
+
+    database = await _read_setup_data(setup_session_factory)
+    assert database["settings"][SETUP_STATUS_KEY] == SETUP_STATUS_PENDING
+    assert _business_record_counts(database) == {"users": 0, "channels": 0, "prompts": 0, "profiles": 0}
 
 
 def _resolve_schema(openapi: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

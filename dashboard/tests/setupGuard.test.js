@@ -155,6 +155,40 @@ test('a successful page retry restores ready state after a failed setup check', 
   assert.deepEqual(state.getSnapshot(), { phase: 'ready', required: false, error: null })
 })
 
+test('a failed page retry preserves the latest setup error and leaves setup renderable', async () => {
+  const state = createSetupStatusState()
+  let guardCalls = 0
+  let retryCalls = 0
+  const firstFailure = Object.assign(new Error('first failure'), { response: { data: { code: 'FIRST_FAILURE', message: 'First failure' } } })
+  const retryFailure = Object.assign(new Error('retry failure'), { response: { data: { code: 'RETRY_FAILURE', message: 'Retry failure' } } })
+  const guard = createSetupGuard({
+    state,
+    getToken: () => null,
+    statusRequest: async () => { guardCalls += 1; throw firstFailure },
+  })
+
+  assert.equal(await guard('/profiles'), SETUP_PATH)
+  assert.equal(guardCalls, 1)
+  assert.deepEqual(state.getSnapshot(), {
+    phase: 'error',
+    required: null,
+    error: { code: 'FIRST_FAILURE', message: 'First failure' },
+  })
+  await assert.rejects(
+    refreshSetupStatus({ state, statusRequest: async () => { retryCalls += 1; throw retryFailure } }),
+    error => error === retryFailure,
+  )
+  assert.equal(retryCalls, 1)
+  assert.deepEqual(state.getSnapshot(), {
+    phase: 'error',
+    required: null,
+    error: { code: 'RETRY_FAILURE', message: 'Retry failure' },
+  })
+  assert.equal(await guard(SETUP_PATH), undefined)
+  assert.equal(guardCalls, 1)
+  assert.equal(retryCalls, 1)
+})
+
 test('API and routing sources retain setup endpoints and setup error codes while removing reset flows', () => {
   assert.match(apiSource, /status:\s*\(\)\s*=>\s*request\.get\('\/setup\/status'\)/)
   assert.match(apiSource, /complete:\s*\(data\)\s*=>\s*request\.post\('\/setup\/complete',\s*data\)/)
