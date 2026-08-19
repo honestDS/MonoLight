@@ -12,7 +12,6 @@
   margin-bottom: 18px;
   background: var(--color-bg-base);
   border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
   box-shadow: 0 1px 3px rgb(0 0 0 / 4%);
 
   &:last-child {
@@ -34,7 +33,6 @@
     width: 4px;
     height: 16px;
     background: var(--el-color-primary);
-    border-radius: 2px;
   }
 }
 

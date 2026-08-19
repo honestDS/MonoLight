@@ -123,7 +123,7 @@
           <el-button @click="openEditor()">{{ $t('memories.create') }}</el-button>
           <el-button @click="loadMemories">{{ $t('memories.refresh') }}</el-button>
         </div>
-        <el-table :data="memories" v-loading="memoriesLoading" border stripe class="memory-table memory-data-table">
+        <el-table :data="memories" v-loading="memoriesLoading" class="memory-table memory-data-table">
           <el-table-column prop="id" :label="$t('memories.memory_id')" width="88" align="center" />
           <el-table-column :label="$t('memories.content_preview')" min-width="200"><template #default="{ row }"><div class="content-preview">{{ row.content || '-' }}</div></template></el-table-column>
           <el-table-column :label="$t('memories.type')" width="120" align="center"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column>
@@ -156,7 +156,7 @@
           <el-input v-model="jobFilters.memory_id" :placeholder="$t('memories.memory_id')" clearable class="small-input" @keyup.enter="resetAndLoadJobs" />
           <el-button type="primary" @click="resetAndLoadJobs">{{ $t('common.confirm') }}</el-button><el-button @click="loadJobs">{{ $t('memories.refresh') }}</el-button>
         </div>
-        <el-table :data="jobs" v-loading="jobsLoading" border stripe row-key="id" :tree-props="{ children: 'childJobs' }" :default-expand-all="false" class="memory-data-table">
+        <el-table :data="jobs" v-loading="jobsLoading" row-key="id" :tree-props="{ children: 'childJobs' }" :default-expand-all="false" class="memory-data-table">
           <el-table-column prop="id" :label="$t('memories.job_id')" width="90" align="center" />
           <el-table-column :label="$t('memories.operation')" width="190"><template #default="{ row }"><div class="job-tree"><el-tag v-if="row.jobLevel" size="small" type="info">{{ $t('memories.job_child') }}</el-tag><el-tag v-else-if="row.child_job_ids?.length" size="small" type="success">{{ $t('memories.job_parent') }}</el-tag><span>{{ operationLabel(row.operation) }}</span></div></template></el-table-column>
           <el-table-column prop="memory_id" :label="$t('memories.memory_id')" width="100" align="center" />
@@ -182,7 +182,7 @@
 
       <el-tab-pane :label="$t('memories.migrations')" name="migrations">
         <div class="filter-bar"><el-button @click="loadMigrations">{{ $t('memories.refresh') }}</el-button></div>
-        <el-table :data="migrations" v-loading="migrationsLoading" border stripe class="memory-data-table">
+        <el-table :data="migrations" v-loading="migrationsLoading" class="memory-data-table">
           <el-table-column :label="$t('memories.migration_job')" width="110" align="center">
             <template #default="{ row }">{{ migrationId(row) }}</template>
           </el-table-column>
@@ -234,7 +234,7 @@
 
     <el-dialog v-model="historyVisible" :title="$t('memories.history_title', { key: selectedMemory?.memory_key || '' })" width="900px" class="standard-dialog" align-center>
       <el-alert type="info" :closable="false" show-icon :title="$t('memories.deleted_history_read_only')" />
-      <el-table :data="history" v-loading="historyLoading" border stripe><el-table-column prop="version" :label="$t('memories.revision_version')" width="100" align="center" /><el-table-column prop="memory_type" :label="$t('memories.type')" width="120"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column><el-table-column prop="content_token_count" :label="$t('memories.token_count')" width="100" align="center" /><el-table-column prop="content" :label="$t('memories.content')" min-width="350" show-overflow-tooltip /><el-table-column prop="published_at" :label="$t('memories.published_at')" width="180"><template #default="{ row }">{{ formatTime(row.published_at || row.created_at) }}</template></el-table-column></el-table>
+      <el-table :data="history" v-loading="historyLoading"><el-table-column prop="version" :label="$t('memories.revision_version')" width="100" align="center" /><el-table-column prop="memory_type" :label="$t('memories.type')" width="120"><template #default="{ row }">{{ typeLabel(row.memory_type) }}</template></el-table-column><el-table-column prop="content_token_count" :label="$t('memories.token_count')" width="100" align="center" /><el-table-column prop="content" :label="$t('memories.content')" min-width="350" show-overflow-tooltip /><el-table-column prop="published_at" :label="$t('memories.published_at')" width="180"><template #default="{ row }">{{ formatTime(row.published_at || row.created_at) }}</template></el-table-column></el-table>
       <el-empty v-if="!historyLoading && !history.length" :description="$t('memories.no_history')" />
     </el-dialog>
 
@@ -608,7 +608,7 @@ onBeforeUnmount(() => {
 @import "@/assets/css/common.scss";
 
 .memory-view { min-width: 0; }
-.settings-panel { padding: 20px; margin-bottom: 18px; background: #fff; border: 1px solid var(--color-border-light); }
+.settings-panel { padding: 20px; margin-bottom: 18px; background: #fff; box-shadow: none; }
 .section-heading { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .section-heading-content { min-width: 0; flex: 1; }
 .section-heading h2 { margin: 0 0 4px; font-size: 22px; color: var(--color-text-main); }
@@ -627,11 +627,11 @@ onBeforeUnmount(() => {
 .progress-counts { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; color: var(--color-text-secondary); font-size: 12px; }
 .settings-error { margin-top: 16px; }
 .organization-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.memory-tabs { background: #fff; padding: 0 20px 20px; border: 1px solid var(--color-border-light); }
+.memory-tabs { background: #fff; padding: 0 20px 20px; box-shadow: none; }
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0; }
 .keyword-input { width: 240px; }.filter-input { width: 150px; }.sort-input { width: 130px; }.order-input { width: 110px; }.operation-input { width: 190px; }.small-input { width: 120px; }
 .memory-table { width: 100%; }.memory-data-table { position: relative; isolation: isolate; }.memory-data-table > .el-loading-mask { z-index: 4; }.content-preview { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.45; }
-.table-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 16px; color: var(--color-text-secondary); font-size: 13px; }
+.table-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 16px; border-top: 1px solid var(--color-border-light); color: var(--color-text-secondary); font-size: 13px; }
 .memory-content { max-height: 360px; margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word; font: inherit; line-height: 1.55; }
 .memory-action-buttons { width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }.memory-action-buttons .el-button { margin-left: 0; }.job-tree { display: flex; align-items: center; gap: 6px; }
 .memory-task-summary { display: flex; align-items: center; gap: 24px; min-width: 0; margin-top: 8px; width: 100%; color: var(--color-text-secondary); font-size: 13px; white-space: nowrap; overflow: hidden; }

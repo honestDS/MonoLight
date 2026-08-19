@@ -1,6 +1,5 @@
 .channel-settings-shell {
   border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
   padding: 16px 16px 12px;
   background: #fff;
 }
@@ -46,7 +45,6 @@
   overflow: hidden;
   background: var(--color-bg-base);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
 
   .remove {
     color: var(--el-color-danger);

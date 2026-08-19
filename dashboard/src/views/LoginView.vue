@@ -16,7 +16,10 @@
 
       <div class="login-left">
         <div class="brand-info">
-          <h1 class="brand-logo">MonoLight</h1>
+          <div class="brand-title">
+            <img class="brand-image" :src="logoImage" alt="" aria-hidden="true">
+            <h1 class="brand-logo">MonoLight</h1>
+          </div>
           <p class="brand-desc">{{ $t('login.brand_desc') }}</p>
         </div>
         <div class="illustration">
@@ -64,6 +67,7 @@ import { useI18n } from 'vue-i18n'
 import { authApi } from '../api'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import githubIcon from '../assets/svg/github.svg'
+import logoImage from '../../../logo.jpg'
 const { t } = useI18n()
 const router = useRouter()
 

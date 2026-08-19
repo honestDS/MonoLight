@@ -22,7 +22,6 @@
   width: 1000px;
   height: 600px;
   background: var(--color-bg-base);
-  border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0,0,0,0.08);
   display: flex;
   overflow: hidden;
@@ -39,7 +38,6 @@
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: 8px;
   transition: background-color 0.2s ease, transform 0.2s ease;
 }
 
@@ -98,6 +96,24 @@
     pointer-events: none;
     animation: dotsFloat 5s ease-in-out infinite reverse;
     filter: blur(1px);
+  }
+
+  .brand-title {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .brand-image {
+    border: 2px solid #FFF;
+    border-radius: 50%;
+    width: 64px;
+    height: 64px;
+    flex: 0 0 64px;
+    display: block;
+    object-fit: cover;
   }
 
   .brand-logo {
@@ -175,7 +191,6 @@
   .login-form {
     .custom-input .el-input__wrapper {
       border: 1px solid var(--color-border-base) !important;
-      border-radius: 8px !important;
       box-shadow: none !important;
       transition: all 0.3s;
     }
@@ -199,13 +214,11 @@
         background: linear-gradient(135deg, var(--color-login-bg-left) 0%, var(--color-login-gradient-start) 100%) !important;
         border: none !important;
         height: 48px;
-        border-radius: 24px !important;
         font-weight: bold;
       }
       .btn-signup {
         flex: 1;
         height: 48px;
-        border-radius: 24px !important;
         border: 1px solid var(--color-login-bg-left) !important;
         color: var(--color-login-bg-left) !important;
       }

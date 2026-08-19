@@ -5,12 +5,10 @@
     <el-container v-else class="app-wrapper">
       <el-aside width="220px" class="sidebar">
         <div class="logo-container">
-          <div class="logo-icon">
-            <i class="el-icon-s-grid"></i>
-          </div>
+          <img class="logo-image" :src="logoImage" alt="" aria-hidden="true">
           <div class="logo-content">
             <span class="logo-text">MonoLight</span>
-            <span class="logo-version">LLM Admin v1.0</span>
+            <span class="logo-version">MonoLight v0.1</span>
           </div>
         </div>
         <el-menu
@@ -100,7 +98,7 @@
             <router-view></router-view>
           </transition>
           <div class="app-footer">
-              <span>&copy; 2024 MonoLight LLM Admin. All rights reserved.</span>
+              <span>&copy; 2026 MonoLight LLM Admin. All rights reserved.</span>
             </div>
           </el-main>
         </el-container>
@@ -114,6 +112,7 @@ import { useResizeObserver } from './composables/useResizeObserver'
 import { routeNameMap } from './constants'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import githubIcon from './assets/svg/github.svg'
+import logoImage from '../../logo.jpg'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 
@@ -127,7 +126,8 @@ export default {
   },
   data() {
     return {
-      githubIcon
+      githubIcon,
+      logoImage
     }
   },
 

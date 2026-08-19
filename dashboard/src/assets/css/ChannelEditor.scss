@@ -14,7 +14,6 @@
   overflow: hidden;
   background: var(--color-bg-base);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 
   &:hover {
@@ -63,7 +62,6 @@
   font-weight: 600;
   background: var(--el-color-primary-light-9);
   border: 1px solid var(--el-color-primary-light-7);
-  border-radius: 10px;
 }
 
 .rule-name {
@@ -135,7 +133,6 @@
   margin-bottom: 12px;
   padding: 10px 12px;
   background: var(--color-bg-page);
-  border-radius: 6px;
 }
 
 .channel-hint-item {
@@ -166,5 +163,4 @@
   font-weight: 600;
   background: var(--color-bg-page);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
 }
