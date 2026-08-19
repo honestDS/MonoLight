@@ -14,8 +14,6 @@
       <el-table
         :data="data"
         v-loading="loading"
-        border
-        stripe
         size="default"
         :empty-text="resolvedEmptyText">
         <slot></slot>

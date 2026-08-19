@@ -147,7 +147,7 @@
       center
       align-center
     >
-      <el-table :data="documentList" :loading="documentLoading" border>
+      <el-table :data="documentList" :loading="documentLoading">
         <el-table-column prop="filename" :label="$t('knowledgeBase.filename')" min-width="220" show-overflow-tooltip />
         <el-table-column prop="chunk_count" :label="$t('knowledgeBase.chunk_count')" width="90" align="center" />
         <el-table-column prop="chunk_size" :label="$t('knowledgeBase.chunk_size')" width="100" align="center" />
@@ -234,7 +234,7 @@
         class="mt-5"
         :title="$t('knowledgeBase.hybrid_rerank_enabled')"
       />
-      <el-table v-if="queryTestResults.length" :data="queryTestResults" border class="query-result-table">
+      <el-table v-if="queryTestResults.length" :data="queryTestResults" class="query-result-table">
         <el-table-column label="#" width="60" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>

@@ -60,7 +60,6 @@
   padding: 32px;
   background: var(--setup-panel-bg);
   border: 1px solid var(--setup-border);
-  border-radius: 8px;
   box-shadow: 0 10px 28px rgb(15 23 42 / 8%);
 }
 
@@ -80,7 +79,6 @@
   height: 36px;
   color: #ffffff;
   background: var(--color-primary, #1e293b);
-  border-radius: 6px;
   font-size: 20px;
 }
 
@@ -282,7 +280,6 @@
   color: var(--setup-error);
   background: var(--setup-error-bg);
   border: 1px solid var(--setup-error);
-  border-radius: 4px;
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;

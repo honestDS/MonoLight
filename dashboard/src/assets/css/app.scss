@@ -30,16 +30,14 @@ body {
   border-bottom: 1px solid var(--color-sidebar-border);
 }
 
-.logo-icon {
-  width: 32px;
-  height: 32px;
-  background-color: var(--color-primary);
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 18px;
+.logo-image {
+  border: 2px solid #FFF;
+  border-radius: 50%;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  display: block;
+  object-fit: cover;
 }
 
 .logo-content {
@@ -80,7 +78,6 @@ body {
   .el-sub-menu__title {
     padding: 0 24px !important;
     margin: 2px 12px;
-    border-radius: 0px;
     transition: all 0.15s ease;
   }
 
@@ -150,7 +147,6 @@ body {
     padding: 8px 16px !important;
     font-size: 12px;
     margin: 2px 12px;
-    border-radius: 4px;
     transition: all 0.15s ease;
 
     &:hover {
@@ -170,7 +166,6 @@ body {
   width: 40px;
   height: 40px;
   padding: 0;
-  border-radius: 8px;
   text-decoration: none;
   transition: background-color 0.2s ease, transform 0.2s ease;
 }
