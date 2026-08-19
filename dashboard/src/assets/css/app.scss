@@ -162,6 +162,33 @@ body {
 .app-wrapper { height: 100vh; overflow: hidden; }
 .app-header { background: #fff; border-bottom: 1px solid #ebedf0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
 .app-header .header-right { display: flex; align-items: center; gap: 16px; }
+.app-header .github-link {
+  display: inline-flex;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 8px;
+  text-decoration: none;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+.app-header .github-link:hover {
+  background-color: rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+.app-header .github-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.app-header .github-icon {
+  display: block;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
 .app-main {
   padding: 24px; 
   overflow-y: auto; 

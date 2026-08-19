@@ -4,6 +4,15 @@
       <LanguageSwitcher />
     </div>
     <div class="login-box">
+      <a
+        class="github-link"
+        href="https://github.com/honestDS/MonoLight"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="GitHub"
+      >
+        <img :src="githubIcon" alt="GitHub" class="github-icon">
+      </a>
 
       <div class="login-left">
         <div class="brand-info">
@@ -54,6 +63,7 @@ import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { authApi } from '../api'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import githubIcon from '../assets/svg/github.svg'
 const { t } = useI18n()
 const router = useRouter()
 
