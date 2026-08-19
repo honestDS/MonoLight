@@ -55,8 +55,20 @@ function validSetupProfileGuideResponse(configs = validSetupProfileConfigs(), to
   return {
     data: {
       data: {
-        items: [{ id: 7, configs }],
+        items: [{ id: 7, prompt_id: 13, configs }],
         meta: { tool_options: toolOptions }
+      }
+    }
+  }
+}
+
+function validSetupPromptListResponse(prompts = [
+  { id: 13, name: 'default', content: '' }
+]) {
+  return {
+    data: {
+      data: {
+        items: prompts
       }
     }
   }
@@ -350,25 +362,102 @@ test('readSetupProfileGuideData returns cloned configs and tool options for a va
   const expectedConfigs = validSetupProfileConfigs()
   const toolOptions = [{ value: 'read_file', label: 'Read file' }]
   const response = validSetupProfileGuideResponse(configs, toolOptions)
-  const result = readSetupProfileGuideData(response, 7)
+  const promptResponse = validSetupPromptListResponse()
+  const promptItems = promptResponse.data.data.items
+  const result = readSetupProfileGuideData(response, promptResponse, 7)
 
   assert.deepEqual(result, {
     configs: expectedConfigs,
-    toolOptions: [{ value: 'read_file', label: 'Read file' }]
+    toolOptions: [{ value: 'read_file', label: 'Read file' }],
+    prompt: { id: 13, name: 'default', content: '' }
   })
   assert.notStrictEqual(result.configs, configs)
   assert.notStrictEqual(result.toolOptions, toolOptions)
+  assert.notStrictEqual(result.prompt, promptItems[0])
 
   result.configs.tool.enabled_tools.push('web_search')
   result.configs.channel.base_url = 'https://changed.example.test'
   result.toolOptions[0].label = 'Changed label'
+  result.prompt.content = 'Changed content'
 
   assert.deepEqual(configs, expectedConfigs)
   assert.deepEqual(toolOptions, [{ value: 'read_file', label: 'Read file' }])
+  assert.deepEqual(promptItems, [{ id: 13, name: 'default', content: '' }])
 })
 
 test('readSetupProfileGuideData returns null when the target profile is missing', () => {
-  assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(), 99), null)
+  assert.equal(
+    readSetupProfileGuideData(validSetupProfileGuideResponse(), validSetupPromptListResponse(), 99),
+    null
+  )
+})
+
+test('readSetupProfileGuideData returns null when profile prompt_id is missing or invalid', () => {
+  const missingPromptIdResponse = validSetupProfileGuideResponse()
+  delete missingPromptIdResponse.data.data.items[0].prompt_id
+
+  assert.equal(
+    readSetupProfileGuideData(missingPromptIdResponse, validSetupPromptListResponse(), 7),
+    null
+  )
+
+  for (const promptId of [0, -1, 1.5, '13', null]) {
+    const response = validSetupProfileGuideResponse()
+    response.data.data.items[0].prompt_id = promptId
+
+    assert.equal(
+      readSetupProfileGuideData(response, validSetupPromptListResponse(), 7),
+      null
+    )
+  }
+})
+
+test('readSetupProfileGuideData returns null when prompt items are not an array', () => {
+  for (const items of [null, {}, 'prompts']) {
+    assert.equal(
+      readSetupProfileGuideData(
+        validSetupProfileGuideResponse(),
+        validSetupPromptListResponse(items),
+        7
+      ),
+      null
+    )
+  }
+})
+
+test('readSetupProfileGuideData returns null when the associated prompt is missing', () => {
+  assert.equal(
+    readSetupProfileGuideData(
+      validSetupProfileGuideResponse(),
+      validSetupPromptListResponse([{ id: 99, name: 'other', content: '' }]),
+      7
+    ),
+    null
+  )
+})
+
+test('readSetupProfileGuideData returns null for malformed associated prompts', () => {
+  const nonPlainPrompt = Object.assign(new Date(0), {
+    id: 13,
+    name: 'default',
+    content: ''
+  })
+
+  for (const prompt of [
+    nonPlainPrompt,
+    { id: 13, name: '', content: '' },
+    { id: 13, name: 1, content: '' },
+    { id: 13, name: 'default', content: 1 }
+  ]) {
+    assert.equal(
+      readSetupProfileGuideData(
+        validSetupProfileGuideResponse(),
+        validSetupPromptListResponse([prompt]),
+        7
+      ),
+      null
+    )
+  }
 })
 
 test('readSetupProfileGuideData returns null when required config groups are missing', () => {
@@ -376,7 +465,14 @@ test('readSetupProfileGuideData returns null when required config groups are mis
     const configs = validSetupProfileConfigs()
     delete configs[group]
 
-    assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(configs), 7), null)
+    assert.equal(
+      readSetupProfileGuideData(
+        validSetupProfileGuideResponse(configs),
+        validSetupPromptListResponse(),
+        7
+      ),
+      null
+    )
   }
 })
 
@@ -389,7 +485,14 @@ test('readSetupProfileGuideData returns null when required tool arrays are missi
     const configs = validSetupProfileConfigs()
     delete configs.tool[arrayName]
 
-    assert.equal(readSetupProfileGuideData(validSetupProfileGuideResponse(configs), 7), null)
+    assert.equal(
+      readSetupProfileGuideData(
+        validSetupProfileGuideResponse(configs),
+        validSetupPromptListResponse(),
+        7
+      ),
+      null
+    )
   }
 })
 
@@ -404,7 +507,11 @@ test('readSetupProfileGuideData returns null for malformed tool options', () => 
     ['read_file', 'Read file']
   ]) {
     assert.equal(
-      readSetupProfileGuideData(validSetupProfileGuideResponse(undefined, [toolOption]), 7),
+      readSetupProfileGuideData(
+        validSetupProfileGuideResponse(undefined, [toolOption]),
+        validSetupPromptListResponse(),
+        7
+      ),
       null
     )
   }

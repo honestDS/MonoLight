@@ -39,13 +39,13 @@
         v-else-if="setupStatus.phase === 'ready' && (setupStatus.required || profileGuideActive)"
         class="setup-content"
       >
-        <el-steps v-if="!profileGuideStarted" :active="activeStep" finish-status="success" class="setup-steps">
+        <el-steps v-if="!profileGuideStarted" :active="activeStep" finish-status="success" class="setup-steps" align-center>
           <el-step :title="t('setup.step_admin')" />
           <el-step :title="t('setup.step_channel')" />
           <el-step :title="t('setup.step_profile')" />
         </el-steps>
-        <el-steps v-else :active="profileGuideStep" finish-status="success" class="setup-steps">
-          <el-step :title="t('profiles.context_summary_threshold')" />
+        <el-steps v-else :active="profileGuideStep" finish-status="success" class="setup-steps" align-center>
+          <el-step :title="t('profiles.base_settings')" />
           <el-step :title="t('profiles.security_settings')" />
           <el-step :title="t('profiles.tool_settings')" />
         </el-steps>
@@ -384,7 +384,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft, ArrowRight, Check, Loading, Refresh, Setting } from '@element-plus/icons-vue'
-import { openRouterApi, profileApi, setupApi } from '@/api'
+import { openRouterApi, profileApi, promptApi, setupApi } from '@/api'
 import LanguageSwitcher from '@/components/LanguageSwitcher.vue'
 import ChannelModelEntry from '@/components/ChannelModelEntry.vue'
 import ModelTestResultDialog from '@/components/ModelTestResultDialog.vue'
@@ -445,6 +445,7 @@ const profileGuideReady = ref(false)
 const profileGuideError = ref(null)
 const profileGuideSaving = ref(false)
 const profileGuideCommittedConfigs = ref(null)
+const profileGuideCommittedPromptContent = ref(null)
 const profileGuideRef = ref()
 
 const profileGuideResource = reactive({
@@ -456,6 +457,7 @@ const profileGuideResource = reactive({
 
 const profileGuideForm = reactive({
   configs: null,
+  prompt: null,
 })
 
 const profileGuideToolOptions = ref([])
@@ -995,16 +997,30 @@ async function loadProfileGuide() {
   profileGuideLoading.value = true
   profileGuideReady.value = false
   profileGuideError.value = null
+  profileGuideForm.configs = null
+  profileGuideForm.prompt = null
+  profileGuideCommittedConfigs.value = null
+  profileGuideCommittedPromptContent.value = null
+  profileGuideToolOptions.value = []
 
   try {
-    const response = await profileApi.list({ page: 1, size: 1000 })
-    const guideData = readSetupProfileGuideData(response, profileGuideResource.profile_id)
+    const [profileResponse, promptResponse] = await Promise.all([
+      profileApi.list({ page: 1, size: 1000 }),
+      promptApi.list({ page: 1, size: 1000 }),
+    ])
+    const guideData = readSetupProfileGuideData(
+      profileResponse,
+      promptResponse,
+      profileGuideResource.profile_id,
+    )
     if (!guideData) {
       throw new Error(t('setup.guide_load_failed'))
     }
 
     profileGuideForm.configs = guideData.configs
+    profileGuideForm.prompt = guideData.prompt
     profileGuideCommittedConfigs.value = cloneSetupProfileConfigs(guideData.configs)
+    profileGuideCommittedPromptContent.value = guideData.prompt.content
     profileGuideToolOptions.value = guideData.toolOptions
     profileGuideReady.value = true
   } catch (error) {
@@ -1035,14 +1051,40 @@ function previousProfileGuideStep() {
 function restoreProfileGuideDraft() {
   profileGuideRef.value?.discardPendingInputs()
   const configs = cloneSetupProfileConfigs(profileGuideCommittedConfigs.value)
-  if (!configs) return
-  profileGuideForm.configs = configs
+  if (configs) {
+    profileGuideForm.configs = configs
+  }
+  if (profileGuideForm.prompt && typeof profileGuideCommittedPromptContent.value === 'string') {
+    profileGuideForm.prompt.content = profileGuideCommittedPromptContent.value
+  }
 }
 
 async function saveProfileGuideStep() {
   if (!profileGuideReady.value || profileGuideSaving.value) return
 
   profileGuideRef.value?.commitPendingInputs()
+  const prompt = profileGuideForm.prompt
+  if (
+    !prompt ||
+    !Number.isInteger(prompt.id) ||
+    prompt.id <= 0 ||
+    typeof prompt.name !== 'string' ||
+    !prompt.name.trim() ||
+    typeof prompt.content !== 'string'
+  ) {
+    ElMessage.error(t('profiles.submit_failed'))
+    return
+  }
+
+  const shouldUpdatePrompt = (
+    profileGuideStep.value === 0 &&
+    prompt.content !== profileGuideCommittedPromptContent.value
+  )
+  if (shouldUpdatePrompt && prompt.content === '') {
+    ElMessage.warning(t('setup.default_prompt_required'))
+    return
+  }
+
   const configs = cloneSetupProfileConfigs(profileGuideForm.configs)
   if (!configs) {
     ElMessage.error(t('profiles.submit_failed'))
@@ -1059,6 +1101,28 @@ async function saveProfileGuideStep() {
 
     profileGuideForm.configs = updatedConfigs
     profileGuideCommittedConfigs.value = cloneSetupProfileConfigs(updatedConfigs)
+
+    if (shouldUpdatePrompt) {
+      const promptResponse = await promptApi.update(prompt.id, { content: prompt.content })
+      const updatedPrompt = promptResponse?.data?.data
+      if (
+        !updatedPrompt ||
+        updatedPrompt.id !== prompt.id ||
+        typeof updatedPrompt.name !== 'string' ||
+        !updatedPrompt.name.trim() ||
+        typeof updatedPrompt.content !== 'string'
+      ) {
+        throw new Error(t('prompts.submit_failed'))
+      }
+
+      profileGuideForm.prompt = {
+        id: updatedPrompt.id,
+        name: updatedPrompt.name,
+        content: updatedPrompt.content,
+      }
+      profileGuideCommittedPromptContent.value = updatedPrompt.content
+    }
+
     ElMessage.success(t('profiles.save_success'))
     advanceProfileGuideStep()
   } catch (error) {
