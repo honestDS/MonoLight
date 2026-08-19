@@ -5,9 +5,10 @@
       :active="activeSection"
       finish-status="success"
       process-status="process"
+      align-center
       class="setup-profile-guide__steps"
     >
-      <el-step :title="$t('profiles.context_summary_threshold')" />
+      <el-step :title="$t('profiles.base_settings')" />
       <el-step :title="$t('profiles.security_settings')" />
       <el-step :title="$t('profiles.tool_settings')" />
     </el-steps>
@@ -17,10 +18,26 @@
         <el-form :model="form" label-position="top" class="setup-profile-guide__form" @submit.prevent>
           <section v-if="activeSection === 0" class="setup-profile-guide__section">
             <h2 class="setup-profile-guide__section-title">
-              {{ $t('profiles.context_summary_threshold') }}
+              {{ $t('profiles.base_settings') }}
             </h2>
 
             <div class="setup-profile-guide__form-grid">
+              <el-form-item
+                class="setup-profile-guide__field setup-profile-guide__field--wide"
+                :label="$t('setup.default_prompt')"
+              >
+                <el-input
+                  v-model="form.prompt.content"
+                  type="textarea"
+                  :rows="8"
+                  :placeholder="$t('setup.default_prompt_placeholder')"
+                  class="setup-profile-guide__control"
+                />
+                <div class="setup-profile-guide__hint">
+                  {{ $t('setup.default_prompt_hint') }}
+                </div>
+              </el-form-item>
+
               <el-form-item
                 class="setup-profile-guide__field setup-profile-guide__field--wide"
                 :label="$t('profiles.context_summary_threshold')"
@@ -741,7 +758,9 @@ defineExpose({ commitPendingInputs, discardPendingInputs })
 }
 
 .setup-profile-guide :deep(.el-slider__input) {
-  max-width: 100%;
+  flex: 0 0 130px;
+  width: 130px;
+  max-width: 40%;
 }
 
 .step-forward-enter-active,

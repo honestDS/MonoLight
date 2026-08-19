@@ -242,9 +242,12 @@ test('SetupView has only the approved token persistence and submission contract'
   assert.doesNotMatch(setupSource, /sessionStorage\.setItem\(/)
   for (const forbidden of ['redirect', 'jwt_secret', 'encryption_key']) assert.doesNotMatch(setupSource, new RegExp(forbidden))
 
-  assert.match(setupSource, /import\s+\{\s*openRouterApi,\s*profileApi,\s*setupApi\s*\}\s+from\s+'@\/api'/)
+  assert.match(setupSource, /import\s+\{\s*openRouterApi,\s*profileApi,\s*promptApi,\s*setupApi\s*\}\s+from\s+'@\/api'/)
   assert.match(setupSource, /import\s+SetupProfileGuide\s+from\s+'@\/components\/SetupProfileGuide\.vue'/)
   assert.match(setupSource, /readSetupProfileGuideData/)
+  assert.match(setupSource, /const\s+profileGuideForm\s*=\s*reactive\(\{[\s\S]*?\bprompt:\s*null\b/)
+  assert.match(setupSource, /const\s+profileGuideCommittedPromptContent\s*=\s*ref\(null\)/)
+  assert.match(setupSource, /profileGuideForm\.prompt\s*=\s*[^;\n]+/)
   assert.match(setupSource, /const profileGuideActive = ref\(false\)/)
   assert.match(setupSource, /const profileGuideStarted = ref\(false\)/)
   assert.match(setupSource, /const profileGuideStep = ref\(0\)/)
@@ -257,10 +260,12 @@ test('SetupView has only the approved token persistence and submission contract'
 
   const setupSteps = [...setupSource.matchAll(/<el-steps\b[\s\S]*?<\/el-steps>/g)].map(match => match[0])
   assert.equal(setupSteps.length, 2)
+  assert.match(setupSteps[0], /(?:^|\s)align-center(?:\s|>)/)
+  assert.match(setupSteps[1], /(?:^|\s)align-center(?:\s|>)/)
   assert.match(setupSteps[0], /<el-steps\b[^>]*\bv-if="!profileGuideStarted"[^>]*>/)
   assert.match(setupSteps[1], /<el-steps\b[^>]*\bv-else\b[^>]*>/)
   assert.match(setupSteps[1], /:active="profileGuideStep"/)
-  for (const titleKey of ['context_summary_threshold', 'security_settings', 'tool_settings']) {
+  for (const titleKey of ['base_settings', 'security_settings', 'tool_settings']) {
     assert.match(setupSteps[1], new RegExp(`profiles\\.${titleKey}`))
   }
 
@@ -294,8 +299,13 @@ test('SetupView has only the approved token persistence and submission contract'
   assert.doesNotMatch(completeSetupSource, /\bloadProfileGuide\s*\(/)
 
   assert.match(setupSource, /profileApi\.list\(\{\s*page:\s*1,\s*size:\s*1000\s*\}\)/)
-  assert.match(setupSource, /readSetupProfileGuideData\(response,\s*profileGuideResource\.profile_id\)/)
+  assert.match(setupSource, /promptApi\.list\(\{\s*page:\s*1,\s*size:\s*1000\s*\}\)/)
+  assert.match(
+    setupSource,
+    /readSetupProfileGuideData\(\s*profileResponse,\s*promptResponse,\s*profileGuideResource\.profile_id\s*,?\s*\)/,
+  )
   assert.match(setupSource, /profileApi\.update\(profileGuideResource\.profile_id,\s*\{\s*configs\s*\}\)/)
+  assert.match(setupSource, /promptApi\.update\(prompt\.id,\s*\{\s*content:\s*prompt\.content\s*\}\)/)
   assert.match(setupSource, /profileGuideRef\.value\?\.commitPendingInputs\(\)/)
   assert.match(setupSource, /setupStatus\.required\s*\|\|\s*profileGuideActive/)
   assert.match(setupSource, /setupStatus\.required\s*===\s*false\s*&&\s*!profileGuideActive/)
@@ -396,6 +406,9 @@ test('SetupView keeps step transition boundaries and reduced-motion styles in th
 })
 
 test('SetupProfileGuide keeps the three optional configuration groups and source contract', () => {
+  const profileGuideStepsTag = profileGuideSource.match(/<el-steps\b[^>]*>/)?.[0]
+  assert.ok(profileGuideStepsTag)
+  assert.match(profileGuideStepsTag, /(?:^|\s)align-center(?:\s|>)/)
   assert.match(profileGuideSource, /<el-steps\b[^>]*\bv-if="showSteps"[^>]*>/)
   assert.match(profileGuideSource, /<el-steps[\s\S]*:active="activeSection"[\s\S]*class="setup-profile-guide__steps"/)
   assert.match(profileGuideSource, /showSteps:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/)
@@ -405,6 +418,7 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
   assert.match(profileGuideSource, /<section v-else class="setup-profile-guide__section">/)
 
   for (const field of [
+    /form\.prompt\.content/,
     /form\.configs\.other\.context_summary_threshold_percent/,
     /security\.audit_channel_id/,
     /security\.audit_model_id/,
@@ -420,6 +434,18 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
   ]) {
     assert.match(profileGuideSource, field)
   }
+  assert.match(
+    profileGuideSource,
+    /<el-slider\b[^>]*v-model\s*=\s*"form\.configs\.security\.audit_threshold"[^>]*:min\s*=\s*"1"[^>]*:max\s*=\s*"7"[^>]*show-stops\b[^>]*show-input\b[^>]*class\s*=\s*"setup-profile-guide__slider"[^>]*>/,
+  )
+  assert.match(
+    profileGuideSource,
+    /\.setup-profile-guide\s*:deep\(\.el-slider__input\)\s*\{\s*flex\s*:\s*0\s+0\s+130px\s*;\s*width\s*:\s*130px\s*;\s*max-width\s*:\s*40%\s*;\s*\}/,
+  )
+  for (const key of ['default_prompt', 'default_prompt_placeholder', 'default_prompt_hint']) {
+    assert.match(profileGuideSource, new RegExp(`setup\\.${key}`))
+  }
+  assert.ok(profileGuideSource.indexOf('form.prompt.content') < profileGuideSource.indexOf('form.configs.other.context_summary_threshold_percent'))
 
   assert.match(
     profileGuideSource,

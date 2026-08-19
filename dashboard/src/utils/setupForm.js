@@ -235,25 +235,50 @@ export function cloneSetupProfileConfigs(configs) {
   }
 }
 
-export function readSetupProfileGuideData(response, profileId) {
+export function readSetupProfileGuideData(profileResponse, promptResponse, profileId) {
   try {
     if (!Number.isInteger(profileId) || profileId <= 0) {
       return null
     }
 
-    const data = response?.data?.data
-    if (!Array.isArray(data?.items) || !Array.isArray(data?.meta?.tool_options)) {
+    const profileData = profileResponse?.data?.data
+    if (
+      !Array.isArray(profileData?.items) ||
+      !Array.isArray(profileData?.meta?.tool_options)
+    ) {
       return null
     }
 
-    const profile = data.items.find(item => item?.id === profileId)
+    const profile = profileData.items.find(item => item?.id === profileId)
+    if (!Number.isInteger(profile?.prompt_id) || profile.prompt_id <= 0) {
+      return null
+    }
+
+    const promptItems = promptResponse?.data?.data?.items
+    if (!Array.isArray(promptItems)) {
+      return null
+    }
+
+    const prompt = promptItems.find(item => item?.id === profile.prompt_id)
+    if (
+      !isPlainObject(prompt) ||
+      !Number.isInteger(prompt.id) ||
+      prompt.id <= 0 ||
+      prompt.id !== profile.prompt_id ||
+      typeof prompt.name !== 'string' ||
+      !prompt.name ||
+      typeof prompt.content !== 'string'
+    ) {
+      return null
+    }
+
     const configs = cloneSetupProfileConfigs(profile?.configs)
     if (!configs) {
       return null
     }
 
     const toolOptions = []
-    for (const option of data.meta.tool_options) {
+    for (const option of profileData.meta.tool_options) {
       if (
         !isPlainObject(option) ||
         typeof option.value !== 'string' ||
@@ -267,7 +292,15 @@ export function readSetupProfileGuideData(response, profileId) {
       toolOptions.push({ value: option.value, label: option.label })
     }
 
-    return { configs, toolOptions }
+    return {
+      configs,
+      prompt: {
+        id: prompt.id,
+        name: prompt.name,
+        content: prompt.content
+      },
+      toolOptions
+    }
   } catch {
     return null
   }
