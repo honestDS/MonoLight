@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import struct
 from collections.abc import Iterable, Mapping, Sized
 from numbers import Real
 from typing import Any, NoReturn
@@ -47,6 +49,46 @@ logger = get_logger(__name__)
 
 _VECTOR_COMPARISON_REL_TOL = 1e-5
 _VECTOR_COMPARISON_ABS_TOL = 1e-6
+
+
+def _vector_digest(vector: list[float]) -> str:
+    hasher = hashlib.sha256()
+    for value in vector:
+        hasher.update(struct.pack("!d", value))
+    return hasher.hexdigest()
+
+
+def _vector_norm(vector: list[float]) -> float:
+    return math.hypot(*vector)
+
+
+def _cosine_similarity(
+    actual_vector: list[float],
+    expected_vector: list[float],
+    actual_norm: float,
+    expected_norm: float,
+) -> float | None:
+    if actual_norm == 0.0 or expected_norm == 0.0:
+        return None
+    return math.fsum((actual_value / actual_norm) * (expected_value / expected_norm) for actual_value, expected_value in zip(actual_vector, expected_vector))
+
+
+def _batch_vector_diagnostics(
+    records: list[LongTermMemoryRecord],
+    vectors: list[list[float]],
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for record, vector in zip(records, vectors):
+        diagnostics.append(
+            {
+                "memory_id": record.id,
+                "vector_item_id": record.vector_item_id,
+                "vector_digest": _vector_digest(vector),
+                "vector_norm": _vector_norm(vector),
+                "dimension": len(vector),
+            }
+        )
+    return diagnostics
 
 
 def _raise_collection_validation_failure(
@@ -143,6 +185,13 @@ async def upsert_records(
         raise
     except Exception as exc:
         raise retryable(ERR_MEMORY_JOB_VECTOR_WRITE_FAILED) from exc
+    logger.bind(
+        uid=context.job.uid,
+        job_id=context.job.id,
+        collection_name=collection_name,
+        vector_stage="upsert_completed",
+        vector_diagnostics=_batch_vector_diagnostics(records, vectors),
+    ).debug("Memory vector batch upsert diagnostics")
 
 
 async def ensure_collection(
@@ -379,6 +428,13 @@ async def reconcile_collection(
         await context.checkpoint()
         batch_records = records[start : start + BATCH_SIZE]
         expected_vectors = await embed_records(context, batch_records, config)
+        logger.bind(
+            uid=context.job.uid,
+            job_id=context.job.id,
+            collection_name=collection_name,
+            vector_stage="final_validation_regenerated",
+            vector_diagnostics=_batch_vector_diagnostics(batch_records, expected_vectors),
+        ).debug("Memory vector batch final validation diagnostics")
         for record, expected_vector in zip(batch_records, expected_vectors):
             actual = final_items.get(record.vector_item_id)
             if actual is None:
@@ -405,12 +461,51 @@ async def reconcile_collection(
                     rel_tol=_VECTOR_COMPARISON_REL_TOL,
                     abs_tol=_VECTOR_COMPARISON_ABS_TOL,
                 ):
+                    mismatched_coordinate_count = 0
+                    max_abs_difference = 0.0
+                    for compared_actual_value, compared_expected_value in zip(actual_vector, expected_vector):
+                        compared_absolute_difference = abs(compared_actual_value - compared_expected_value)
+                        max_abs_difference = max(max_abs_difference, compared_absolute_difference)
+                        if not math.isclose(
+                            compared_actual_value,
+                            compared_expected_value,
+                            rel_tol=_VECTOR_COMPARISON_REL_TOL,
+                            abs_tol=_VECTOR_COMPARISON_ABS_TOL,
+                        ):
+                            mismatched_coordinate_count += 1
+                    actual_vector_norm = _vector_norm(actual_vector)
+                    expected_vector_norm = _vector_norm(expected_vector)
+                    absolute_difference = abs(actual_value - expected_value)
+                    logger.bind(
+                        uid=context.job.uid,
+                        job_id=context.job.id,
+                        collection_name=collection_name,
+                        memory_id=record.id,
+                        vector_item_id=record.vector_item_id,
+                        vector_stage="final_validation_mismatch",
+                        actual_vector_digest=_vector_digest(actual_vector),
+                        expected_vector_digest=_vector_digest(expected_vector),
+                        actual_vector_norm=actual_vector_norm,
+                        expected_vector_norm=expected_vector_norm,
+                        cosine_similarity=_cosine_similarity(
+                            actual_vector,
+                            expected_vector,
+                            actual_vector_norm,
+                            expected_vector_norm,
+                        ),
+                        mismatched_coordinate_count=mismatched_coordinate_count,
+                        max_abs_difference=max_abs_difference,
+                        first_mismatch_coordinate=coordinate,
+                        actual_value=actual_value,
+                        expected_value=expected_value,
+                        absolute_difference=absolute_difference,
+                    ).debug("Memory vector final validation mismatch diagnostics")
                     _raise_collection_validation_failure(
                         context,
                         collection_name,
                         stage="final_vector_validation",
                         category="vector_value_mismatch",
-                        difference_summary=f"coordinate={coordinate}",
+                        difference_summary=f"memory_id={record.id},coordinate={coordinate}",
                     )
 
     logger.bind(
