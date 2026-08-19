@@ -6,6 +6,8 @@ from app.core.i18n import t
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
+DASHBOARD_STATIC_DIR = ROOT_DIR / "app" / "static" / "dashboard"
+DASHBOARD_INDEX_PATH = DASHBOARD_STATIC_DIR / "index.html"
 DASHBOARD_PUBLIC_DIR = DASHBOARD_DIR / "public"
 FAVICON_PATH = DASHBOARD_PUBLIC_DIR / "favicon.ico"
 

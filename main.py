@@ -1,8 +1,10 @@
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 import app.warning_filters  # noqa: F401
 from app.api.v1.auth import router as auth_router
@@ -21,7 +23,7 @@ from app.api.v1.users import router as user_router
 from app.core.event_loop import get_uvicorn_loop
 from app.core.log import LogManager, get_logger
 from app.core.log_broadcaster import log_broadcaster
-from app.core.paths import DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
+from app.core.paths import DASHBOARD_STATIC_DIR, DATA_DIR, DEFAULT_LOG_FILE_PATH, TEMP_DIR
 from app.core.session_notifier import session_notifier
 from app.core.utils.time import get_local_time
 from app.handler import register_handlers, register_middlewares
@@ -70,11 +72,19 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(scheduled_task_router, prefix="/api/v1")
 
 
+def register_dashboard(app: FastAPI, dashboard_dir: Path = DASHBOARD_STATIC_DIR) -> None:
+    if not (dashboard_dir / "index.html").is_file():
+        return
+
+    app.mount("/", StaticFiles(directory=dashboard_dir, html=True), name="dashboard")
+
+
 def create_app() -> FastAPI:
     fastapi_app = FastAPI(lifespan=lifespan, title="Monolight API", version="1.0.0")
     register_middlewares(fastapi_app)
     register_handlers(fastapi_app)
     register_routers(fastapi_app)
+    register_dashboard(fastapi_app)
     return fastapi_app
 
 

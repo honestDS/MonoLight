@@ -72,33 +72,84 @@ MonoLight 不只是一个对话界面或单次工具调用封装，而是一套�
 
 ## 运行服务
 
-项目包含 Web 服务和四个独立 Worker：消息平台 Worker、后台任务 Worker、终端 Worker 和会话最终回复 Worker。Web 服务支持多个 Worker，四个后台 Worker 通过数据库租约保证同一数据库范围内各自只有一个有效实例。
+MonoLight 包含一个 Web 服务和五个独立 Worker：消息平台 Worker、后台任务 Worker、长期记忆 Worker、终端 Worker、会话最终回复 Worker。Web 服务可通过 `APP_WORKERS` 启动多个 Web Worker；五个后台 Worker 使用数据库租约，保证在同一数据库范围内每类 Worker 只有一个有效实例。
 
-在 `.env` 中配置监听地址、端口和 Web Worker 数量：
+### 共同后端准备
+
+三种方式都先在项目根目录安装后端依赖：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+在根目录 `.env` 配置数据库、监听地址、端口和 Web Worker 数量。SQLite 与 MySQL 的 `DATABASE_URL` 二选一：
 
 ```dotenv
+# SQLite
+DATABASE_URL=sqlite+aiosqlite:///./data/monolight.db
+
+# MySQL（替换上面的 SQLite 配置）
+# DATABASE_URL=mysql+aiomysql://username:password@127.0.0.1:3306/monolight
+
 APP_HOST=0.0.0.0
 APP_PORT=8001
 APP_WORKERS=1
 ```
 
-项目启动默认使用SQLite数据库，如需配置Mysql请在 `.env` 中根据MySQL示例进行启动,并删除或注释 SQLite 相关配置项：
+`APP_HOST` 默认值为 `0.0.0.0`，只能填写 IP 地址字面量；不接受主机名，也拒绝 IPv6 未指定地址 `::`。`0.0.0.0` 表示监听所有网卡；配置为该地址时，控制台打印的 `127.0.0.1` 地址只供服务器本机访问，其他设备需使用服务器实际 IP 或反向代理域名。通过反向代理对外提供服务时，建议将其设为 `127.0.0.1`。当前示例端口为 `8001`，可按部署环境修改。
 
-```dotenv
-# SQLite 配置
-# APP_DATABASE=sqlite:///./data/monooligh.db
+### 方式一：一体化部署（推荐）
 
-# MySQL 配置
-# APP_DATABASE=mysql+pymysql://root:123456@localhost:3306/monooligh
-```
-
-推荐在 Windows、Linux 和 macOS 上使用统一启动器：
+这是默认且推荐的部署方式。发布包预置 `app/static/dashboard/` 中的 Dashboard 构建资源，部署机器不需要安装 Node.js 或 npm。执行：
 
 ```bash
 python start.py
 ```
 
-启动器会在启动 Web 服务及四个后台 Worker 前完成系统密钥与锁文件完整性检查、数据库建表与迁移和系统数据初始化；任一步骤失败都不会启动任何子进程。任一子进程异常退出或收到终止信号时，启动器会关闭其余子进程。
+Dashboard、API 和 WebSocket 由同一 Web 服务提供，浏览器访问时保持同源。`start.py` 不执行前端构建，只校验预构建资源是否存在；完整启动后，控制台会打印英文 `Dashboard access URL: ...` 访问地址。
+
+启动器会在创建任何子进程前校验预构建资源和系统密钥完整性，完成数据库建表与迁移及系统初始化；全部成功后才启动 Web 服务和五个 Worker。任一前置步骤失败时不会启动子进程；子进程启动后如有任一进程异常退出或收到终止信号，启动器会清理其余进程。
+
+### 方式二：前后端分离部署
+
+后端仍必须通过 `python start.py` 启动。当前启动器仍要求保留 `app/static/dashboard/` 的预构建资源，即使外部前端不使用这些文件也不能删除。
+
+前端构建需要 Node.js 和 npm。推荐让浏览器保持同源：独立静态服务器托管前端，并将 `/api`（包括 WebSocket Upgrade）反向代理到后端。此方式保持根 `.env` 中以下变量为注释状态，前端会使用当前浏览器源的 `/api/v1`：
+
+```dotenv
+# VUE_APP_API_BASE_URL=https://api.example.com/api/v1
+# VUE_APP_WS_BASE_URL=wss://api.example.com
+```
+
+只有让浏览器直接跨域访问后端时，才取消注释并按实际地址配置这两个变量。`VUE_APP_API_BASE_URL` 必须包含 `/api/v1`；`VUE_APP_WS_BASE_URL` 只填写 WebSocket 服务根地址或反向代理前缀，不填写最终的 `/api/v1/.../ws` 端点。它们是前端构建期变量，修改后必须重新构建：
+
+```bash
+cd dashboard
+npm install
+npm run build
+```
+
+构建产物固定输出到 `app/static/dashboard/`，随后将其复制或发布到独立静态服务器。
+
+初始化流程使用 `SameSite=Strict` Cookie。跨域直连时，前后端至少应为同一站点下且都使用 HTTPS 的子域，例如 `console.example.com` 和 `api.example.com`；完全不同的站点会导致初始化会话失败。生产环境应使用 HTTPS 和 WSS。
+
+### 方式三：开发模式
+
+根目录 `.env` 中的 `VUE_APP_API_BASE_URL` 和 `VUE_APP_WS_BASE_URL` 通常保持注释。第一个终端在项目根目录启动后端：
+
+```bash
+python start.py
+```
+
+第二个终端进入 `dashboard`；首次运行先安装依赖，再启动 Vue 开发服务器：
+
+```bash
+cd dashboard
+npm install
+npm run serve
+```
+
+Vue 开发服务器读取根 `.env` 的 `APP_HOST` 和 `APP_PORT`，将 `/api` 的 HTTP 和 WebSocket 请求代理到后端，并提供热更新。修改 `APP_HOST` 或 `APP_PORT` 后需要重启 `npm run serve`；开发时不需要每次执行 `npm run build`。
 
 需要分别调试各进程时，先执行一次全局初始化：
 
@@ -112,11 +163,14 @@ python -c "import asyncio; from start import initialize_system; asyncio.run(init
 python main.py
 python -m app.workers.message_platform
 python -m app.workers.background_task
+python -m app.workers.memory
 python -m app.workers.terminal
 python -m app.workers.session_reply
 ```
 
-多实例部署时，所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
+### 多实例部署
+
+所有实例必须连接同一个数据库。未取得租约的后台 Worker 会保持待命，并在当前持有者退出或租约过期后自动接管。
 
 ## 自动化测试
 项目已接入自动化测试体系，涵盖单元测试、初始化逻辑测试以及 API 集成测试。

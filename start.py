@@ -1,5 +1,6 @@
 import asyncio
 import http.client
+import ipaddress
 import logging
 import os
 import signal
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from app.core.event_loop import get_uvicorn_loop
+from app.core.paths import DASHBOARD_INDEX_PATH
 from app.core.system_secrets import initialize_system_secrets
 
 DEFAULT_HOST = "0.0.0.0"
@@ -43,13 +45,34 @@ def _parse_positive_int(name: str, default: int, *, maximum: int | None = None) 
     return value
 
 
+def _parse_host() -> str:
+    host = (os.getenv("APP_HOST") or "").strip() or DEFAULT_HOST
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError("APP_HOST must be a valid IPv4 or IPv6 address literal") from exc
+
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.scope_id is not None:
+            raise ValueError("APP_HOST must be an unscoped IPv4 or IPv6 address literal")
+        if address.is_unspecified:
+            raise ValueError("APP_HOST must not be the unspecified IPv6 address")
+
+    return str(address)
+
+
 def load_start_config() -> StartConfig:
     load_dotenv()
     return StartConfig(
-        host=(os.getenv("APP_HOST") or DEFAULT_HOST).strip(),
+        host=_parse_host(),
         port=_parse_positive_int("APP_PORT", DEFAULT_PORT, maximum=65535),
         web_workers=_parse_positive_int("APP_WORKERS", DEFAULT_WEB_WORKERS),
     )
+
+
+def validate_dashboard_assets() -> None:
+    if not DASHBOARD_INDEX_PATH.is_file():
+        raise RuntimeError(f"Pre-built Dashboard assets are missing: {DASHBOARD_INDEX_PATH}")
 
 
 def _subprocess_options() -> dict:
@@ -121,9 +144,27 @@ async def initialize_system() -> None:
 
 
 def _connect_host(host: str) -> str:
-    if host in {"0.0.0.0", "::", ""}:
+    if host == "0.0.0.0":
         return "127.0.0.1"
     return host
+
+
+def build_access_url(config: StartConfig) -> str:
+    host = _connect_host(config.host)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{config.port}/"
+
+
+def _should_color_access_url() -> bool:
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def report_access_url(config: StartConfig) -> None:
+    message = f"Dashboard access URL: {build_access_url(config)} you can access it in your browser or use."
+    if _should_color_access_url():
+        message = f"\033[1;92m{message}\033[0m"
+    print(message, flush=True)
 
 
 def wait_for_web_service(process: subprocess.Popen, config: StartConfig) -> None:
@@ -220,6 +261,7 @@ def _restore_signal_handlers(previous_handlers: dict[int, signal.Handlers]) -> N
 
 def run() -> int:
     config = load_start_config()
+    validate_dashboard_assets()
     asyncio.run(initialize_system())
     process_options = _subprocess_options()
     child_environment = os.environ.copy()
@@ -247,6 +289,7 @@ def run() -> int:
         session_reply_process = subprocess.Popen(build_session_reply_command(), env=child_environment, **process_options)
         processes.append(session_reply_process)
         report_process_started("Session reply worker", session_reply_process)
+        report_access_url(config)
 
         while True:
             for process in processes:
