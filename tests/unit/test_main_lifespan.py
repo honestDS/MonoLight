@@ -1,7 +1,38 @@
+import httpx
 import pytest
 from fastapi import FastAPI
 
 import main
+
+
+def test_register_dashboard_skips_mount_when_index_is_missing(tmp_path):
+    app = FastAPI()
+
+    main.register_dashboard(app, tmp_path)
+
+    assert "dashboard" not in {route.name for route in app.routes}
+
+
+@pytest.mark.asyncio
+async def test_register_dashboard_serves_index_and_preserves_prior_api_route(tmp_path):
+    index_html = "<html><body>Dashboard</body></html>"
+    (tmp_path / "index.html").write_text(index_html, encoding="utf-8")
+    app = FastAPI()
+
+    @app.get("/api/test")
+    async def test_api_route():
+        return {"status": "ok"}
+
+    main.register_dashboard(app, tmp_path)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        index_response = await client.get("/")
+        api_response = await client.get("/api/test")
+
+    assert index_response.status_code == 200
+    assert index_response.text == index_html
+    assert api_response.status_code == 200
+    assert api_response.json() == {"status": "ok"}
 
 
 @pytest.mark.asyncio

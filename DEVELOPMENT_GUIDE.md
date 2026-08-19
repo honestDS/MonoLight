@@ -63,6 +63,11 @@ Monolight 是一个基于 **FastAPI** 与 **SQLAlchemy** 的轻量级 AI 转发�
   - 测试必须基于目标源码的实际行为编写；编写测试前应完整阅读目标实现，严禁凭假设构造断言或 Mock。
   - 当前测试环境不提供 DOM、Vue 组件挂载或端到端浏览器能力；涉及这些行为时仍需完成实际页面验证，不得用纯函数测试替代交互验证。
 - **前端测试命令**：进入 `dashboard` 目录执行 `npm test`，该命令会运行 `tests/*.test.js`。
+- **前端开发服务器**：`npm run serve` 通过 `dashboard/vue.config.js` 读取项目根 `.env` 的 `APP_HOST`/`APP_PORT`，代理 `/api` 的 HTTP 和 WebSocket；修改端口后必须重启开发服务器。
+- **前端发布构建**：
+  - Vue 源码位于 `dashboard/`，执行 `npm run build` 时固定输出到 `app/static/dashboard/`。
+  - 前端源码变更影响发布页面时，开发者必须重新构建并同步提交构建产物。
+  - Node.js 仅作为前端开发和构建依赖；运行 `python start.py` 的部署环境不得依赖 Node.js。
 
 ## 七、 异常处理规范
 1. 业务异常必须继承自 `app.core.exceptions` 中的 `BaseBusinessException`。

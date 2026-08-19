@@ -93,6 +93,58 @@ def test_load_start_config_reads_worker_count_from_environment(monkeypatch):
     assert config == start.StartConfig(host="127.0.0.1", port=9000, web_workers=3)
 
 
+@pytest.mark.parametrize("app_host", [None, "   "])
+def test_load_start_config_defaults_missing_or_blank_app_host(monkeypatch, app_host):
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setenv("APP_PORT", "8000")
+    monkeypatch.setenv("APP_WORKERS", "1")
+    if app_host is None:
+        monkeypatch.delenv("APP_HOST", raising=False)
+    else:
+        monkeypatch.setenv("APP_HOST", app_host)
+
+    config = start.load_start_config()
+
+    assert config.host == "0.0.0.0"
+
+
+@pytest.mark.parametrize(
+    ("app_host", "expected_host"),
+    [
+        ("192.0.2.10", "192.0.2.10"),
+        ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"),
+    ],
+)
+def test_load_start_config_accepts_and_normalizes_app_host(monkeypatch, app_host, expected_host):
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setenv("APP_PORT", "8000")
+    monkeypatch.setenv("APP_WORKERS", "1")
+    monkeypatch.setenv("APP_HOST", app_host)
+
+    config = start.load_start_config()
+
+    assert config.host == expected_host
+
+
+@pytest.mark.parametrize(
+    "app_host",
+    [
+        "example.com",
+        "http://127.0.0.1:8000",
+        "127.0.0.1:8000",
+        "::",
+        "0:0:0:0:0:0:0:0",
+        "fe80::1%eth0",
+    ],
+)
+def test_load_start_config_rejects_invalid_app_host(monkeypatch, app_host):
+    monkeypatch.setattr(start, "load_dotenv", lambda: None)
+    monkeypatch.setenv("APP_HOST", app_host)
+
+    with pytest.raises(ValueError, match="APP_HOST"):
+        start.load_start_config()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -170,6 +222,45 @@ def test_report_process_started_includes_name_and_pid(capsys):
     assert capsys.readouterr().out == "Background task worker process started [PID 4321]\n"
 
 
+@pytest.mark.parametrize(
+    ("config", "expected_url"),
+    [
+        (start.StartConfig(host="0.0.0.0", port=8001, web_workers=1), "http://127.0.0.1:8001/"),
+        (start.StartConfig(host="192.0.2.10", port=9123, web_workers=1), "http://192.0.2.10:9123/"),
+        (start.StartConfig(host="::1", port=9123, web_workers=1), "http://[::1]:9123/"),
+    ],
+)
+def test_build_access_url_uses_local_accessible_host(config, expected_url):
+    assert start.build_access_url(config) == expected_url
+
+
+def test_report_access_url_prints_english_dashboard_log(capsys, monkeypatch):
+    config = start.StartConfig(host="0.0.0.0", port=8001, web_workers=1)
+    monkeypatch.setattr(start, "_should_color_access_url", lambda: False)
+
+    start.report_access_url(config)
+
+    assert capsys.readouterr().out == "Dashboard access URL: http://127.0.0.1:8001/ you can access it in your browser or use.\n"
+
+
+def test_validate_dashboard_assets_accepts_existing_index(tmp_path, monkeypatch):
+    index_path = tmp_path / "index.html"
+    index_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(start, "DASHBOARD_INDEX_PATH", index_path)
+
+    start.validate_dashboard_assets()
+
+
+def test_validate_dashboard_assets_rejects_missing_index(tmp_path, monkeypatch):
+    index_path = tmp_path / "index.html"
+    monkeypatch.setattr(start, "DASHBOARD_INDEX_PATH", index_path)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        start.validate_dashboard_assets()
+
+    assert str(index_path) in str(exc_info.value)
+
+
 def test_run_initializes_system_before_starting_processes(monkeypatch):
     events = []
     process = ExitedProcess(return_code=1)
@@ -183,15 +274,47 @@ def test_run_initializes_system_before_starting_processes(monkeypatch):
         return process
 
     monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=2))
+    monkeypatch.setattr(start, "validate_dashboard_assets", lambda: events.append("dashboard"))
     monkeypatch.setattr(start.asyncio, "run", run_coroutine)
     monkeypatch.setattr(start.subprocess, "Popen", start_process)
     monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: None)
+    monkeypatch.setattr(start, "report_access_url", lambda config: events.append("access_url"))
     monkeypatch.setattr(start, "stop_processes", lambda processes: None)
 
     return_code = start.run()
 
     assert return_code == 1
-    assert events == ["initialize", "process", "process", "process", "process", "process", "process"]
+    assert events == ["dashboard", "initialize", "process", "process", "process", "process", "process", "process", "access_url"]
+
+
+def test_run_rejects_missing_dashboard_before_initializing_or_starting_processes(tmp_path, monkeypatch):
+    events = []
+    index_path = tmp_path / "index.html"
+    validate_dashboard_assets = start.validate_dashboard_assets
+
+    def validate_dashboard():
+        events.append("dashboard")
+        validate_dashboard_assets()
+
+    def run_coroutine(coroutine):
+        events.append("initialize")
+        coroutine.close()
+
+    def start_process(*args, **kwargs):
+        events.append("process")
+        return ExitedProcess(return_code=1)
+
+    monkeypatch.setattr(start, "DASHBOARD_INDEX_PATH", index_path)
+    monkeypatch.setattr(start, "load_start_config", lambda: start.StartConfig(host="127.0.0.1", port=8000, web_workers=1))
+    monkeypatch.setattr(start, "validate_dashboard_assets", validate_dashboard)
+    monkeypatch.setattr(start.asyncio, "run", run_coroutine)
+    monkeypatch.setattr(start.subprocess, "Popen", start_process)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        start.run()
+
+    assert str(index_path) in str(exc_info.value)
+    assert events == ["dashboard"]
 
 
 def test_run_propagates_system_secret_initialization_error_before_starting_processes(monkeypatch):
@@ -218,9 +341,8 @@ def test_run_propagates_system_secret_initialization_error_before_starting_proce
     ("host", "expected"),
     [
         ("0.0.0.0", "127.0.0.1"),
-        ("::", "127.0.0.1"),
-        ("", "127.0.0.1"),
         ("192.0.2.1", "192.0.2.1"),
+        ("::1", "::1"),
     ],
 )
 def test_connect_host_converts_wildcard_addresses(host, expected):
@@ -376,6 +498,7 @@ def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypa
     process = ExitedProcess(return_code=None)
     stopped_processes = []
     restored_handlers = []
+    reported_access_urls = []
     previous_handlers = {start.signal.SIGTERM: object()}
 
     def run_coroutine(coroutine):
@@ -388,9 +511,11 @@ def test_run_stops_children_and_restores_handlers_after_shutdown_signal(monkeypa
     monkeypatch.setattr(start, "_restore_signal_handlers", restored_handlers.append)
     monkeypatch.setattr(start, "stop_processes", lambda processes: stopped_processes.append(list(processes)))
     monkeypatch.setattr(start, "wait_for_web_service", lambda process, config: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(start, "report_access_url", reported_access_urls.append)
 
     return_code = start.run()
 
     assert return_code == 0
     assert stopped_processes == [[process]]
     assert restored_handlers == [previous_handlers]
+    assert reported_access_urls == []

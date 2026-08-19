@@ -1,11 +1,11 @@
 import axios from 'axios'
 import i18n from '../i18n'
 import { truncateErrorMessage } from '../utils/errorMessage.js'
+import { resolveApiBaseUrl, resolveWebSocketBaseUrl } from '../utils/runtimeEndpoints.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
-const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8001/api/v1'
-const API_BASE_URL = process.env.VUE_APP_API_BASE_URL || DEFAULT_API_BASE_URL
+const API_BASE_URL = resolveApiBaseUrl(process.env.VUE_APP_API_BASE_URL, window.location.origin)
 const API_ORIGIN = new URL(API_BASE_URL, window.location.origin).origin
 
 const request = axios.create({
@@ -15,7 +15,7 @@ const request = axios.create({
 
 const withSetupCredentials = (config = {}) => ({ ...config, withCredentials: true })
 
-const WS_BASE_URL = process.env.VUE_APP_WS_BASE_URL || API_ORIGIN.replace(/^http/, 'ws')
+const WS_BASE_URL = resolveWebSocketBaseUrl(process.env.VUE_APP_WS_BASE_URL, API_BASE_URL, window.location.origin)
 
 const getCurrentLocale = () => localStorage.getItem('locale') || 'zh'
 

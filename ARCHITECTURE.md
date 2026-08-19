@@ -7,7 +7,7 @@
 ```text
 Monoligh/
 ├── app/                    # FastAPI 后端源码
-├── dashboard/              # Vue 管理与聊天前端
+├── dashboard/              # Vue 管理与聊天前端源码
 ├── data/                   # 运行期持久化数据
 ├── scripts/                # 数据库迁移与维护脚本
 ├── temp/                   # 运行期临时文件
@@ -33,6 +33,8 @@ Monoligh/
 
 ```text
 app/
+├── static/
+│   └── dashboard/           # 随发布包分发并由 FastAPI 托管的 Vue 生产构建产物
 ├── adapters/               # 外部对话与消息平台适配
 ├── api/                    # HTTP 与 WebSocket 接口
 ├── core/                   # 应用服务、领域能力与通用组件
@@ -472,13 +474,16 @@ app/transformers/
 
 ```text
 dashboard/
-├── dist/                   # 构建产物
+├── devServerProxy.cjs       # 从项目根 .env 解析 Vue 开发代理目标
 ├── public/                 # 静态资源模板
 ├── src/                    # Vue 源码
 ├── tests/                  # 前端自动化测试
+├── vue.config.js           # Vue 构建配置，npm run build 输出到 app/static/dashboard/
 ├── package-lock.json       # 前端依赖锁定
 └── package.json            # 前端依赖与脚本配置
 ```
+
+开发服务器将同源 `/api` 的 HTTP/WebSocket 请求代理到 `APP_HOST`/`APP_PORT` 指定的后端；生产环境仍由 FastAPI 托管预构建资源。
 
 ### 前端源码：`dashboard/src/`
 
@@ -564,7 +569,7 @@ database / vector storage / external model services
 
 ## 进程边界
 
-- Web 进程承载 FastAPI 接口、WebSocket 接口和对话适配入口。
+- Web 进程同时承载 FastAPI 接口、WebSocket 接口、对话适配入口和预构建 Dashboard 静态资源。
 - 后台 Worker 进程承载通用任务、长期记忆作业、消息平台、会话回复和交互终端等独立能力。
 - Web 进程与 Worker 进程通过核心服务及持久化资源共享应用数据，不直接形成前端依赖。
 - 数据库、向量存储、日志、审计文件和临时文件构成运行期资源边界。

@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -45,6 +46,7 @@ from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.providers.database import get_db
 from app.schemas.setup import SetupAdminInput, SetupChannelInput, SetupCompleteRequest, SetupProfileInput
+from main import register_dashboard
 
 FIXED_ACCESS_TOKEN = "setup-api-fixed-token"
 FIXED_JWT_SECRET = "setup-api-fixed-jwt-secret"
@@ -336,6 +338,55 @@ async def test_setup_status_rejects_non_readable_states(
     assert payload["message"] == t(expected_error)
     assert payload["data"] is None
     assert payload["data"] != {"required": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://127.0.0.1:9123", "https://setup.example.test:9443"],
+)
+async def test_setup_dashboard_static_hosting_preserves_setup_cookie_for_models(
+    setup_app: FastAPI,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+) -> None:
+    index_html = "<html><body>Setup dashboard</body></html>"
+    dashboard_dir = tmp_path / "dashboard"
+    dashboard_dir.mkdir()
+    (dashboard_dir / "index.html").write_text(index_html, encoding="utf-8")
+    delegate_calls: list[None] = []
+
+    async def fake_list_channel_models(*, payload: Any, _admin: dict[str, Any]) -> Any:
+        delegate_calls.append(None)
+        return setup_api.StandardResponse.success(data={"models": [{"id": "setup-model"}]})
+
+    monkeypatch.setattr(setup_api, "list_channel_models", fake_list_channel_models)
+    register_dashboard(setup_app, dashboard_dir)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=setup_app),
+        base_url=base_url,
+    ) as client:
+        index_response = await client.get("/")
+        status_response = await client.get("/api/v1/setup/status")
+        models_response = await client.post(
+            "/api/v1/setup/models",
+            json={
+                "api_key": "setup-models-api-key",
+                "base_url": "https://models.example.test/v1",
+            },
+        )
+
+        assert client.cookies.get(SETUP_SESSION_COOKIE_NAME) == _setup_cookie_value(status_response)
+
+    assert index_response.status_code == 200
+    assert index_response.text == index_html
+    status_payload = _assert_standard_response(status_response, 200)
+    assert status_payload["data"] == {"required": True}
+    models_payload = _assert_standard_response(models_response, 200)
+    assert models_payload["data"] == {"models": [{"id": "setup-model"}]}
+    assert delegate_calls == [None]
 
 
 @pytest.mark.asyncio
