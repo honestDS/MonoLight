@@ -26,6 +26,39 @@
   box-shadow: 0 10px 30px rgba(0,0,0,0.08);
   display: flex;
   overflow: hidden;
+  position: relative;
+}
+
+.github-link {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.github-link:hover {
+  background-color: rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.github-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.github-icon {
+  display: block;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
 }
 
 /* 左侧区域：深色调，与侧边栏呼应 */

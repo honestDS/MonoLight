@@ -81,6 +81,15 @@
             <span class="breadcrumb">{{ currentRouteName }}</span>
           </div>
           <div class="header-right">
+            <a
+              class="github-link"
+              href="https://github.com/honestDS/MonoLight"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="GitHub"
+            >
+              <img :src="githubIcon" alt="GitHub" class="github-icon">
+            </a>
             <LanguageSwitcher class="header-lang-switcher" />
             <el-button type="text" @click="logout">{{ $t('common.logout') }}</el-button>
           </div>
@@ -104,6 +113,7 @@
 import { useResizeObserver } from './composables/useResizeObserver'
 import { routeNameMap } from './constants'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
+import githubIcon from './assets/svg/github.svg'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 
@@ -114,6 +124,11 @@ export default {
   name: 'App',
   components: {
     LanguageSwitcher
+  },
+  data() {
+    return {
+      githubIcon
+    }
   },
 
   computed: {
