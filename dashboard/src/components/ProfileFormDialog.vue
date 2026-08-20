@@ -20,7 +20,11 @@
                     <el-option v-for="item in prompts" :key="item.id" :label="item.name" :value="item.id"></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.context_summary_threshold')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.context_summary_threshold') }}
+                    <HelpTooltip :content="$t('profiles.context_summary_threshold_hint')" />
+                  </template>
                   <el-select v-model="form.configs.other.context_summary_threshold_percent" class="full-width-input">
                     <el-option
                       v-for="percent in contextSummaryThresholdOptions"
@@ -29,7 +33,6 @@
                       :value="percent"
                     ></el-option>
                   </el-select>
-                  <div class="help-text mt-5">{{ $t('profiles.context_summary_threshold_hint') }}</div>
                 </el-form-item>
               </div>
             </div>
@@ -55,61 +58,93 @@
                 class="mb-15"
               />
               <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.long_term_memory_settings') }}</div>
-                <el-form-item :label="$t('profiles.long_term_memory_enabled')">
+                <div class="settings-section-title">
+                  {{ $t('profiles.long_term_memory_settings') }}
+                  <HelpTooltip v-if="dialogType !== 'edit'" :content="$t('profiles.memory_embedding_create_hint')" />
+                </div>
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.long_term_memory_enabled') }}
+                    <HelpTooltip :content="$t('profiles.long_term_memory_enabled_hint')" />
+                  </template>
                   <el-switch v-model="form.configs.memory.enabled"></el-switch>
-                  <div class="help-text mt-5">{{ $t('profiles.long_term_memory_enabled_hint') }}</div>
                 </el-form-item>
                 <el-row :gutter="20">
                   <el-col :xs="24" :sm="12" :md="8">
-                    <el-form-item :label="$t('profiles.memory_top_k')">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.memory_top_k') }}
+                        <HelpTooltip :content="$t('profiles.memory_top_k_hint')" />
+                      </template>
                       <el-input-number v-model="form.configs.memory.top_k" :min="1" :max="50" class="full-width-input" controls-position="right" />
-                      <div class="help-text mt-5">{{ $t('profiles.memory_top_k_hint') }}</div>
                     </el-form-item>
                   </el-col>
                   <el-col :xs="24" :sm="12" :md="8">
-                    <el-form-item :label="$t('profiles.memory_candidate_k')">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.memory_candidate_k') }}
+                        <HelpTooltip :content="$t('profiles.memory_candidate_k_hint')" />
+                      </template>
                       <el-input-number v-model="form.configs.memory.candidate_k" :min="1" :max="100" class="full-width-input" controls-position="right" />
-                      <div class="help-text mt-5">{{ $t('profiles.memory_candidate_k_hint') }}</div>
                     </el-form-item>
                   </el-col>
                   <el-col :xs="24" :sm="12" :md="8">
-                    <el-form-item :label="$t('profiles.memory_result_max_chars')">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.memory_result_max_chars') }}
+                        <HelpTooltip :content="$t('profiles.memory_result_max_chars_hint')" />
+                      </template>
                       <el-input-number v-model="form.configs.memory.result_max_chars" :min="256" :max="50000" class="full-width-input" controls-position="right" />
-                      <div class="help-text mt-5">{{ $t('profiles.memory_result_max_chars_hint') }}</div>
                     </el-form-item>
                   </el-col>
                 </el-row>
-                <template v-if="dialogType === 'edit'">
-                  <el-form-item :label="$t('profiles.memory_embedding_target')">
-                    <el-select
-                      :model-value="memoryEmbeddingTargetKey"
-                      :placeholder="$t('profiles.memory_embedding_target_placeholder')"
-                      class="full-width-input"
-                      filterable
-                      clearable
-                      @update:model-value="$emit('update:memoryEmbeddingTargetKey', $event)"
-                    >
-                      <el-option v-for="item in memoryEmbeddingOptions" :key="item.key" :label="item.label" :value="item.key" />
-                    </el-select>
-                    <div class="help-text mt-5">{{ $t('profiles.memory_embedding_target_hint') }}</div>
-                  </el-form-item>
-                  <div class="help-text memory-current-config">
-                    {{ $t('profiles.memory_embedding_current') }}: {{ memoryEmbeddingCurrentLabel || $t('profiles.memory_embedding_not_configured') }}
+              </div>
+
+              <div v-if="dialogType === 'edit'" class="settings-section">
+                <div class="settings-section-title">{{ $t('profiles.memory_embedding_settings') }}</div>
+                <div class="model-summary memory-embedding-summary">
+                  <div class="config-line">
+                    <span>{{ $t('profiles.memory_embedding_current') }}</span>
+                    <b>{{ memoryEmbeddingCurrentLabel || $t('profiles.memory_embedding_not_configured') }}</b>
                   </div>
-                  <el-button type="primary" plain :loading="memoryEmbeddingPreviewing" :disabled="!memoryEmbeddingTargetKey" @click="$emit('preview-memory-embedding')">
-                    {{ $t('profiles.memory_embedding_preview') }}
+                  <div v-if="memoryEmbeddingTargetLabel" class="config-line">
+                    <span>{{ $t('profiles.memory_embedding_migration_target') }}</span>
+                    <b>{{ memoryEmbeddingTargetLabel }}</b>
+                  </div>
+                  <div v-if="memoryEmbeddingMigrationStatusText" class="config-line">
+                    <span>{{ $t('profiles.memory_embedding_migration_status') }}</span>
+                    <el-tag :type="memoryEmbeddingMigrationStatusType">{{ memoryEmbeddingMigrationStatusText }}</el-tag>
+                  </div>
+                </div>
+                <el-alert
+                  v-if="memoryEmbeddingMigrationActive"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  :title="$t('profiles.memory_embedding_migration_notice')"
+                  class="mb-15"
+                />
+                <div class="el-form-item__content memory-embedding-action">
+                  <HelpTooltip :content="$t('profiles.memory_embedding_workflow_hint')" />
+                  <el-button
+                    type="primary"
+                    plain
+                    :disabled="memoryEmbeddingMigrationActive"
+                    @click="$emit('manage-memory-embedding')"
+                  >
+                    {{ $t(memoryEmbeddingMigrationActive ? 'profiles.memory_embedding_migration_active' : (memoryEmbeddingConfigured ? 'profiles.memory_embedding_change' : 'profiles.memory_embedding_configure')) }}
                   </el-button>
-                  <div class="help-text mt-5">{{ $t('profiles.memory_embedding_preview_hint') }}</div>
-                </template>
-                <div v-else class="help-text">{{ $t('profiles.memory_embedding_create_hint') }}</div>
+                </div>
               </div>
 
               <div v-loading="memorySettingsLoading" class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.memory_organization_settings') }}</div>
-                <el-form-item :label="$t('profiles.auto_organize_enabled')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.auto_organize_enabled') }}
+                    <HelpTooltip :content="$t('profiles.auto_organize_enabled_hint')" />
+                  </template>
                   <el-switch v-model="form.memory_organization.auto_organize_enabled" :disabled="memorySettingsLoading || memorySettingsUnavailable || !memorySettingsReady" />
-                  <div class="help-text mt-5">{{ $t('profiles.auto_organize_enabled_hint') }}</div>
                 </el-form-item>
                 <el-form-item :label="$t('profiles.organization_channel')">
                   <el-select
@@ -161,14 +196,16 @@
               </div>
 
               <div class="settings-section">
-                <div class="settings-section-title">{{ $t('profiles.context_summary_channel') }}</div>
+                <div class="settings-section-title">
+                  {{ $t('profiles.context_summary_channel') }}
+                  <HelpTooltip :content="$t('profiles.context_summary_channel_hint')" />
+                </div>
                 <ChannelEditor
                   :channel="form.configs.channel.context_summary_channel"
                   :channels="channels"
                   usage="CHAT"
                   :label="$t('profiles.context_summary_model')"
                 />
-                <div class="help-text mt-5">{{ $t('profiles.context_summary_channel_hint') }}</div>
               </div>
 
               <div class="settings-section">
@@ -199,7 +236,11 @@
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.knowledge_base_settings') }}</div>
-                <el-form-item :label="$t('profiles.bound_knowledge_bases')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.bound_knowledge_bases') }}
+                    <HelpTooltip :content="$t('profiles.knowledge_base_binding_hint')" />
+                  </template>
                   <el-select
                     v-model="form.knowledge_base_ids"
                     :placeholder="$t('profiles.select_knowledge_bases')"
@@ -217,7 +258,6 @@
                       </div>
                     </el-option>
                   </el-select>
-                  <div class="help-text mt-5">{{ $t('profiles.knowledge_base_binding_hint') }}</div>
                 </el-form-item>
               </div>
             </div>
@@ -244,7 +284,11 @@
                     ></el-option>
                   </el-select>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.audit_report_language')" label-width="auto">
+                <el-form-item label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.audit_report_language') }}
+                    <HelpTooltip :content="$t('profiles.audit_report_language_hint')" />
+                  </template>
                   <el-select v-model="form.configs.security.audit_report_language" class="full-width-input">
                     <el-option
                       v-for="locale in localeOptions"
@@ -253,22 +297,30 @@
                       :value="locale.value"
                     ></el-option>
                   </el-select>
-                  <div class="help-text mt-5">{{ $t('profiles.audit_report_language_hint') }}</div>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.secondary_confirmation')" label-width="auto">
+                <el-form-item label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.secondary_confirmation') }}
+                    <HelpTooltip :content="$t('profiles.secondary_confirmation_hint')" />
+                  </template>
                   <el-switch
                     :model-value="form.configs.security.audit_threshold > 0"
                     @update:model-value="form.configs.security.audit_threshold = $event ? 5 : 0"
                   ></el-switch>
-                  <div class="help-text">{{ $t('profiles.secondary_confirmation_hint') }}</div>
                 </el-form-item>
-                <el-form-item v-if="form.configs.security.audit_threshold > 0" :label="$t('profiles.audit_threshold')" label-width="auto">
+                <el-form-item v-if="form.configs.security.audit_threshold > 0" label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.audit_threshold') }}
+                    <HelpTooltip :content="$t('profiles.audit_threshold_hint')" />
+                  </template>
                   <el-slider v-model="form.configs.security.audit_threshold" :min="1" :max="7" show-stops show-input></el-slider>
-                  <div class="help-text">{{ $t('profiles.audit_threshold_hint') }}</div>
                 </el-form-item>
-                <el-form-item :label="$t('profiles.audit_confirmation_timeout_seconds')" label-width="auto">
+                <el-form-item label-width="auto">
+                  <template #label>
+                    {{ $t('profiles.audit_confirmation_timeout_seconds') }}
+                    <HelpTooltip :content="$t('profiles.audit_confirmation_timeout_seconds_hint')" />
+                  </template>
                   <el-input-number v-model="form.configs.security.audit_confirmation_timeout_seconds" :min="1" :max="86400" :step="1" class="full-width-input" controls-position="right"></el-input-number>
-                  <div class="help-text">{{ $t('profiles.audit_confirmation_timeout_seconds_hint') }}</div>
                 </el-form-item>
               </div>
             </div>
@@ -279,7 +331,11 @@
             <div class="tab-pane-content">
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.common_tool_config') }}</div>
-                <el-form-item :label="$t('profiles.allowed_operation_dirs')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.allowed_operation_dirs') }}
+                    <HelpTooltip :content="$t('profiles.allowed_operation_dirs_hint')" />
+                  </template>
                   <div class="tag-input-panel full-width-input">
                     <el-input
                       :model-value="allowedOperationDirInput" @update:model-value="$emit('update:allowedOperationDirInput', $event)"
@@ -301,46 +357,67 @@
                       </el-tag>
                     </div>
                   </div>
-                  <div class="help-text mt-5">{{ $t('profiles.allowed_operation_dirs_hint') }}</div>
                 </el-form-item>
               </div>
 
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.scheduling_control') }}</div>
                 <div class="scheduling-control-list">
-                  <el-form-item :label="$t('profiles.max_parallel_tools')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.max_parallel_tools') }}
+                      <HelpTooltip :content="$t('profiles.max_parallel_tools_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.max_parallel_tools" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.max_parallel_tools_hint') }}</div>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.executor_max_workers')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.executor_max_workers') }}
+                      <HelpTooltip :content="$t('profiles.executor_max_workers_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.executor_max_workers" :min="1" :max="100" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.executor_max_workers_hint') }}</div>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.background_task_max_concurrency')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.background_task_max_concurrency') }}
+                      <HelpTooltip :content="$t('profiles.background_task_max_concurrency_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.background_task_max_concurrency" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.background_task_max_concurrency_hint') }}</div>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.scheduled_task_max_concurrency')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.scheduled_task_max_concurrency') }}
+                      <HelpTooltip :content="$t('profiles.scheduled_task_max_concurrency_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.scheduled_task_max_concurrency" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.scheduled_task_max_concurrency_hint') }}</div>
                   </el-form-item>
                   <el-form-item :label="$t('profiles.max_turns')">
                     <el-input-number v-model="form.configs.tool.max_turns" :min="1" :max="20" class="full-width-input" controls-position="right"></el-input-number>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.tool_timeout')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.tool_timeout') }}
+                      <HelpTooltip :content="$t('profiles.tool_timeout_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.tool_timeout" :min="1" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.tool_timeout_hint') }}</div>
                   </el-form-item>
-                  <el-form-item :label="$t('profiles.image_generation_tool_timeout')">
+                  <el-form-item>
+                    <template #label>
+                      {{ $t('profiles.image_generation_tool_timeout') }}
+                      <HelpTooltip :content="$t('profiles.image_generation_tool_timeout_hint')" />
+                    </template>
                     <el-input-number v-model="form.configs.tool.image_generation_timeout" :min="1" :max="600" class="full-width-input" controls-position="right"></el-input-number>
-                    <div class="help-text mt-5">{{ $t('profiles.image_generation_tool_timeout_hint') }}</div>
                   </el-form-item>
                 </div>
               </div>
 
               <div class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.tool_visibility_config') }}</div>
-                <el-form-item :label="$t('profiles.enabled_tools')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.enabled_tools') }}
+                    <HelpTooltip :content="$t('profiles.enabled_tools_hint')" />
+                  </template>
                   <el-select
                     v-model="form.configs.tool.enabled_tools"
                     multiple
@@ -354,7 +431,6 @@
                       :value="item.value"
                     ></el-option>
                   </el-select>
-                  <div class="help-text mt-5">{{ $t('profiles.enabled_tools_hint') }}</div>
                 </el-form-item>
               </div>
 
@@ -377,7 +453,11 @@
                     </el-form-item>
                   </el-col>
                 </el-row>
-                <el-form-item :label="$t('profiles.file_send_blocked_extensions')">
+                <el-form-item>
+                  <template #label>
+                    {{ $t('profiles.file_send_blocked_extensions') }}
+                    <HelpTooltip :content="$t('profiles.file_send_blocked_extensions_hint')" />
+                  </template>
                   <div class="tag-input-panel full-width-input">
                     <el-input
                       :model-value="fileSendBlockedExtensionInput" @update:model-value="$emit('update:fileSendBlockedExtensionInput', $event)"
@@ -399,7 +479,6 @@
                       </el-tag>
                     </div>
                   </div>
-                  <div class="help-text mt-5">{{ $t('profiles.file_send_blocked_extensions_hint') }}</div>
                 </el-form-item>
               </div>
 
@@ -407,13 +486,18 @@
                 <div class="settings-section-title">{{ $t('profiles.firecrawl_config') }}</div>
                 <el-row :gutter="20">
                   <el-col :span="24">
-                    <el-form-item :label="$t('profiles.api_key')">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.api_key') }}
+                        <HelpTooltip :ariaLabel="$t('profiles.firecrawl_hint_1') + $t('profiles.firecrawl_hint_2') + $t('profiles.firecrawl_hint_3')">
+                          <span>
+                            {{ $t('profiles.firecrawl_hint_1') }}
+                            <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" underline="never">{{ $t('profiles.firecrawl_hint_2') }}</el-link>
+                            {{ $t('profiles.firecrawl_hint_3') }}
+                          </span>
+                        </HelpTooltip>
+                      </template>
                       <el-input v-model="form.configs.tool.firecrawl_api_key" :placeholder="$t('profiles.firecrawl_key_placeholder')" show-password></el-input>
-                      <div class="help-text mt-5">
-                        {{ $t('profiles.firecrawl_hint_1') }}
-                        <el-link type="primary" href="https://www.firecrawl.dev/" target="_blank" underline="never">{{ $t('profiles.firecrawl_hint_2') }}</el-link>
-                        {{ $t('profiles.firecrawl_hint_3') }}
-                      </div>
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -432,6 +516,7 @@
 
 <script setup>
 import ChannelEditor from './ChannelEditor.vue'
+import HelpTooltip from './HelpTooltip.vue'
 
 defineProps({
   activeTab: { type: String, required: true },
@@ -449,10 +534,12 @@ defineProps({
   knowledgeBasesReady: { type: Boolean, required: true },
   knowledgeBasesUnavailable: { type: Boolean, required: true },
   localeOptions: { type: Array, required: true },
+  memoryEmbeddingConfigured: { type: Boolean, default: false },
   memoryEmbeddingCurrentLabel: { type: String, default: '' },
-  memoryEmbeddingOptions: { type: Array, required: true },
-  memoryEmbeddingPreviewing: { type: Boolean, required: true },
-  memoryEmbeddingTargetKey: { type: String, default: '' },
+  memoryEmbeddingMigrationActive: { type: Boolean, default: false },
+  memoryEmbeddingMigrationStatusText: { type: String, default: '' },
+  memoryEmbeddingMigrationStatusType: { type: String, default: 'warning' },
+  memoryEmbeddingTargetLabel: { type: String, default: '' },
   memoryOrganizationChannels: { type: Array, required: true },
   memoryOrganizationModels: { type: Array, required: true },
   memoryOrganizationModel: { type: Object, default: null },
@@ -471,16 +558,15 @@ defineProps({
 defineEmits([
   'add-allowed-operation-dir',
   'add-file-send-blocked-extension',
+  'manage-memory-embedding',
   'owner-change',
   'remove-allowed-operation-dir',
   'remove-file-send-blocked-extension',
-  'preview-memory-embedding',
   'submit',
   'update:activeTab',
   'update:allowedOperationDirInput',
   'update:auditModelKey',
   'update:dialogVisible',
-  'update:fileSendBlockedExtensionInput',
-  'update:memoryEmbeddingTargetKey'
+  'update:fileSendBlockedExtensionInput'
 ])
 </script>

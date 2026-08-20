@@ -2,7 +2,11 @@
   <div class="channel-editor">
     <div class="channel-editor-config">
       <div v-if="usage === 'CHAT'" class="channel-editor-config-item">
-        <el-form-item :label="$t('profiles.chat_timeout')" label-width="auto">
+        <el-form-item label-width="auto">
+          <template #label>
+            {{ $t('profiles.chat_timeout') }}
+            <HelpTooltip :content="$t('profiles.chat_timeout_hint')" />
+          </template>
           <el-input-number
             v-model="channel.chat_timeout"
             :min="1"
@@ -10,9 +14,6 @@
             controls-position="right"
           />
         </el-form-item>
-        <div class="channel-hints chat-timeout-hint">
-          <div class="channel-hint-item text-muted">{{ $t('profiles.chat_timeout_hint') }}</div>
-        </div>
       </div>
       <template v-else-if="usage === 'RERANK'">
         <div class="channel-editor-config-item">
@@ -48,7 +49,11 @@
       </template>
     </div>
 
-    <el-form-item :label="label || $t('profiles.model_id')" label-width="auto">
+    <el-form-item label-width="auto">
+      <template #label>
+        {{ label || $t('profiles.model_id') }}
+        <HelpTooltip :content="$t('profiles.disabled_rule_hint')" />
+      </template>
       <el-select
         v-model="selectedRuleKeys"
         multiple
@@ -77,13 +82,6 @@
       </el-select>
     </el-form-item>
 
-    <div v-if="channel.rules && channel.rules.length > 0" class="channel-hints">
-      <div class="channel-hint-item text-muted">{{ $t('profiles.priority_hint') }}</div>
-      <div class="channel-hint-item text-muted">{{ $t('profiles.weight_hint') }}</div>
-      <div class="channel-hint-item text-muted">{{ $t('profiles.drag_hint') }}</div>
-      <div class="channel-hint-item text-muted">{{ $t('profiles.disabled_rule_hint') }}</div>
-    </div>
-
     <draggable
       v-if="channel.rules && channel.rules.length > 0"
       :list="channel.rules"
@@ -101,6 +99,7 @@
             <span class="rule-drag-handle" :title="$t('profiles.drag_to_sort')">
               <el-icon><Rank /></el-icon>
             </span>
+            <HelpTooltip :content="$t('profiles.drag_hint')" />
             <span class="rule-priority-tag">P{{ element.priority || 1 }}</span>
             <span class="rule-name">{{ getRuleLabel(element) }}</span>
             <el-tag v-if="getRuleStatus(element)" :type="getRuleStatus(element).type" size="small" class="rule-status-tag">
@@ -117,12 +116,20 @@
               </el-form-item>
             </div>
             <div class="channel-rule-field">
-              <el-form-item :label="$t('profiles.priority')" label-width="auto">
+              <el-form-item label-width="auto">
+                <template #label>
+                  {{ $t('profiles.priority') }}
+                  <HelpTooltip :content="$t('profiles.priority_hint')" />
+                </template>
                 <el-input-number v-model="element.priority" :min="1" controls-position="right" @change="handlePriorityChange" />
               </el-form-item>
             </div>
             <div class="channel-rule-field">
-              <el-form-item :label="$t('profiles.weight')" label-width="auto">
+              <el-form-item label-width="auto">
+                <template #label>
+                  {{ $t('profiles.weight') }}
+                  <HelpTooltip :content="$t('profiles.weight_hint')" />
+                </template>
                 <el-input-number v-model="element.weight" :min="0" controls-position="right" />
               </el-form-item>
             </div>
@@ -142,6 +149,7 @@ import { computed, onMounted } from 'vue'
 import { ElIcon } from 'element-plus'
 import { Rank } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
+import HelpTooltip from './HelpTooltip.vue'
 import { defaultChannelRule } from '../constants'
 
 const props = defineProps({

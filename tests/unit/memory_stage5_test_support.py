@@ -22,9 +22,11 @@ from app.models.memory import (
     LongTermMemoryStore,
     LongTermMemoryType,
 )
+from app.models.profile import Profile
 from app.providers.database.time import get_database_time
 
 MEMORY_TABLES = (
+    Profile.__table__,
     LongTermMemoryStore.__table__,
     LongTermMemoryEmbeddingRevision.__table__,
     LongTermMemoryEmbeddingDelta.__table__,

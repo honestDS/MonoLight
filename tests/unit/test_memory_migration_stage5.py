@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import chromadb
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tests.unit.memory_stage5_test_support import (
@@ -48,6 +48,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         LongTermMemoryOldCollectionCleanupStatus,
         LongTermMemoryRecord,
     )
+    from app.models.profile import Profile, ProfileConfig
     from app.providers.database.time import get_database_time
 
 
@@ -276,6 +277,42 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
         model_id=target["model_id"],
         dimensions=target["dimensions"],
     )
+    profile_a = Profile(
+        uid=uid,
+        name="stage5-migration-profile-a",
+        configs=ProfileConfig.model_validate(
+            {
+                "memory": {
+                    "enabled": True,
+                    "embedding_channel_id": source["channel_id"],
+                    "embedding_model_id": source["model_id"],
+                    "top_k": 3,
+                    "candidate_k": 7,
+                    "result_max_chars": 2000,
+                }
+            }
+        ).model_dump(),
+    )
+    profile_b = Profile(
+        uid=uid,
+        name="stage5-migration-profile-b",
+        configs=ProfileConfig.model_validate(
+            {
+                "memory": {
+                    "enabled": False,
+                    "embedding_channel_id": source["channel_id"],
+                    "embedding_model_id": source["model_id"],
+                    "top_k": 8,
+                    "candidate_k": 12,
+                    "result_max_chars": 4000,
+                }
+            }
+        ).model_dump(),
+    )
+    async with memory_session_factory() as db:
+        db.add(profile_a)
+        db.add(profile_b)
+        await db.commit()
     job = await _prepare_embedding_migration(
         memory_session_factory,
         uid=uid,
@@ -368,6 +405,7 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
             uid=uid,
             migration_job_id=job.id,
         )
+        profiles = list((await db.execute(select(Profile).where(Profile.uid == uid).order_by(Profile.id))).scalars().all())
     assert finished_job is not None
     assert finished_job.status == LongTermMemoryMutationStatus.SUCCEEDED
     assert store is not None
@@ -403,6 +441,21 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
     assert current_record.version == 2
     assert current_record.indexed_version == 2
     assert current_record.vector_item_id == "vector-v2"
+    assert len(profiles) == 2
+    profile_a_memory = ProfileConfig.model_validate(profiles[0].configs).memory
+    profile_b_memory = ProfileConfig.model_validate(profiles[1].configs).memory
+    assert profile_a_memory.embedding_channel_id == target["channel_id"]
+    assert profile_a_memory.embedding_model_id == target["model_id"]
+    assert profile_a_memory.enabled is True
+    assert profile_a_memory.top_k == 3
+    assert profile_a_memory.candidate_k == 7
+    assert profile_a_memory.result_max_chars == 2000
+    assert profile_b_memory.embedding_channel_id == target["channel_id"]
+    assert profile_b_memory.embedding_model_id == target["model_id"]
+    assert profile_b_memory.enabled is False
+    assert profile_b_memory.top_k == 8
+    assert profile_b_memory.candidate_k == 12
+    assert profile_b_memory.result_max_chars == 4000
 
     target_items = vector_backend.collections[target_collection]["items"]
     item_ids: list[str] = []
