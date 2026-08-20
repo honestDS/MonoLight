@@ -41,25 +41,5 @@ const handleSwitch = (value) => {
 </script>
 
 <style lang="scss" scoped>
-.lang-switcher {
-  cursor: pointer;
-}
-
-.lang-switcher-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: inherit;
-  font-size: 14px;
-  outline: none;
-}
-
-.lang-switcher-icon {
-  font-size: 16px;
-}
-
-:deep(.is-active) {
-  color: var(--el-color-primary);
-  font-weight: 600;
-}
+@import "@/assets/css/LanguageSwitcher.scss";
 </style>

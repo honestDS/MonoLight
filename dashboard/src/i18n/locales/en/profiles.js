@@ -37,6 +37,7 @@ export default {
   memory_result_max_chars: 'Max Memory Result Characters',
   memory_result_max_chars_hint: 'Limits the maximum characters returned by one recall.',
   memory_embedding_settings: 'Embedding Model',
+  memory_embedding_scope: 'Scope: all Profiles owned by the current user share the same embedding model.',
   memory_embedding_configure: 'Configure Embedding Model',
   memory_embedding_change: 'Change Embedding Model',
   memory_embedding_target: 'Target Embedding Channel / Model',

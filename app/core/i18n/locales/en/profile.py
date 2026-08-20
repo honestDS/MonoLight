@@ -11,7 +11,7 @@ MESSAGES = {
     "ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE": "The long-term memory embedding channel and model must be set together or both left empty",
     "ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN": "Profile creation cannot carry a long-term memory embedding confirmation token",
     "ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED": "Long-term memory embedding model changes require preview and confirmation",
-    "ERR_PROFILE_MEMORY_ACTIVE_NOT_CONFIGURED": "Long-term memory has no confirmed embedding model; preview and confirm one first",
+    "ERR_PROFILE_MEMORY_ACTIVE_NOT_CONFIGURED": "Long-term memory has no embedding model configured. Please configure one first",
     "ERR_PROFILE_MEMORY_SELECTION_INVALID": "The long-term memory embedding confirmation token is invalid or already consumed",
     "ERR_PROFILE_MEMORY_SELECTION_EXPIRED": "The long-term memory embedding confirmation token has expired; preview again",
     "ERR_PROFILE_MEMORY_SELECTION_STALE": "The long-term memory configuration changed during model probing; preview again",
