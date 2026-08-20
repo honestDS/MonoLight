@@ -18,6 +18,7 @@ const appSource = readSource('src/App.vue')
 const appScssSource = readSource('src/assets/css/app.scss')
 const constantsSource = readSource('src/constants/index.js')
 const memoriesSource = readSource('src/views/MemoriesView.vue')
+const memoriesScssSource = readSource('src/assets/css/MemoriesView.scss')
 const memoryEmbeddingDialogSource = readSource('src/components/MemoryEmbeddingDialog.vue')
 const profileFormSource = readSource('src/components/ProfileFormDialog.vue')
 const profilesScssSource = readSource('src/assets/css/ProfilesView.scss')
@@ -147,6 +148,7 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
   assert.match(memorySource, /form\.configs\.memory\.candidate_k/)
   assert.match(memorySource, /form\.configs\.memory\.result_max_chars/)
   assert.match(memorySource, /memory_embedding_settings/)
+  assert.match(memorySource, /class="help-text memory-embedding-scope"[\s\S]*profiles\.memory_embedding_scope/)
   assert.match(memorySource, /memoryEmbeddingCurrentLabel/)
   assert.match(memorySource, /manage-memory-embedding/)
   assert.match(memorySource, /el-form-item__content memory-embedding-action/)
@@ -262,7 +264,7 @@ const requiredProfileMemoryKeys = [
   'memory_settings', 'long_term_memory_settings', 'long_term_memory_enabled', 'long_term_memory_enabled_hint',
   'memory_storage_not_configured', 'memory_settings_unavailable', 'memory_top_k', 'memory_top_k_hint',
   'memory_candidate_k', 'memory_candidate_k_hint', 'memory_result_max_chars', 'memory_result_max_chars_hint',
-  'memory_embedding_settings', 'memory_embedding_configure', 'memory_embedding_change',
+  'memory_embedding_settings', 'memory_embedding_scope', 'memory_embedding_configure', 'memory_embedding_change',
   'memory_embedding_migration_active', 'memory_embedding_workflow_hint',
   'memory_embedding_dialog_configure_title', 'memory_embedding_dialog_change_title', 'memory_embedding_dialog_hint',
   'memory_embedding_migration_target', 'memory_embedding_migration_status', 'memory_embedding_migration_notice',
@@ -623,9 +625,9 @@ test('MemoriesView shows the task summary only for real tasks and keeps it visib
   assert.doesNotMatch(memoriesSource, /临时展示占位，验收后删除/)
   assert.match(memoriesSource, /<el-collapse-transition>[\s\S]*v-show="settingsExpanded" class="settings-content"[\s\S]*<\/el-collapse-transition>/)
   assert.match(memoriesSource, /<div class="settings-grid runtime-settings-grid" v-loading="settingsLoading">/)
-  assert.match(memoriesSource, /\.settings-content \{[^}]*display:\s*flow-root;/)
-  assert.match(memoriesSource, /\.runtime-settings-grid \{[^}]*margin-top:\s*0;/)
-  assert.match(memoriesSource, /\.settings-content > \.el-alert \+ \.runtime-settings-grid \{[^}]*margin-top:\s*16px;/)
+  assert.match(memoriesScssSource, /\.settings-content \{[^}]*display:\s*flow-root;/)
+  assert.match(memoriesScssSource, /\.runtime-settings-grid \{[^}]*margin-top:\s*0;/)
+  assert.match(memoriesScssSource, /\.settings-content > \.el-alert \+ \.runtime-settings-grid \{[^}]*margin-top:\s*16px;/)
   assert.match(memoriesSource, /\$t\('memories\.current_task'\)/)
   assert.match(memoriesSource, /\$t\('memories\.progress'\)/)
   assert.match(memoriesSource, /const currentMemoryTask = computed\(\(\) => getCurrentMemoryTask\(settings\)\)/)
@@ -634,21 +636,21 @@ test('MemoriesView shows the task summary only for real tasks and keeps it visib
   assert.match(contentSource, /currentMemoryTask\.total[\s\S]*currentMemoryTask\.completed/)
   assert.match(contentSource, /currentMemoryTask\.percentage/)
   assert.match(contentSource, /statusText\(currentMemoryTask\.status\)/)
-  assert.match(memoriesSource, /\.memory-task-summary \{[^}]*white-space: nowrap;[^}]*overflow: hidden;/)
-  assert.match(memoriesSource, /\.section-heading-content \{[^}]*min-width: 0;[^}]*flex: 1;/)
-  assert.match(memoriesSource, /\.memory-task-summary \{[^}]*width: 100%;/)
-  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex:\s*1/)
-  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex-direction:\s*column/)
-  assert.doesNotMatch(memoriesSource, /\.memory-task-summary \{[^}]*flex-basis:/)
-  assert.match(memoriesSource, /memory-task-transition-(?:enter|leave)-active/)
-  assert.match(memoriesSource, /memory-task-transition-(?:enter|leave)-active[^}]*180ms/)
-  assert.match(memoriesSource, /\.memory-view \.el-collapse-transition-(?:enter|leave)-active[^}]*transition-duration:\s*180ms\s*!important/)
+  assert.match(memoriesScssSource, /\.memory-task-summary \{[^}]*white-space: nowrap;[^}]*overflow: hidden;/)
+  assert.match(memoriesScssSource, /\.section-heading-content \{[^}]*min-width: 0;[^}]*flex: 1;/)
+  assert.match(memoriesScssSource, /\.memory-task-summary \{[^}]*width: 100%;/)
+  assert.doesNotMatch(memoriesScssSource, /\.memory-task-summary \{[^}]*flex:\s*1/)
+  assert.doesNotMatch(memoriesScssSource, /\.memory-task-summary \{[^}]*flex-direction:\s*column/)
+  assert.doesNotMatch(memoriesScssSource, /\.memory-task-summary \{[^}]*flex-basis:/)
+  assert.match(memoriesScssSource, /memory-task-transition-(?:enter|leave)-active/)
+  assert.match(memoriesScssSource, /memory-task-transition-(?:enter|leave)-active[^}]*180ms/)
+  assert.match(memoriesScssSource, /\.memory-view \.el-collapse-transition-(?:enter|leave)-active[^}]*transition-duration:\s*180ms\s*!important/)
 })
 
 test('MemoriesView removes the memory key list column and right-aligns memory actions', () => {
   assert.doesNotMatch(memoriesSource, /<el-table-column prop="memory_key"[^>]*>/)
   assert.match(memoriesSource, /<el-table-column :label="\$t\('memories\.content_preview'\)" min-width="200">/)
-  assert.match(memoriesSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
+  assert.match(memoriesScssSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
 
   const memoriesTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.memories\')"')
   const jobsTabStart = memoriesSource.indexOf('<el-tab-pane :label="$t(\'memories.jobs\')"')
@@ -666,14 +668,14 @@ test('MemoriesView removes the memory key list column and right-aligns memory ac
     assert.doesNotMatch(tabSource, /<el-table-column :label="\$t\('memories\.actions'\)"[^>]*(?:class-name|label-class-name)=/)
   }
   assert.doesNotMatch(memoriesSource, /memory-actions-column|memory-actions-header|class-name=|label-class-name=/)
-  assert.match(memoriesSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
+  assert.match(memoriesScssSource, /\.memory-action-buttons \{ width: 100%; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end;/)
 
   assert.match(memoriesSource, /<el-table :data="memories"[\s\S]*?class="memory-table memory-data-table"/)
   assert.match(memoriesSource, /<el-table :data="jobs"[\s\S]*?class="memory-data-table"/)
   assert.match(memoriesSource, /<el-table :data="migrations"[\s\S]*?class="memory-data-table"/)
 
-  const dataTableStyleMatch = memoriesSource.match(/\.memory-data-table\s*\{([\s\S]*?)\}/)
-  const loadingMaskStyleMatch = memoriesSource.match(/\.memory-data-table\s*>\s*\.el-loading-mask\s*\{([\s\S]*?)\}/)
+  const dataTableStyleMatch = memoriesScssSource.match(/\.memory-data-table\s*\{([\s\S]*?)\}/)
+  const loadingMaskStyleMatch = memoriesScssSource.match(/\.memory-data-table\s*>\s*\.el-loading-mask\s*\{([\s\S]*?)\}/)
   assert.ok(dataTableStyleMatch, '.memory-data-table source block is missing')
   assert.ok(loadingMaskStyleMatch, '.memory-data-table loading mask source block is missing')
   assert.match(dataTableStyleMatch[1], /\bposition:\s*relative\s*;/)

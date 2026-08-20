@@ -11,7 +11,7 @@ MESSAGES = {
     "ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE": "长期记忆嵌入渠道和模型必须同时设置或同时留空",
     "ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN": "创建配置不能携带长期记忆嵌入确认凭证",
     "ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED": "长期记忆嵌入模型变更必须先预览并确认",
-    "ERR_PROFILE_MEMORY_ACTIVE_NOT_CONFIGURED": "长期记忆尚未确认嵌入模型，请先预览并确认",
+    "ERR_PROFILE_MEMORY_ACTIVE_NOT_CONFIGURED": "长期记忆尚未配置嵌入模型，请先配置",
     "ERR_PROFILE_MEMORY_SELECTION_INVALID": "长期记忆嵌入模型确认凭证无效或已被使用",
     "ERR_PROFILE_MEMORY_SELECTION_EXPIRED": "长期记忆嵌入模型确认凭证已过期，请重新预览",
     "ERR_PROFILE_MEMORY_SELECTION_STALE": "长期记忆配置在模型探测期间发生变化，请重新预览",

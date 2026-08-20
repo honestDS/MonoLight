@@ -1,0 +1,77 @@
+@import '@/assets/css/ChannelFormDialog.scss';
+@import '@/assets/css/setup.scss';
+
+.setup-actions-right {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+}
+
+.setup-profile-guide-entry {
+  flex: 1 1 auto;
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.setup-profile-guide-entry h2 {
+  margin: 0;
+}
+
+.setup-profile-guide-entry-description {
+  width: min(100%, 560px);
+  max-width: 100%;
+  margin: 0 auto;
+  color: var(--el-text-color-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.setup-profile-guide-entry-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  width: 100%;
+  gap: 12px;
+}
+
+.setup-profile-guide-entry-actions .el-button {
+  min-width: 132px;
+  min-height: 40px;
+  margin-left: 0;
+  justify-content: center;
+}
+
+@media (max-width: 420px) {
+  .setup-profile-guide-entry {
+    min-height: 240px;
+    padding: 24px 12px;
+  }
+
+  .setup-profile-guide-entry-actions {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .setup-profile-guide-entry-actions .el-button {
+    width: min(100%, 240px);
+  }
+
+  .setup-actions-right {
+    flex: 1 1 0;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .setup-actions-right .el-button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}

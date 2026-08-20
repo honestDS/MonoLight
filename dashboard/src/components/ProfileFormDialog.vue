@@ -102,6 +102,7 @@
 
               <div v-if="dialogType === 'edit'" class="settings-section">
                 <div class="settings-section-title">{{ $t('profiles.memory_embedding_settings') }}</div>
+                <div class="help-text memory-embedding-scope">{{ $t('profiles.memory_embedding_scope') }}</div>
                 <div class="model-summary memory-embedding-summary">
                   <div class="config-line">
                     <span>{{ $t('profiles.memory_embedding_current') }}</span>

@@ -27,6 +27,7 @@ const loginSource = source('views/LoginView.vue')
 const appSource = source('App.vue')
 const setupSource = source('views/SetupView.vue')
 const profileGuideSource = source('components/SetupProfileGuide.vue')
+const profileGuideStyleSource = source('assets/css/SetupProfileGuide.scss')
 const setupStyleSource = source('assets/css/setup.scss')
 const publicIndexSource = readFileSync(fileURLToPath(new URL('../public/index.html', import.meta.url)), 'utf8')
 const localeKeys = value => Object.keys(value).sort()
@@ -435,13 +436,13 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
     /<el-slider\b[^>]*v-model\s*=\s*"form\.configs\.security\.audit_threshold"[^>]*:min\s*=\s*"1"[^>]*:max\s*=\s*"7"[^>]*show-stops\b[^>]*show-input\b[^>]*class\s*=\s*"setup-profile-guide__slider"[^>]*>/,
   )
   assert.match(
-    profileGuideSource,
+    profileGuideStyleSource,
     /\.setup-profile-guide\s*:deep\(\.el-slider__input\)\s*\{\s*flex\s*:\s*0\s+0\s+130px\s*;\s*width\s*:\s*130px\s*;\s*max-width\s*:\s*40%\s*;\s*\}/,
   )
   assert.match(profileGuideSource, /class="setup-profile-guide__section-description"/)
   assert.match(profileGuideSource, /t\('setup\.audit_guide_description'\)/)
   assert.match(
-    profileGuideSource,
+    profileGuideStyleSource,
     /\.setup-profile-guide__section-description\s*\{[\s\S]*?color\s*:\s*var\(--setup-profile-guide-muted\)\s*;[\s\S]*?font-size\s*:\s*14px\s*;[\s\S]*?line-height\s*:\s*1\.6\s*;[\s\S]*?overflow-wrap\s*:\s*anywhere\s*;[\s\S]*?word-break\s*:\s*break-word\s*;[\s\S]*?white-space\s*:\s*normal\s*;/,
   )
   for (const key of ['default_prompt', 'default_prompt_placeholder', 'default_prompt_hint']) {
@@ -481,9 +482,9 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
     assert.doesNotMatch(profileGuideSource, forbidden)
   }
 
-  const reducedMotionStart = profileGuideSource.indexOf('@media (prefers-reduced-motion: reduce)')
+  const reducedMotionStart = profileGuideStyleSource.indexOf('@media (prefers-reduced-motion: reduce)')
   assert.ok(reducedMotionStart >= 0)
-  const reducedMotionSource = profileGuideSource.slice(reducedMotionStart)
+  const reducedMotionSource = profileGuideStyleSource.slice(reducedMotionStart)
   assert.match(reducedMotionSource, /transition\s*:\s*none\s*;/)
   assert.match(reducedMotionSource, /transform\s*:\s*none\s*;/)
 

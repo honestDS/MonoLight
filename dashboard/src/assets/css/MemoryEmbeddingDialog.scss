@@ -1,0 +1,79 @@
+.memory-embedding-dialog__content {
+  min-width: 0;
+}
+
+.memory-embedding-dialog__target {
+  margin-top: 18px;
+}
+
+.memory-embedding-dialog__field-label {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.memory-embedding-dialog__control-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+  gap: 8px;
+}
+
+.memory-embedding-dialog__select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.memory-embedding-dialog__control-row :deep(.el-button) {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.memory-embedding-dialog__preview {
+  min-width: 0;
+  margin-top: 20px;
+}
+
+.memory-embedding-dialog__descriptions {
+  margin-top: 16px;
+}
+
+.memory-embedding-dialog__confirmation-check {
+  display: flex;
+  align-items: flex-start;
+  height: auto;
+  margin-top: 16px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.memory-embedding-dialog__confirmation-check :deep(.el-checkbox__label) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.memory-embedding-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-embedding-dialog__footer :deep(.el-button) {
+  margin-left: 0;
+}
+
+@media (max-width: 480px) {
+  .memory-embedding-dialog__footer {
+    justify-content: stretch;
+  }
+
+  .memory-embedding-dialog__footer :deep(.el-button) {
+    flex: 1 1 auto;
+  }
+}

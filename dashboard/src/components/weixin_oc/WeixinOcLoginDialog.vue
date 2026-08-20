@@ -23,14 +23,5 @@ const emit = defineEmits(['update:visible', 'closed'])
 </script>
 
 <style lang="scss" scoped>
-.qrcode-box {
-  text-align: center;
-}
-
-.qrcode-image {
-  width: 260px;
-  height: 260px;
-  margin: 16px auto;
-  display: block;
-}
+@import "@/assets/css/WeixinOcLoginDialog.scss";
 </style>

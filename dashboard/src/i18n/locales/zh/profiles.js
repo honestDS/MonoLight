@@ -37,6 +37,7 @@ export default {
   memory_result_max_chars: '记忆结果最大字符数',
   memory_result_max_chars_hint: '限制一次召回结果的最大字符数。',
   memory_embedding_settings: '嵌入模型',
+  memory_embedding_scope: '生效范围：当前用户的全部配置文件，共用同一嵌入模型。',
   memory_embedding_configure: '配置嵌入模型',
   memory_embedding_change: '更换嵌入模型',
   memory_embedding_target: '目标嵌入渠道 / 模型',
