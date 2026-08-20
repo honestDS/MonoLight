@@ -26,26 +26,6 @@
             />
           </el-form-item>
         </div>
-        <div class="channel-editor-config-item">
-          <el-form-item :label="$t('profiles.rerank_candidate_k')" label-width="auto">
-            <el-input-number
-              v-model="channel.rerank_candidate_k"
-              :min="1"
-              :max="50"
-              controls-position="right"
-            />
-          </el-form-item>
-        </div>
-        <div class="channel-editor-config-item">
-          <el-form-item :label="$t('profiles.kb_query_top_k')" label-width="auto">
-            <el-input-number
-              v-model="channel.kb_query_top_k"
-              :min="1"
-              :max="50"
-              controls-position="right"
-            />
-          </el-form-item>
-        </div>
       </template>
     </div>
 

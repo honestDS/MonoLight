@@ -18,32 +18,23 @@ from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
-from app.models.channel import ChannelConfig
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse
-from app.models.profile import Profile
+from app.models.profile import Profile, ProfileConfig
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
 
 logger = get_logger(__name__)
 
 
-def _get_channel_config(profile: Profile, channel_key: str) -> ChannelConfig | None:
-    channel_config = (profile.configs or {}).get("channel", {})
-    channel_raw = channel_config.get(channel_key)
-    if not channel_raw:
-        return None
-    try:
-        return ChannelConfig.model_validate(channel_raw)
-    except Exception:
-        return None
-
-
 def get_profile_kb_query_top_k(profile: Profile) -> int:
-    """读取重排渠道配置的知识库检索最终返回数量。"""
-    rerank_channel = _get_channel_config(profile, "rerank_channel")
-    if not rerank_channel or rerank_channel.kb_query_top_k <= 0:
+    """读取 Profile 配置中的知识库检索最终返回数量。"""
+    try:
+        top_k = ProfileConfig.model_validate(profile.configs or {}).memory.knowledge.top_k
+    except Exception:
         return KNOWLEDGE_BASE_QUERY_TOP_K
-    return min(rerank_channel.kb_query_top_k, 50)
+    if top_k <= 0:
+        return KNOWLEDGE_BASE_QUERY_TOP_K
+    return min(top_k, 50)
 
 
 async def embed_chunks_with_knowledge_base_config(

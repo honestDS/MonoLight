@@ -377,6 +377,4 @@ class ChannelConfig(BaseModel):
 
     chat_timeout: float = PydanticField(60.0, gt=0, le=600, description="对话渠道调用超时（秒）；仅用于正常对话、后台任务与计划任务请求模型，不用于上下文总结压缩")
     rerank_timeout: float = PydanticField(15.0, gt=0, le=120, description="重排渠道调用超时（秒）")
-    rerank_candidate_k: int = PydanticField(20, gt=0, le=50, description="送入远程 reranker 的候选数量")
-    kb_query_top_k: int = PydanticField(5, gt=0, le=50, description="知识库检索最终返回的片段数量")
     rules: list[ChannelRule] = PydanticField(default_factory=list, description="路由规则列表")

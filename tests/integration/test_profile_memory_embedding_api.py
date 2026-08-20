@@ -378,6 +378,106 @@ async def test_profile_create_and_update_sync_memory_organization_with_user_stor
 
 
 @pytest.mark.asyncio
+async def test_profile_create_and_update_reject_legacy_knowledge_recall_budget(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    legacy_configs = _profile_configs()
+    legacy_configs["memory"].pop("knowledge")
+    legacy_configs["channel"]["rerank_channel"] = {
+        "kb_query_top_k": 11,
+        "rerank_candidate_k": 3,
+    }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        create_response = await client.post(
+            "/api/v1/profiles/create",
+            json={
+                "name": "profile-legacy-knowledge-recall-invalid",
+                "configs": legacy_configs,
+            },
+        )
+
+    create_payload = _assert_standard(create_response, 422)
+    assert create_payload["data"] is None
+    assert await profile_crud.get_by_name(db_session, "profile-legacy-knowledge-recall-invalid", uid="user-a") is None
+
+    profile = await profile_crud.create(
+        db_session,
+        obj_in={"uid": "user-a", "name": "profile-valid", "configs": _profile_configs()},
+    )
+    original_configs = ProfileConfig.model_validate(profile.configs).model_dump()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        update_response = await client.post(
+            "/api/v1/profiles/update",
+            params={"profile_id": profile.id},
+            json={"configs": legacy_configs},
+        )
+
+    update_payload = _assert_standard(update_response, 422)
+    assert update_payload["data"] is None
+    persisted_profile = await profile_crud.get(db_session, profile.id)
+    assert persisted_profile is not None
+    assert persisted_profile.configs == original_configs
+
+
+@pytest.mark.asyncio
+async def test_profile_update_omitted_bindings_are_preserved(
+    api_app: tuple[FastAPI, SimpleNamespace],
+    db_session: AsyncSession,
+) -> None:
+    app, _current_user = api_app
+    profile = await profile_crud.create(
+        db_session,
+        obj_in={"uid": "user-a", "name": "profile-a", "configs": _profile_configs()},
+    )
+    knowledge_base = KnowledgeBase(
+        uid="user-a",
+        name="knowledge-base-a",
+        embedding_channel_id=1,
+        embedding_model_id="embed-v1",
+        collection_name="knowledge-base-profile-update-omitted-bindings",
+    )
+    db_session.add(knowledge_base)
+    await db_session.flush()
+    assert profile.id is not None
+    assert knowledge_base.id is not None
+    db_session.add(
+        KnowledgeBaseProfileBinding(
+            knowledge_base_id=knowledge_base.id,
+            profile_id=profile.id,
+        )
+    )
+    await db_session.commit()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/profiles/update",
+            params={"profile_id": profile.id},
+            json={"name": "profile-a-renamed"},
+        )
+
+    payload = _assert_standard(response, 200)
+    assert payload["data"]["knowledge_base_ids"] == [knowledge_base.id]
+    binding = (
+        (
+            await db_session.execute(
+                select(KnowledgeBaseProfileBinding).where(
+                    KnowledgeBaseProfileBinding.knowledge_base_id == knowledge_base.id,
+                    KnowledgeBaseProfileBinding.profile_id == profile.id,
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert binding.knowledge_base_id == knowledge_base.id
+    assert binding.profile_id == profile.id
+
+
+@pytest.mark.asyncio
 async def test_admin_can_preview_and_confirm_other_user_profile_embedding(
     api_app: tuple[FastAPI, SimpleNamespace],
     db_session: AsyncSession,
@@ -386,7 +486,19 @@ async def test_admin_can_preview_and_confirm_other_user_profile_embedding(
     current_user.is_superuser = True
     profile = await profile_crud.create(
         db_session,
-        obj_in={"uid": "user-b", "name": "profile-b", "configs": _profile_configs()},
+        obj_in={
+            "uid": "user-b",
+            "name": "profile-b",
+            "configs": _profile_configs(
+                _memory_config(
+                    top_k=9,
+                    candidate_k=19,
+                    result_max_chars=9000,
+                    chat_history={"top_k": 8, "candidate_k": 80, "result_max_chars": 8000},
+                    knowledge={"top_k": 7, "candidate_k": 17, "result_max_chars": 7000},
+                )
+            ),
+        },
     )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -407,8 +519,15 @@ async def test_admin_can_preview_and_confirm_other_user_profile_embedding(
 
     confirm_payload = _assert_standard(confirm_response, 200)
     assert confirm_payload["data"]["uid"] == "user-b"
-    assert confirm_payload["data"]["configs"]["memory"]["embedding_channel_id"] == 7
-    assert confirm_payload["data"]["configs"]["memory"]["embedding_model_id"] == "embed-v1"
+    memory_config = confirm_payload["data"]["configs"]["memory"]
+    assert memory_config["enabled"] is True
+    assert memory_config["embedding_channel_id"] == 7
+    assert memory_config["embedding_model_id"] == "embed-v1"
+    assert memory_config["top_k"] == 9
+    assert memory_config["candidate_k"] == 19
+    assert memory_config["result_max_chars"] == 9000
+    assert memory_config["chat_history"] == {"top_k": 8, "candidate_k": 80, "result_max_chars": 8000}
+    assert memory_config["knowledge"] == {"top_k": 7, "candidate_k": 17, "result_max_chars": 7000}
     store = await memory_store_crud.get_snapshot_by_uid(db_session, uid="user-b")
     assert store is not None
     assert store.active_embedding_channel_id == 7

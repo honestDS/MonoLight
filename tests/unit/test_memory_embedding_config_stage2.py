@@ -43,6 +43,8 @@ from app.models.memory import (
     LongTermMemoryStore,
 )
 from app.models.profile import (
+    ChatHistoryRecallConfig,
+    KnowledgeRecallConfig,
     LongTermMemoryConfig,
     LongTermMemoryOrganizationConfig,
     Profile,
@@ -155,6 +157,16 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
     assert old_config.memory.top_k == 5
     assert old_config.memory.candidate_k == 10
     assert old_config.memory.result_max_chars == 4000
+    assert old_config.memory.chat_history.model_dump() == {
+        "top_k": 5,
+        "candidate_k": 500,
+        "result_max_chars": 4000,
+    }
+    assert old_config.memory.knowledge.model_dump() == {
+        "top_k": 5,
+        "candidate_k": 20,
+        "result_max_chars": 4000,
+    }
 
     flat_config = ProfileConfig.model_validate(
         {
@@ -174,6 +186,16 @@ def test_profile_config_memory_defaults_and_legacy_flat_fields() -> None:
         "top_k": 7,
         "candidate_k": 12,
         "result_max_chars": 8192,
+        "chat_history": {
+            "top_k": 7,
+            "candidate_k": 500,
+            "result_max_chars": 8192,
+        },
+        "knowledge": {
+            "top_k": 5,
+            "candidate_k": 20,
+            "result_max_chars": 4000,
+        },
     }
 
 
@@ -241,9 +263,119 @@ def test_profile_config_requires_embedding_channel_and_model_as_a_pair(values: d
         LongTermMemoryConfig.model_validate(values)
 
 
-def test_profile_config_rejects_candidate_budget_below_top_k() -> None:
+def test_profile_config_migrates_legacy_knowledge_recall_fields_and_preserves_explicit_config() -> None:
+    legacy_config = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "rerank_channel": {
+                    "kb_query_top_k": 9,
+                    "rerank_candidate_k": 12,
+                }
+            }
+        }
+    )
+
+    assert legacy_config.memory.knowledge.model_dump() == {
+        "top_k": 9,
+        "candidate_k": 12,
+        "result_max_chars": 4000,
+    }
+    assert "kb_query_top_k" not in legacy_config.channel.rerank_channel.model_dump()
+    assert "rerank_candidate_k" not in legacy_config.channel.rerank_channel.model_dump()
+
+    string_config = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "rerank_channel": {
+                    "kb_query_top_k": "9",
+                    "rerank_candidate_k": "12",
+                }
+            }
+        }
+    )
+
+    assert string_config.memory.knowledge.top_k == 9
+    assert string_config.memory.knowledge.candidate_k == 12
+    assert isinstance(string_config.memory.knowledge.top_k, int)
+    assert isinstance(string_config.memory.knowledge.candidate_k, int)
+
     with pytest.raises(ValueError):
-        LongTermMemoryConfig.model_validate({"top_k": 8, "candidate_k": 7})
+        ProfileConfig.model_validate(
+            {
+                "channel": {
+                    "rerank_channel": {
+                        "kb_query_top_k": 9,
+                        "rerank_candidate_k": 4,
+                    }
+                }
+            }
+        )
+
+    with pytest.raises(ValueError):
+        ProfileConfig.model_validate(
+            {
+                "channel": {
+                    "rerank_channel": {
+                        "kb_query_top_k": 9,
+                        "rerank_candidate_k": None,
+                    }
+                }
+            }
+        )
+
+    explicit_config = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "rerank_channel": {
+                    "kb_query_top_k": 9,
+                    "rerank_candidate_k": 4,
+                }
+            },
+            "memory": {
+                "knowledge": {
+                    "top_k": 11,
+                    "candidate_k": 12,
+                    "result_max_chars": 5000,
+                }
+            },
+        }
+    )
+
+    assert explicit_config.memory.knowledge.model_dump() == {
+        "top_k": 11,
+        "candidate_k": 12,
+        "result_max_chars": 5000,
+    }
+
+
+@pytest.mark.parametrize("model", [LongTermMemoryConfig, ChatHistoryRecallConfig, KnowledgeRecallConfig])
+def test_profile_config_rejects_candidate_budget_below_top_k(model) -> None:
+    with pytest.raises(ValueError):
+        model.model_validate({"top_k": 8, "candidate_k": 7})
+
+
+@pytest.mark.parametrize(
+    ("model", "values", "is_valid"),
+    [
+        (ChatHistoryRecallConfig, {"candidate_k": 501}, False),
+        (KnowledgeRecallConfig, {"candidate_k": 51}, False),
+        (LongTermMemoryConfig, {"top_k": 0}, False),
+        (ChatHistoryRecallConfig, {"top_k": 0}, False),
+        (KnowledgeRecallConfig, {"top_k": 0}, False),
+        (LongTermMemoryConfig, {"result_max_chars": 255}, False),
+        (ChatHistoryRecallConfig, {"result_max_chars": 255}, False),
+        (KnowledgeRecallConfig, {"result_max_chars": 255}, False),
+        (LongTermMemoryConfig, {"top_k": 50, "candidate_k": 100, "result_max_chars": 50000}, True),
+        (ChatHistoryRecallConfig, {"top_k": 50, "candidate_k": 500, "result_max_chars": 50000}, True),
+        (KnowledgeRecallConfig, {"top_k": 50, "candidate_k": 50, "result_max_chars": 50000}, True),
+    ],
+)
+def test_recall_config_boundaries(model, values: dict, is_valid: bool) -> None:
+    if is_valid:
+        model.model_validate(values)
+    else:
+        with pytest.raises(ValueError):
+            model.model_validate(values)
 
 
 @pytest.mark.asyncio

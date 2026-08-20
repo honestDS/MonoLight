@@ -8,6 +8,8 @@ MESSAGES = {
     "ERR_PROFILE_NOT_FOUND": "Profile not found",
     "ERR_PROFILE_NAME_EXISTS": "Profile name already exists",
     "ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL": "Long-term memory candidate count must be greater than or equal to the final result count",
+    "ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL": "Chat history candidate count must be greater than or equal to the final result count",
+    "ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL": "Knowledge candidate count must be greater than or equal to the final result count",
     "ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE": "The long-term memory embedding channel and model must be set together or both left empty",
     "ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN": "Profile creation cannot carry a long-term memory embedding confirmation token",
     "ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED": "Long-term memory embedding model changes require preview and confirmation",

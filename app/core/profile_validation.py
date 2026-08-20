@@ -8,7 +8,6 @@ from app.core.constants import (
     ERR_PROFILE_CHANNEL_CONFIG_INVALID,
     ERR_PROFILE_NO_CHAT_CHANNEL,
     ERR_PROFILE_NOT_FOUND,
-    ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL,
 )
 from app.core.crud.channel import channel_crud
 from app.core.crud.profile import profile_crud
@@ -86,9 +85,6 @@ async def validate_channel_configs(db: AsyncSession, channel_config: dict) -> No
             ) from e
 
         await validate_channel_rule_usage(db, channel_config_obj, expected_usage)
-
-        if expected_usage == ModelUsage.RERANK and channel_config_obj.rerank_candidate_k < channel_config_obj.kb_query_top_k:
-            raise ParameterException(ERR_PROFILE_RERANK_CANDIDATE_K_TOO_SMALL)
 
 
 async def validate_profile_for_assignment(db: AsyncSession, profile: Profile) -> ProfileConfig:

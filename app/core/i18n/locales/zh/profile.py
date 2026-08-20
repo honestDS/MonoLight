@@ -8,6 +8,8 @@ MESSAGES = {
     "ERR_PROFILE_NOT_FOUND": "配置信息未找到",
     "ERR_PROFILE_NAME_EXISTS": "配置名称已存在",
     "ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL": "长期记忆候选数量必须大于或等于最终返回数量",
+    "ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL": "聊天记录候选数量必须大于或等于最终返回数量",
+    "ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL": "知识候选数量必须大于或等于最终返回数量",
     "ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE": "长期记忆嵌入渠道和模型必须同时设置或同时留空",
     "ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN": "创建配置不能携带长期记忆嵌入确认凭证",
     "ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED": "长期记忆嵌入模型变更必须先预览并确认",

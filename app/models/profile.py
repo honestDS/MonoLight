@@ -29,6 +29,8 @@ from sqlmodel import (
 from app.core.constants import (
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_PROFILE_AUDIT_REPORT_LANGUAGE_UNSUPPORTED,
+    ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL,
+    ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_CANDIDATE_K_TOO_SMALL,
     ERR_PROFILE_MEMORY_EMBEDDING_SELECTION_INCOMPLETE,
 )
@@ -137,6 +139,34 @@ class OtherConfig(BaseModel):
     )
 
 
+class ChatHistoryRecallConfig(BaseModel):
+    """聊天记录召回参数配置。"""
+
+    top_k: int = PydanticField(5, ge=1, le=50, description="聊天记录最终返回数量")
+    candidate_k: int = PydanticField(500, ge=1, le=500, description="聊天记录候选数量")
+    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="聊天记录结果最大字符数")
+
+    @model_validator(mode="after")
+    def validate_candidate_k(self) -> "ChatHistoryRecallConfig":
+        if self.candidate_k < self.top_k:
+            raise ValueError(t(ERR_PROFILE_CHAT_HISTORY_CANDIDATE_K_TOO_SMALL))
+        return self
+
+
+class KnowledgeRecallConfig(BaseModel):
+    """知识库召回参数配置。"""
+
+    top_k: int = PydanticField(5, ge=1, le=50, description="知识最终返回数量")
+    candidate_k: int = PydanticField(20, ge=1, le=50, description="知识候选数量")
+    result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="知识结果最大字符数")
+
+    @model_validator(mode="after")
+    def validate_candidate_k(self) -> "KnowledgeRecallConfig":
+        if self.candidate_k < self.top_k:
+            raise ValueError(t(ERR_PROFILE_KNOWLEDGE_CANDIDATE_K_TOO_SMALL))
+        return self
+
+
 class LongTermMemoryConfig(BaseModel):
     """长期记忆检索和嵌入模型配置。"""
 
@@ -146,6 +176,8 @@ class LongTermMemoryConfig(BaseModel):
     top_k: int = PydanticField(5, ge=1, le=50, description="长期记忆最终返回数量")
     candidate_k: int = PydanticField(10, ge=1, le=100, description="长期记忆候选数量")
     result_max_chars: int = PydanticField(4000, ge=256, le=50000, description="长期记忆结果最大字符数")
+    chat_history: ChatHistoryRecallConfig = PydanticField(default_factory=ChatHistoryRecallConfig, description="聊天记录召回参数")
+    knowledge: KnowledgeRecallConfig = PydanticField(default_factory=KnowledgeRecallConfig, description="知识库召回参数")
 
     @model_validator(mode="before")
     @classmethod
@@ -238,6 +270,8 @@ class ProfileConfig(BaseModel):
                 "top_k",
                 "candidate_k",
                 "result_max_chars",
+                "chat_history",
+                "knowledge",
                 "memory_enabled",
                 "memory_embedding_channel_id",
                 "memory_embedding_model_id",
@@ -246,7 +280,35 @@ class ProfileConfig(BaseModel):
                 "memory_result_max_chars",
             ],
         }
-        return standardize_config(data, schema_map)
+        normalized = standardize_config(data, schema_map)
+        if not isinstance(normalized, dict):
+            return normalized
+
+        memory = normalized.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+            normalized["memory"] = memory
+        if not isinstance(memory.get("chat_history"), dict):
+            chat_history = ChatHistoryRecallConfig().model_dump()
+            if "top_k" in memory:
+                chat_history["top_k"] = memory["top_k"]
+            elif "memory_top_k" in memory:
+                chat_history["top_k"] = memory["memory_top_k"]
+            if "result_max_chars" in memory:
+                chat_history["result_max_chars"] = memory["result_max_chars"]
+            elif "memory_result_max_chars" in memory:
+                chat_history["result_max_chars"] = memory["memory_result_max_chars"]
+            memory["chat_history"] = chat_history
+        if not isinstance(memory.get("knowledge"), dict):
+            channel = normalized.get("channel")
+            rerank_channel = channel.get("rerank_channel") if isinstance(channel, dict) else None
+            if not isinstance(rerank_channel, dict):
+                rerank_channel = {}
+            memory["knowledge"] = {
+                "top_k": rerank_channel.get("kb_query_top_k", 5),
+                "candidate_k": rerank_channel.get("rerank_candidate_k", 20),
+            }
+        return normalized
 
 
 # 共享的 OpenAPI 示例
@@ -268,8 +330,6 @@ PROFILE_EXAMPLE = {
             },
             "rerank_channel": {
                 "rerank_timeout": 15.0,
-                "rerank_candidate_k": 20,
-                "kb_query_top_k": 5,
                 "rules": [
                     {"channel_id": 1, "model_id": "bge-reranker-large", "priority": 1, "weight": 100},
                 ],
@@ -313,6 +373,16 @@ PROFILE_EXAMPLE = {
             "top_k": 5,
             "candidate_k": 10,
             "result_max_chars": 4000,
+            "chat_history": {
+                "top_k": 5,
+                "candidate_k": 500,
+                "result_max_chars": 4000,
+            },
+            "knowledge": {
+                "top_k": 5,
+                "candidate_k": 20,
+                "result_max_chars": 4000,
+            },
         },
     },
 }
@@ -349,6 +419,11 @@ class ProfileCreate(ProfileBase):
     memory_embedding_selection_signature: str | None = None
     memory_organization: LongTermMemoryOrganizationConfig | None = None
 
+    @field_validator("configs")
+    @classmethod
+    def validate_configs(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return ProfileConfig.model_validate(value).model_dump()
+
 
 class ProfileUpdate(SQLModel):
     """Profile 更新模型"""
@@ -360,6 +435,13 @@ class ProfileUpdate(SQLModel):
     confirm_memory_embedding_selection: bool = False
     memory_embedding_selection_signature: str | None = None
     memory_organization: LongTermMemoryOrganizationConfig | None = None
+
+    @field_validator("configs")
+    @classmethod
+    def validate_configs(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return ProfileConfig.model_validate(value).model_dump()
 
     model_config = ConfigDict(json_schema_extra={"example": PROFILE_EXAMPLE})
 
