@@ -129,25 +129,6 @@
   font-size: 13px;
 }
 
-.channel-hints {
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  background: var(--color-bg-page);
-}
-
-.channel-hint-item {
-  margin-bottom: 4px;
-  line-height: 1.5;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-}
-
-.chat-timeout-hint {
-  flex: 1 1 100%;
-}
-
 .channel-priority-group {
   margin-bottom: 12px;
 }

@@ -18,7 +18,9 @@ const appSource = readSource('src/App.vue')
 const appScssSource = readSource('src/assets/css/app.scss')
 const constantsSource = readSource('src/constants/index.js')
 const memoriesSource = readSource('src/views/MemoriesView.vue')
+const memoryEmbeddingDialogSource = readSource('src/components/MemoryEmbeddingDialog.vue')
 const profileFormSource = readSource('src/components/ProfileFormDialog.vue')
+const profilesScssSource = readSource('src/assets/css/ProfilesView.scss')
 const profilesSource = readSource('src/views/ProfilesView.vue')
 const routerSource = readSource('src/router/index.js')
 
@@ -139,17 +141,71 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
   const baseSource = profileFormSource.slice(baseStart, memoryStart)
   const memorySource = profileFormSource.slice(memoryStart, modelStart)
   assert.doesNotMatch(baseSource, /long_term_memory|form\.configs\.memory|memory_embedding|memory_organization/)
+  assert.match(memorySource, /class="model-summary memory-embedding-summary"/)
   assert.match(memorySource, /form\.configs\.memory\.enabled/)
   assert.match(memorySource, /form\.configs\.memory\.top_k/)
   assert.match(memorySource, /form\.configs\.memory\.candidate_k/)
   assert.match(memorySource, /form\.configs\.memory\.result_max_chars/)
-  assert.match(memorySource, /memoryEmbeddingTargetKey/)
+  assert.match(memorySource, /memory_embedding_settings/)
+  assert.match(memorySource, /memoryEmbeddingCurrentLabel/)
+  assert.match(memorySource, /manage-memory-embedding/)
+  assert.match(memorySource, /el-form-item__content memory-embedding-action/)
+  assert.doesNotMatch(memorySource, /memoryEmbeddingTargetKey/)
+  assert.doesNotMatch(memorySource, /preview-memory-embedding/)
   assert.match(memorySource, /form\.memory_organization\.auto_organize_enabled/)
   assert.match(memorySource, /form\.memory_organization\.organization_channel_id/)
   assert.match(memorySource, /form\.memory_organization\.organization_model_id/)
   assert.match(memorySource, /<el-option v-for="channel in memoryOrganizationChannels"[^>]*:label="channel\.name"/)
   assert.doesNotMatch(memorySource, /memoryOrganizationChannels"[^>]*:[^>]*label="[^"\n]*channel\.id/)
+  const configLineStyle = profilesScssSource.match(/\.config-line\s*\{([\s\S]*?)\}/)
+  assert.ok(configLineStyle)
+  assert.match(configLineStyle[1], /justify-content:\s*space-between;/)
+  const memoryEmbeddingSummaryStyle = profilesScssSource.match(/\.memory-embedding-summary\s*\{([\s\S]*?)\n  \}\n}/)
+  assert.ok(memoryEmbeddingSummaryStyle)
+  assert.match(memoryEmbeddingSummaryStyle[1], /\.config-line\s*\{[\s\S]*?justify-content:\s*flex-start;[\s\S]*?gap:\s*8px;/)
+  assert.match(memoryEmbeddingSummaryStyle[1], /\.config-line\s*>\s*b\s*\{[\s\S]*?text-align:\s*left;/)
+  const memoryEmbeddingActionStyle = profilesScssSource.match(/\.memory-embedding-action\s*\{([\s\S]*?)\}/)
+  assert.ok(memoryEmbeddingActionStyle)
+  assert.match(memoryEmbeddingActionStyle[1], /width:\s*100%;/)
+  assert.match(memoryEmbeddingActionStyle[1], /justify-content:\s*flex-end;/)
   assert.match(profileFormSource, /<el-button type="primary"[\s\S]*:disabled="memorySettingsLoading \|\| memorySettingsUnavailable \|\| !memorySettingsReady"[\s\S]*\$t\('profiles\.save'\)/)
+})
+
+test('MemoryEmbeddingDialog keeps target detection and confirmation independent', () => {
+  const targetLabelStart = memoryEmbeddingDialogSource.indexOf('<div class="memory-embedding-dialog__field-label">')
+  const controlRowStart = memoryEmbeddingDialogSource.indexOf('<div class="memory-embedding-dialog__control-row">')
+  const previewStart = memoryEmbeddingDialogSource.indexOf('<div v-if="props.preview" class="memory-embedding-dialog__preview">', controlRowStart)
+  assert.ok(targetLabelStart >= 0 && controlRowStart > targetLabelStart)
+  assert.ok(controlRowStart >= 0 && previewStart > controlRowStart)
+
+  const targetLabelSource = memoryEmbeddingDialogSource.slice(targetLabelStart, controlRowStart)
+  assert.equal((targetLabelSource.match(/<HelpTooltip\b/g) || []).length, 1)
+  assert.match(targetLabelSource, /<HelpTooltip\s+:content="memoryEmbeddingTargetHint"\s*\/>/)
+
+  const hintStart = memoryEmbeddingDialogSource.indexOf('const memoryEmbeddingTargetHint = computed')
+  const hintEnd = memoryEmbeddingDialogSource.indexOf('const isInitialSelection = computed', hintStart)
+  assert.ok(hintStart >= 0 && hintEnd > hintStart)
+  const hintSource = memoryEmbeddingDialogSource.slice(hintStart, hintEnd)
+  assert.match(hintSource, /`\$\{t\('profiles\.memory_embedding_target_hint'\)\}\s+\$\{t\('profiles\.memory_embedding_preview_hint'\)\}`/)
+
+  const controlRowSource = memoryEmbeddingDialogSource.slice(controlRowStart, previewStart)
+  const selectIndex = controlRowSource.indexOf('<el-select')
+  const detectButtonIndex = controlRowSource.indexOf('<el-button')
+  assert.ok(selectIndex >= 0 && detectButtonIndex > selectIndex)
+  assert.doesNotMatch(controlRowSource, /HelpTooltip/)
+  assert.doesNotMatch(memoryEmbeddingDialogSource, /memory-embedding-dialog__preview-action/)
+
+  assert.match(memoryEmbeddingDialogSource, /:model-value="props\.targetKey"/)
+  assert.match(memoryEmbeddingDialogSource, /@update:model-value="handleTargetKeyChange"/)
+  assert.match(memoryEmbeddingDialogSource, /t\('profiles\.memory_embedding_preview'\)/)
+  assert.match(memoryEmbeddingDialogSource, /emit\('detect'\)/)
+  assert.match(memoryEmbeddingDialogSource, /emit\('confirm'\)/)
+  assert.match(memoryEmbeddingDialogSource, /const sameConfiguration = computed\(\(\) => Boolean\(props\.preview\)[\s\S]*&& !isInitialSelection\.value[\s\S]*&& !props\.requiresMigration\)/)
+  assert.match(memoryEmbeddingDialogSource, /const confirmationRequired = computed\(\(\) => Boolean\(props\.preview\) && !sameConfiguration\.value\)/)
+  assert.match(memoryEmbeddingDialogSource, /v-if="confirmationRequired"/)
+  assert.match(memoryEmbeddingDialogSource, /isInitialSelection\.value\s*\?\s*t\('profiles\.memory_embedding_confirm_enable'\)\s*:\s*t\('profiles\.memory_embedding_start_migration'\)/)
+  assert.match(memoryEmbeddingDialogSource, /:disabled="!props\.confirmationChecked \|\| props\.previewing"/)
+  assert.match(memoryEmbeddingDialogSource, /const handleConfirm = \(\) => \{\s*if \(!confirmationRequired\.value \|\| !props\.confirmationChecked \|\| props\.confirming \|\| props\.previewing\) return/)
 })
 
 test('profile knowledge base binding keeps loading state separate from profile saving', () => {
@@ -206,6 +262,12 @@ const requiredProfileMemoryKeys = [
   'memory_settings', 'long_term_memory_settings', 'long_term_memory_enabled', 'long_term_memory_enabled_hint',
   'memory_storage_not_configured', 'memory_settings_unavailable', 'memory_top_k', 'memory_top_k_hint',
   'memory_candidate_k', 'memory_candidate_k_hint', 'memory_result_max_chars', 'memory_result_max_chars_hint',
+  'memory_embedding_settings', 'memory_embedding_configure', 'memory_embedding_change',
+  'memory_embedding_migration_active', 'memory_embedding_workflow_hint',
+  'memory_embedding_dialog_configure_title', 'memory_embedding_dialog_change_title', 'memory_embedding_dialog_hint',
+  'memory_embedding_migration_target', 'memory_embedding_migration_status', 'memory_embedding_migration_notice',
+  'memory_embedding_confirm_enable', 'memory_embedding_start_migration', 'memory_embedding_enable_success',
+  'memory_embedding_migration_started',
   'memory_embedding_target', 'memory_embedding_target_placeholder', 'memory_embedding_target_hint',
   'memory_embedding_current', 'memory_embedding_preview', 'memory_embedding_preview_hint',
   'memory_embedding_not_configured', 'memory_embedding_dimensions', 'memory_embedding_estimated_records',
@@ -322,7 +384,8 @@ test('MemoriesView uses processing feedback and clears its polling timer', () =>
 
 test('ProfilesView performs memory embedding preview and confirmation as separate steps', () => {
   const previewStart = profilesSource.indexOf('const previewMemoryEmbedding =')
-  const closeStart = profilesSource.indexOf('const closeMemoryConfirmation', previewStart)
+  const openStart = profilesSource.indexOf('const openMemoryEmbeddingDialog =', previewStart)
+  const closeStart = profilesSource.indexOf('const closeMemoryEmbeddingDialog', openStart)
   const confirmStart = profilesSource.indexOf('const confirmMemoryEmbedding =')
   const migrateStart = profilesSource.indexOf('const migrateToolConfig', confirmStart)
   const showDialogStart = profilesSource.indexOf('const showDialog =')
@@ -330,6 +393,7 @@ test('ProfilesView performs memory embedding preview and confirmation as separat
   const visibilityStart = profilesSource.indexOf('const handleDialogVisibilityChange =')
   const buildConfigsStart = profilesSource.indexOf('const buildConfigsForSave', visibilityStart)
   assert.notEqual(previewStart, -1)
+  assert.notEqual(openStart, -1)
   assert.notEqual(closeStart, -1)
   assert.notEqual(confirmStart, -1)
   assert.notEqual(migrateStart, -1)
@@ -338,23 +402,43 @@ test('ProfilesView performs memory embedding preview and confirmation as separat
   assert.notEqual(visibilityStart, -1)
   assert.notEqual(buildConfigsStart, -1)
 
-  const previewSource = profilesSource.slice(previewStart, closeStart)
+  const previewSource = profilesSource.slice(previewStart, openStart)
+  const openSource = profilesSource.slice(openStart, closeStart)
   const confirmSource = profilesSource.slice(confirmStart, migrateStart)
   const showDialogSource = profilesSource.slice(showDialogStart, ownerChangeStart)
   const visibilitySource = profilesSource.slice(visibilityStart, buildConfigsStart)
 
   assert.match(previewSource, /const profileId = form\.id[\s\S]*const targetKey = target\.key/)
   assert.match(previewSource, /profileApi\.memoryEmbeddingPreview\(\{[\s\S]*profile_id:\s*profileId[\s\S]*embedding_channel_id:\s*target\.channel_id[\s\S]*embedding_model_id:\s*target\.model_id/)
+  const previewResetIndex = previewSource.indexOf('memoryPreview.value = null')
+  const confirmationResetIndex = previewSource.indexOf('memoryConfirmationChecked.value = false')
+  const previewRequestIndex = previewSource.indexOf('profileApi.memoryEmbeddingPreview(')
+  assert.notEqual(previewResetIndex, -1)
+  assert.notEqual(confirmationResetIndex, -1)
+  assert.notEqual(previewRequestIndex, -1)
+  assert.ok(previewResetIndex < previewRequestIndex, 'preview must clear stale data before requesting a new preview')
+  assert.ok(confirmationResetIndex < previewRequestIndex, 'preview must clear confirmation before requesting a new preview')
   const previewIdentityCheck = previewSource.indexOf('if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)) return')
   const previewResponseApply = previewSource.indexOf('memoryPreview.value = res.data.data || null')
   assert.notEqual(previewIdentityCheck, -1)
   assert.notEqual(previewResponseApply, -1)
   assert.ok(previewIdentityCheck < previewResponseApply, 'preview must validate request identity before applying the response')
-  assert.match(previewSource, /memoryConfirmationVisible\.value = true/)
   assert.doesNotMatch(previewSource, /memoryEmbeddingConfirm\(/)
+  assert.doesNotMatch(previewSource, /memoryEmbeddingDialogVisible\.value\s*=\s*true/)
+
+  assert.match(openSource, /const openMemoryEmbeddingDialog = \(\) => \{\s*if \(dialogType\.value !== 'edit' \|\| !form\.id \|\| memoryEmbeddingMigrationActive\.value\) return[\s\S]*memoryEmbeddingDialogVisible\.value = true/)
+  assert.match(profilesSource, /@manage-memory-embedding="openMemoryEmbeddingDialog"/)
+  assert.match(profilesSource, /<MemoryEmbeddingDialog[\s\S]*@detect="previewMemoryEmbedding"[\s\S]*@confirm="confirmMemoryEmbedding"/)
 
   assert.match(confirmSource, /if \(!memoryPreview\.value \|\| !memoryConfirmationChecked\.value \|\| !form\.id\) return/)
-  assert.match(confirmSource, /const profileId = form\.id[\s\S]*const targetKey = target\.key[\s\S]*const currentMemory = form\.configs\.memory \|\| \{\}[\s\S]*const memory = \{[\s\S]*embedding_channel_id:\s*target\.channel_id[\s\S]*embedding_model_id:\s*target\.model_id[\s\S]*\}[\s\S]*const embeddingSelectionSignature = memoryPreview\.value\.embedding_selection_signature/)
+  assert.match(confirmSource, /const profileId = form\.id[\s\S]*const targetKey = target\.key/)
+  const memoryPayloadStart = confirmSource.indexOf('const memory =')
+  const memoryPayloadEnd = confirmSource.indexOf('const embeddingSelectionSignature', memoryPayloadStart)
+  assert.ok(memoryPayloadStart >= 0 && memoryPayloadEnd > memoryPayloadStart)
+  const memoryPayloadSource = confirmSource.slice(memoryPayloadStart, memoryPayloadEnd)
+  assert.match(memoryPayloadSource, /const memory = \{[\s\S]*\.\.\.persistedMemoryConfig\.value,[\s\S]*embedding_channel_id:\s*target\.channel_id,[\s\S]*embedding_model_id:\s*target\.model_id[\s\S]*\}/)
+  assert.doesNotMatch(memoryPayloadSource, /form\.configs\.memory/)
+  assert.doesNotMatch(confirmSource, /const currentMemory = form\.configs\.memory/)
   assert.match(confirmSource, /profileApi\.memoryEmbeddingConfirm\(\{[\s\S]*profile_id:\s*profileId[\s\S]*memory,\s*embedding_selection_signature:\s*embeddingSelectionSignature/)
   const confirmIdentityCheck = confirmSource.indexOf('if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)')
   const confirmResponseApply = confirmSource.indexOf('const confirmed = res.data.data || {}')
@@ -364,7 +448,7 @@ test('ProfilesView performs memory embedding preview and confirmation as separat
   assert.doesNotMatch(confirmSource, /memoryEmbeddingPreview\(/)
 
   assert.match(showDialogSource, /const showDialog = \(type, row = null\) => \{\s*invalidateMemoryEmbeddingRequests\(\)/)
-  assert.match(visibilitySource, /const handleDialogVisibilityChange = \(visible\) => \{\s*if \(visible\) return\s*invalidateMemoryEmbeddingRequests\(\)/)
+  assert.match(visibilitySource, /const handleDialogVisibilityChange = \(visible\) => \{\s*if \(visible\) return\s*closeMemoryEmbeddingDialog\(\)/)
 })
 
 test('ProfilesView loads user memory settings with a latest-request tracker', () => {
@@ -421,7 +505,13 @@ test('ProfilesView sends auto organization settings at the top level and keeps c
   assert.match(buildSource, /configs\.memory\.embedding_model_id = active\.model_id \|\| null/)
   assert.doesNotMatch(buildSource, /auto_organize_enabled|organization_channel_id|organization_model_id/)
   assert.match(profilesSource, /watch\(memoryEmbeddingTargetKey, \(\) => \{[\s\S]*memoryPreview\.value = null[\s\S]*memoryConfirmationChecked\.value = false[\s\S]*\}\)/)
-  assert.match(profilesSource, /if \(confirmed\.configs\?\.memory\) form\.configs\.memory = \{ \.\.\.form\.configs\.memory, \.\.\.confirmed\.configs\.memory \}/)
+  const confirmedMemoryStart = profilesSource.indexOf('if (confirmed.configs?.memory) {')
+  const confirmedMemoryEnd = profilesSource.indexOf('memoryRuntime.value =', confirmedMemoryStart)
+  assert.ok(confirmedMemoryStart >= 0 && confirmedMemoryEnd > confirmedMemoryStart)
+  const confirmedMemorySource = profilesSource.slice(confirmedMemoryStart, confirmedMemoryEnd)
+  assert.match(confirmedMemorySource, /persistedMemoryConfig\.value = JSON\.parse\(JSON\.stringify\(confirmed\.configs\.memory\)\)/)
+  assert.match(confirmedMemorySource, /form\.configs\.memory = \{\s*\.\.\.form\.configs\.memory,\s*embedding_channel_id:\s*confirmed\.configs\.memory\.embedding_channel_id,\s*embedding_model_id:\s*confirmed\.configs\.memory\.embedding_model_id\s*\}/)
+  assert.doesNotMatch(confirmedMemorySource, /\.\.\.confirmed\.configs\.memory/)
 })
 
 const requiredMemoryKeys = [

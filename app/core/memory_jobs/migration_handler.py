@@ -21,6 +21,7 @@ from app.core.crud.memory_maintenance import (
     memory_maintenance_record_crud,
     memory_maintenance_store_crud,
 )
+from app.core.crud.profile import profile_crud
 from app.core.i18n import t
 from app.core.memory_jobs.executor import (
     MemoryJobCancelledError,
@@ -546,6 +547,13 @@ async def _switch_migration(
             if current_claim.cancel_requested_at is not None:
                 raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
             raise retryable(ERR_MEMORY_MIGRATION_SWITCH_FAILED)
+        await profile_crud.normalize_memory_selection_by_uid(
+            db,
+            uid=context.job.uid,
+            embedding_channel_id=target["channel_id"],
+            embedding_model_id=target["model_id"],
+            commit=False,
+        )
         await db.commit()
     return await cleanup_old_collection(context, operation=MIGRATION_OPERATION)
 

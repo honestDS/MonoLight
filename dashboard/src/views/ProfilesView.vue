@@ -67,10 +67,12 @@
       :knowledge-bases-ready="knowledgeBasesReady"
       :knowledge-bases-unavailable="knowledgeBasesUnavailable"
       :locale-options="localeOptions"
+      :memory-embedding-configured="memoryEmbeddingConfigured"
       :memory-embedding-current-label="memoryEmbeddingCurrentLabel"
-      :memory-embedding-options="memoryEmbeddingOptions"
-      :memory-embedding-previewing="memoryEmbeddingPreviewing"
-      v-model:memory-embedding-target-key="memoryEmbeddingTargetKey"
+      :memory-embedding-migration-active="memoryEmbeddingMigrationActive"
+      :memory-embedding-migration-status-text="memoryEmbeddingMigrationStatusText"
+      :memory-embedding-migration-status-type="memoryEmbeddingMigrationStatusType"
+      :memory-embedding-target-label="memoryEmbeddingTargetLabel"
       :memory-organization-channels="memoryOrganizationChannels"
       :memory-organization-models="memoryOrganizationModels"
       :memory-organization-model="memoryOrganizationModel"
@@ -90,51 +92,25 @@
       @add-file-send-blocked-extension="addFileSendBlockedExtension"
       @remove-allowed-operation-dir="removeAllowedOperationDir"
       @remove-file-send-blocked-extension="removeFileSendBlockedExtension"
-      @preview-memory-embedding="previewMemoryEmbedding"
+      @manage-memory-embedding="openMemoryEmbeddingDialog"
       @submit="submitForm"
     />
 
-    <el-dialog
-      v-model="memoryConfirmationVisible"
-      :title="$t('profiles.memory_embedding_confirmation_title')"
-      width="min(560px, 92vw)"
-      class="standard-dialog"
-      center
-      align-center
-      @close="closeMemoryConfirmation"
-    >
-      <template v-if="memoryPreview">
-        <el-alert
-          :title="memoryPreview.is_initial_selection ? $t('profiles.memory_embedding_confirmation_first_notice') : memoryPreviewRequiresMigration ? $t('profiles.memory_embedding_confirmation_change_notice') : $t('profiles.memory_embedding_confirmation_same_notice')"
-          type="warning"
-          :closable="false"
-          show-icon
-        />
-        <el-descriptions :column="1" border class="mt-5">
-          <el-descriptions-item :label="$t('profiles.memory_embedding_current')">
-            {{ formatMemorySelection(memoryPreview.current_active) }}
-          </el-descriptions-item>
-          <el-descriptions-item :label="$t('profiles.memory_embedding_target')">
-            {{ memoryPreview.channel_name }} / {{ memoryPreview.model_id }}
-          </el-descriptions-item>
-          <el-descriptions-item :label="$t('profiles.memory_embedding_dimensions')">
-            {{ memoryPreview.current_active?.dimensions || $t('profiles.memory_embedding_not_configured') }} -> {{ memoryPreview.actual_dimensions || memoryPreview.dimensions }}
-          </el-descriptions-item>
-          <el-descriptions-item :label="$t('profiles.memory_embedding_estimated_records')">
-            {{ memoryPreview.estimated_record_count }}
-          </el-descriptions-item>
-        </el-descriptions>
-        <el-checkbox v-model="memoryConfirmationChecked" class="mt-5">
-          {{ $t('profiles.memory_embedding_confirmation_check') }}
-        </el-checkbox>
-      </template>
-      <template #footer>
-        <el-button @click="closeMemoryConfirmation">{{ $t('profiles.cancel') }}</el-button>
-        <el-button type="warning" :loading="memoryEmbeddingConfirming" :disabled="!memoryConfirmationChecked" @click="confirmMemoryEmbedding">
-          {{ $t('profiles.memory_embedding_confirm') }}
-        </el-button>
-      </template>
-    </el-dialog>
+    <MemoryEmbeddingDialog
+      v-model:visible="memoryEmbeddingDialogVisible"
+      v-model:target-key="memoryEmbeddingTargetKey"
+      v-model:confirmation-checked="memoryConfirmationChecked"
+      :configured="memoryEmbeddingConfigured"
+      :current-label="memoryEmbeddingCurrentLabel"
+      :options="memoryEmbeddingOptions"
+      :preview="memoryPreview"
+      :previewing="memoryEmbeddingPreviewing"
+      :confirming="memoryEmbeddingConfirming"
+      :requires-migration="memoryPreviewRequiresMigration"
+      @detect="previewMemoryEmbedding"
+      @confirm="confirmMemoryEmbedding"
+      @closed="closeMemoryEmbeddingDialog"
+    />
 
     <el-dialog :title="$t('profiles.global_settings')" v-model="settingsDialogVisible" width="520px" class="standard-dialog" center align-center>
       <el-form :model="systemSettings" label-width="150px" size="default">
@@ -178,6 +154,7 @@ import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import ProfileFormDialog from '../components/ProfileFormDialog.vue'
+import MemoryEmbeddingDialog from '../components/MemoryEmbeddingDialog.vue'
 import { defaultProfileConfigs } from '../constants'
 import { SUPPORT_LOCALES } from '../i18n'
 import {
@@ -220,10 +197,11 @@ const fileSendBlockedExtensionInput = ref('')
 const memoryEmbeddingTargetKey = ref('')
 const memoryPreview = ref(null)
 const memoryEmbeddingPreviewing = ref(false)
-const memoryConfirmationVisible = ref(false)
+const memoryEmbeddingDialogVisible = ref(false)
 const memoryConfirmationChecked = ref(false)
 const memoryEmbeddingConfirming = ref(false)
 const memoryRuntime = ref({})
+const persistedMemoryConfig = ref({})
 const memorySettingsLoading = ref(false)
 const memorySettingsReady = ref(false)
 const memorySettingsUnavailable = ref(false)
@@ -233,6 +211,13 @@ const memorySettingsRequestTracker = createLatestRequestTracker()
 let memoryEmbeddingRequestGeneration = 0
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
+const activeMemoryEmbeddingMigrationStatuses = new Set([
+  'preparing',
+  'building',
+  'catching_up',
+  'validating',
+  'switching'
+])
 
 const systemSettings = reactive({
   log_locale: 'zh',
@@ -275,7 +260,7 @@ const memoryEmbeddingOptions = computed(() => channels.value
 const formatMemorySelection = (selection) => {
   if (!selection?.channel_id || !selection?.model_id) return t('profiles.memory_embedding_not_configured')
   const channel = channels.value.find(item => String(item.id) === String(selection.channel_id))
-  return channel ? `${channel.name} / ${selection.model_id}` : t('profiles.memory_embedding_not_configured')
+  return channel ? `${channel.name} / ${selection.model_id}` : `${selection.channel_id} / ${selection.model_id}`
 }
 
 const form = reactive({
@@ -316,6 +301,34 @@ const currentMemoryEmbedding = computed(() => ({
 }))
 
 const memoryEmbeddingCurrentLabel = computed(() => formatMemorySelection(currentMemoryEmbedding.value))
+
+const memoryEmbeddingConfigured = computed(() => Boolean(
+  memoryRuntime.value.embedding_channel_id && memoryRuntime.value.embedding_model_id
+))
+
+const memoryEmbeddingTargetLabel = computed(() => {
+  const channelId = memoryRuntime.value.target_embedding_channel_id
+  const modelId = memoryRuntime.value.target_embedding_model_id
+  if (!channelId || !modelId) return ''
+  return formatMemorySelection({ channel_id: channelId, model_id: modelId })
+})
+
+const memoryEmbeddingMigrationActive = computed(() => activeMemoryEmbeddingMigrationStatuses.has(
+  memoryRuntime.value.migration_status
+))
+
+const memoryEmbeddingMigrationStatusText = computed(() => {
+  const status = memoryRuntime.value.migration_status
+  return status ? t(`memories.status_${status}`, status) : ''
+})
+
+const memoryEmbeddingMigrationStatusType = computed(() => {
+  const status = memoryRuntime.value.migration_status
+  if (status === 'succeeded') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'cancelled') return 'info'
+  return 'warning'
+})
 
 const memoryPreviewRequiresMigration = computed(() => {
   const preview = memoryPreview.value
@@ -366,6 +379,7 @@ const invalidateMemoryEmbeddingRequests = () => {
 const isCurrentMemoryEmbeddingRequest = (requestGeneration, profileId, targetKey) => (
   requestGeneration === memoryEmbeddingRequestGeneration
   && dialogVisible.value
+  && memoryEmbeddingDialogVisible.value
   && dialogType.value === 'edit'
   && String(form.id) === String(profileId)
   && memoryEmbeddingTargetKey.value === targetKey
@@ -569,6 +583,8 @@ const previewMemoryEmbedding = async () => {
   const profileId = form.id
   const targetKey = target.key
   const requestGeneration = ++memoryEmbeddingRequestGeneration
+  memoryPreview.value = null
+  memoryConfirmationChecked.value = false
   memoryEmbeddingPreviewing.value = true
   try {
     const res = await profileApi.memoryEmbeddingPreview({
@@ -579,7 +595,6 @@ const previewMemoryEmbedding = async () => {
     if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)) return
     memoryPreview.value = res.data.data || null
     memoryConfirmationChecked.value = false
-    memoryConfirmationVisible.value = true
   } catch (err) {
     if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)) return
     ElMessage.error(err.message || t('profiles.submit_failed'))
@@ -588,27 +603,38 @@ const previewMemoryEmbedding = async () => {
   }
 }
 
-const closeMemoryConfirmation = () => {
+const openMemoryEmbeddingDialog = () => {
+  if (dialogType.value !== 'edit' || !form.id || memoryEmbeddingMigrationActive.value) return
   invalidateMemoryEmbeddingRequests()
-  memoryConfirmationVisible.value = false
+  memoryEmbeddingTargetKey.value = ''
+  memoryPreview.value = null
+  memoryConfirmationChecked.value = false
+  memoryEmbeddingPreviewing.value = false
+  memoryEmbeddingConfirming.value = false
+  memoryEmbeddingDialogVisible.value = true
+}
+
+const closeMemoryEmbeddingDialog = () => {
+  invalidateMemoryEmbeddingRequests()
+  memoryEmbeddingDialogVisible.value = false
+  memoryEmbeddingTargetKey.value = ''
   memoryConfirmationChecked.value = false
   memoryPreview.value = null
+  memoryEmbeddingPreviewing.value = false
   memoryEmbeddingConfirming.value = false
 }
 
 const confirmMemoryEmbedding = async () => {
   if (!memoryPreview.value || !memoryConfirmationChecked.value || !form.id) return
+  if (!memoryPreview.value.is_initial_selection && !memoryPreviewRequiresMigration.value) return
   const target = memoryEmbeddingOptions.value.find(item => item.key === memoryEmbeddingTargetKey.value)
   if (!target) return
 
   const profileId = form.id
   const targetKey = target.key
-  const currentMemory = form.configs.memory || {}
+  const isInitialSelection = Boolean(memoryPreview.value.is_initial_selection)
   const memory = {
-    enabled: currentMemory.enabled,
-    top_k: currentMemory.top_k,
-    candidate_k: currentMemory.candidate_k,
-    result_max_chars: currentMemory.result_max_chars,
+    ...persistedMemoryConfig.value,
     embedding_channel_id: target.channel_id,
     embedding_model_id: target.model_id
   }
@@ -622,18 +648,27 @@ const confirmMemoryEmbedding = async () => {
       embedding_selection_signature: embeddingSelectionSignature
     })
     if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)
-      || !memoryConfirmationVisible.value
       || memoryPreview.value?.embedding_selection_signature !== embeddingSelectionSignature) return
     const confirmed = res.data.data || {}
-    if (confirmed.configs?.memory) form.configs.memory = { ...form.configs.memory, ...confirmed.configs.memory }
+    if (confirmed.configs?.memory) {
+      persistedMemoryConfig.value = JSON.parse(JSON.stringify(confirmed.configs.memory))
+      form.configs.memory = {
+        ...form.configs.memory,
+        embedding_channel_id: confirmed.configs.memory.embedding_channel_id,
+        embedding_model_id: confirmed.configs.memory.embedding_model_id
+      }
+    }
     memoryRuntime.value = confirmed.memory_runtime || memoryRuntime.value
-    memoryEmbeddingTargetKey.value = targetKey
-    closeMemoryConfirmation()
-    ElMessage.success(t('profiles.memory_embedding_confirm_success'))
+    memoryStorageConfigured.value = Boolean(
+      memoryRuntime.value.embedding_channel_id && memoryRuntime.value.embedding_model_id
+    )
+    closeMemoryEmbeddingDialog()
+    ElMessage.success(t(isInitialSelection
+      ? 'profiles.memory_embedding_enable_success'
+      : 'profiles.memory_embedding_migration_started'))
     loadProfiles()
   } catch (err) {
     if (!isCurrentMemoryEmbeddingRequest(requestGeneration, profileId, targetKey)
-      || !memoryConfirmationVisible.value
       || memoryPreview.value?.embedding_selection_signature !== embeddingSelectionSignature) return
     ElMessage.error(err.message || t('profiles.submit_failed'))
   } finally {
@@ -687,7 +722,7 @@ const showDialog = (type, row = null) => {
   memoryEmbeddingPreviewing.value = false
   memoryEmbeddingConfirming.value = false
   memoryPreview.value = null
-  memoryConfirmationVisible.value = false
+  memoryEmbeddingDialogVisible.value = false
   memoryConfirmationChecked.value = false
   if (type === 'edit' && row) {
     form.id = row.id
@@ -721,10 +756,9 @@ const showDialog = (type, row = null) => {
       if (row.configs.memory) Object.assign(base.memory, row.configs.memory)
     }
     form.configs = base
+    persistedMemoryConfig.value = JSON.parse(JSON.stringify(base.memory))
     memoryRuntime.value = row.memory_runtime || {}
-    memoryEmbeddingTargetKey.value = base.memory.embedding_channel_id && base.memory.embedding_model_id
-      ? `${base.memory.embedding_channel_id}::${base.memory.embedding_model_id}`
-      : ''
+    memoryEmbeddingTargetKey.value = ''
   } else {
     form.id = null
     form.uid = users.value[0]?.uid || null
@@ -737,6 +771,7 @@ const showDialog = (type, row = null) => {
       organization_model_id: null
     }
     form.configs = defaultProfileConfigs()
+    persistedMemoryConfig.value = JSON.parse(JSON.stringify(form.configs.memory))
     memoryRuntime.value = {}
     memoryEmbeddingTargetKey.value = ''
   }
@@ -757,13 +792,11 @@ const handleMemoryOwnerChange = (uid) => {
 
 const handleDialogVisibilityChange = (visible) => {
   if (visible) return
-  invalidateMemoryEmbeddingRequests()
+  closeMemoryEmbeddingDialog()
   memorySettingsRequestTracker.invalidate()
   memorySettingsLoading.value = false
   memorySettingsReady.value = false
   memorySettingsUnavailable.value = false
-  memoryEmbeddingPreviewing.value = false
-  memoryEmbeddingConfirming.value = false
 }
 
 const buildConfigsForSave = () => {
