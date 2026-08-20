@@ -168,7 +168,7 @@ export default {
   tool_timeout: '工具超时(s)',
   tool_timeout_hint: '作用于普通工具执行过程，超过该时长的工具调用会被超时中止。图像生成工具使用独立超时配置。',
   image_generation_tool_timeout: '图像生成超时(s)',
-  image_generation_tool_timeout_hint: '仅作用于 generate_image 图像生成工具，不影响其他工具的执行超时。',
+  image_generation_tool_timeout_hint: '仅作用于图像生成工具，不影响其他工具的执行超时。',
   common_tool_config: '公共设置',
   allowed_operation_dirs: '允许操作的目录',
   allowed_operation_dirs_placeholder: '输入绝对路径后按回车添加',

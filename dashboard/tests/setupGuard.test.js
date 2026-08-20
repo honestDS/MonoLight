@@ -424,12 +424,8 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
     /security\.audit_model_id/,
     /form\.configs\.security\.audit_report_language/,
     /form\.configs\.security\.audit_confirmation_timeout_seconds/,
-    /form\.configs\.tool\.tool_timeout/,
+    /form\.configs\.tool\.allowed_operation_dirs/,
     /form\.configs\.tool\.enabled_tools/,
-    /form\.configs\.tool\.file_send_max_count/,
-    /form\.configs\.tool\.file_send_max_single_size_mb/,
-    /form\.configs\.tool\.file_send_max_total_size_mb/,
-    /form\.configs\.tool\.file_send_blocked_extensions/,
     /form\.configs\.tool\.firecrawl_api_key/,
   ]) {
     assert.match(profileGuideSource, field)
@@ -442,6 +438,12 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
     profileGuideSource,
     /\.setup-profile-guide\s*:deep\(\.el-slider__input\)\s*\{\s*flex\s*:\s*0\s+0\s+130px\s*;\s*width\s*:\s*130px\s*;\s*max-width\s*:\s*40%\s*;\s*\}/,
   )
+  assert.match(profileGuideSource, /class="setup-profile-guide__section-description"/)
+  assert.match(profileGuideSource, /t\('setup\.audit_guide_description'\)/)
+  assert.match(
+    profileGuideSource,
+    /\.setup-profile-guide__section-description\s*\{[\s\S]*?color\s*:\s*var\(--setup-profile-guide-muted\)\s*;[\s\S]*?font-size\s*:\s*14px\s*;[\s\S]*?line-height\s*:\s*1\.6\s*;[\s\S]*?overflow-wrap\s*:\s*anywhere\s*;[\s\S]*?word-break\s*:\s*break-word\s*;[\s\S]*?white-space\s*:\s*normal\s*;/,
+  )
   for (const key of ['default_prompt', 'default_prompt_placeholder', 'default_prompt_hint']) {
     assert.match(profileGuideSource, new RegExp(`setup\\.${key}`))
   }
@@ -453,8 +455,31 @@ test('SetupProfileGuide keeps the three optional configuration groups and source
   )
   assert.match(profileGuideSource, /const commitPendingInputs = \(\) => \{/)
   assert.match(profileGuideSource, /const discardPendingInputs = \(\) => \{/)
-  assert.match(profileGuideSource, /commitPendingInputs[\s\S]*addAllowedOperationDir\(\)[\s\S]*addFileSendBlockedExtension\(\)/)
+  assert.match(profileGuideSource, /commitPendingInputs[\s\S]*addAllowedOperationDir\(\)/)
+  assert.doesNotMatch(profileGuideSource, /addFileSendBlockedExtension\(\)/)
   assert.match(profileGuideSource, /defineExpose\(\{\s*commitPendingInputs\s*,\s*discardPendingInputs\s*\}\)/)
+
+  for (const forbidden of [
+    /profiles\.scheduling_control/,
+    /profiles\.file_send_config/,
+    /\bmax_parallel_tools\b/,
+    /\bexecutor_max_workers\b/,
+    /\bbackground_task_max_concurrency\b/,
+    /\bscheduled_task_max_concurrency\b/,
+    /\bmax_turns\b/,
+    /\btool_timeout\b/,
+    /\bimage_generation_timeout\b/,
+    /\bfile_send_max_count\b/,
+    /\bfile_send_max_single_size_mb\b/,
+    /\bfile_send_max_total_size_mb\b/,
+    /\bfile_send_blocked_extensions\b/,
+    /\bfileSendBlockedExtensionDraft\b/,
+    /\baddFileSendBlockedExtension\b/,
+    /\bremoveFileSendBlockedExtension\b/,
+    /setup-profile-guide__file-grid/,
+  ]) {
+    assert.doesNotMatch(profileGuideSource, forbidden)
+  }
 
   const reducedMotionStart = profileGuideSource.indexOf('@media (prefers-reduced-motion: reduce)')
   assert.ok(reducedMotionStart >= 0)
@@ -511,7 +536,7 @@ test('Chinese and English setup locales have identical complete key sets and non
     'password_mismatch', 'url_format', 'max_length', 'status_checking', 'status_error_title',
     'status_error_description', 'status_retry', 'complete_failed', 'invalid_token_response',
     'skip_step', 'continue_configuration', 'skip_and_finish', 'save_and_continue', 'save_and_finish', 'guide_load_failed',
-    'profile_guide_description',
+    'profile_guide_description', 'audit_guide_description',
   ]
   for (const key of criticalKeys) {
     assert.equal(typeof zhSetup[key], 'string')

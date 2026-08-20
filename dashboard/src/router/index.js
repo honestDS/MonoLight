@@ -15,7 +15,9 @@ const routes = [
   { path: '/memories', component: () => import('../views/MemoriesView.vue') },
   { path: '/knowledge-base', component: () => import('../views/KnowledgeBase.vue') },
   { path: '/logs/realtime', component: () => import('../views/RealTimeLogs.vue') },
-  { path: '/logs/history', component: () => import('../views/HistoryLogs.vue') }
+  { path: '/logs/history', component: () => import('../views/HistoryLogs.vue') },
+  { path: '/docs', component: () => import('../views/UnderConstructionView.vue'), props: { titleKey: 'common.menu.docs', descriptionKey: 'common.construction.docs_description' } },
+  { path: '/support', component: () => import('../views/UnderConstructionView.vue'), props: { titleKey: 'common.menu.support', descriptionKey: 'common.construction.support_description' } }
 ]
 
 const router = createRouter({

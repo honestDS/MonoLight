@@ -7,6 +7,7 @@ export default {
   channel_title: 'Configure Channel',
   profile_title: 'Optional Configuration Guide',
   profile_guide_description: 'Completing the optional configuration can tailor the system to your usage habits and improve the overall experience.',
+  audit_guide_description: 'Purpose: check whether an action is safe before the assistant changes files or the system. Steps: the system reviews what will happen and its possible effects; if your decision is needed, it pauses and explains why; it continues only after you agree, while rejection or timeout stops the action; the process is saved for later review.',
   default_prompt: 'Default Prompt',
   default_prompt_placeholder: 'Enter a default prompt (optional)',
   default_prompt_hint: 'Defines the assistant role, behavior, and response style for the default profile. No custom prompt is added when left unset.',
