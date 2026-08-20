@@ -192,11 +192,17 @@ def _profile_configs_with_active_memory(
     store: LongTermMemoryStore,
 ) -> dict[str, Any]:
     configs = ProfileConfig.model_validate(profile.configs or {}).model_dump()
-    memory_data = memory.model_dump()
-    memory_data["embedding_channel_id"] = store.active_embedding_channel_id
-    memory_data["embedding_model_id"] = store.active_embedding_model_id
-    configs["memory"] = memory_data
-    return configs
+    current_memory = configs["memory"]
+    memory_data = memory.model_dump(exclude_unset=True)
+    for field in ("chat_history", "knowledge"):
+        nested_data = memory_data.pop(field, None)
+        if nested_data is not None:
+            current_memory[field] = {**current_memory[field], **nested_data}
+    current_memory.update(memory_data)
+    current_memory["embedding_channel_id"] = store.active_embedding_channel_id
+    current_memory["embedding_model_id"] = store.active_embedding_model_id
+    configs["memory"] = current_memory
+    return ProfileConfig.model_validate(configs).model_dump()
 
 
 async def _confirm_embedding_selection(

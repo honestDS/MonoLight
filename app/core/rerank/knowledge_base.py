@@ -15,7 +15,7 @@ from app.core.retrieval.schemas import RetrievalHit
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.models.channel import ChannelConfig, resolve_model_protocol
-from app.models.profile import Profile
+from app.models.profile import Profile, ProfileConfig
 from app.providers.rerank import RerankClient
 
 logger = get_logger(__name__)
@@ -38,6 +38,13 @@ async def get_profile_rerank_config(
 
     try:
         rerank_channel = ChannelConfig.model_validate(rerank_channel_raw)
+    except Exception as e:
+        logger.bind(profile_id=profile.id).warning(t("LOG_RERANK_CONFIG_PARSE_FAILED", error=str(e)))
+        return None
+
+    try:
+        profile_config = ProfileConfig.model_validate(profile.configs or {})
+        knowledge_candidate_k = profile_config.memory.knowledge.candidate_k
     except Exception as e:
         logger.bind(profile_id=profile.id).warning(t("LOG_RERANK_CONFIG_PARSE_FAILED", error=str(e)))
         return None
@@ -68,7 +75,7 @@ async def get_profile_rerank_config(
         base_url=channel.base_url,
         model_id=model_entry["model_id"],
         protocol=resolve_model_protocol(model_entry),
-        candidate_k=rerank_channel.rerank_candidate_k,
+        candidate_k=knowledge_candidate_k,
         timeout=model_entry.get("rerank_timeout") if model_entry.get("rerank_timeout") is not None else rerank_channel.rerank_timeout,
         priority=_rule.priority,
         http_proxy=get_channel_http_proxy(channel),

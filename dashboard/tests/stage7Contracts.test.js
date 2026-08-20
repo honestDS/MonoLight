@@ -17,6 +17,7 @@ const apiSource = readSource('src/api/index.js')
 const appSource = readSource('src/App.vue')
 const appScssSource = readSource('src/assets/css/app.scss')
 const constantsSource = readSource('src/constants/index.js')
+const channelEditorSource = readSource('src/components/ChannelEditor.vue')
 const memoriesSource = readSource('src/views/MemoriesView.vue')
 const memoriesScssSource = readSource('src/assets/css/MemoriesView.scss')
 const memoryEmbeddingDialogSource = readSource('src/components/MemoryEmbeddingDialog.vue')
@@ -141,12 +142,24 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
 
   const baseSource = profileFormSource.slice(baseStart, memoryStart)
   const memorySource = profileFormSource.slice(memoryStart, modelStart)
+  const longTermMemoryStart = memorySource.indexOf('<div class="settings-section">')
+  const memoryEmbeddingStart = memorySource.indexOf('<div v-if="dialogType === \'edit\'" class="settings-section">', longTermMemoryStart)
   assert.doesNotMatch(baseSource, /long_term_memory|form\.configs\.memory|memory_embedding|memory_organization/)
   assert.match(memorySource, /class="model-summary memory-embedding-summary"/)
-  assert.match(memorySource, /form\.configs\.memory\.enabled/)
-  assert.match(memorySource, /form\.configs\.memory\.top_k/)
-  assert.match(memorySource, /form\.configs\.memory\.candidate_k/)
-  assert.match(memorySource, /form\.configs\.memory\.result_max_chars/)
+  assert.ok(longTermMemoryStart >= 0 && memoryEmbeddingStart > longTermMemoryStart)
+  const longTermMemorySource = memorySource.slice(longTermMemoryStart, memoryEmbeddingStart)
+  assert.equal((longTermMemorySource.match(/<div class="settings-section-title">/g) || []).length, 1)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.enabled"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.top_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.candidate_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.result_max_chars"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.chat_history\.top_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.chat_history\.candidate_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.chat_history\.result_max_chars"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.knowledge\.top_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.knowledge\.candidate_k"/)
+  assert.match(longTermMemorySource, /v-model="form\.configs\.memory\.knowledge\.result_max_chars"/)
+  assert.doesNotMatch(profileFormSource, /profiles\.(?:memory_recall_settings|chat_history_recall_settings|knowledge_recall_settings)/)
   assert.match(memorySource, /memory_embedding_settings/)
   assert.match(memorySource, /class="help-text memory-embedding-scope"[\s\S]*profiles\.memory_embedding_scope/)
   assert.match(memorySource, /memoryEmbeddingCurrentLabel/)
@@ -171,6 +184,15 @@ test('ProfileFormDialog separates profile memory settings from user auto organiz
   assert.match(memoryEmbeddingActionStyle[1], /width:\s*100%;/)
   assert.match(memoryEmbeddingActionStyle[1], /justify-content:\s*flex-end;/)
   assert.match(profileFormSource, /<el-button type="primary"[\s\S]*:disabled="memorySettingsLoading \|\| memorySettingsUnavailable \|\| !memorySettingsReady"[\s\S]*\$t\('profiles\.save'\)/)
+})
+
+test('ChannelEditor and default channel configs remove obsolete rerank settings', () => {
+  for (const [sourceName, source] of [['ChannelEditor.vue', channelEditorSource], ['default channel config', constantsSource]]) {
+    assert.doesNotMatch(source, /rerank_candidate_k/, `${sourceName} must not contain rerank_candidate_k`)
+    assert.doesNotMatch(source, /kb_query_top_k/, `${sourceName} must not contain kb_query_top_k`)
+  }
+  assert.match(channelEditorSource, /usage === 'RERANK'[\s\S]*rerank_timeout/)
+  assert.match(constantsSource, /rerank_timeout:\s*15\.0/)
 })
 
 test('MemoryEmbeddingDialog keeps target detection and confirmation independent', () => {
@@ -264,6 +286,11 @@ const requiredProfileMemoryKeys = [
   'memory_settings', 'long_term_memory_settings', 'long_term_memory_enabled', 'long_term_memory_enabled_hint',
   'memory_storage_not_configured', 'memory_settings_unavailable', 'memory_top_k', 'memory_top_k_hint',
   'memory_candidate_k', 'memory_candidate_k_hint', 'memory_result_max_chars', 'memory_result_max_chars_hint',
+  'memory_recall_settings', 'chat_history_recall_settings', 'knowledge_recall_settings',
+  'chat_history_top_k', 'chat_history_top_k_hint', 'chat_history_candidate_k', 'chat_history_candidate_k_hint',
+  'chat_history_result_max_chars', 'chat_history_result_max_chars_hint',
+  'knowledge_top_k', 'knowledge_top_k_hint', 'knowledge_candidate_k', 'knowledge_candidate_k_hint',
+  'knowledge_result_max_chars', 'knowledge_result_max_chars_hint',
   'memory_embedding_settings', 'memory_embedding_scope', 'memory_embedding_configure', 'memory_embedding_change',
   'memory_embedding_migration_active', 'memory_embedding_workflow_hint',
   'memory_embedding_dialog_configure_title', 'memory_embedding_dialog_change_title', 'memory_embedding_dialog_hint',
@@ -304,10 +331,22 @@ test('defaultProfileConfigs includes independent memory defaults', () => {
     embedding_model_id: null,
     top_k: 5,
     candidate_k: 10,
-    result_max_chars: 4000
+    result_max_chars: 4000,
+    chat_history: {
+      top_k: 5,
+      candidate_k: 500,
+      result_max_chars: 4000
+    },
+    knowledge: {
+      top_k: 5,
+      candidate_k: 20,
+      result_max_chars: 4000
+    }
   })
   assert.notStrictEqual(first, second)
   assert.notStrictEqual(first.memory, second.memory)
+  assert.notStrictEqual(first.memory.chat_history, second.memory.chat_history)
+  assert.notStrictEqual(first.memory.knowledge, second.memory.knowledge)
   assert.notStrictEqual(first.channel.chat_channel, second.channel.chat_channel)
   assert.notStrictEqual(first.channel.chat_channel.rules, second.channel.chat_channel.rules)
   assert.notStrictEqual(first.tool.enabled_tools, second.tool.enabled_tools)
@@ -315,12 +354,16 @@ test('defaultProfileConfigs includes independent memory defaults', () => {
 
   first.memory.enabled = true
   first.memory.top_k = 99
+  first.memory.chat_history.top_k = 99
+  first.memory.knowledge.top_k = 99
   first.channel.chat_channel.rules.push({ channel_id: 1, model_id: 'model-a' })
   first.tool.enabled_tools.pop()
   first.tool.allowed_operation_dirs.push('C:/isolated')
 
   assert.equal(second.memory.enabled, false)
   assert.equal(second.memory.top_k, 5)
+  assert.equal(second.memory.chat_history.top_k, 5)
+  assert.equal(second.memory.knowledge.top_k, 5)
   assert.deepEqual(second.channel.chat_channel.rules, [])
   assert.equal(second.tool.enabled_tools.includes('execute_shell'), true)
   assert.deepEqual(second.tool.allowed_operation_dirs, [])
@@ -450,6 +493,8 @@ test('ProfilesView performs memory embedding preview and confirmation as separat
   assert.doesNotMatch(confirmSource, /memoryEmbeddingPreview\(/)
 
   assert.match(showDialogSource, /const showDialog = \(type, row = null\) => \{\s*invalidateMemoryEmbeddingRequests\(\)/)
+  assert.match(showDialogSource, /if \(row\.configs\.memory\) Object\.assign\(base\.memory, JSON\.parse\(JSON\.stringify\(row\.configs\.memory\)\)\)/)
+  assert.doesNotMatch(showDialogSource, /Object\.assign\(base\.memory, row\.configs\.memory\)/)
   assert.match(visibilitySource, /const handleDialogVisibilityChange = \(visible\) => \{\s*if \(visible\) return\s*closeMemoryEmbeddingDialog\(\)/)
 })
 

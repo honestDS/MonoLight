@@ -753,7 +753,7 @@ const showDialog = (type, row = null) => {
       if (row.configs.security) Object.assign(base.security, migrateSecurityConfig(row.configs.security))
       if (row.configs.tool) Object.assign(base.tool, row.configs.tool)
       if (row.configs.other) Object.assign(base.other, row.configs.other)
-      if (row.configs.memory) Object.assign(base.memory, row.configs.memory)
+      if (row.configs.memory) Object.assign(base.memory, JSON.parse(JSON.stringify(row.configs.memory)))
     }
     form.configs = base
     persistedMemoryConfig.value = JSON.parse(JSON.stringify(base.memory))

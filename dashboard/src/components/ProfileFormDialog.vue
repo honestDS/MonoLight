@@ -98,6 +98,64 @@
                     </el-form-item>
                   </el-col>
                 </el-row>
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.chat_history_top_k') }}
+                        <HelpTooltip :content="$t('profiles.chat_history_top_k_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.chat_history.top_k" :min="1" :max="50" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.chat_history_candidate_k') }}
+                        <HelpTooltip :content="$t('profiles.chat_history_candidate_k_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.chat_history.candidate_k" :min="1" :max="500" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.chat_history_result_max_chars') }}
+                        <HelpTooltip :content="$t('profiles.chat_history_result_max_chars_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.chat_history.result_max_chars" :min="256" :max="50000" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.knowledge_top_k') }}
+                        <HelpTooltip :content="$t('profiles.knowledge_top_k_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.knowledge.top_k" :min="1" :max="50" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.knowledge_candidate_k') }}
+                        <HelpTooltip :content="$t('profiles.knowledge_candidate_k_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.knowledge.candidate_k" :min="1" :max="50" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12" :md="8">
+                    <el-form-item>
+                      <template #label>
+                        {{ $t('profiles.knowledge_result_max_chars') }}
+                        <HelpTooltip :content="$t('profiles.knowledge_result_max_chars_hint')" />
+                      </template>
+                      <el-input-number v-model="form.configs.memory.knowledge.result_max_chars" :min="256" :max="50000" class="full-width-input" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
               </div>
 
               <div v-if="dialogType === 'edit'" class="settings-section">
