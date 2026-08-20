@@ -504,6 +504,7 @@ dashboard/src/
 
 ```text
 dashboard/src/views/
+├── BackendUnavailableView.vue # 后端服务不可用时展示的独立错误页面
 ├── ChannelsView.vue        # 渠道管理页面
 ├── ChatView.vue            # 聊天页面
 ├── HistoryLogs.vue         # 历史日志页面

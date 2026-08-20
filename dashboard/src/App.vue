@@ -133,7 +133,7 @@ export default {
 
   computed: {
     isStandalonePage() {
-      return ['/login', '/setup'].includes(this.$route.path)
+      return ['/login', '/setup', '/backend-unavailable'].includes(this.$route.path)
     },
     currentRouteName() {
       const path = this.$route.path

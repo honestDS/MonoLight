@@ -8,6 +8,7 @@ import zhSetup from '../src/i18n/locales/zh/setup.js'
 import enLogin from '../src/i18n/locales/en/login.js'
 import zhLogin from '../src/i18n/locales/zh/login.js'
 import {
+  BACKEND_UNAVAILABLE_PATH,
   HOME_PATH,
   LOGIN_PATH,
   SETUP_PATH,
@@ -26,6 +27,8 @@ const routerSource = source('router/index.js')
 const loginSource = source('views/LoginView.vue')
 const appSource = source('App.vue')
 const setupSource = source('views/SetupView.vue')
+const backendUnavailableSource = source('views/BackendUnavailableView.vue')
+const backendUnavailableStyleSource = source('assets/css/BackendUnavailableView.scss')
 const profileGuideSource = source('components/SetupProfileGuide.vue')
 const profileGuideStyleSource = source('assets/css/SetupProfileGuide.scss')
 const setupStyleSource = source('assets/css/setup.scss')
@@ -104,14 +107,19 @@ test('refreshSetupStatus transitions to ready on success and rethrows errors wit
   })
 })
 
-test('resolveSetupNavigation covers setup state, token state, and every destination class', () => {
-  const paths = [SETUP_PATH, LOGIN_PATH, '/', '/profiles']
+test('resolveSetupNavigation covers setup state, backend availability, token state, and every destination class', () => {
+  const paths = [SETUP_PATH, BACKEND_UNAVAILABLE_PATH, LOGIN_PATH, '/', '/profiles']
   for (const toPath of paths) {
+    const leavesStandalonePage = toPath === SETUP_PATH || toPath === BACKEND_UNAVAILABLE_PATH
     assert.equal(resolveSetupNavigation({ required: true, toPath, hasToken: false }), toPath === SETUP_PATH ? undefined : SETUP_PATH)
     assert.equal(resolveSetupNavigation({ required: true, toPath, hasToken: true }), toPath === SETUP_PATH ? undefined : SETUP_PATH)
-    assert.equal(resolveSetupNavigation({ required: false, toPath, hasToken: true }), toPath === SETUP_PATH ? HOME_PATH : undefined)
-    assert.equal(resolveSetupNavigation({ required: false, toPath, hasToken: false }), toPath === SETUP_PATH ? LOGIN_PATH : toPath === LOGIN_PATH ? undefined : LOGIN_PATH)
+    assert.equal(resolveSetupNavigation({ required: false, toPath, hasToken: true }), leavesStandalonePage ? HOME_PATH : undefined)
+    assert.equal(resolveSetupNavigation({ required: false, toPath, hasToken: false }), leavesStandalonePage ? LOGIN_PATH : toPath === LOGIN_PATH ? undefined : LOGIN_PATH)
   }
+  assert.equal(resolveSetupNavigation({ required: true, toPath: BACKEND_UNAVAILABLE_PATH, hasToken: false }), SETUP_PATH)
+  assert.equal(resolveSetupNavigation({ required: true, toPath: BACKEND_UNAVAILABLE_PATH, hasToken: true }), SETUP_PATH)
+  assert.equal(resolveSetupNavigation({ required: false, toPath: BACKEND_UNAVAILABLE_PATH, hasToken: true }), HOME_PATH)
+  assert.equal(resolveSetupNavigation({ required: false, toPath: BACKEND_UNAVAILABLE_PATH, hasToken: false }), LOGIN_PATH)
 })
 
 test('createSetupGuard sends pending users to setup and completed users according to token', async () => {
@@ -130,16 +138,16 @@ test('createSetupGuard sends pending users to setup and completed users accordin
   assert.equal(await completedWithoutToken(LOGIN_PATH), undefined)
 })
 
-test('createSetupGuard exposes a retryable setup error without repeating failed checks on setup', async () => {
+test('createSetupGuard routes backend failures without repeating failed checks on the unavailable page', async () => {
   const state = createSetupStatusState()
   let calls = 0
   const failure = Object.assign(new Error('database unavailable'), { response: { data: { code: 'DB_DOWN', message: 'Database unavailable' } } })
   const guard = createSetupGuard({ state, getToken: () => null, statusRequest: async () => { calls += 1; throw failure } })
 
-  assert.equal(await guard('/profiles'), SETUP_PATH)
+  assert.equal(await guard('/profiles'), BACKEND_UNAVAILABLE_PATH)
   assert.equal(calls, 1)
   assert.deepEqual(state.getSnapshot(), { phase: 'error', required: null, error: { code: 'DB_DOWN', message: 'Database unavailable' } })
-  assert.equal(await guard(SETUP_PATH), undefined)
+  assert.equal(await guard(BACKEND_UNAVAILABLE_PATH), undefined)
   assert.equal(calls, 1)
 })
 
@@ -155,12 +163,12 @@ test('a successful page retry restores ready state after a failed setup check', 
       return { data: { data: { required: false } } }
     },
   })
-  assert.equal(await guard('/'), SETUP_PATH)
+  assert.equal(await guard('/'), BACKEND_UNAVAILABLE_PATH)
   assert.equal(await refreshSetupStatus({ state, statusRequest: async () => ({ data: { data: { required: false } } }) }), false)
   assert.deepEqual(state.getSnapshot(), { phase: 'ready', required: false, error: null })
 })
 
-test('a failed page retry preserves the latest setup error and leaves setup renderable', async () => {
+test('a failed page retry preserves the latest backend error and leaves the unavailable page renderable', async () => {
   const state = createSetupStatusState()
   let guardCalls = 0
   let retryCalls = 0
@@ -172,7 +180,7 @@ test('a failed page retry preserves the latest setup error and leaves setup rend
     statusRequest: async () => { guardCalls += 1; throw firstFailure },
   })
 
-  assert.equal(await guard('/profiles'), SETUP_PATH)
+  assert.equal(await guard('/profiles'), BACKEND_UNAVAILABLE_PATH)
   assert.equal(guardCalls, 1)
   assert.deepEqual(state.getSnapshot(), {
     phase: 'error',
@@ -189,7 +197,7 @@ test('a failed page retry preserves the latest setup error and leaves setup rend
     required: null,
     error: { code: 'RETRY_FAILURE', message: 'Retry failure' },
   })
-  assert.equal(await guard(SETUP_PATH), undefined)
+  assert.equal(await guard(BACKEND_UNAVAILABLE_PATH), undefined)
   assert.equal(guardCalls, 1)
   assert.equal(retryCalls, 1)
 })
@@ -207,6 +215,7 @@ test('API and routing sources retain setup endpoints and setup error codes while
     assert.doesNotMatch(text, /reset_admin|resetAdmin|reset_token/)
   }
   assert.match(routerSource, /path:\s*'\/setup'/)
+  assert.match(routerSource, /path:\s*BACKEND_UNAVAILABLE_PATH,\s*component:\s*\(\)\s*=>\s*import\('\.\.\/views\/BackendUnavailableView\.vue'\)/)
   assert.match(routerSource, /createSetupGuard\(/)
 })
 
@@ -231,10 +240,33 @@ test('startup waits for router readiness and the public loading page stays self-
   assert.doesNotMatch(publicIndexSource, /<img\b/i)
 })
 
-test('App keeps login and setup as independent standalone pages', () => {
-  assert.match(appSource, /\['\/login',\s*'\/setup'\]\.includes\(this\.\$route\.path\)/)
+test('App keeps login, setup, and backend unavailable as independent standalone pages', () => {
+  assert.match(appSource, /\['\/login',\s*'\/setup',\s*'\/backend-unavailable'\]\.includes\(this\.\$route\.path\)/)
   assert.match(routerSource, /path:\s*'\/login'/)
   assert.match(routerSource, /path:\s*'\/setup'/)
+  assert.match(routerSource, /path:\s*BACKEND_UNAVAILABLE_PATH/)
+})
+
+test('BackendUnavailableView keeps the standalone error page source and responsive style contract', () => {
+  assert.match(backendUnavailableSource, /import\s+UnderConstruction\s+from\s+'\.\.\/components\/UnderConstruction\.vue'/)
+  assert.match(backendUnavailableSource, /<UnderConstruction\b/)
+  assert.match(backendUnavailableSource, /<WarningFilled\s*\/>/)
+  assert.match(backendUnavailableSource, /:status-text="t\('setup\.backend_unavailable_status'\)"/)
+  for (const key of [
+    'backend_unavailable_title',
+    'backend_unavailable_status',
+    'backend_unavailable_description',
+    'backend_unavailable_retry',
+  ]) {
+    assert.match(backendUnavailableSource, new RegExp(`setup\\.${key}`))
+  }
+  assert.match(backendUnavailableSource, /window\.location\.reload\(\)/)
+  assert.match(backendUnavailableSource, /@import\s+'@\/assets\/css\/BackendUnavailableView\.scss';/)
+
+  assert.match(backendUnavailableStyleSource, /min-height\s*:\s*100vh\s*;/)
+  assert.match(backendUnavailableStyleSource, /:deep\(\.under-construction__content\)/)
+  assert.match(backendUnavailableStyleSource, /:deep\(\.under-construction__extra\)/)
+  assert.match(backendUnavailableStyleSource, /@media\s*\(max-width:\s*600px\)/)
 })
 
 test('SetupView has only the approved token persistence and submission contract', () => {
@@ -537,7 +569,8 @@ test('Chinese and English setup locales have identical complete key sets and non
     'password_mismatch', 'url_format', 'max_length', 'status_checking', 'status_error_title',
     'status_error_description', 'status_retry', 'complete_failed', 'invalid_token_response',
     'skip_step', 'continue_configuration', 'skip_and_finish', 'save_and_continue', 'save_and_finish', 'guide_load_failed',
-    'profile_guide_description', 'audit_guide_description',
+    'profile_guide_description', 'audit_guide_description', 'backend_unavailable_title',
+    'backend_unavailable_status', 'backend_unavailable_description', 'backend_unavailable_retry',
   ]
   for (const key of criticalKeys) {
     assert.equal(typeof zhSetup[key], 'string')

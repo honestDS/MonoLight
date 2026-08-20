@@ -1,6 +1,7 @@
 export const SETUP_PATH = '/setup'
 export const LOGIN_PATH = '/login'
 export const HOME_PATH = '/'
+export const BACKEND_UNAVAILABLE_PATH = '/backend-unavailable'
 
 export function createSetupStatusState() {
   let snapshot = Object.freeze({ phase: 'idle', required: null, error: null })
@@ -71,7 +72,7 @@ export function resolveSetupNavigation({ required, toPath, hasToken }) {
   if (required) {
     return toPath === SETUP_PATH ? undefined : SETUP_PATH
   }
-  if (toPath === SETUP_PATH) {
+  if (toPath === SETUP_PATH || toPath === BACKEND_UNAVAILABLE_PATH) {
     return hasToken ? HOME_PATH : LOGIN_PATH
   }
   if (!hasToken && toPath !== LOGIN_PATH) {
@@ -85,7 +86,7 @@ export function createSetupGuard({ statusRequest, getToken, state = setupStatusS
     const toPath = typeof to === 'string' ? to : to?.path
     const snapshot = state.getSnapshot()
 
-    if (toPath === SETUP_PATH && snapshot.phase === 'error') {
+    if (toPath === BACKEND_UNAVAILABLE_PATH && snapshot.phase === 'error') {
       return undefined
     }
 
@@ -97,7 +98,7 @@ export function createSetupGuard({ statusRequest, getToken, state = setupStatusS
         hasToken: Boolean(getToken()),
       })
     } catch {
-      return toPath === SETUP_PATH ? undefined : SETUP_PATH
+      return toPath === BACKEND_UNAVAILABLE_PATH ? undefined : BACKEND_UNAVAILABLE_PATH
     }
   }
 }
