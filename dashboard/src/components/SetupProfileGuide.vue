@@ -62,6 +62,10 @@
               {{ $t('profiles.security_settings') }}
             </h2>
 
+            <div class="setup-profile-guide__section-description">
+              {{ $t('setup.audit_guide_description') }}
+            </div>
+
             <div class="setup-profile-guide__form-grid">
               <el-form-item class="setup-profile-guide__field" :label="$t('profiles.audit_model_id')">
                 <el-select
@@ -190,101 +194,6 @@
 
               <section class="setup-profile-guide__tool-group">
                 <h3 class="setup-profile-guide__group-title">
-                  {{ $t('profiles.scheduling_control') }}
-                </h3>
-
-                <div class="setup-profile-guide__form-grid">
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.max_parallel_tools')">
-                    <el-input-number
-                      v-model="form.configs.tool.max_parallel_tools"
-                      :min="1"
-                      :max="20"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.max_parallel_tools_hint') }}
-                    </div>
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.executor_max_workers')">
-                    <el-input-number
-                      v-model="form.configs.tool.executor_max_workers"
-                      :min="1"
-                      :max="100"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.executor_max_workers_hint') }}
-                    </div>
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.background_task_max_concurrency')">
-                    <el-input-number
-                      v-model="form.configs.tool.background_task_max_concurrency"
-                      :min="1"
-                      :max="20"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.background_task_max_concurrency_hint') }}
-                    </div>
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.scheduled_task_max_concurrency')">
-                    <el-input-number
-                      v-model="form.configs.tool.scheduled_task_max_concurrency"
-                      :min="1"
-                      :max="20"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.scheduled_task_max_concurrency_hint') }}
-                    </div>
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.max_turns')">
-                    <el-input-number
-                      v-model="form.configs.tool.max_turns"
-                      :min="1"
-                      :max="20"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.tool_timeout')">
-                    <el-input-number
-                      v-model="form.configs.tool.tool_timeout"
-                      :min="1"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.tool_timeout_hint') }}
-                    </div>
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.image_generation_tool_timeout')">
-                    <el-input-number
-                      v-model="form.configs.tool.image_generation_timeout"
-                      :min="1"
-                      :max="600"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                    <div class="setup-profile-guide__hint">
-                      {{ $t('profiles.image_generation_tool_timeout_hint') }}
-                    </div>
-                  </el-form-item>
-                </div>
-              </section>
-
-              <section class="setup-profile-guide__tool-group">
-                <h3 class="setup-profile-guide__group-title">
                   {{ $t('profiles.tool_visibility_config') }}
                 </h3>
 
@@ -304,79 +213,6 @@
                   </el-select>
                   <div class="setup-profile-guide__hint">
                     {{ $t('profiles.enabled_tools_hint') }}
-                  </div>
-                </el-form-item>
-              </section>
-
-              <section class="setup-profile-guide__tool-group">
-                <h3 class="setup-profile-guide__group-title">
-                  {{ $t('profiles.file_send_config') }}
-                </h3>
-
-                <div class="setup-profile-guide__file-grid">
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.file_send_max_count')">
-                    <el-input-number
-                      v-model="form.configs.tool.file_send_max_count"
-                      :min="1"
-                      :max="100"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.file_send_max_single_size_mb')">
-                    <el-input-number
-                      v-model="form.configs.tool.file_send_max_single_size_mb"
-                      :min="1"
-                      :max="1024"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                  </el-form-item>
-
-                  <el-form-item class="setup-profile-guide__field" :label="$t('profiles.file_send_max_total_size_mb')">
-                    <el-input-number
-                      v-model="form.configs.tool.file_send_max_total_size_mb"
-                      :min="1"
-                      :max="4096"
-                      controls-position="right"
-                      class="setup-profile-guide__control"
-                    />
-                  </el-form-item>
-                </div>
-
-                <el-form-item class="setup-profile-guide__field setup-profile-guide__field--wide" :label="$t('profiles.file_send_blocked_extensions')">
-                  <div class="setup-profile-guide__tag-input">
-                    <el-input
-                      v-model="fileSendBlockedExtensionDraft"
-                      :placeholder="$t('profiles.file_send_blocked_extensions_placeholder')"
-                      class="setup-profile-guide__control"
-                      @keyup.enter="addFileSendBlockedExtension"
-                    >
-                      <template #append>
-                        <el-button
-                          :title="$t('profiles.add')"
-                          :aria-label="$t('profiles.add')"
-                          @click="addFileSendBlockedExtension"
-                        >
-                          <el-icon><Plus /></el-icon>
-                        </el-button>
-                      </template>
-                    </el-input>
-                    <div v-if="form.configs.tool.file_send_blocked_extensions.length" class="setup-profile-guide__tag-list">
-                      <el-tag
-                        v-for="item in form.configs.tool.file_send_blocked_extensions"
-                        :key="item"
-                        closable
-                        class="setup-profile-guide__tag"
-                        @close="removeFileSendBlockedExtension(item)"
-                      >
-                        {{ item }}
-                      </el-tag>
-                    </div>
-                  </div>
-                  <div class="setup-profile-guide__hint">
-                    {{ $t('profiles.file_send_blocked_extensions_hint') }}
                   </div>
                 </el-form-item>
               </section>
@@ -452,7 +288,6 @@ const { activeSection, transitionName, showSteps, form, auditModelOptions, toolO
 const localeOptions = SUPPORT_LOCALES
 const contextSummaryThresholdOptions = [50, 60, 70, 80, 90]
 const allowedOperationDirDraft = ref('')
-const fileSendBlockedExtensionDraft = ref('')
 
 const auditModelKey = computed({
   get() {
@@ -477,12 +312,6 @@ const auditModelKey = computed({
 
 const normalizeDirectory = value => String(value ?? '').trim()
 
-const normalizeExtension = value => {
-  const normalized = String(value ?? '').trim().toLowerCase()
-  if (!normalized) return ''
-  return normalized.startsWith('.') ? normalized : `.${normalized}`
-}
-
 const addUniqueValue = (list, rawValue, normalize) => {
   const value = normalize(rawValue)
   if (!value || list.some(item => normalize(item) === value)) return false
@@ -501,25 +330,8 @@ const addAllowedOperationDir = () => {
   }
 }
 
-const addFileSendBlockedExtension = () => {
-  if (fileSendBlockedExtensionDraft.value.trim()) {
-    addUniqueValue(
-      form.value.configs.tool.file_send_blocked_extensions,
-      fileSendBlockedExtensionDraft.value,
-      normalizeExtension
-    )
-    fileSendBlockedExtensionDraft.value = ''
-  }
-}
-
 const removeAllowedOperationDir = value => {
   const list = form.value.configs.tool.allowed_operation_dirs
-  const index = list.indexOf(value)
-  if (index >= 0) list.splice(index, 1)
-}
-
-const removeFileSendBlockedExtension = value => {
-  const list = form.value.configs.tool.file_send_blocked_extensions
   const index = list.indexOf(value)
   if (index >= 0) list.splice(index, 1)
 }
@@ -530,12 +342,10 @@ const setAuditConfirmationEnabled = enabled => {
 
 const commitPendingInputs = () => {
   addAllowedOperationDir()
-  addFileSendBlockedExtension()
 }
 
 const discardPendingInputs = () => {
   allowedOperationDirDraft.value = ''
-  fileSendBlockedExtensionDraft.value = ''
 }
 
 defineExpose({ commitPendingInputs, discardPendingInputs })
@@ -623,6 +433,18 @@ defineExpose({ commitPendingInputs, discardPendingInputs })
   line-height: 1.4;
 }
 
+.setup-profile-guide__section-description {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 20px;
+  color: var(--setup-profile-guide-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
 .setup-profile-guide__group-title {
   margin-bottom: 18px;
   font-size: 15px;
@@ -636,8 +458,7 @@ defineExpose({ commitPendingInputs, discardPendingInputs })
   border-top: 1px solid var(--setup-profile-guide-border);
 }
 
-.setup-profile-guide__form-grid,
-.setup-profile-guide__file-grid {
+.setup-profile-guide__form-grid {
   display: grid;
   min-width: 0;
   align-content: start;
@@ -648,13 +469,8 @@ defineExpose({ commitPendingInputs, discardPendingInputs })
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.setup-profile-guide__file-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
 .setup-profile-guide__field,
-.setup-profile-guide__form-grid > *,
-.setup-profile-guide__file-grid > * {
+.setup-profile-guide__form-grid > * {
   min-width: 0;
 }
 
@@ -799,8 +615,7 @@ defineExpose({ commitPendingInputs, discardPendingInputs })
     }
   }
 
-  .setup-profile-guide__form-grid,
-  .setup-profile-guide__file-grid {
+  .setup-profile-guide__form-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
   }

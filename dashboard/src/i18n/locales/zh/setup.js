@@ -7,6 +7,7 @@ export default {
   channel_title: '配置模型渠道',
   profile_title: '可选配置引导',
   profile_guide_description: '完成可选配置，可以让系统更贴合你的使用习惯，提升整体使用体验。',
+  audit_guide_description: 'MonoLight在执行可能影响文件或系统的操作前，安全系统会先分析操作和影响，需要时暂停并说明，经用户同意才继续，拒绝或超时则取消，全过程保存记录以备追溯。',
   default_prompt: '默认提示词',
   default_prompt_placeholder: '请输入默认提示词（可选）',
   default_prompt_hint: '用于设定默认配置下助手的角色、行为和回复方式；未设置时不附加自定义提示词。',

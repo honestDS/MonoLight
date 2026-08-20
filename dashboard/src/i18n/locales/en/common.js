@@ -37,6 +37,11 @@ export default {
     docs: 'Documentation',
     support: 'Support'
   },
+  construction: {
+    status: 'Page under construction',
+    docs_description: 'The documentation center is being built. Usage guides, configuration references, and developer documentation will be published progressively.',
+    support_description: 'The support page is being built. Frequently asked questions and support channels will be published progressively.'
+  },
   code: {
     copy_all: 'Copy All Code',
     copy_success: 'Copied successfully',

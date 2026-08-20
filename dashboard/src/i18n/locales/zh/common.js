@@ -37,6 +37,11 @@ export default {
     docs: '文档中心',
     support: '技术支持'
   },
+  construction: {
+    status: '页面建设中',
+    docs_description: '文档中心正在建设中，使用指南、配置说明和开发文档将陆续上线。',
+    support_description: '技术支持页面正在建设中，常见问题与支持渠道将陆续上线。'
+  },
   code: {
     copy_all: '复制全部代码',
     copy_success: '复制成功',

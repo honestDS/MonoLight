@@ -14,7 +14,9 @@ export const routeNameMap = {
   '/prompts': 'common.menu.system',
   '/scheduled-tasks': 'common.menu.scheduled_tasks',
   '/logs/realtime': 'common.menu.logs',
-  '/logs/history': 'common.menu.logs'
+  '/logs/history': 'common.menu.logs',
+  '/docs': 'common.menu.docs',
+  '/support': 'common.menu.support'
 }
 
 export const MEMORY_TYPES = ['fact', 'preference', 'project', 'todo', 'constraint']
