@@ -767,6 +767,7 @@ async def test_concurrent_setup_completion_has_one_success_and_one_conflict(
         session_response = await client.get("/api/v1/setup/status")
         _assert_standard_response(session_response, 200)
         session_token = _setup_cookie_value(session_response)
+        assert client.cookies.get(SETUP_SESSION_COOKIE_NAME) == session_token
 
         original_get_valid_setup_status = setup_api._get_valid_setup_status
         status_barrier = asyncio.Barrier(2)
@@ -783,7 +784,6 @@ async def test_concurrent_setup_completion_has_one_success_and_one_conflict(
             return await client.post(
                 "/api/v1/setup/complete",
                 json=_setup_payload(),
-                cookies={SETUP_SESSION_COOKIE_NAME: session_token},
             )
 
         responses = await asyncio.gather(submit_setup(), submit_setup())
