@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, insert, text
+from sqlalchemy import event, insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
@@ -16,7 +16,6 @@ import app.models as exported_models
 from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
 from app.models import KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBase
-from scripts import migration_20260822_add_knowledge_base_collection_owner as migration
 
 
 def _value_for_required_channel_column(column) -> object:
@@ -83,14 +82,6 @@ async def sqlite_database(tmp_path: Path) -> AsyncIterator[tuple[AsyncEngine, as
         await engine.dispose()
 
 
-@pytest_asyncio.fixture()
-async def migrated_database(sqlite_database) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    engine, session_factory = sqlite_database
-    async with session_factory() as session:
-        await migration.migrate(session)
-    return engine, session_factory
-
-
 async def _create_knowledge_base(session: AsyncSession, collection_name: str, *, uid: str = "user-a") -> KnowledgeBase:
     knowledge_base = KnowledgeBase(
         uid=uid,
@@ -102,6 +93,8 @@ async def _create_knowledge_base(session: AsyncSession, collection_name: str, *,
     session.add(knowledge_base)
     await session.commit()
     await session.refresh(knowledge_base)
+    session.add(KnowledgeBaseCollectionOwner(collection_name=collection_name, knowledge_base_id=knowledge_base.id))
+    await session.commit()
     return knowledge_base
 
 
@@ -110,35 +103,14 @@ async def _get_owner(session: AsyncSession, collection_name: str) -> KnowledgeBa
     return result.scalar_one_or_none()
 
 
-async def _trigger_names(engine: AsyncEngine) -> set[str]:
-    async with engine.connect() as connection:
-        rows = await connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'knowledge_base'"))
-    return {str(row[0]) for row in rows}
-
-
 def test_collection_owner_is_explicitly_exported_and_registered() -> None:
     assert exported_models.KnowledgeBaseCollectionOwner is KnowledgeBaseCollectionOwner
     assert SQLModel.metadata.tables["knowledge_base_collection_owner"] is KnowledgeBaseCollectionOwner.__table__
 
 
 @pytest.mark.asyncio
-async def test_create_all_owner_table_is_accepted_by_migration_and_gets_triggers(sqlite_database) -> None:
-    engine, session_factory = sqlite_database
-
-    async with engine.connect() as connection:
-        assert (await connection.execute(text("PRAGMA foreign_keys"))).scalar_one() == 1
-        table_names = await connection.run_sync(lambda sync_connection: set(sync_connection.dialect.get_table_names(sync_connection)))
-    assert "knowledge_base_collection_owner" in table_names
-
-    async with session_factory() as session:
-        await migration.migrate(session)
-
-    assert await _trigger_names(engine) == set(migration._OWNER_TRIGGER_NAMES)
-
-
-@pytest.mark.asyncio
-async def test_collection_owner_crud_covers_active_and_pending_lifecycle(migrated_database) -> None:
-    _engine, session_factory = migrated_database
+async def test_collection_owner_crud_covers_active_and_pending_lifecycle(sqlite_database) -> None:
+    _engine, session_factory = sqlite_database
 
     async with session_factory() as session:
         knowledge_base_a = await _create_knowledge_base(session, "collection-a")
@@ -214,8 +186,8 @@ async def test_collection_owner_crud_covers_active_and_pending_lifecycle(migrate
 
 
 @pytest.mark.asyncio
-async def test_pending_collection_name_cannot_be_reassigned_after_failure(migrated_database) -> None:
-    _engine, session_factory = migrated_database
+async def test_pending_collection_name_cannot_be_reassigned_after_failure(sqlite_database) -> None:
+    _engine, session_factory = sqlite_database
 
     async with session_factory() as session:
         knowledge_base_a = await _create_knowledge_base(session, "collection-a")

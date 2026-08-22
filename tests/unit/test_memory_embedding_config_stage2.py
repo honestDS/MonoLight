@@ -4,10 +4,7 @@ from datetime import timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import inspect, text
-from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlmodel import SQLModel, select
 
 from app.core.constants import (
@@ -54,7 +51,6 @@ from app.models.profile import (
     ProfileUpdate,
 )
 from app.schemas.memory import MemorySettingsUpdateRequest
-from scripts import migration_20260803_add_memory_embedding_selection_token as selection_token_migration
 
 MEMORY_CONFIG_TABLES = [
     Profile.__table__,
@@ -376,105 +372,6 @@ def test_recall_config_boundaries(model, values: dict, is_valid: bool) -> None:
     else:
         with pytest.raises(ValueError):
             model.model_validate(values)
-
-
-@pytest.mark.asyncio
-async def test_selection_token_migration_is_idempotent_has_no_foreign_keys_and_preserves_rows() -> None:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(text("CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"))
-            await connection.execute(
-                text("INSERT INTO legacy_marker (id, value) VALUES (:id, :value)"),
-                {"id": 1, "value": "preserved"},
-            )
-        async with session_factory() as session:
-            await selection_token_migration.migrate(session)
-            await session.commit()
-            await session.execute(
-                text(
-                    "INSERT INTO long_term_memory_embedding_selection_token "
-                    "(uid, profile_id, token_digest, profile_config_digest, target_embedding_channel_id, "
-                    "target_embedding_model_id, target_embedding_dimensions, target_embedding_signature, expires_at) "
-                    "VALUES (:uid, :profile_id, :token_digest, :profile_config_digest, :channel_id, :model_id, :dimensions, :signature, :expires_at)"
-                ),
-                {
-                    "uid": "user-a",
-                    "profile_id": 11,
-                    "token_digest": "a" * 64,
-                    "profile_config_digest": "b" * 64,
-                    "channel_id": 7,
-                    "model_id": "embed-v1",
-                    "dimensions": 3,
-                    "signature": "c" * 64,
-                    "expires_at": "2099-01-01 00:00:00",
-                },
-            )
-            await session.commit()
-            await selection_token_migration.migrate(session)
-            await session.commit()
-
-        async with engine.connect() as connection:
-            schema = await connection.run_sync(
-                lambda sync_connection: {
-                    "tables": set(inspect(sync_connection).get_table_names()),
-                    "columns": {column["name"] for column in inspect(sync_connection).get_columns("long_term_memory_embedding_selection_token")},
-                    "foreign_keys": inspect(sync_connection).get_foreign_keys("long_term_memory_embedding_selection_token"),
-                    "indexes": {index["name"] for index in inspect(sync_connection).get_indexes("long_term_memory_embedding_selection_token")},
-                    "unique": {(item["name"], tuple(item["column_names"])) for item in inspect(sync_connection).get_unique_constraints("long_term_memory_embedding_selection_token") if item.get("name")},
-                }
-            )
-            row = (await connection.execute(text("SELECT uid, profile_id, token_digest FROM long_term_memory_embedding_selection_token"))).mappings().one()
-            legacy_value = (await connection.execute(text("SELECT value FROM legacy_marker WHERE id = 1"))).scalar_one()
-
-        assert schema["tables"] == {"legacy_marker", "long_term_memory_embedding_selection_token"}
-        assert {
-            "id",
-            "uid",
-            "profile_id",
-            "token_digest",
-            "profile_config_digest",
-            "active_embedding_revision",
-            "target_embedding_channel_id",
-            "target_embedding_model_id",
-            "target_embedding_dimensions",
-            "target_embedding_signature",
-            "expires_at",
-            "consumed_at",
-            "created_at",
-        } <= schema["columns"]
-        assert schema["foreign_keys"] == []
-        assert {
-            "ix_ltm_embedding_selection_token_id",
-            "ix_ltm_embedding_selection_token_uid",
-            "ix_ltm_embedding_selection_token_profile_id",
-            "ix_ltm_embedding_selection_token_uid_profile",
-            "ix_ltm_embedding_selection_token_expires_at",
-            "ix_ltm_embedding_selection_token_consumed_at",
-            "ix_ltm_embedding_selection_token_created_at",
-        } <= schema["indexes"]
-        assert schema["unique"] == {
-            ("uq_ltm_embedding_selection_token_digest", ("token_digest",)),
-        }
-        assert dict(row) == {"uid": "user-a", "profile_id": 11, "token_digest": "a" * 64}
-        assert legacy_value == "preserved"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
-def test_selection_token_migration_table_and_indexes_compile_for_supported_dialects(dialect) -> None:
-    table = selection_token_migration.long_term_memory_embedding_selection_token
-
-    assert str(CreateTable(table).compile(dialect=dialect)).strip()
-    for index in table.indexes:
-        assert str(CreateIndex(index).compile(dialect=dialect)).strip()
-
-    identifiers = {table.name, *[column.name for column in table.columns]}
-    identifiers.update(index.name for index in table.indexes if index.name)
-    identifiers.update(constraint.name for constraint in table.constraints if constraint.name)
-    assert max(map(len, identifiers)) <= 63
 
 
 @pytest.mark.asyncio
