@@ -446,6 +446,7 @@ async def test_profile_update_omitted_bindings_are_preserved(
     assert knowledge_base.id is not None
     db_session.add(
         KnowledgeBaseProfileBinding(
+            uid=profile.uid,
             knowledge_base_id=knowledge_base.id,
             profile_id=profile.id,
         )
@@ -475,6 +476,7 @@ async def test_profile_update_omitted_bindings_are_preserved(
     )
     assert binding.knowledge_base_id == knowledge_base.id
     assert binding.profile_id == profile.id
+    assert binding.uid == profile.uid
 
 
 @pytest.mark.asyncio

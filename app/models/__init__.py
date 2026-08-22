@@ -9,6 +9,7 @@ from app.models.channel_cursor import ChannelCursor as ChannelCursor
 from app.models.context_summary_stage import ContextSummaryFragment as ContextSummaryFragment
 from app.models.context_summary_stage import ContextSummaryStage as ContextSummaryStage
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
+from app.models.knowledge_base import KnowledgeBaseCollectionOwner as KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.memory import LongTermMemoryCapacityStatus as LongTermMemoryCapacityStatus

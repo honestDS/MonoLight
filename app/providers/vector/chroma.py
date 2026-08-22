@@ -156,6 +156,14 @@ async def async_delete_collection(collection_name: str) -> None:
     await _to_thread_and_wait(delete_collection, collection_name)
 
 
+async def async_delete_collection_if_exists(collection_name: str) -> bool:
+    try:
+        await _to_thread_and_wait(delete_collection, collection_name)
+    except ChromaNotFoundError:
+        return False
+    return True
+
+
 async def async_upsert_collection_items(
     collection_name: str,
     item_ids: Sequence[str],

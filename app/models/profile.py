@@ -24,6 +24,7 @@ from sqlmodel import (
     Column,
     Field,
     SQLModel,
+    UniqueConstraint,
 )
 
 from app.core.constants import (
@@ -407,6 +408,7 @@ class Profile(ProfileBase, table=True):
     """Profile 数据库实体模型"""
 
     __tablename__ = "profile"
+    __table_args__ = (UniqueConstraint("id", "uid", name="uq_profile_id_uid"),)
     id: int | None = Field(default=None, primary_key=True, index=True)
     is_default: bool = Field(default=False)
 

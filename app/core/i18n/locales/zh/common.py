@@ -12,6 +12,7 @@ MESSAGES = {
     "MSG_KB_DOC_DELETED": "文档删除成功",
     "ERR_KB_NOT_FOUND": "知识库不存在",
     "ERR_KB_COLLECTION_CREATE_FAILED": "创建向量库集合失败: {message}",
+    "ERR_KB_COLLECTION_OWNER_CONFLICT": "向量集合“{collection_name}”已属于其他知识库",
     "ERR_KB_CREATE_FAILED_WITH_ROLLBACK": "创建知识库失败，已回滚向量库集合: {message}",
     "ERR_KB_DELETE_FAILED": "删除知识库失败，已撤销数据库删除操作: {message}",
     "ERR_KB_PROFILE_NOT_FOUND": "知识库绑定的配置文件不存在",
