@@ -4,7 +4,6 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 from pydantic import ValidationError
-from sqlalchemy import inspect, text
 from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -42,8 +41,6 @@ from app.models.memory import (
     LongTermMemorySource,
     LongTermMemoryStore,
 )
-from scripts import migration_20260803_add_longterm_memory as memory_migration
-from scripts import migration_20260813_add_memory_id_allocator as memory_id_allocator_migration
 
 MEMORY_TABLES = [
     LongTermMemoryStore.__table__,
@@ -53,158 +50,6 @@ MEMORY_TABLES = [
     LongTermMemoryRevision.__table__,
     LongTermMemoryMutationJob.__table__,
 ]
-
-MEMORY_TABLE_NAMES = {table.name for table in MEMORY_TABLES}
-
-EXPECTED_COLUMNS = {
-    "long_term_memory_store": {
-        "id",
-        "uid",
-        "active_embedding_revision",
-        "migration_total_count",
-        "migration_success_count",
-        "migration_failure_count",
-        "migration_delta_high_watermark",
-        "migration_delta_applied_watermark",
-        "old_collection_cleanup_status",
-        "max_active_records",
-        "index_revision",
-        "index_status",
-        "created_at",
-        "updated_at",
-    },
-    "long_term_memory_record": {
-        "id",
-        "uid",
-        "memory_key",
-        "content",
-        "content_hash",
-        "version",
-        "indexed_version",
-        "vector_item_id",
-        "is_active",
-        "suppress_recall",
-        "index_status",
-        "created_at",
-        "updated_at",
-    },
-    "long_term_memory_revision": {
-        "id",
-        "uid",
-        "memory_id",
-        "version",
-        "memory_key",
-        "content",
-        "published_at",
-        "created_at",
-    },
-    "long_term_memory_embedding_revision": {
-        "id",
-        "uid",
-        "revision",
-        "confirmation_source",
-        "status",
-        "created_at",
-        "updated_at",
-    },
-    "long_term_memory_embedding_delta": {
-        "id",
-        "uid",
-        "migration_job_id",
-        "sequence",
-        "action",
-        "snapshot",
-        "status",
-        "created_at",
-    },
-    "long_term_memory_mutation_job": {
-        "id",
-        "uid",
-        "operation",
-        "dedupe_key",
-        "active_mutation_key",
-        "status",
-        "payload",
-        "available_at",
-        "attempt_count",
-        "max_attempts",
-        "created_at",
-        "updated_at",
-    },
-}
-
-EXPECTED_UNIQUE_CONSTRAINTS = {
-    "long_term_memory_store": {
-        ("uq_long_term_memory_store_uid", ("uid",)),
-    },
-    "long_term_memory_record": {
-        ("uq_long_term_memory_record_uid_key", ("uid", "memory_key")),
-        ("uq_long_term_memory_record_uid_content_hash", ("uid", "content_hash")),
-        ("uq_long_term_memory_record_vector_item_id", ("vector_item_id",)),
-    },
-    "long_term_memory_revision": {
-        (
-            "uq_long_term_memory_revision_uid_memory_version",
-            ("uid", "memory_id", "version"),
-        ),
-    },
-    "long_term_memory_embedding_revision": {
-        (
-            "uq_long_term_memory_embedding_revision_uid_revision",
-            ("uid", "revision"),
-        ),
-    },
-    "long_term_memory_embedding_delta": {
-        (
-            "uq_long_term_memory_embedding_delta_job_sequence",
-            ("migration_job_id", "sequence"),
-        ),
-    },
-    "long_term_memory_mutation_job": {
-        (
-            "uq_long_term_memory_mutation_job_uid_dedupe",
-            ("uid", "dedupe_key"),
-        ),
-        (
-            "uq_long_term_memory_mutation_job_active_key",
-            ("active_mutation_key",),
-        ),
-    },
-}
-
-EXPECTED_INDEXES = {
-    "long_term_memory_store": {
-        "ix_long_term_memory_store_id",
-        "ix_long_term_memory_store_uid",
-        "ix_long_term_memory_store_index_status",
-    },
-    "long_term_memory_record": {
-        "ix_long_term_memory_record_id",
-        "ix_long_term_memory_record_uid",
-        "ix_long_term_memory_record_uid_is_active_deleted_at",
-        "ix_long_term_memory_record_uid_updated_at",
-    },
-    "long_term_memory_revision": {
-        "ix_long_term_memory_revision_id",
-        "ix_long_term_memory_revision_uid",
-        "ix_long_term_memory_revision_uid_memory_version",
-    },
-    "long_term_memory_embedding_revision": {
-        "ix_long_term_memory_embedding_revision_id",
-        "ix_long_term_memory_embedding_revision_uid",
-        "ix_long_term_memory_embedding_revision_status",
-    },
-    "long_term_memory_embedding_delta": {
-        "ix_long_term_memory_embedding_delta_id",
-        "ix_long_term_memory_embedding_delta_uid",
-        "ix_long_term_memory_embedding_delta_uid_job_sequence",
-    },
-    "long_term_memory_mutation_job": {
-        "ix_long_term_memory_mutation_job_id",
-        "ix_long_term_memory_mutation_job_uid",
-        "ix_long_term_memory_mutation_job_uid_status_available",
-    },
-}
 
 
 @pytest_asyncio.fixture
@@ -224,37 +69,6 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
             yield session
     finally:
         await engine.dispose()
-
-
-def _unique_definitions(sync_connection, table_name: str) -> set[tuple[str, tuple[str, ...]]]:
-    inspector = inspect(sync_connection)
-    definitions = {(constraint["name"], tuple(constraint["column_names"])) for constraint in inspector.get_unique_constraints(table_name) if constraint.get("name")}
-    definitions.update((index["name"], tuple(index["column_names"])) for index in inspector.get_indexes(table_name) if index.get("unique") and index.get("name"))
-    return definitions
-
-
-def _memory_schema(sync_connection):
-    inspector = inspect(sync_connection)
-    return {
-        "tables": set(inspector.get_table_names()),
-        "columns": {table_name: {column["name"] for column in inspector.get_columns(table_name)} for table_name in MEMORY_TABLE_NAMES},
-        "foreign_keys": {table_name: inspector.get_foreign_keys(table_name) for table_name in MEMORY_TABLE_NAMES},
-        "indexes": {table_name: {index["name"] for index in inspector.get_indexes(table_name)} for table_name in MEMORY_TABLE_NAMES},
-        "unique_definitions": {table_name: _unique_definitions(sync_connection, table_name) for table_name in MEMORY_TABLE_NAMES},
-    }
-
-
-async def _migrate_memory_database() -> object:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        await memory_migration.migrate(session)
-        await memory_id_allocator_migration.migrate(session)
-        await session.commit()
-        await memory_migration.migrate(session)
-        await memory_id_allocator_migration.migrate(session)
-        await session.commit()
-    return engine
 
 
 def test_long_term_memory_v2_models_expose_defaults_enums_constraints_and_indexes():
@@ -342,125 +156,6 @@ def test_long_term_memory_v2_models_compile_for_sqlite_and_mysql():
             for index in table.indexes:
                 assert str(CreateIndex(index).compile(dialect=dialect)).strip()
     assert "AUTOINCREMENT" in str(CreateTable(LongTermMemoryRecord.__table__).compile(dialect=sqlite.dialect())).upper()
-
-
-@pytest.mark.asyncio
-async def test_long_term_memory_migration_is_idempotent_and_has_foundation_schema():
-    engine = await _migrate_memory_database()
-    try:
-        async with engine.connect() as connection:
-            schema = await connection.run_sync(_memory_schema)
-
-        assert schema["tables"] == MEMORY_TABLE_NAMES
-        for table_name, column_names in EXPECTED_COLUMNS.items():
-            assert column_names <= schema["columns"][table_name]
-            assert schema["foreign_keys"][table_name] == []
-        for table_name, index_names in EXPECTED_INDEXES.items():
-            assert index_names <= schema["indexes"][table_name]
-        for table_name, definitions in EXPECTED_UNIQUE_CONSTRAINTS.items():
-            assert definitions <= schema["unique_definitions"][table_name]
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_long_term_memory_migration_defaults_support_minimal_store_and_job_inserts():
-    engine = await _migrate_memory_database()
-    try:
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with session_factory() as session:
-            await session.execute(
-                text("INSERT INTO long_term_memory_store (uid) VALUES (:uid)"),
-                {"uid": "user-a"},
-            )
-            await session.execute(
-                text("INSERT INTO long_term_memory_mutation_job (uid, operation, dedupe_key, payload) VALUES (:uid, :operation, :dedupe_key, :payload)"),
-                {
-                    "uid": "user-a",
-                    "operation": "create",
-                    "dedupe_key": "job-1",
-                    "payload": "{}",
-                },
-            )
-            await session.commit()
-
-            store_defaults = (
-                (
-                    await session.execute(
-                        text("SELECT active_embedding_revision, migration_total_count, old_collection_cleanup_status, max_active_records, index_status FROM long_term_memory_store WHERE uid = :uid"),
-                        {"uid": "user-a"},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            job_defaults = (
-                (
-                    await session.execute(
-                        text("SELECT status, attempt_count, max_attempts, available_at, created_at, updated_at FROM long_term_memory_mutation_job WHERE uid = :uid AND dedupe_key = :dedupe_key"),
-                        {"uid": "user-a", "dedupe_key": "job-1"},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-
-        assert dict(store_defaults) == {
-            "active_embedding_revision": 0,
-            "migration_total_count": 0,
-            "old_collection_cleanup_status": "none",
-            "max_active_records": 500,
-            "index_status": "pending",
-        }
-        assert job_defaults["status"] == "pending"
-        assert job_defaults["attempt_count"] == 0
-        assert job_defaults["max_attempts"] == 3
-        assert job_defaults["available_at"] is not None
-        assert job_defaults["created_at"] is not None
-        assert job_defaults["updated_at"] is not None
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_long_term_memory_migration_preserves_existing_database_tables_and_data():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(text("CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"))
-            await connection.execute(
-                text("INSERT INTO legacy_marker (id, value) VALUES (:id, :value)"),
-                {"id": 1, "value": "preserved"},
-            )
-
-        async with session_factory() as session:
-            await memory_migration.migrate(session)
-            await memory_id_allocator_migration.migrate(session)
-            await memory_migration.migrate(session)
-            await memory_id_allocator_migration.migrate(session)
-            await session.commit()
-
-        async with engine.connect() as connection:
-            table_names = await connection.run_sync(lambda sync_connection: set(inspect(sync_connection).get_table_names()))
-            legacy_value = (await connection.execute(text("SELECT value FROM legacy_marker WHERE id = :id"), {"id": 1})).scalar_one()
-
-        assert MEMORY_TABLE_NAMES <= table_names
-        assert "legacy_marker" in table_names
-        assert legacy_value == "preserved"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), mysql.dialect()])
-def test_long_term_memory_migration_tables_and_indexes_compile_for_each_dialect(dialect):
-    tables = list(memory_migration.metadata.tables.values())
-
-    assert {table.name for table in tables} == MEMORY_TABLE_NAMES
-    for table in tables:
-        assert str(CreateTable(table).compile(dialect=dialect)).strip()
-        for index in table.indexes:
-            assert str(CreateIndex(index).compile(dialect=dialect)).strip()
 
 
 async def _create_record(

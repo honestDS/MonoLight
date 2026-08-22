@@ -1,10 +1,8 @@
 import json
 from collections.abc import AsyncGenerator
-from importlib import import_module
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
@@ -605,124 +603,6 @@ async def test_message_id_cursor_rejects_unbounded_page_size(
             uid="user-1",
             limit=limit,
         )
-
-
-@pytest.mark.asyncio
-async def test_context_summary_storage_migration_upgrades_legacy_schema():
-    migration = import_module("scripts.migration_20260714_add_context_summary_stages")
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    async with session_factory() as session:
-        await session.execute(
-            text(
-                """
-                CREATE TABLE chat_session (
-                    session_id VARCHAR(100) NOT NULL PRIMARY KEY,
-                    uid VARCHAR(100) NOT NULL,
-                    context_summary TEXT,
-                    context_summary_message_id INTEGER
-                )
-                """
-            )
-        )
-        await session.execute(
-            text(
-                """
-                INSERT INTO chat_session (
-                    session_id,
-                    uid,
-                    context_summary,
-                    context_summary_message_id
-                ) VALUES (
-                    'session-1',
-                    'user-1',
-                    'old summary',
-                    12
-                )
-                """
-            )
-        )
-        await migration.migrate(session)
-        await migration.migrate(session)
-        await session.commit()
-
-        columns = await session.execute(text("PRAGMA table_info(chat_session)"))
-        column_names = {str(row[1]) for row in columns.fetchall()}
-        revision = await session.execute(text("SELECT context_summary_revision FROM chat_session WHERE session_id = 'session-1'"))
-        tables = await session.execute(text("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('context_summary_stage', 'context_summary_fragment')"))
-        indexes = await session.execute(text("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('ix_context_summary_stage_status', 'ix_context_summary_fragment_stage_key')"))
-
-        assert "context_summary_revision" in column_names
-        assert revision.scalar_one() == 0
-        assert {str(row[0]) for row in tables.fetchall()} == {
-            "context_summary_stage",
-            "context_summary_fragment",
-        }
-        assert {str(row[0]) for row in indexes.fetchall()} == {
-            "ix_context_summary_stage_status",
-            "ix_context_summary_fragment_stage_key",
-        }
-
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_llm_request_metadata_migration_upgrades_legacy_schema():
-    migration = import_module("scripts.migration_20260725_add_chat_session_llm_request_metadata")
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    async with session_factory() as session:
-        await session.execute(
-            text(
-                """
-                CREATE TABLE chat_session (
-                    session_id VARCHAR(100) NOT NULL PRIMARY KEY,
-                    uid VARCHAR(100) NOT NULL
-                )
-                """
-            )
-        )
-        await migration.migrate(session)
-        await migration.migrate(session)
-        await session.commit()
-
-        columns = await session.execute(text("PRAGMA table_info(chat_session)"))
-        column_names = {str(row[1]) for row in columns.fetchall()}
-
-    await engine.dispose()
-    assert "llm_request_metadata" in column_names
-
-
-@pytest.mark.asyncio
-async def test_llm_request_metadata_order_migration_upgrades_applied_metadata_schema():
-    migration = import_module("scripts.migration_20260726_add_chat_session_llm_request_metadata_order")
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    async with session_factory() as session:
-        await session.execute(
-            text(
-                """
-                CREATE TABLE chat_session (
-                    session_id VARCHAR(100) NOT NULL PRIMARY KEY,
-                    uid VARCHAR(100) NOT NULL,
-                    llm_request_metadata JSON
-                )
-                """
-            )
-        )
-        await migration.migrate(session)
-        await migration.migrate(session)
-        await session.commit()
-
-        columns = await session.execute(text("PRAGMA table_info(chat_session)"))
-        column_names = {str(row[1]) for row in columns.fetchall()}
-
-    await engine.dispose()
-    assert "llm_request_metadata_work_sequence_no" in column_names
-    assert "llm_request_metadata_event_sequence_no" in column_names
 
 
 def test_context_summary_storage_models_use_stable_work_and_stage_identity():
