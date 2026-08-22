@@ -31,6 +31,7 @@ from app.core.constants import (
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
+from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
 from app.core.crud.memory import memory_store_crud
 from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.profile import profile_crud
@@ -104,7 +105,7 @@ def get_profile_tool_options() -> list[dict[str, str]]:
 
 
 async def get_profile_knowledge_base_ids(db: AsyncSession, profile_id: int, uid: str | None) -> list[int]:
-    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBase.uid == uid))
+    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBaseProfileBinding.uid == uid).where(KnowledgeBase.uid == uid))
     return list(result.scalars().all())
 
 
@@ -113,6 +114,8 @@ async def replace_profile_knowledge_base_bindings(db: AsyncSession, profile_id: 
         return
     normalized_kb_ids = list(dict.fromkeys(knowledge_base_ids))
     if normalized_kb_ids:
+        if uid is None:
+            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
         result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id.in_(normalized_kb_ids)).where(KnowledgeBase.uid == uid))
         knowledge_bases = list(result.scalars().all())
         if len(knowledge_bases) != len(normalized_kb_ids):
@@ -124,7 +127,7 @@ async def replace_profile_knowledge_base_bindings(db: AsyncSession, profile_id: 
         if kb and kb.uid == uid:
             await db.delete(binding)
     for kb_id in normalized_kb_ids:
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id))
+        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=uid))
 
 
 async def build_profile_response(
@@ -465,8 +468,29 @@ async def delete_profile(
     if has_session_override or has_platform_assignment or has_scheduled_assignment:
         raise ParameterException(ERR_DELETE_BOUND_PROFILE)
 
-    binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
-    for binding in binding_result.scalars().all():
-        await db.delete(binding)
-    await profile_crud.remove(db, id=profile_id)
+    managed_kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.managed_profile_id == profile_id))
+    managed_knowledge_bases = list(managed_kb_result.scalars().all())
+
+    try:
+        for knowledge_base in managed_knowledge_bases:
+            await knowledge_base_collection_owner_crud.enqueue(
+                db,
+                knowledge_base_id=knowledge_base.id,
+                collection_names=(
+                    knowledge_base.collection_name,
+                    knowledge_base.active_collection_name,
+                    knowledge_base.target_collection_name,
+                    knowledge_base.old_collection_name,
+                ),
+                commit=False,
+            )
+        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
+        for binding in binding_result.scalars().all():
+            await db.delete(binding)
+        await db.delete(db_profile)
+        await db.flush()
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     return StandardResponse.success(message=MSG_PROFILE_DELETED)

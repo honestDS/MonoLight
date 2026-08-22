@@ -136,6 +136,7 @@ app/core/
 ├── exceptions.py           # 应用异常类型
 ├── log.py                  # 日志服务
 ├── log_broadcaster.py      # 日志广播
+├── knowledge_base_collection_cleanup.py # 知识库 collection 持久化清理队列处理服务
 ├── paths.py                # 数据和临时目录定义
 ├── profile_selection.py    # Profile 选择服务
 ├── profile_validation.py   # Profile 配置检查

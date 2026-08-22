@@ -26,6 +26,7 @@ from app.core.constants import (
     MSG_KB_DOC_DELETED,
     MSG_KB_UPDATED,
 )
+from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
 from app.core.crud.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, load_embedding_runtime_config
 
@@ -45,12 +46,14 @@ from app.models.knowledge_base import (
     KnowledgeBaseDocumentContentResponse,
     KnowledgeBaseDocumentListResponse,
     KnowledgeBaseDocumentResponse,
+    KnowledgeBaseIndexStatus,
     KnowledgeBaseListResponse,
     KnowledgeBaseProfileBinding,
     KnowledgeBaseProfileBindingUpdate,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
     KnowledgeBaseResponse,
+    KnowledgeBaseType,
     KnowledgeBaseUpdate,
 )
 from app.models.profile import Profile
@@ -70,24 +73,34 @@ async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: 
     return kb
 
 
-async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int) -> list[int]:
-    result = await db.execute(select(KnowledgeBaseProfileBinding.profile_id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
+async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int, uid: str) -> list[int]:
+    result = await db.execute(select(KnowledgeBaseProfileBinding.profile_id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.uid == uid))
     return list(result.scalars().all())
 
 
 async def replace_knowledge_base_bindings(db: AsyncSession, kb_id: int, profile_ids: list[int]) -> None:
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+
+    normalized_profile_ids = list(dict.fromkeys(profile_ids))
+    if normalized_profile_ids:
+        profile_result = await db.execute(select(Profile.id).where(Profile.id.in_(normalized_profile_ids)).where(Profile.uid == kb.uid))
+        if len(list(profile_result.scalars().all())) != len(normalized_profile_ids):
+            raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
+
     result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
     for binding in result.scalars().all():
         await db.delete(binding)
 
-    for profile_id in dict.fromkeys(profile_ids):
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id))
+    for profile_id in normalized_profile_ids:
+        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=kb.uid))
 
 
 async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> KnowledgeBaseResponse:
     response = KnowledgeBaseResponse.model_validate(kb)
     if kb.id is not None:
-        response.profile_ids = await get_knowledge_base_profile_ids(db, kb.id)
+        response.profile_ids = await get_knowledge_base_profile_ids(db, kb.id, kb.uid)
     return response
 
 
@@ -128,7 +141,7 @@ async def load_user_knowledge_base(db: AsyncSession, kb_id: int, current_user: A
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
 
-    result = await db.execute(select(Profile).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(Profile.uid == getattr(current_user, "uid", None)))
+    result = await db.execute(select(Profile).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.uid == kb.uid).where(Profile.uid == getattr(current_user, "uid", None)))
     profile = result.scalars().first()
     if not profile:
         raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
@@ -145,6 +158,7 @@ async def create_knowledge_base(
     """创建知识库"""
 
     _channel, embedding_model = await load_embedding_model(db, kb_in.embedding_channel_id, kb_in.embedding_model_id)
+    embedding_dimensions = embedding_model.get("embedding_dimensions")
 
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
@@ -162,8 +176,17 @@ async def create_knowledge_base(
         description=kb_in.description,
         embedding_channel_id=kb_in.embedding_channel_id,
         embedding_model_id=kb_in.embedding_model_id,
-        embedding_dimensions=embedding_model.get("embedding_dimensions"),
+        embedding_dimensions=embedding_dimensions,
         collection_name=collection_name,
+        knowledge_base_type=KnowledgeBaseType.USER,
+        managed_profile_id=None,
+        active_embedding_channel_id=kb_in.embedding_channel_id,
+        active_embedding_model_id=kb_in.embedding_model_id,
+        active_embedding_dimensions=embedding_dimensions,
+        active_embedding_revision=1,
+        active_collection_name=collection_name,
+        index_revision=1,
+        index_status=KnowledgeBaseIndexStatus.READY,
     )
     db.add(db_kb)
     try:
@@ -245,7 +268,9 @@ async def get_profile_knowledge_base_bindings(
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
 
-    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBase.uid == profile.uid))
+    result = await db.execute(
+        select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBaseProfileBinding.uid == profile.uid).where(KnowledgeBase.uid == profile.uid)
+    )
     return StandardResponse.success(data=list(result.scalars().all()))
 
 
@@ -276,7 +301,7 @@ async def update_profile_knowledge_base_bindings(
             await db.delete(binding)
 
     for kb_id in normalized_kb_ids:
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id))
+        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=profile.uid))
     await db.commit()
     return StandardResponse.success(data=normalized_kb_ids)
 
@@ -308,16 +333,27 @@ async def delete_knowledge_base(
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
 
-    docs_result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
-    for document in docs_result.scalars().all():
-        await db.delete(document)
-    binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
-    for binding in binding_result.scalars().all():
-        await db.delete(binding)
-    await db.delete(kb)
     try:
+        await knowledge_base_collection_owner_crud.enqueue(
+            db,
+            knowledge_base_id=kb.id,
+            collection_names=(
+                kb.collection_name,
+                kb.active_collection_name,
+                kb.target_collection_name,
+                kb.old_collection_name,
+            ),
+            commit=False,
+        )
+        docs_result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
+        for document in docs_result.scalars().all():
+            await db.delete(document)
+        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
+        for binding in binding_result.scalars().all():
+            await db.delete(binding)
         await db.flush()
-        delete_collection(kb.collection_name)
+        await db.delete(kb)
+        await db.flush()
         await db.commit()
     except Exception as e:
         await db.rollback()

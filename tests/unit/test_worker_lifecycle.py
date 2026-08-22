@@ -14,6 +14,8 @@ from app.workers import terminal as terminal_worker
 @pytest.mark.asyncio
 async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkeypatch):
     events = []
+    captured_cleanup_stop_event = None
+    leased_stop_event = None
 
     async def create_tables():
         events.append("tables")
@@ -37,7 +39,14 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
         finally:
             events.append(f"{name}-stop")
 
+    async def collection_cleanup_loop(stop_event):
+        nonlocal captured_cleanup_stop_event
+        captured_cleanup_stop_event = stop_event
+        await cleaner("collection-cleanup")
+
     async def run_with_lease(worker_name, stop_event, run_owned_worker):
+        nonlocal leased_stop_event
+        leased_stop_event = stop_event
         events.append(f"lease:{worker_name}")
         await run_owned_worker(stop_event)
 
@@ -55,6 +64,11 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
         "background_context_summary_cleaner",
         lambda: cleaner("context-summary-cleaner"),
     )
+    monkeypatch.setattr(
+        background_task_worker,
+        "run_knowledge_base_collection_cleanup_loop",
+        collection_cleanup_loop,
+    )
 
     task = asyncio.create_task(background_task_worker.run_background_task_worker())
     await asyncio.sleep(0)
@@ -63,6 +77,7 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    assert captured_cleanup_stop_event is leased_stop_event
     assert events == [
         "tables",
         "lease:background_task",
@@ -72,10 +87,12 @@ async def test_worker_recovers_then_starts_and_stops_manager_and_cleaners(monkey
         "log-cleaner-start",
         "temp-cleaner-start",
         "context-summary-cleaner-start",
+        "collection-cleanup-start",
         "manager-stop",
         "log-cleaner-stop",
         "temp-cleaner-stop",
         "context-summary-cleaner-stop",
+        "collection-cleanup-stop",
     ]
 
 

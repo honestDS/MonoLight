@@ -12,6 +12,7 @@ MESSAGES = {
     "MSG_KB_DOC_DELETED": "Document deleted",
     "ERR_KB_NOT_FOUND": "Knowledge base not found",
     "ERR_KB_COLLECTION_CREATE_FAILED": "Failed to create vector collection: {message}",
+    "ERR_KB_COLLECTION_OWNER_CONFLICT": "Collection '{collection_name}' belongs to another knowledge base",
     "ERR_KB_CREATE_FAILED_WITH_ROLLBACK": "Failed to create knowledge base, vector collection rolled back: {message}",
     "ERR_KB_DELETE_FAILED": "Failed to delete knowledge base, database operation reversed: {message}",
     "ERR_KB_PROFILE_NOT_FOUND": "Knowledge base profile not found",

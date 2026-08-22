@@ -4,6 +4,7 @@ import os
 import app.warning_filters  # noqa: F401
 from app.core.background_tasks.manager import background_task_manager
 from app.core.background_tasks.recovery import recover_pending_background_task_replies, recover_pending_background_tasks
+from app.core.knowledge_base_collection_cleanup import run_knowledge_base_collection_cleanup_loop
 from app.core.log import LogManager, get_logger
 from app.core.paths import DEFAULT_LOG_FILE_PATH
 from app.core.utils.context_summary.cleanup import (
@@ -34,6 +35,7 @@ async def run_background_task_worker() -> None:
             asyncio.create_task(background_log_cleaner(7)),
             asyncio.create_task(background_temp_cleaner()),
             asyncio.create_task(background_context_summary_cleaner()),
+            asyncio.create_task(run_knowledge_base_collection_cleanup_loop(owned_stop_event)),
         ]
         logger.info("Background task worker started")
         try:

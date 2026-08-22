@@ -31,8 +31,30 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     ("audit_execution_record", ("audit_record_id",), "audit_record", ("id",), "CASCADE"),
     # knowledge base
     ("knowledge_base", ("embedding_channel_id",), "channel", ("id",), "RESTRICT"),
-    ("knowledge_base_profile_binding", ("knowledge_base_id",), "knowledge_base", ("id",), "CASCADE"),
-    ("knowledge_base_profile_binding", ("profile_id",), "profile", ("id",), "CASCADE"),
+    (
+        "knowledge_base",
+        ("managed_profile_id", "uid"),
+        "profile",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    ("knowledge_base", ("active_embedding_channel_id",), "channel", ("id",), "RESTRICT"),
+    ("knowledge_base", ("target_embedding_channel_id",), "channel", ("id",), "RESTRICT"),
+    (
+        "knowledge_base_profile_binding",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    (
+        "knowledge_base_profile_binding",
+        ("profile_id", "uid"),
+        "profile",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    ("knowledge_base_collection_owner", ("knowledge_base_id",), "knowledge_base", ("id",), "SET NULL"),
     ("knowledge_base_document", ("knowledge_base_id",), "knowledge_base", ("id",), "CASCADE"),
     # session, profile, platform, and scheduled task
     ("profile", ("prompt_id",), "prompt", ("id",), "RESTRICT"),

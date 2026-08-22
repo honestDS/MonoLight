@@ -58,7 +58,17 @@ async def embed_chunks_with_knowledge_base_config(
 
 async def list_available_knowledge_bases(db: AsyncSession, profile: Profile) -> list[KnowledgeBase]:
     """查询当前所选 Profile 可用的知识库"""
-    query = select(KnowledgeBase).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.knowledge_base_id == KnowledgeBase.id).where(KnowledgeBaseProfileBinding.profile_id == profile.id).order_by(KnowledgeBase.created_at.desc())
+    query = (
+        select(KnowledgeBase)
+        .join(
+            KnowledgeBaseProfileBinding,
+            KnowledgeBaseProfileBinding.knowledge_base_id == KnowledgeBase.id,
+        )
+        .where(KnowledgeBaseProfileBinding.profile_id == profile.id)
+        .where(KnowledgeBaseProfileBinding.uid == profile.uid)
+        .where(KnowledgeBase.uid == profile.uid)
+        .order_by(KnowledgeBase.created_at.desc())
+    )
     result = await db.execute(query)
     return list(result.scalars().all())
 
@@ -100,8 +110,11 @@ async def query_knowledge_base(
     if not kb:
         raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND_FOR_QUERY)
 
+    if kb.uid != profile.uid:
+        raise HTTPException(status_code=403, detail=ERR_KB_NOT_IN_PROFILE)
+
     if require_binding:
-        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.profile_id == profile.id))
+        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.profile_id == profile.id).where(KnowledgeBaseProfileBinding.uid == profile.uid))
         if not binding_result.scalars().first():
             raise HTTPException(status_code=403, detail=ERR_KB_NOT_IN_PROFILE)
 
