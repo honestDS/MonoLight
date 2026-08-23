@@ -67,6 +67,25 @@ def _path_exists_without_following_symlink(path: Path) -> bool:
     return True
 
 
+def _existing_file_stat(path: Path) -> os.stat_result:
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        _raise_file_invalid()
+    except OSError:
+        _raise_file_invalid()
+
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        _raise_file_invalid()
+    return path_stat
+
+
+def _ensure_existing_file_is_unchanged(path: Path, expected_stat: os.stat_result) -> None:
+    current_stat = _existing_file_stat(path)
+    if (current_stat.st_dev, current_stat.st_ino) != (expected_stat.st_dev, expected_stat.st_ino):
+        _raise_file_invalid()
+
+
 def _ensure_open_path_is_unchanged(path: Path, file_descriptor: int) -> None:
     try:
         path_stat = os.lstat(path)
@@ -271,7 +290,12 @@ def _fsync_parent_directory(path: Path) -> None:
             os.close(directory_descriptor)
 
 
-def _write_system_secrets(secrets_path: Path, system_secrets: SystemSecrets) -> bool:
+def _write_system_secrets(
+    secrets_path: Path,
+    system_secrets: SystemSecrets,
+    *,
+    replace_existing: bool = False,
+) -> bool:
     payload = json.dumps(
         {
             "version": SYSTEM_SECRETS_FILE_VERSION,
@@ -281,6 +305,10 @@ def _write_system_secrets(secrets_path: Path, system_secrets: SystemSecrets) -> 
         ensure_ascii=True,
         separators=(",", ":"),
     )
+
+    existing_stat: os.stat_result | None = None
+    if replace_existing:
+        existing_stat = _existing_file_stat(secrets_path)
 
     temp_path: Path | None = None
     file_descriptor: int | None = None
@@ -300,11 +328,20 @@ def _write_system_secrets(secrets_path: Path, system_secrets: SystemSecrets) -> 
 
         with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as temp_file:
             file_descriptor = None
+            if replace_existing:
+                if existing_stat is None:
+                    _raise_file_invalid()
+                if os.name != "nt":
+                    os.fchmod(temp_file.fileno(), stat.S_IMODE(existing_stat.st_mode))
             temp_file.write(payload)
             temp_file.flush()
             os.fsync(temp_file.fileno())
 
-        if _path_exists_without_following_symlink(secrets_path):
+        if replace_existing:
+            if existing_stat is None:
+                _raise_file_invalid()
+            _ensure_existing_file_is_unchanged(secrets_path, existing_stat)
+        elif _path_exists_without_following_symlink(secrets_path):
             return False
         os.replace(temp_path, secrets_path)
         temp_path = None
@@ -340,6 +377,37 @@ def initialize_system_secrets(
         return load_system_secrets(secrets_path)
 
 
+def _validate_replacement_secrets(value: object) -> SystemSecrets:
+    if not isinstance(value, SystemSecrets):
+        _raise_migration_invalid()
+    if not isinstance(value.jwt_secret_key, str) or not value.jwt_secret_key:
+        _raise_migration_invalid()
+    if not isinstance(value.channel_encryption_key, bytes) or len(value.channel_encryption_key) != 32:
+        _raise_migration_invalid()
+    return value
+
+
+def replace_system_secrets(
+    expected: SystemSecrets,
+    replacement: SystemSecrets,
+    secrets_path: Path = SYSTEM_SECRETS_PATH,
+    lock_path: Path = SYSTEM_SECRETS_LOCK_PATH,
+) -> SystemSecrets:
+    expected = _validate_replacement_secrets(expected)
+    replacement = _validate_replacement_secrets(replacement)
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with _system_secrets_lock(lock_path):
+        current = load_system_secrets(secrets_path)
+        if current == replacement:
+            return current
+        if current != expected:
+            _raise_migration_invalid()
+        _write_system_secrets(secrets_path, replacement, replace_existing=True)
+        return load_system_secrets(secrets_path)
+
+
 def get_jwt_secret_key() -> str:
     return load_system_secrets().jwt_secret_key
 
@@ -353,6 +421,7 @@ __all__ = [
     "SystemSecretsError",
     "initialize_system_secrets",
     "load_system_secrets",
+    "replace_system_secrets",
     "get_jwt_secret_key",
     "get_channel_encryption_key",
 ]
