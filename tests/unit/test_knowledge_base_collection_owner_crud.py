@@ -93,8 +93,6 @@ async def _create_knowledge_base(session: AsyncSession, collection_name: str, *,
     session.add(knowledge_base)
     await session.commit()
     await session.refresh(knowledge_base)
-    session.add(KnowledgeBaseCollectionOwner(collection_name=collection_name, knowledge_base_id=knowledge_base.id))
-    await session.commit()
     return knowledge_base
 
 

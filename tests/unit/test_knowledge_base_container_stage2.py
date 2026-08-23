@@ -335,6 +335,7 @@ async def test_profile_delete_cascades_managed_knowledge_base(
         managed_profile_id=profile.id,
     )
     user = await _create_knowledge_base(db_session, channel.id, name="user", uid=profile.uid)
+    managed_initial_collection_name = managed.collection_name
     managed.collection_name = "managed-collection"
     managed.active_collection_name = "managed-active-collection"
     managed.target_collection_name = "managed-target-collection"
@@ -397,31 +398,37 @@ async def test_profile_delete_cascades_managed_knowledge_base(
     bindings = (await db_session.execute(select(KnowledgeBaseProfileBinding))).scalars().all()
     assert bindings == []
 
-    expected_collections = {
+    expected_pending_collections = {
+        managed_initial_collection_name,
         managed.collection_name,
         managed.active_collection_name,
         managed.target_collection_name,
         managed.old_collection_name,
     }
-    assert len(expected_collections) == 4
+    assert len(expected_pending_collections) == 5
     owners = (await db_session.execute(select(KnowledgeBaseCollectionOwner).order_by(KnowledgeBaseCollectionOwner.collection_name))).scalars().all()
-    assert {owner.collection_name for owner in owners} == expected_collections
-    assert len(owners) == 4
-    assert all(owner.knowledge_base_id is None for owner in owners)
-    assert user.collection_name not in {owner.collection_name for owner in owners}
+    assert {owner.collection_name for owner in owners} == expected_pending_collections | {user.collection_name}
+    assert len(owners) == 6
+    pending_owners = [owner for owner in owners if owner.knowledge_base_id is None]
+    assert {owner.collection_name for owner in pending_owners} == expected_pending_collections
+    active_owners = [owner for owner in owners if owner.knowledge_base_id == user.id]
+    assert [owner.collection_name for owner in active_owners] == [user.collection_name]
 
     first_result = await collection_cleanup.process_pending_collection_cleanups(db_session)
-    assert first_result.pending_count == 4
-    assert first_result.succeeded_count == 3
+    assert first_result.pending_count == 5
+    assert first_result.succeeded_count == 4
     assert first_result.failed_count == 1
-    assert set(deleted_collections) == expected_collections
+    assert set(deleted_collections) == expected_pending_collections
+    assert user.collection_name not in deleted_collections
 
     remaining_owners = (await db_session.execute(select(KnowledgeBaseCollectionOwner))).scalars().all()
-    assert [owner.collection_name for owner in remaining_owners] == [managed.target_collection_name]
-    failed_owner = remaining_owners[0]
+    assert {owner.collection_name for owner in remaining_owners} == {managed.target_collection_name, user.collection_name}
+    failed_owner = next(owner for owner in remaining_owners if owner.collection_name == managed.target_collection_name)
     assert failed_owner.knowledge_base_id is None
     assert failed_owner.cleanup_attempt_count == 1
     assert failed_owner.cleanup_error == "RuntimeError: temporary collection delete failure"
+    active_owner = next(owner for owner in remaining_owners if owner.collection_name == user.collection_name)
+    assert active_owner.knowledge_base_id == user.id
     remaining_profile_ids = (await db_session.execute(select(Profile.id).order_by(Profile.id))).scalars().all()
     remaining_knowledge_base_ids = (await db_session.execute(select(KnowledgeBase.id).order_by(KnowledgeBase.id))).scalars().all()
     assert remaining_profile_ids == [other_profile.id]
@@ -432,4 +439,7 @@ async def test_profile_delete_cascades_managed_knowledge_base(
     assert second_result.succeeded_count == 1
     assert second_result.failed_count == 0
     assert deleted_collections[-1] == managed.target_collection_name
-    assert (await db_session.execute(select(KnowledgeBaseCollectionOwner))).scalars().all() == []
+    remaining_owners = (await db_session.execute(select(KnowledgeBaseCollectionOwner))).scalars().all()
+    assert len(remaining_owners) == 1
+    assert remaining_owners[0].collection_name == user.collection_name
+    assert remaining_owners[0].knowledge_base_id == user.id
