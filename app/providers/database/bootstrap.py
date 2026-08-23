@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import logging
 from pathlib import Path
@@ -78,7 +79,7 @@ async def _initialize_setup_state_and_get_admin_uid(session: AsyncSession) -> st
     return None
 
 
-async def ensure_migration_record_table(session: AsyncSession) -> None:
+async def ensure_migration_record_table(session: AsyncSession, *, commit: bool = True) -> None:
     dialect_name = session.get_bind().dialect.name
     if dialect_name == "mysql":
         id_definition = "INTEGER PRIMARY KEY AUTO_INCREMENT"
@@ -98,7 +99,8 @@ async def ensure_migration_record_table(session: AsyncSession) -> None:
             """
         )
     )
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def has_migration_executed(session: AsyncSession, migration_id: str) -> bool:
@@ -107,6 +109,11 @@ async def has_migration_executed(session: AsyncSession, migration_id: str) -> bo
         {"migration_id": migration_id},
     )
     return result.scalar() is not None
+
+
+async def get_executed_migration_ids(session: AsyncSession) -> set[str]:
+    result = await session.execute(text(f"SELECT migration_id FROM {MIGRATION_RECORD_TABLE}"))
+    return set(result.scalars().all())
 
 
 async def mark_migration_executed(session: AsyncSession, migration_id: str, script_name: str) -> None:
@@ -131,29 +138,98 @@ def load_migration_module(script_path: Path) -> ModuleType:
     return module
 
 
+def read_migration_metadata(script_path: Path) -> tuple[Path, str]:
+    try:
+        source = script_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(script_path))
+    except (OSError, SyntaxError, UnicodeError, ValueError, TypeError) as error:
+        raise RuntimeError(t(ERR_MIGRATION_SCRIPT_INVALID, script_name=script_path.name)) from error
+
+    migration_id_node: ast.expr | None = None
+    has_migration_id = False
+    has_migrate_function = False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "migrate":
+            has_migrate_function = True
+        if isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == "MIGRATION_ID" for target in node.targets):
+                has_migration_id = True
+                migration_id_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "MIGRATION_ID":
+            has_migration_id = True
+            migration_id_node = node.value
+
+    migration_id: str = script_path.stem
+    if has_migration_id:
+        if not isinstance(migration_id_node, ast.Constant) or not isinstance(migration_id_node.value, str):
+            raise RuntimeError(t(ERR_MIGRATION_ID_INVALID, script_name=script_path.name))
+        migration_id = migration_id_node.value
+        if not migration_id.strip():
+            raise RuntimeError(t(ERR_MIGRATION_ID_INVALID, script_name=script_path.name))
+    if not has_migrate_function:
+        raise RuntimeError(t(ERR_MIGRATION_FUNCTION_MISSING, script_name=script_path.name))
+    return script_path, migration_id
+
+
 def iter_migration_scripts() -> list[Path]:
     if not MIGRATION_SCRIPTS_DIR.exists():
         return []
     return sorted(path for path in MIGRATION_SCRIPTS_DIR.iterdir() if path.is_file() and path.name.startswith(MIGRATION_FILE_PREFIX) and path.name.endswith(MIGRATION_FILE_SUFFIX))
 
 
+async def _is_fresh_deployment(session: AsyncSession) -> bool:
+    setup_status = await system_setting_crud.get_setup_status(session)
+    superuser = await user_crud.get_superuser(session)
+    return setup_status is None and superuser is None
+
+
+async def _mark_all_migrations_executed(session: AsyncSession, migration_metadata: list[tuple[Path, str]]) -> None:
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "mysql":
+        insert_prefix = "INSERT IGNORE"
+    elif dialect_name == "sqlite":
+        insert_prefix = "INSERT OR IGNORE"
+    else:
+        raise RuntimeError(t(ERR_DATABASE_TYPE_UNSUPPORTED, database_type=dialect_name))
+
+    if migration_metadata:
+        await session.execute(
+            text(
+                f"""
+                {insert_prefix} INTO {MIGRATION_RECORD_TABLE} (migration_id, script_name)
+                VALUES (:migration_id, :script_name)
+                """
+            ),
+            [{"migration_id": migration_id, "script_name": script_path.name} for script_path, migration_id in migration_metadata],
+        )
+    await session.commit()
+
+
 async def run_once_migration_scripts(session: AsyncSession) -> None:
+    migration_metadata = [read_migration_metadata(script_path) for script_path in iter_migration_scripts()]
+    if await _is_fresh_deployment(session):
+        await ensure_migration_record_table(session, commit=False)
+        await _mark_all_migrations_executed(session, migration_metadata)
+        return
+
     await ensure_migration_record_table(session)
-    for script_path in iter_migration_scripts():
+    executed_migration_ids = await get_executed_migration_ids(session)
+    for script_path, static_migration_id in migration_metadata:
+        if static_migration_id in executed_migration_ids:
+            continue
         module = load_migration_module(script_path)
         migration_id = getattr(module, "MIGRATION_ID", script_path.stem)
         migrate_func = getattr(module, "migrate", None)
-        if not isinstance(migration_id, str) or not migration_id.strip():
+        if not isinstance(migration_id, str) or not migration_id.strip() or migration_id != static_migration_id:
             raise RuntimeError(t(ERR_MIGRATION_ID_INVALID, script_name=script_path.name))
-        if migrate_func is None:
+        if not callable(migrate_func):
             raise RuntimeError(t(ERR_MIGRATION_FUNCTION_MISSING, script_name=script_path.name))
-        if await has_migration_executed(session, migration_id):
-            continue
 
         logger.info("MIGRATION: running %s", migration_id)
         await migrate_func(session)
         await mark_migration_executed(session, migration_id, script_path.name)
         await session.commit()
+        executed_migration_ids.add(migration_id)
         logger.info("MIGRATION: completed %s", migration_id)
 
 
