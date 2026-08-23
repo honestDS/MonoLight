@@ -7,8 +7,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.crud.context_summary_fragment import (
+    build_context_summary_fragment_dedupe_key,
+    context_summary_fragment_crud,
+)
+from app.core.crud.context_summary_stage import context_summary_stage_crud
 from app.core.crud.scheduled_task import scheduled_task_crud
-from app.models import ChatSession, Profile, PromptLibrary, ScheduledTask, SessionEvent
+from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
+from app.core.utils.context_summary.stage import build_summary_work_identity
+from app.models import (
+    ChatSession,
+    ContextSummaryFragment,
+    ContextSummaryStage,
+    Profile,
+    PromptLibrary,
+    ScheduledTask,
+    SessionEvent,
+    SessionReplyWorkItem,
+)
 from app.models.scheduled_task import ScheduledTaskStatus
 
 EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
@@ -92,20 +108,6 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     ),
     # context summary and reply work
     (
-        "context_summary_stage",
-        ("work_id", "session_id", "uid"),
-        "session_reply_work_item",
-        ("id", "session_id", "uid"),
-        "CASCADE",
-    ),
-    (
-        "context_summary_fragment",
-        ("work_id", "session_id", "uid"),
-        "session_reply_work_item",
-        ("id", "session_id", "uid"),
-        "CASCADE",
-    ),
-    (
         "session_reply_work_item",
         ("session_id", "uid"),
         "chat_session",
@@ -180,6 +182,9 @@ async def db_session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession
                     PromptLibrary.__table__,
                     Profile.__table__,
                     ChatSession.__table__,
+                    SessionReplyWorkItem.__table__,
+                    ContextSummaryStage.__table__,
+                    ContextSummaryFragment.__table__,
                     SessionEvent.__table__,
                     ScheduledTask.__table__,
                 ],
@@ -272,3 +277,88 @@ async def test_scheduled_task_crud_has_profile_assignment(db_session_factory):
 
         assert await scheduled_task_crud.has_profile_assignment(db, profile.id) is True
         assert await scheduled_task_crud.has_profile_assignment(db, profile.id + 1) is False
+
+
+@pytest.mark.asyncio
+async def test_context_summary_stage_and_fragment_do_not_require_reply_work_item(db_session_factory):
+    session_id = "session-1"
+    uid = "user-1"
+    snapshot = ContextSummarySnapshot(
+        expected_summary_message_id=None,
+        snapshot_before_id=None,
+        snapshot_max_message_id=1,
+        persistent_summary_target_id=1,
+        recent_round_start_ids=(),
+        frozen_user_message_ids=(),
+        recent_messages=(),
+    )
+    work_id, work_dedupe_key, snapshot_key = build_summary_work_identity(
+        session_id=session_id,
+        uid=uid,
+        snapshot=snapshot,
+        revision=0,
+    )
+    stage_key = "stage-0"
+    model_key = "model-key"
+
+    async with db_session_factory() as db:
+        db.add(ChatSession(session_id=session_id, uid=uid))
+        await db.flush()
+        assert await db.get(SessionReplyWorkItem, work_id) is None
+
+        stage = ContextSummaryStage(
+            uid=uid,
+            session_id=session_id,
+            work_id=work_id,
+            work_dedupe_key=work_dedupe_key,
+            snapshot_key=snapshot_key,
+            stage_key=stage_key,
+            model_key=model_key,
+            channel_id=1,
+            model_id="summary-model",
+            context_window_k=128,
+            max_output_tokens=4096,
+            safety_margin_tokens=512,
+            expected_summary_message_id=snapshot.expected_summary_message_id,
+            expected_summary_revision=0,
+            expected_content_revision=snapshot.content_revision,
+            snapshot_max_message_id=snapshot.snapshot_max_message_id,
+            persistent_summary_target_id=snapshot.persistent_summary_target_id,
+            expected_fragment_count=1,
+        )
+        persisted_stage, stage_created = await context_summary_stage_crud.create_stage(
+            db,
+            stage=stage,
+        )
+        assert stage_created is True
+        assert persisted_stage.id is not None
+
+        fragment = ContextSummaryFragment(
+            dedupe_key=build_context_summary_fragment_dedupe_key(
+                work_dedupe_key=work_dedupe_key,
+                stage_key=stage_key,
+                model_key=model_key,
+                fragment_index=0,
+            ),
+            uid=uid,
+            session_id=session_id,
+            work_id=work_id,
+            work_dedupe_key=work_dedupe_key,
+            snapshot_key=snapshot_key,
+            stage_key=stage_key,
+            model_key=model_key,
+            fragment_index=0,
+            message_start_id=1,
+            message_end_id=1,
+            channel_id=1,
+            model_id="summary-model",
+            token_count=1,
+            content="summary",
+        )
+        persisted_fragment, fragment_created = await context_summary_fragment_crud.write_ordered(
+            db,
+            fragment=fragment,
+        )
+        assert fragment_created is True
+        assert persisted_fragment is not None
+        assert persisted_fragment.id is not None
