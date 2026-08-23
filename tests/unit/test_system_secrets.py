@@ -24,7 +24,13 @@ from app.core.constants import (
     SYSTEM_SECRETS_FILE_VERSION,
 )
 from app.core.paths import ROOT_DIR, SYSTEM_SECRETS_LOCK_PATH, SYSTEM_SECRETS_PATH
-from app.core.system_secrets import SystemSecretsError, initialize_system_secrets, load_system_secrets
+from app.core.system_secrets import (
+    SystemSecrets,
+    SystemSecretsError,
+    initialize_system_secrets,
+    load_system_secrets,
+    replace_system_secrets,
+)
 
 VALID_JWT_SECRET = "legacy-jwt-secret-for-system-secrets-tests"
 VALID_ENCRYPTION_KEY_HEX = "0123456789abcdef" * 4
@@ -181,6 +187,58 @@ def test_restart_initialization_preserves_existing_permissions_and_secret_bytes(
     assert secrets_path.read_bytes() == original_file_bytes
     assert secrets_path.stat().st_mode == original_secrets_mode
     assert lock_path.stat().st_mode == original_lock_mode
+
+
+def test_replace_system_secrets_replaces_idempotently_and_preserves_permissions(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "system_secrets.json"
+    lock_path = tmp_path / "system_secrets.lock"
+    expected = initialize_system_secrets(secrets_path, lock_path, environment={})
+    replacement = SystemSecrets(
+        jwt_secret_key="replacement-jwt-secret-for-system-secrets-tests",
+        channel_encryption_key=bytes.fromhex("abcdef0123456789" * 4),
+    )
+
+    original_mode = None
+    if os.name == "posix":
+        os.chmod(secrets_path, 0o640)
+        original_mode = secrets_path.stat().st_mode & 0o777
+
+    result = replace_system_secrets(expected, replacement, secrets_path, lock_path)
+
+    assert result == replacement
+    assert load_system_secrets(secrets_path) == replacement
+    replacement_file_bytes = secrets_path.read_bytes()
+
+    second_result = replace_system_secrets(expected, replacement, secrets_path, lock_path)
+
+    assert second_result == replacement
+    assert load_system_secrets(secrets_path) == replacement
+    assert secrets_path.read_bytes() == replacement_file_bytes
+    assert not list(secrets_path.parent.glob(".system-secrets-*.tmp"))
+    if original_mode is not None:
+        assert secrets_path.stat().st_mode & 0o777 == original_mode
+
+
+def test_replace_system_secrets_rejects_unexpected_current_value_without_overwrite(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "system_secrets.json"
+    lock_path = tmp_path / "system_secrets.lock"
+    initialize_system_secrets(secrets_path, lock_path, environment={})
+    expected = SystemSecrets(
+        jwt_secret_key="unexpected-current-jwt-secret",
+        channel_encryption_key=bytes.fromhex("0123456789abcdef" * 4),
+    )
+    replacement = SystemSecrets(
+        jwt_secret_key="replacement-jwt-secret-for-system-secrets-tests",
+        channel_encryption_key=bytes.fromhex("abcdef0123456789" * 4),
+    )
+    original_file_bytes = secrets_path.read_bytes()
+
+    with pytest.raises(SystemSecretsError) as error_info:
+        replace_system_secrets(expected, replacement, secrets_path, lock_path)
+
+    assert error_info.value.message_key == ERR_SYSTEM_SECRETS_MIGRATION_INVALID
+    assert secrets_path.read_bytes() == original_file_bytes
+    assert not list(secrets_path.parent.glob(".system-secrets-*.tmp"))
 
 
 def test_initialization_does_not_call_os_chmod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
