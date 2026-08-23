@@ -1,7 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import ForeignKeyConstraint
 from sqlmodel import Column, DateTime, Field, SQLModel, UniqueConstraint
 
 from app.core.utils.time import get_local_time
@@ -26,16 +25,6 @@ class ContextSummaryStage(SQLModel, table=True):
             "work_dedupe_key",
             "stage_key",
             name="uq_context_summary_stage_work_stage",
-        ),
-        ForeignKeyConstraint(
-            ["work_id", "session_id", "uid"],
-            [
-                "session_reply_work_item.id",
-                "session_reply_work_item.session_id",
-                "session_reply_work_item.uid",
-            ],
-            name="fk_context_summary_stage_work_owner",
-            ondelete="CASCADE",
         ),
     )
 
@@ -88,16 +77,6 @@ class ContextSummaryFragment(SQLModel, table=True):
         UniqueConstraint(
             "dedupe_key",
             name="uq_context_summary_fragment_dedupe",
-        ),
-        ForeignKeyConstraint(
-            ["work_id", "session_id", "uid"],
-            [
-                "session_reply_work_item.id",
-                "session_reply_work_item.session_id",
-                "session_reply_work_item.uid",
-            ],
-            name="fk_context_summary_fragment_work_owner",
-            ondelete="CASCADE",
         ),
     )
 
