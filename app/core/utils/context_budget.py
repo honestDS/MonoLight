@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_VALUE_MUST_BE_BETWEEN,
@@ -60,7 +61,7 @@ def measure_context_request_usage(
     context_window_k: int,
     max_tokens: int,
     tools: list[dict] | None = None,
-    safety_margin_tokens: int = 256,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     threshold_percent: int = 100,
     additional_non_system_tokens: int = 0,
 ) -> ContextRequestUsage:
@@ -105,7 +106,7 @@ def build_context_request_budget(
     max_tokens: int,
     system_tokens: int = 0,
     tools: list[dict] | None = None,
-    safety_margin_tokens: int = 256,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
 ) -> ContextRequestBudget:
     context_window_tokens = max(1, context_window_k * CONTEXT_WINDOW_TOKENS_PER_K)
     output_tokens = max(max_tokens, 0)

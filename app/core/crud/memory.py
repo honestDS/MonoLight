@@ -31,9 +31,9 @@ _MEMORY_RECORD_SORT_COLUMNS = {
 }
 
 
-def _recallable_conditions(uid: str) -> list[Any]:
+def _organization_record_conditions(uid_condition: Any) -> list[Any]:
     return [
-        LongTermMemoryRecord.uid == uid,
+        uid_condition,
         LongTermMemoryRecord.is_active.is_(True),
         LongTermMemoryRecord.deleted_at.is_(None),
         LongTermMemoryRecord.suppress_recall.is_(False),
@@ -42,6 +42,10 @@ def _recallable_conditions(uid: str) -> list[Any]:
         LongTermMemoryRecord.vector_item_id.is_not(None),
         LongTermMemoryRecord.vector_item_id != "",
     ]
+
+
+def _recallable_conditions(uid: str) -> list[Any]:
+    return _organization_record_conditions(LongTermMemoryRecord.uid == uid)
 
 
 def _eviction_candidate_conditions(
@@ -225,6 +229,39 @@ class CRUDLongTermMemoryStore:
         await _finish(db, commit=commit)
         refreshed = await db.execute(select(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid).execution_options(populate_existing=True))
         return refreshed.scalars().first()
+
+    async def update_auto_organize_if_channel_and_model(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        expected_channel_id: int | None,
+        expected_model_id: str | None,
+        obj_in: Any = None,
+        commit: bool = True,
+        **values: Any,
+    ) -> bool:
+        data = _input_data(obj_in)
+        data.update(values)
+        allowed = {
+            "auto_organize_enabled",
+            "organization_channel_id",
+            "organization_model_id",
+        }
+        update_values = {key: value for key, value in data.items() if key in allowed}
+        update_values["updated_at"] = get_local_time()
+        result = await db.execute(
+            update(LongTermMemoryStore)
+            .where(
+                LongTermMemoryStore.uid == uid,
+                LongTermMemoryStore.organization_channel_id == expected_channel_id,
+                LongTermMemoryStore.organization_model_id == expected_model_id,
+            )
+            .values(**update_values)
+            .execution_options(synchronize_session=False)
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
 
     async def get_or_create(
         self,
@@ -555,13 +592,13 @@ class CRUDLongTermMemoryRecord:
         result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid), LongTermMemoryRecord.id.in_(memory_ids)))
         return list(result.scalars().all())
 
-    async def list_recallable_for_organization(
+    async def list_for_organization(
         self,
         db: AsyncSession,
         *,
         uid: str,
     ) -> list[LongTermMemoryRecord]:
-        result = await db.execute(select(LongTermMemoryRecord).where(*_recallable_conditions(uid)).order_by(LongTermMemoryRecord.id.asc()).execution_options(populate_existing=True))
+        result = await db.execute(select(LongTermMemoryRecord).where(*_organization_record_conditions(LongTermMemoryRecord.uid == uid)).order_by(LongTermMemoryRecord.id.asc()).execution_options(populate_existing=True))
         return list(result.scalars().all())
 
     async def get_eviction_candidate(self, db: AsyncSession, *, uid: str) -> LongTermMemoryRecord | None:
@@ -1576,19 +1613,14 @@ class CRUDLongTermMemoryEmbeddingDelta:
 class CRUDLongTermMemoryReference:
     """管理员保护检查使用的长期记忆基础数据读取。"""
 
-    async def count_active_records_by_uids(self, db: AsyncSession, *, uids: set[str]) -> dict[str, int]:
+    async def list_organization_records_by_uids(self, db: AsyncSession, *, uids: set[str]) -> dict[str, list[LongTermMemoryRecord]]:
         if not uids:
             return {}
-        result = await db.execute(
-            select(LongTermMemoryRecord.uid, func.count())
-            .where(
-                LongTermMemoryRecord.uid.in_(uids),
-                LongTermMemoryRecord.is_active.is_(True),
-                LongTermMemoryRecord.deleted_at.is_(None),
-            )
-            .group_by(LongTermMemoryRecord.uid)
-        )
-        return {uid: int(count) for uid, count in result.all()}
+        result = await db.execute(select(LongTermMemoryRecord).where(*_organization_record_conditions(LongTermMemoryRecord.uid.in_(uids))).order_by(LongTermMemoryRecord.uid.asc(), LongTermMemoryRecord.id.asc()))
+        records_by_uid: dict[str, list[LongTermMemoryRecord]] = {}
+        for record in result.scalars().all():
+            records_by_uid.setdefault(record.uid, []).append(record)
+        return records_by_uid
 
     async def list_all_stores_for_admin(self, db: AsyncSession) -> list[LongTermMemoryStore]:
         result = await db.execute(select(LongTermMemoryStore).order_by(LongTermMemoryStore.uid))

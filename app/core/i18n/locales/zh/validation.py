@@ -3,7 +3,7 @@ MESSAGES = {
     "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS": "配置模型条目时 base_url 必须配置",
     "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK": "含 RERANK 用途的模型时 base_url 必须配置",
     "ERR_CHANNEL_BASE_URL_SCHEME": "base_url 必须以 http:// 或 https:// 开头",
-    "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] 校验失败: {error}",
+    "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "模型 {model_id} 校验失败: {error}",
     "ERR_CHANNEL_MODEL_IDS_DUPLICATED": "同一用途下模型 ID 不能重复: {usage}/{model_id}",
     "ERR_VALIDATION_FAILED": "参数验证失败",
     "ERR_SETUP_CONFLICT": "初始化已完成或正在进行，无法重复执行",

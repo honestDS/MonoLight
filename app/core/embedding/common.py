@@ -51,11 +51,15 @@ async def load_embedding_runtime_config(
     channel_id: int,
     model_id: str,
     *,
+    lock_for_reference_write: bool = False,
     channel_not_found_status_code: int = 400,
     model_not_found_status_code: int = 400,
 ) -> EmbeddingRuntimeConfig:
-    """Load and validate an embedding model without retaining its ORM entity."""
-    channel = await channel_crud.get(db, channel_id)
+    """Load and validate an embedding model without retaining its ORM entity.
+
+    When enabled, locks and reads the latest channel state within a reference-write transaction.
+    """
+    channel = await channel_crud.lock_for_mutation(db, channel_id=channel_id, commit=False) if lock_for_reference_write else await channel_crud.get(db, channel_id)
     if not channel:
         raise HTTPException(status_code=channel_not_found_status_code, detail=ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND)
     if not channel.is_active:

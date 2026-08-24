@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
@@ -209,7 +210,7 @@ async def _ensure_context_summary(
     max_tokens: int,
     reserved_tokens: int,
     tools: list[dict] | None = None,
-    safety_margin_tokens: int = 256,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     frozen_user_message_ids: list[int] | None = None,
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,
@@ -596,7 +597,7 @@ async def ensure_context_summary(
     max_tokens: int,
     reserved_tokens: int,
     tools: list[dict] | None = None,
-    safety_margin_tokens: int = 256,
+    safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     frozen_user_message_ids: list[int] | None = None,
     trigger_mode: ContextSummaryTriggerMode | None = None,
     fixed_upper_message_id: int | None = None,

@@ -17,6 +17,7 @@ from app.core.constants import (
     LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK,
     LOG_MEMORY_ORGANIZATION_MODEL_RETRY,
 )
+from app.core.crud.channel import channel_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.exceptions import LLMException
 from app.core.i18n import t
@@ -234,6 +235,13 @@ async def _submit_organization_plan(
             if parent_job.cancel_requested_at is not None:
                 raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
             _validate_organization_job(parent_job)
+            channel = await channel_crud.lock_for_mutation(
+                db,
+                channel_id=request.organization_model.channel_id,
+                commit=False,
+            )
+            if channel is None:
+                raise MemoryJobRetryableError(t(ERR_MEMORY_JOB_PUBLICATION_FAILED))
 
             child_job_ids: list[int] = []
             group_results: list[dict[str, Any]] = []
@@ -313,6 +321,9 @@ async def _submit_organization_plan(
                 if current.cancel_requested_at is not None:
                     raise MemoryJobCancelledError(t(ERR_MEMORY_JOB_CANCELLATION_REQUESTED))
                 raise MemoryJobRetryableError(t(ERR_MEMORY_JOB_PUBLICATION_FAILED))
+            from app.core.channel_model_protection import finalize_pending_channel_model_deletions_for_organization_job
+
+            await finalize_pending_channel_model_deletions_for_organization_job(db, job=parent_job)
             await db.commit()
             return MemoryJobExecutionResult(result=final_result, finalized=True)
         except Exception:

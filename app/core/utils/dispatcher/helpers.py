@@ -2,7 +2,7 @@ import json
 from importlib import import_module
 from typing import Any
 
-from app.core.constants import ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
+from app.core.constants import DEFAULT_CHAT_CONTEXT_WINDOW_K, DEFAULT_CHAT_MAX_TOKENS, ERR_INTERNAL_SERVER_ERROR, ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL
 from app.core.exceptions import BaseBusinessException, LLMException, ServerException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -28,9 +28,9 @@ def resolve_chat_params(model_entry: dict, chat_channel) -> dict:
     return {
         "temperature": model_entry.get("temperature") if model_entry.get("temperature") is not None else 0.7,
         "top_p": model_entry.get("top_p"),
-        "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else 2048,
+        "max_tokens": model_entry.get("max_tokens") if model_entry.get("max_tokens") is not None else DEFAULT_CHAT_MAX_TOKENS,
         "chat_timeout": chat_channel.chat_timeout,
-        "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else 4,
+        "context_window_k": model_entry.get("context_window_k") if model_entry.get("context_window_k") is not None else DEFAULT_CHAT_CONTEXT_WINDOW_K,
     }
 
 

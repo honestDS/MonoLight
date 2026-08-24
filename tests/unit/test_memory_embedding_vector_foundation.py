@@ -168,6 +168,44 @@ async def test_load_embedding_runtime_config_filters_channel_and_model_and_detac
 
 
 @pytest.mark.asyncio
+async def test_load_embedding_runtime_config_uses_channel_lock_for_reference_write(monkeypatch) -> None:
+    channel = _FakeChannel(model_ids=[_embedding_model()])
+    db = object()
+    lock_calls: list[tuple[object, int, bool]] = []
+
+    async def fake_lock_for_mutation(actual_db, channel_id: int, *, commit: bool = True):
+        lock_calls.append((actual_db, channel_id, commit))
+        return channel
+
+    async def fail_get(*_args, **_kwargs):
+        raise AssertionError("load_embedding_runtime_config must use the channel lock")
+
+    monkeypatch.setattr(embedding_common.channel_crud, "lock_for_mutation", fake_lock_for_mutation)
+    monkeypatch.setattr(embedding_common.channel_crud, "get", fail_get)
+
+    config = await embedding_common.load_embedding_runtime_config(
+        db,
+        7,
+        "embedding-model",
+        lock_for_reference_write=True,
+    )
+
+    assert lock_calls == [(db, 7, False)]
+    assert config.channel_id == 7
+    assert config.channel_name == "embedding-channel"
+    assert config.model_id == "embedding-model"
+    assert config.declared_dimensions == 1536
+    assert config.protocol == "openai_embedding"
+    assert config.timeout == 45.5
+    assert config.base_url == "https://embedding.example/v1"
+    assert config.http_proxy == "http://proxy-user:proxy-pass@proxy.example.com:8080"
+    assert dict(config.custom_headers) == {
+        "x-trace-id": "header-value-secret",
+        "user-agent": "MemoryTest/1.0",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("channel", "model_id", "channel_status", "model_status", "detail"),
     [

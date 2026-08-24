@@ -174,7 +174,16 @@ async def test_create_and_list_keep_legacy_fields_and_persist_index_state(
     api_client: AsyncClient,
     db_session: AsyncSession,
     embedding_channel: ModelChannel,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    load_embedding_model_locks: list[bool] = []
+
+    async def record_load_embedding_model(*_args: object, lock_for_reference_write: bool = False, **_kwargs: object):
+        load_embedding_model_locks.append(lock_for_reference_write)
+        return object(), {"model_id": "embed-v1", "embedding_dimensions": 768}
+
+    monkeypatch.setattr(knowledge_base_api, "load_embedding_model", record_load_embedding_model)
+
     response = await api_client.post(
         "/api/v1/knowledge-base/create",
         json={
@@ -186,6 +195,7 @@ async def test_create_and_list_keep_legacy_fields_and_persist_index_state(
     )
 
     assert response.status_code == 200
+    assert load_embedding_model_locks == [False, True]
     created = response.json()["data"]
     collection_name = assert_knowledge_base_fields(created, embedding_channel.id)
 
