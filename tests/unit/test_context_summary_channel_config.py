@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -219,3 +220,76 @@ def test_channel_model_rename_includes_context_summary_rules():
     assert referenced[ModelUsage.CHAT.value] == {"old-summary-model"}
     assert updated_count == 1
     assert configs["channel"]["context_summary_channel"]["rules"][0]["model_id"] == "new-summary-model"
+
+
+@pytest.mark.asyncio
+async def test_preview_channel_model_update_impacts_applies_renames_before_cleanup():
+    class FakeScalars:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class FakeResult:
+        def __init__(self, values):
+            self.values = values
+
+        def scalars(self):
+            return FakeScalars(self.values)
+
+    class FakeDB:
+        def __init__(self, results):
+            self.results = iter(results)
+
+        async def execute(self, _statement):
+            return next(self.results)
+
+    profile = SimpleNamespace(
+        id=1,
+        configs={
+            "channel": {
+                "chat_channel": {
+                    "rules": [_rule(7, "old-chat-model")],
+                }
+            },
+            "security": {
+                "audit_channel_id": 7,
+                "audit_model_id": "old-chat-model",
+            },
+        },
+    )
+    original_configs = deepcopy(profile.configs)
+    old_model_ids = [
+        {
+            "model_id": "old-chat-model",
+            "usage": ModelUsage.CHAT.value,
+            "protocol": "OPENAI",
+            "context_window_k": 128,
+            "max_tokens": 64,
+        }
+    ]
+    new_model_ids = [
+        {
+            "model_id": "new-chat-model",
+            "usage": ModelUsage.CHAT.value,
+            "protocol": "OPENAI",
+            "context_window_k": 128,
+            "max_tokens": 64,
+        }
+    ]
+
+    impacts = await channel_profile_sync_module._preview_channel_model_update_impacts(
+        FakeDB([FakeResult([profile]), FakeResult([])]),
+        7,
+        old_model_ids,
+        new_model_ids,
+    )
+
+    assert impacts == {
+        "synced_profile_rules": 1,
+        "removed_profile_rules": 0,
+        "synced_audit_refs": 1,
+        "cleared_audit_refs": 0,
+    }
+    assert profile.configs == original_configs

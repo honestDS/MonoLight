@@ -56,3 +56,27 @@ test('ChannelModelEntry keeps metadata detection and result viewing as separate 
     modelEntrySource.indexOf("emit('view-test-result')"),
   )
 })
+
+test('ChannelFormDialog renders config impact messages as block VNodes', () => {
+  assert.match(channelFormSource, /import\s+\{[^}]*\bh\b[^}]*\}\s+from\s+['"]vue['"]/)
+  assert.match(channelFormSource, /import\s+\{[^}]*\bElMessageBox\b[^}]*\}\s+from\s+['"]element-plus['"]/)
+  assert.match(channelFormSource, /ElMessageBox\.confirm\(/)
+  assert.match(channelFormSource, /const syncedMemoryOrganizationSettings = data\?\.synced_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const retainedMemoryOrganizationSettings = data\?\.retained_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const disabledMemoryOrganizationSettings = data\?\.disabled_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /h\(\s*['"]div['"]\s*,\s*\{\s*class:\s*['"]config-impact-warning['"]\s*\}\s*,\s*messages\.map/)
+  assert.match(
+    channelFormSource,
+    /h\(\s*['"]div['"]\s*,\s*\{\s*class:\s*['"]config-impact-warning__item['"]\s*,\s*key:\s*index\s*\}\s*,\s*message\s*\)/,
+  )
+  assert.equal(channelFormSource.includes('alert('), false)
+  assert.equal(channelFormSource.includes('showConfigImpactWarning'), false)
+  assert.equal(channelFormSource.includes("messages.join('\\n')"), false)
+})
+
+test('ChannelFormDialog confirms config impact before the final edit update', () => {
+  assert.match(
+    channelFormSource,
+    /if \(isEdit\.value\) \{[\s\S]*?const res = await channelApi\.update\(currentId\.value, payload\)[\s\S]*?if \(res\.data\?\.data\?\.requires_confirmation\) \{[\s\S]*?const confirmed = await confirmConfigImpact\(res\.data\?\.data\)[\s\S]*?if \(!confirmed\) return[\s\S]*?await channelApi\.update\(currentId\.value, \{ \.\.\.payload, confirm_config_impact: true \}\)/,
+  )
+})

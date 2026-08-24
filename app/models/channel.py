@@ -299,6 +299,7 @@ class ChannelUpdate(SQLModel):
     http_proxy: str | None = None
     is_active: bool | None = None
     model_ids: list[dict] | None = None
+    confirm_config_impact: bool = Field(default=False)
 
     @field_validator("api_key", mode="before")
     @classmethod

@@ -1333,11 +1333,16 @@ def _is_positive_integer(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value > 0
 
 
-async def _load_organization_model_config_for_selection(
-    db: AsyncSession,
-    *,
+def build_organization_model_config_for_channel_values(
     store: LongTermMemoryStore,
+    *,
     channel_id: Any,
+    channel_name: Any,
+    channel_is_active: Any,
+    base_url: Any,
+    api_key: Any,
+    http_proxy: Any,
+    model_ids: Any,
     model_id: Any,
     snapshot_count: int,
 ) -> MemoryOrganizationModelConfig:
@@ -1346,13 +1351,11 @@ async def _load_organization_model_config_for_selection(
         raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
     required_output_tokens = calculate_organization_required_output_tokens(snapshot_count)
 
-    channel = await channel_crud.get(db, normalized_channel_id)
-    if channel is None or channel.is_active is not True or not _is_valid_organization_base_url(channel.base_url):
+    if channel_is_active is not True or not _is_valid_organization_base_url(base_url):
         _raise_organization_config_invalid()
 
     try:
-        api_key = channel.get_decrypted_api_key()
-        http_proxy = get_channel_http_proxy(channel)
+        normalized_http_proxy = get_channel_http_proxy({"http_proxy": http_proxy})
     except Exception:
         _raise_organization_config_invalid()
     if not isinstance(api_key, str) or not api_key.strip():
@@ -1361,7 +1364,7 @@ async def _load_organization_model_config_for_selection(
     selected_item: ChannelModelItem | None = None
     context_window_k: Any = None
     max_tokens: Any = None
-    for raw_item in channel.model_ids or []:
+    for raw_item in model_ids or []:
         if not isinstance(raw_item, dict) or raw_item.get("model_id") != normalized_model_id:
             continue
         try:
@@ -1394,13 +1397,13 @@ async def _load_organization_model_config_for_selection(
     context_window_tokens = context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
     return MemoryOrganizationModelConfig(
         channel_id=normalized_channel_id,
-        channel_name=channel.name,
+        channel_name=channel_name,
         model_id=selected_item.model_id,
         usage=selected_item.usage.value,
         protocol=resolve_model_protocol({"protocol": selected_item.protocol.value}),
-        base_url=channel.base_url,
+        base_url=base_url,
         api_key=api_key,
-        http_proxy=http_proxy,
+        http_proxy=normalized_http_proxy,
         custom_headers=selected_item.advanced_settings.custom_headers,
         temperature=selected_item.temperature if selected_item.temperature is not None else 0.7,
         top_p=selected_item.top_p,
@@ -1411,6 +1414,43 @@ async def _load_organization_model_config_for_selection(
         snapshot_count=snapshot_count,
         required_output_tokens=required_output_tokens,
         policy_version=store.organization_policy_version,
+    )
+
+
+async def _load_organization_model_config_for_selection(
+    db: AsyncSession,
+    *,
+    store: LongTermMemoryStore,
+    channel_id: Any,
+    model_id: Any,
+    snapshot_count: int,
+) -> MemoryOrganizationModelConfig:
+    normalized_channel_id, normalized_model_id = _validate_organization_selection(channel_id, model_id)
+    if normalized_channel_id is None or normalized_model_id is None:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
+
+    channel = await channel_crud.get(db, normalized_channel_id)
+    if channel is None:
+        _raise_organization_config_invalid()
+    if channel.is_active is not True or not _is_valid_organization_base_url(channel.base_url):
+        _raise_organization_config_invalid()
+
+    try:
+        api_key = channel.get_decrypted_api_key()
+        http_proxy = getattr(channel, "http_proxy", None)
+    except Exception:
+        _raise_organization_config_invalid()
+    return build_organization_model_config_for_channel_values(
+        store,
+        channel_id=normalized_channel_id,
+        channel_name=channel.name,
+        channel_is_active=channel.is_active,
+        base_url=channel.base_url,
+        api_key=api_key,
+        http_proxy=http_proxy,
+        model_ids=channel.model_ids,
+        model_id=normalized_model_id,
+        snapshot_count=snapshot_count,
     )
 
 
@@ -1628,6 +1668,7 @@ __all__ = [
     "MemoryOrganizationValidatedSource",
     "MemoryOrganizationValidatedTarget",
     "build_organization_execution_request",
+    "build_organization_model_config_for_channel_values",
     "calculate_organization_required_output_tokens",
     "build_organization_dedupe_key",
     "build_organization_job_payload",

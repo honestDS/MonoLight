@@ -1,4 +1,5 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import contextmanager
 
 import pytest
 import pytest_asyncio
@@ -16,12 +17,13 @@ from app.core.constants import ERR_MEMORY_CHANNEL_IN_USE, ERR_MEMORY_MODEL_IDENT
 from app.core.crud.channel import channel_crud
 from app.core.crud.memory import (
     memory_embedding_revision_crud,
+    memory_record_crud,
     memory_store_crud,
 )
 from app.core.crud.memory_job import memory_job_crud
 from app.core.exceptions import ParameterException
 from app.core.memory.channel_protection import list_memory_channel_references
-from app.models.channel import ChannelCreate, ModelChannel
+from app.models.channel import ChannelCreate, ModelChannel, normalize_channel_model_ids
 from app.models.knowledge_base import KnowledgeBase
 from app.models.memory import (
     LongTermMemoryEmbeddingRevision,
@@ -29,13 +31,19 @@ from app.models.memory import (
     LongTermMemoryMutationOperation,
     LongTermMemoryMutationStatus,
     LongTermMemoryOldCollectionCleanupStatus,
+    LongTermMemoryRecord,
     LongTermMemoryStore,
 )
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
 
 MEMORY_TABLES = [
+    PromptLibrary.__table__,
+    Profile.__table__,
     ModelChannel.__table__,
     KnowledgeBase.__table__,
     LongTermMemoryStore.__table__,
+    LongTermMemoryRecord.__table__,
     LongTermMemoryEmbeddingRevision.__table__,
     LongTermMemoryMutationJob.__table__,
 ]
@@ -90,6 +98,82 @@ def _chat_model(model_id: str = "chat-model", **overrides: object) -> dict:
     }
     model.update(overrides)
     return model
+
+
+def _organization_chat_model(model_id: str = "organization-chat", **overrides: object) -> dict:
+    model = {
+        "model_id": model_id,
+        "usage": "CHAT",
+        "protocol": "OPENAI",
+        "image_understanding": False,
+        "audio_understanding": False,
+        "video_understanding": False,
+        "context_window_k": 128,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "is_enabled": True,
+        "description": "organization model",
+        "advanced_settings": {"custom_headers": {"x-test": "one"}},
+    }
+    model.update(overrides)
+    return model
+
+
+@contextmanager
+def _capture_writes(db: AsyncSession) -> Iterator[list[str]]:
+    writes: list[str] = []
+    sync_engine = db.info["sync_engine"]
+
+    def before_cursor_execute(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if isinstance(statement, str) and statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            writes.append(statement)
+
+    event.listen(sync_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        yield writes
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", before_cursor_execute)
+
+
+def _patch_profile_sync_noops(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_op(*_args, **_kwargs) -> int:
+        return 0
+
+    monkeypatch.setattr(channels, "_sync_channel_model_id_renames", no_op)
+    monkeypatch.setattr(channels, "_sync_audit_model_id_renames", no_op)
+    monkeypatch.setattr(channels, "_remove_unavailable_channel_rules", no_op)
+    monkeypatch.setattr(channels, "_clear_unavailable_audit_model_refs", no_op)
+
+
+def _assert_update_impact(
+    response,
+    *,
+    requires_confirmation: bool,
+    synced: int = 0,
+    retained: int = 0,
+    disabled: int = 0,
+) -> None:
+    assert response.code == 200
+    assert response.data["requires_confirmation"] is requires_confirmation
+    assert response.data["synced_memory_organization_settings"] == synced
+    assert response.data["retained_memory_organization_settings"] == retained
+    assert response.data["disabled_memory_organization_settings"] == disabled
+    assert response.data["synced_profile_rules"] == 0
+    assert response.data["removed_profile_rules"] == 0
+    assert response.data["synced_audit_refs"] == 0
+    assert response.data["cleared_audit_refs"] == 0
+
+
+async def _create_active_memory_record(db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord:
+    return await memory_record_crud.create(
+        db,
+        uid=uid,
+        memory_key=memory_key,
+        content="active memory",
+        is_active=True,
+        commit=False,
+    )
 
 
 async def _create_store(
@@ -173,11 +257,11 @@ async def _create_channel(
     name: str,
     model_ids: list[dict] | None = None,
 ) -> ModelChannel:
-    return await channel_crud.create(
+    return await channel_crud.create_with_plain_api_key(
         db,
         obj_in=ChannelCreate(
             name=name,
-            api_key="enc:v1:test-key",
+            api_key="test-key",
             base_url="https://example.invalid",
             model_ids=model_ids or [],
         ),
@@ -732,6 +816,380 @@ async def test_referenced_chat_model_identity_changes_are_rejected(
 
 
 @pytest.mark.asyncio
+async def test_update_channel_previews_and_confirms_exact_chat_model_rename(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_models = [_organization_chat_model("protected-chat")]
+    new_models = [_organization_chat_model("renamed-chat")]
+    channel = await _create_channel(
+        db_session,
+        name="organization-update-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid="organization-update-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="protected-chat",
+    )
+    _patch_profile_sync_noops(monkeypatch)
+
+    with _capture_writes(db_session) as writes:
+        preview = await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=new_models),
+            db=db_session,
+            admin={},
+        )
+
+    assert writes == []
+    _assert_update_impact(preview, requires_confirmation=True, synced=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "protected-chat"
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False, synced=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "renamed-chat"
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == normalize_channel_model_ids(new_models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"description": "updated description"}, id="description"),
+        pytest.param({"image_understanding": True}, id="image-understanding"),
+        pytest.param({"audio_understanding": True}, id="audio-understanding"),
+        pytest.param({"video_understanding": True}, id="video-understanding"),
+    ],
+)
+async def test_update_channel_allows_non_identity_chat_model_metadata_without_memory_confirmation(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    change: dict,
+) -> None:
+    old_models = [_organization_chat_model("mutable-chat")]
+    new_models = [{**old_models[0], **change}]
+    channel = await _create_channel(
+        db_session,
+        name="organization-metadata-update-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid="organization-metadata-update-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="mutable-chat",
+    )
+    _patch_profile_sync_noops(monkeypatch)
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "mutable-chat"
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == normalize_channel_model_ids(new_models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"protocol": "OPENAI_RESPONSES"}, id="protocol"),
+        pytest.param({"temperature": 1.2, "top_p": 0.4}, id="runtime-parameters"),
+    ],
+)
+async def test_update_channel_previews_and_confirms_retained_chat_model_changes(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    change: dict,
+) -> None:
+    old_models = [_organization_chat_model("mutable-chat")]
+    new_models = [{**old_models[0], **change}]
+    channel = await _create_channel(
+        db_session,
+        name="organization-retained-update-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid="organization-retained-update-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="mutable-chat",
+    )
+    _patch_profile_sync_noops(monkeypatch)
+
+    with _capture_writes(db_session) as writes:
+        preview = await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=new_models),
+            db=db_session,
+            admin={},
+        )
+
+    assert writes == []
+    _assert_update_impact(preview, requires_confirmation=True, retained=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "mutable-chat"
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False, retained=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "mutable-chat"
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == normalize_channel_model_ids(new_models)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param("delete", id="delete"),
+        pytest.param("usage", id="usage-change"),
+        pytest.param("rename_with_parameters", id="rename-with-parameters"),
+    ],
+)
+async def test_update_channel_previews_and_confirms_disabling_invalid_chat_model_changes(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    old_models = [_organization_chat_model("protected-chat")]
+    channel = await _create_channel(
+        db_session,
+        name=f"organization-disabled-update-channel-{change}",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid=f"organization-disabled-update-user-{change}",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="protected-chat",
+    )
+    _patch_profile_sync_noops(monkeypatch)
+
+    if change == "delete":
+        new_models = []
+    elif change == "usage":
+        new_models = [_embedding_model("protected-chat")]
+    else:
+        new_models = [_organization_chat_model("renamed-chat", temperature=1.2)]
+
+    with _capture_writes(db_session) as writes:
+        preview = await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=new_models),
+            db=db_session,
+            admin={},
+        )
+
+    assert writes == []
+    _assert_update_impact(preview, requires_confirmation=True, disabled=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "protected-chat"
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False, disabled=1)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is False
+    assert store.organization_channel_id is None
+    assert store.organization_model_id is None
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == normalize_channel_model_ids(new_models)
+
+
+@pytest.mark.asyncio
+async def test_update_channel_organization_budget_validation_uses_each_uid_active_count(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_models = [_organization_chat_model("budget-chat", max_tokens=4096)]
+    new_models = [_organization_chat_model("budget-chat", max_tokens=255)]
+    channel = await _create_channel(
+        db_session,
+        name="organization-budget-update-channel",
+        model_ids=old_models,
+    )
+    active_store = await _create_store(
+        db_session,
+        uid="organization-budget-active-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="budget-chat",
+    )
+    empty_store = await _create_store(
+        db_session,
+        uid="organization-budget-empty-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="budget-chat",
+    )
+    await _create_active_memory_record(
+        db_session,
+        uid="organization-budget-active-user",
+        memory_key="budget-memory",
+    )
+    _patch_profile_sync_noops(monkeypatch)
+
+    with _capture_writes(db_session) as writes:
+        preview = await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=new_models),
+            db=db_session,
+            admin={},
+        )
+
+    assert writes == []
+    _assert_update_impact(preview, requires_confirmation=True, retained=1, disabled=1)
+    await db_session.refresh(active_store)
+    await db_session.refresh(empty_store)
+    assert active_store.auto_organize_enabled is True
+    assert active_store.organization_channel_id == channel.id
+    assert active_store.organization_model_id == "budget-chat"
+    assert empty_store.auto_organize_enabled is True
+    assert empty_store.organization_channel_id == channel.id
+    assert empty_store.organization_model_id == "budget-chat"
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False, retained=1, disabled=1)
+    await db_session.refresh(active_store)
+    await db_session.refresh(empty_store)
+    assert active_store.auto_organize_enabled is False
+    assert active_store.organization_channel_id is None
+    assert active_store.organization_model_id is None
+    assert empty_store.auto_organize_enabled is True
+    assert empty_store.organization_channel_id == channel.id
+    assert empty_store.organization_model_id == "budget-chat"
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == normalize_channel_model_ids(new_models)
+
+
+@pytest.mark.asyncio
+async def test_active_organization_job_rejects_chat_model_update_and_rolls_back_settings(
+    db_session: AsyncSession,
+) -> None:
+    old_models = [_organization_chat_model("job-chat")]
+    channel = await _create_channel(
+        db_session,
+        name="active-organization-job-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid="active-organization-job-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="job-chat",
+    )
+    job = await _create_organization_job(
+        db_session,
+        uid="active-organization-job-user",
+        dedupe_key="active-organization-job",
+        status=LongTermMemoryMutationStatus.PENDING,
+        channel_id=channel.id,
+        model_id="job-chat",
+    )
+    await db_session.commit()
+    references = await list_memory_channel_references(db_session, channel_id=channel.id)
+    reference_values = {(reference.uid, reference.channel_id, reference.model_id, reference.usage, reference.is_adaptable) for reference in references}
+    assert reference_values == {
+        ("active-organization-job-user", channel.id, "job-chat", "CHAT", True),
+        ("active-organization-job-user", channel.id, "job-chat", "CHAT", False),
+    }
+    assert {reference.is_adaptable for reference in references} == {True, False}
+    original_job_status = job.status
+    original_job_payload = dict(job.payload)
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=[]),
+            db=db_session,
+            admin={},
+        )
+
+    assert exc_info.value.message == ERR_MEMORY_MODEL_IDENTITY_IN_USE
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "job-chat"
+    await db_session.refresh(job)
+    assert job.status == original_job_status
+    assert job.payload == original_job_payload
+    references_after = await list_memory_channel_references(db_session, channel_id=channel.id)
+    assert {(reference.uid, reference.channel_id, reference.model_id, reference.usage, reference.is_adaptable) for reference in references_after} == reference_values
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == old_models
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [
@@ -967,3 +1425,40 @@ async def test_organization_referenced_channel_allows_connection_field_maintenan
     assert updated.base_url == "https://changed.example/v1"
     assert updated.get_decrypted_api_key() == "changed-api-key"
     assert updated.http_proxy == "http://changed-proxy.example:8081"
+
+
+@pytest.mark.asyncio
+async def test_update_channel_with_unchanged_models_does_not_decrypt_api_key(
+    db_session: AsyncSession,
+) -> None:
+    old_models = [_organization_chat_model("unchanged-organization-chat")]
+    channel = await _create_channel(
+        db_session,
+        name="organization-unchanged-models-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid="organization-unchanged-models-user",
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id="unchanged-organization-chat",
+    )
+    channel.api_key = "not-a-valid-encrypted-api-key"
+    await db_session.flush()
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=[dict(old_models[0])]),
+        db=db_session,
+        admin={},
+    )
+
+    _assert_update_impact(response, requires_confirmation=False)
+    await db_session.refresh(store)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == "unchanged-organization-chat"
+    updated = await channel_crud.get(db_session, channel.id)
+    assert updated is not None
+    assert updated.model_ids == old_models

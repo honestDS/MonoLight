@@ -2,6 +2,7 @@ MESSAGES = {
     "MSG_CHANNEL_ROUTE_SUCCESS": "渠道路由成功",
     "MSG_CHANNEL_CREATED": "模型渠道创建成功",
     "MSG_CHANNEL_UPDATED": "模型渠道更新成功",
+    "MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED": "检测到相关配置将受影响，请确认后继续",
     "MSG_CHANNEL_DELETED": "模型渠道已删除",
     "MSG_CHANNEL_TEST_SUCCESS": "检测成功，该模型的默认输出维度为: {dim}",
     "MSG_CHANNEL_CHAT_TEST_SUCCESS": "模型对话检测通过",

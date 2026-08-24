@@ -143,7 +143,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
+import { h, reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -449,15 +449,27 @@ const detectModelList = async () => {
   }
 }
 
-const showConfigImpactWarning = async (data) => {
+const confirmConfigImpact = async (data) => {
+  const syncedMemoryOrganizationSettings = data?.synced_memory_organization_settings || 0
+  const retainedMemoryOrganizationSettings = data?.retained_memory_organization_settings || 0
+  const disabledMemoryOrganizationSettings = data?.disabled_memory_organization_settings || 0
   const syncedProfileRules = data?.synced_profile_rules || 0
   const removedProfileRules = data?.removed_profile_rules || 0
   const syncedAuditRefs = data?.synced_audit_refs || 0
   const clearedAuditRefs = data?.cleared_audit_refs || 0
 
-  if (!syncedProfileRules && !removedProfileRules && !syncedAuditRefs && !clearedAuditRefs) return
+  if (!syncedMemoryOrganizationSettings && !retainedMemoryOrganizationSettings && !disabledMemoryOrganizationSettings && !syncedProfileRules && !removedProfileRules && !syncedAuditRefs && !clearedAuditRefs) return true
 
   const messages = []
+  if (syncedMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_synced', { count: syncedMemoryOrganizationSettings }))
+  }
+  if (retainedMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_retained', { count: retainedMemoryOrganizationSettings }))
+  }
+  if (disabledMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_disabled', { count: disabledMemoryOrganizationSettings }))
+  }
   if (syncedProfileRules) {
     messages.push(t('channels.profile_rules_synced', { count: syncedProfileRules }))
   }
@@ -472,14 +484,22 @@ const showConfigImpactWarning = async (data) => {
   }
 
   try {
-    await ElMessageBox.alert(messages.join('\n'), t('channels.config_refs_changed_title'), {
-      type: 'warning',
-      confirmButtonText: t('channels.confirm')
-    })
+    await ElMessageBox.confirm(
+      h('div', { class: 'config-impact-warning' }, messages.map((message, index) => (
+        h('div', { class: 'config-impact-warning__item', key: index }, message)
+      ))),
+      t('channels.config_refs_changed_title'),
+      {
+        type: 'warning',
+        confirmButtonText: t('channels.confirm'),
+        cancelButtonText: t('channels.cancel'),
+        showCancelButton: true
+      }
+    )
+    return true
   } catch (action) {
-    if (action !== 'cancel' && action !== 'close') {
-      console.error(t('channels.config_refs_changed_title'), action)
-    }
+    if (action === 'cancel' || action === 'close') return false
+    return false
   }
 }
 
@@ -874,8 +894,12 @@ const submitForm = async () => {
     }
     if (isEdit.value) {
       const res = await channelApi.update(currentId.value, payload)
+      if (res.data?.data?.requires_confirmation) {
+        const confirmed = await confirmConfigImpact(res.data?.data)
+        if (!confirmed) return
+        await channelApi.update(currentId.value, { ...payload, confirm_config_impact: true })
+      }
       ElMessage.success(t('channels.update_success'))
-      await showConfigImpactWarning(res.data?.data)
     } else {
       await channelApi.create(payload)
       ElMessage.success(t('channels.create_success'))
