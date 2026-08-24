@@ -1576,6 +1576,20 @@ class CRUDLongTermMemoryEmbeddingDelta:
 class CRUDLongTermMemoryReference:
     """管理员保护检查使用的长期记忆基础数据读取。"""
 
+    async def count_active_records_by_uids(self, db: AsyncSession, *, uids: set[str]) -> dict[str, int]:
+        if not uids:
+            return {}
+        result = await db.execute(
+            select(LongTermMemoryRecord.uid, func.count())
+            .where(
+                LongTermMemoryRecord.uid.in_(uids),
+                LongTermMemoryRecord.is_active.is_(True),
+                LongTermMemoryRecord.deleted_at.is_(None),
+            )
+            .group_by(LongTermMemoryRecord.uid)
+        )
+        return {uid: int(count) for uid, count in result.all()}
+
     async def list_all_stores_for_admin(self, db: AsyncSession) -> list[LongTermMemoryStore]:
         result = await db.execute(select(LongTermMemoryStore).order_by(LongTermMemoryStore.uid))
         return list(result.scalars().all())

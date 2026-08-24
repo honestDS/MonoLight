@@ -2,6 +2,7 @@ MESSAGES = {
     "MSG_CHANNEL_ROUTE_SUCCESS": "Channel route success",
     "MSG_CHANNEL_CREATED": "Model channel created successfully",
     "MSG_CHANNEL_UPDATED": "Model channel updated successfully",
+    "MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED": "Related configurations will be affected. Please confirm before continuing.",
     "MSG_CHANNEL_DELETED": "Model channel deleted",
     "MSG_CHANNEL_TEST_SUCCESS": "Detection successful, the default output dimension of the model is: {dim}",
     "MSG_CHANNEL_CHAT_TEST_SUCCESS": "Model chat test passed",

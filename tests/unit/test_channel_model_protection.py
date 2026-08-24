@@ -17,6 +17,8 @@ from app.models.memory import (
     LongTermMemoryMutationJob,
     LongTermMemoryStore,
 )
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
 
 PROTECTION_TABLES = [
     ModelChannel.__table__,
@@ -24,6 +26,8 @@ PROTECTION_TABLES = [
     LongTermMemoryStore.__table__,
     LongTermMemoryEmbeddingRevision.__table__,
     LongTermMemoryMutationJob.__table__,
+    PromptLibrary.__table__,
+    Profile.__table__,
 ]
 
 
