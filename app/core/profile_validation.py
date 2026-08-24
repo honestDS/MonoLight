@@ -92,21 +92,24 @@ async def validate_channel_rule_usage(
         if not channel:
             raise ParameterException(ERR_CHANNEL_NOT_FOUND)
 
-        matched_model = None
+        model_matches = []
         for item in channel.model_ids or []:
             if str(item.get("model_id")) == rule.model_id:
-                if is_channel_model_pending_delete(item):
-                    raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
-                matched_model = item
-                if str(item.get("usage")) == expected_usage.value:
-                    break
-
-        if not matched_model:
+                model_matches.append(item)
+        if not model_matches:
             raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
 
-        actual_usage = str(matched_model.get("usage"))
-        if actual_usage != expected_usage.value:
-            raise ParameterException(ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
+        usage_matches = []
+        for item in model_matches:
+            if str(item.get("usage")) == expected_usage.value:
+                usage_matches.append(item)
+        if usage_matches:
+            if any(not is_channel_model_pending_delete(item) for item in usage_matches):
+                continue
+            raise ParameterException(ERR_CHANNEL_MODEL_NOT_FOUND)
+
+        actual_usage = str(model_matches[0].get("usage"))
+        raise ParameterException(ERR_CHANNEL_USAGE_MISMATCH, expected=expected_usage.value, actual=actual_usage)
 
 
 async def validate_channel_configs(
