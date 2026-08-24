@@ -200,3 +200,46 @@ async def test_profile_creation_and_channel_deletion_serialize_on_channel_lock(t
             except TimeoutError:
                 pass
         await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_profile_update_lock_includes_previous_and_new_channel_references(monkeypatch):
+    locked_ids = []
+
+    async def _fake_lock_many_for_mutation(db, *, channel_ids, commit=False):
+        locked_ids.extend(channel_ids)
+        return {}
+
+    monkeypatch.setattr(
+        profile_api.lock_profile_channel_references.__globals__["channel_crud"],
+        "lock_many_for_mutation",
+        _fake_lock_many_for_mutation,
+    )
+
+    old_channel_id = 10
+    new_channel_id = 20
+    configs = ProfileConfig.model_validate(
+        {
+            "channel": {
+                "chat_channel": {
+                    "rules": [
+                        {
+                            "channel_id": new_channel_id,
+                            "model_id": "new-model",
+                            "priority": 1,
+                            "weight": 100,
+                        }
+                    ]
+                }
+            }
+        }
+    ).model_dump()
+
+    await profile_api.lock_profile_channel_references(
+        db=None,
+        configs=configs,
+        memory_organization=None,
+        extra_channel_ids=[old_channel_id],
+    )
+
+    assert old_channel_id in locked_ids
+    assert new_channel_id in locked_ids

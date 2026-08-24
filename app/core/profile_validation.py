@@ -23,6 +23,7 @@ async def lock_profile_channel_references(
     *,
     configs: dict,
     memory_organization: LongTermMemoryOrganizationConfig | None,
+    extra_channel_ids: list[int] | None = None,
 ) -> dict[int, ModelChannel]:
     """锁定 Profile 配置中所有成对引用的渠道并返回最新渠道对象。"""
     cfg = ProfileConfig.model_validate(configs)
@@ -44,6 +45,9 @@ async def lock_profile_channel_references(
         channel_ids.append(cfg.memory.embedding_channel_id)
     if memory_organization and memory_organization.organization_channel_id and memory_organization.organization_model_id:
         channel_ids.append(memory_organization.organization_channel_id)
+
+    if extra_channel_ids:
+        channel_ids.extend(extra_channel_ids)
 
     return await channel_crud.lock_many_for_mutation(
         db,
