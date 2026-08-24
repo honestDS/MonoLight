@@ -4,6 +4,7 @@ CRUD 支持 model_ids 字段；移除 usage 字段
 """
 
 import copy
+import hashlib
 import json
 from enum import StrEnum
 from time import perf_counter
@@ -75,6 +76,7 @@ from app.models.channel import (
     ChannelModelIdsNormalizationError,
     ChannelResponse,
     ChannelUpdate,
+    ModelChannel,
     ImageGenerationQuality,
     ImageGenerationSize,
     ModelProtocol,
@@ -184,8 +186,9 @@ def _build_channel_model_update_impact_data(
     profile_impacts: dict[str, int],
     *,
     requires_confirmation: bool,
+    config_impact_token: str | None = None,
 ) -> dict[str, object]:
-    return {
+    data: dict[str, object] = {
         "requires_confirmation": requires_confirmation,
         "synced_memory_organization_settings": memory_impact.synced_settings,
         "retained_memory_organization_settings": memory_impact.retained_settings,
@@ -198,6 +201,62 @@ def _build_channel_model_update_impact_data(
         "synced_audit_refs": profile_impacts.get("synced_audit_refs", 0),
         "cleared_audit_refs": profile_impacts.get("cleared_audit_refs", 0),
     }
+    if config_impact_token is not None:
+        data["config_impact_token"] = config_impact_token
+    return data
+
+
+def _build_channel_model_update_confirmation_token(
+    *,
+    channel_id: int,
+    current_channel: ModelChannel,
+    target_name: object,
+    target_is_active: object,
+    target_base_url: object,
+    target_http_proxy: object,
+    target_api_key: object,
+    target_model_ids: list[dict],
+    memory_impact: MemoryOrganizationModelUpdateImpact,
+    profile_impacts: dict[str, int],
+    profile_confirmation_fingerprints: list[str],
+) -> str:
+    payload = {
+        "channel_id": channel_id,
+        "current": {
+            "name": current_channel.name,
+            "is_active": current_channel.is_active,
+            "base_url": current_channel.base_url,
+            "http_proxy": current_channel.http_proxy,
+            "api_key": current_channel.api_key,
+            "model_ids": current_channel.model_ids or [],
+        },
+        "target": {
+            "name": target_name,
+            "is_active": target_is_active,
+            "base_url": target_base_url,
+            "http_proxy": target_http_proxy,
+            "api_key": target_api_key,
+            "model_ids": target_model_ids,
+        },
+        "memory_impact": {
+            "synced": memory_impact.synced_settings,
+            "retained": memory_impact.retained_settings,
+            "disabled": memory_impact.disabled_settings,
+            "deferred": memory_impact.deferred_settings,
+            "pending_deletion_models": memory_impact.pending_deletion_models,
+            "fingerprints": memory_impact.confirmation_fingerprints,
+        },
+        "profile_impacts": profile_impacts,
+        "profile_fingerprints": sorted(profile_confirmation_fingerprints),
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _has_channel_model_update_impact(
@@ -508,6 +567,7 @@ async def update_channel(
 
         update_data = channel_in.model_dump(exclude_unset=True)
         confirm_config_impact = update_data.pop("confirm_config_impact", channel_in.confirm_config_impact)
+        config_impact_token = update_data.pop("config_impact_token", channel_in.config_impact_token)
         api_key = update_data.pop("api_key", None)
         if channel_in.model_ids is not None:
             update_data["model_ids"] = persisted_model_ids
@@ -528,82 +588,100 @@ async def update_channel(
             final_base_url = update_data.get("base_url", db_obj.base_url)
             final_http_proxy = update_data.get("http_proxy", db_obj.http_proxy)
             final_api_key = api_key
+            if final_api_key is None:
+                final_api_key = db_obj.api_key
             final_model_ids = available_model_ids
 
-            if not confirm_config_impact:
-                memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
-                    db,
-                    channel_id=channel_id,
-                    channel_name=final_name,
-                    channel_is_active=final_is_active,
-                    base_url=final_base_url,
-                    api_key=final_api_key,
-                    api_key_loader=db_obj.get_decrypted_api_key,
-                    http_proxy=final_http_proxy,
-                    old_model_ids=old_model_ids,
-                    new_model_ids=final_model_ids,
-                    pending_deletion_uids_by_model_id=pending_deletion_uids_by_model_id,
-                    pending_deletion_models=pending_deletion_models,
-                    apply_changes=False,
-                )
-                profile_impacts = await _preview_channel_model_update_impacts(
-                    db,
-                    channel_id,
-                    profile_old_model_ids,
-                    available_model_ids,
-                )
-                if _has_channel_model_update_impact(memory_impact, profile_impacts):
-                    return StandardResponse.success(
-                        data=_build_channel_model_update_impact_data(
-                            memory_impact,
-                            profile_impacts,
-                            requires_confirmation=True,
-                        ),
-                        message=MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED,
-                    )
-
-        if channel_in.model_ids is not None and confirm_config_impact:
-            memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
+            preview_memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
                 db,
                 channel_id=channel_id,
                 channel_name=final_name,
                 channel_is_active=final_is_active,
                 base_url=final_base_url,
-                api_key=final_api_key,
+                api_key=api_key,
                 api_key_loader=db_obj.get_decrypted_api_key,
                 http_proxy=final_http_proxy,
                 old_model_ids=old_model_ids,
                 new_model_ids=final_model_ids,
                 pending_deletion_uids_by_model_id=pending_deletion_uids_by_model_id,
                 pending_deletion_models=pending_deletion_models,
-                apply_changes=True,
+                apply_changes=False,
+            )
+            profile_confirmation_fingerprints: list[str] = []
+            preview_profile_impacts = await _preview_channel_model_update_impacts(
+                db,
+                channel_id,
+                profile_old_model_ids,
+                available_model_ids,
+                confirmation_fingerprints=profile_confirmation_fingerprints,
+            )
+            has_impact = _has_channel_model_update_impact(preview_memory_impact, preview_profile_impacts)
+            current_config_impact_token = _build_channel_model_update_confirmation_token(
+                channel_id=channel_id,
+                current_channel=db_obj,
+                target_name=final_name,
+                target_is_active=final_is_active,
+                target_base_url=final_base_url,
+                target_http_proxy=final_http_proxy,
+                target_api_key=final_api_key,
+                target_model_ids=persisted_model_ids,
+                memory_impact=preview_memory_impact,
+                profile_impacts=preview_profile_impacts,
+                profile_confirmation_fingerprints=profile_confirmation_fingerprints,
             )
 
-        if channel_in.model_ids is not None and confirm_config_impact is True:
-            # 先把绑定该渠道的 profile 渠道规则与审计模型引用中被重命名的 model_id 同步更新，
-            # 再清理失效引用，使重命名后的配置得以保留而非被当作删除清除
-            profile_impacts["synced_profile_rules"] = await _sync_channel_model_id_renames(
-                db,
-                channel_id,
-                profile_old_model_ids,
-                available_model_ids,
-            )
-            profile_impacts["synced_audit_refs"] = await _sync_audit_model_id_renames(
-                db,
-                channel_id,
-                profile_old_model_ids,
-                available_model_ids,
-            )
-            profile_impacts["removed_profile_rules"] = await _remove_unavailable_channel_rules(
-                db,
-                channel_id,
-                available_model_ids,
-            )
-            profile_impacts["cleared_audit_refs"] = await _clear_unavailable_audit_model_refs(
-                db,
-                channel_id,
-                available_model_ids,
-            )
+            if has_impact and (not confirm_config_impact or config_impact_token != current_config_impact_token):
+                return StandardResponse.success(
+                    data=_build_channel_model_update_impact_data(
+                        preview_memory_impact,
+                        preview_profile_impacts,
+                        requires_confirmation=True,
+                        config_impact_token=current_config_impact_token,
+                    ),
+                    message=MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED,
+                )
+
+            memory_impact = preview_memory_impact
+            profile_impacts = preview_profile_impacts
+            if has_impact:
+                memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
+                    db,
+                    channel_id=channel_id,
+                    channel_name=final_name,
+                    channel_is_active=final_is_active,
+                    base_url=final_base_url,
+                    api_key=api_key,
+                    api_key_loader=db_obj.get_decrypted_api_key,
+                    http_proxy=final_http_proxy,
+                    old_model_ids=old_model_ids,
+                    new_model_ids=final_model_ids,
+                    pending_deletion_uids_by_model_id=pending_deletion_uids_by_model_id,
+                    pending_deletion_models=pending_deletion_models,
+                    apply_changes=True,
+                )
+
+                profile_impacts["synced_profile_rules"] = await _sync_channel_model_id_renames(
+                    db,
+                    channel_id,
+                    profile_old_model_ids,
+                    available_model_ids,
+                )
+                profile_impacts["synced_audit_refs"] = await _sync_audit_model_id_renames(
+                    db,
+                    channel_id,
+                    profile_old_model_ids,
+                    available_model_ids,
+                )
+                profile_impacts["removed_profile_rules"] = await _remove_unavailable_channel_rules(
+                    db,
+                    channel_id,
+                    available_model_ids,
+                )
+                profile_impacts["cleared_audit_refs"] = await _clear_unavailable_audit_model_refs(
+                    db,
+                    channel_id,
+                    available_model_ids,
+                )
 
         for field, value in update_data.items():
             setattr(db_obj, field, value)
