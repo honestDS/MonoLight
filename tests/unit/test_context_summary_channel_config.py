@@ -5,7 +5,7 @@ import pytest
 
 from app.api.v1 import profile as profile_api
 from app.core import profile_validation as profile_validation_module
-from app.core.constants import ERR_CHANNEL_USAGE_MISMATCH
+from app.core.constants import ERR_CHANNEL_MODEL_NOT_FOUND, ERR_CHANNEL_USAGE_MISMATCH
 from app.core.exceptions import ParameterException
 from app.core.utils import channel_profile_sync as channel_profile_sync_module
 from app.core.utils.context_summary import service as summary_service_module
@@ -163,6 +163,79 @@ async def test_context_summary_channel_rejects_non_chat_model(monkeypatch):
         )
 
     assert exc_info.value.message == ERR_CHANNEL_USAGE_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_rerank_channel_ignores_pending_same_id_chat_model(monkeypatch):
+    channel = SimpleNamespace(
+        model_ids=[
+            {
+                "model_id": "shared",
+                "usage": ModelUsage.CHAT.value,
+                "lifecycle_status": "pending_delete",
+                "is_enabled": False,
+            },
+            {
+                "model_id": "shared",
+                "usage": ModelUsage.RERANK.value,
+                "lifecycle_status": "active",
+                "is_enabled": True,
+            },
+        ]
+    )
+
+    async def get_channel(_db, channel_id):
+        assert channel_id == 7
+        return channel
+
+    monkeypatch.setattr(profile_validation_module.channel_crud, "get", get_channel)
+
+    await profile_api.validate_channel_configs(
+        object(),
+        {
+            "rerank_channel": {
+                "rules": [_rule(7, "shared")],
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_rerank_channel_rejects_pending_exact_usage_with_same_id_chat_model(monkeypatch):
+    channel = SimpleNamespace(
+        model_ids=[
+            {
+                "model_id": "shared",
+                "usage": ModelUsage.CHAT.value,
+                "lifecycle_status": "active",
+                "is_enabled": True,
+            },
+            {
+                "model_id": "shared",
+                "usage": ModelUsage.RERANK.value,
+                "lifecycle_status": "pending_delete",
+                "is_enabled": False,
+            },
+        ]
+    )
+
+    async def get_channel(_db, channel_id):
+        assert channel_id == 7
+        return channel
+
+    monkeypatch.setattr(profile_validation_module.channel_crud, "get", get_channel)
+
+    with pytest.raises(ParameterException) as exc_info:
+        await profile_api.validate_channel_configs(
+            object(),
+            {
+                "rerank_channel": {
+                    "rules": [_rule(7, "shared")],
+                }
+            },
+        )
+
+    assert exc_info.value.message == ERR_CHANNEL_MODEL_NOT_FOUND
 
 
 def test_channel_model_cleanup_includes_context_summary_rules():
