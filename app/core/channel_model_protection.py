@@ -73,6 +73,7 @@ class MemoryOrganizationModelUpdateImpact:
     concurrently_disabled_settings: int = 0
     deferred_settings: int = 0
     pending_deletion_models: int = 0
+    confirmation_fingerprints: tuple[str, ...] = ()
 
     @property
     def has_impact(self) -> bool:
@@ -406,10 +407,29 @@ async def adapt_memory_organization_settings_for_channel_model_update(
     pending_deletion_models: int = 0,
 ) -> MemoryOrganizationModelUpdateImpact:
     pending_deletion_uids_by_model_id = pending_deletion_uids_by_model_id or {}
+    confirmation_fingerprints: list[str] = []
+    for pending_model_id in sorted(pending_deletion_uids_by_model_id):
+        pending_uids = pending_deletion_uids_by_model_id[pending_model_id]
+        confirmation_fingerprints.append(
+            json.dumps(
+                {
+                    "pending_model_id": pending_model_id,
+                    "active_job_uids": sorted(pending_uids),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+
     stores = await memory_reference_crud.list_all_stores_for_admin(db)
     channel_stores = [store for store in stores if store.organization_channel_id == channel_id and isinstance(store.organization_model_id, str) and store.organization_model_id]
     if not channel_stores:
-        return MemoryOrganizationModelUpdateImpact(pending_deletion_models=pending_deletion_models)
+        return MemoryOrganizationModelUpdateImpact(
+            pending_deletion_models=pending_deletion_models,
+            confirmation_fingerprints=tuple(sorted(confirmation_fingerprints)),
+        )
 
     referenced_model_ids = {store.organization_model_id for store in channel_stores if store.organization_model_id not in pending_deletion_uids_by_model_id}
     renames = _compute_memory_organization_model_id_renames(
@@ -445,7 +465,10 @@ async def adapt_memory_organization_settings_for_channel_model_update(
             affected_stores.append((store, "validate", expected_model_id, expected_model_id))
 
     if not affected_stores:
-        return MemoryOrganizationModelUpdateImpact(pending_deletion_models=pending_deletion_models)
+        return MemoryOrganizationModelUpdateImpact(
+            pending_deletion_models=pending_deletion_models,
+            confirmation_fingerprints=tuple(sorted(confirmation_fingerprints)),
+        )
 
     has_regular_affected_stores = any(impact_type not in {"deferred", "disable"} for _, impact_type, _, _ in affected_stores)
     resolved_api_key = api_key if isinstance(api_key, str) else (api_key_loader() if has_regular_affected_stores and api_key_loader is not None else api_key)
@@ -553,6 +576,21 @@ async def adapt_memory_organization_settings_for_channel_model_update(
                 deferred_settings += 1
             else:
                 disabled_settings += 1
+            confirmation_fingerprints.append(
+                json.dumps(
+                    {
+                        "uid": store.uid,
+                        "auto_organize_enabled": store.auto_organize_enabled,
+                        "expected_model_id": expected_model_id,
+                        "result": impact_type,
+                        "model_id": model_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
             continue
 
         snapshot_items = build_organization_snapshot_items(active_records_by_uid.get(store.uid, []))
@@ -588,6 +626,21 @@ async def adapt_memory_organization_settings_for_channel_model_update(
                     await recover_failed_conditional_update(store.uid, snapshot_items)
                     continue
             disabled_settings += 1
+            confirmation_fingerprints.append(
+                json.dumps(
+                    {
+                        "uid": store.uid,
+                        "auto_organize_enabled": store.auto_organize_enabled,
+                        "expected_model_id": expected_model_id,
+                        "result": "disabled",
+                        "model_id": model_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
             continue
 
         if impact_type == "synced":
@@ -604,8 +657,25 @@ async def adapt_memory_organization_settings_for_channel_model_update(
                     await recover_failed_conditional_update(store.uid, snapshot_items)
                     continue
             synced_settings += 1
+            confirmation_result = "synced"
         else:
             retained_settings += 1
+            confirmation_result = "retained"
+        confirmation_fingerprints.append(
+            json.dumps(
+                {
+                    "uid": store.uid,
+                    "auto_organize_enabled": store.auto_organize_enabled,
+                    "expected_model_id": expected_model_id,
+                    "result": confirmation_result,
+                    "model_id": model_id,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
 
     return MemoryOrganizationModelUpdateImpact(
         synced_settings=synced_settings,
@@ -614,6 +684,7 @@ async def adapt_memory_organization_settings_for_channel_model_update(
         concurrently_disabled_settings=concurrently_disabled_settings,
         deferred_settings=deferred_settings,
         pending_deletion_models=pending_deletion_models,
+        confirmation_fingerprints=tuple(sorted(confirmation_fingerprints)),
     )
 
 

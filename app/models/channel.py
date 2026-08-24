@@ -397,6 +397,7 @@ class ChannelUpdate(SQLModel):
     is_active: bool | None = None
     model_ids: list[dict] | None = None
     confirm_config_impact: bool = Field(default=False)
+    config_impact_token: str | None = Field(default=None, max_length=64)
 
     @field_validator("api_key", mode="before")
     @classmethod

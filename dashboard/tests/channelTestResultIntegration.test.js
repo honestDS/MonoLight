@@ -98,7 +98,7 @@ test('ChannelFormDialog locks pending-delete model entries', () => {
 test('ChannelFormDialog confirms config impact before the final edit update', () => {
   assert.match(
     channelFormSource,
-    /if \(isEdit\.value\) \{[\s\S]*?let finalResponse = await channelApi\.update\(currentId\.value, payload\)[\s\S]*?if \(finalResponse\.data\?\.data\?\.requires_confirmation\) \{[\s\S]*?const confirmed = await confirmConfigImpact\(finalResponse\.data\?\.data\)[\s\S]*?if \(!confirmed\) return[\s\S]*?finalResponse = await channelApi\.update\(currentId\.value, \{ \.\.\.payload, confirm_config_impact: true \}\)/,
+    /if \(isEdit\.value\) \{[\s\S]*?let finalResponse = await channelApi\.update\(currentId\.value, payload\)[\s\S]*?while \(finalResponse\.data\?\.data\?\.requires_confirmation\) \{[\s\S]*?const impactData = finalResponse\.data\?\.data[\s\S]*?const confirmed = await confirmConfigImpact\(impactData\)[\s\S]*?if \(!confirmed\) return[\s\S]*?confirm_config_impact: true,[\s\S]*?config_impact_token: impactData\?\.config_impact_token \|\| null/,
   )
 })
 

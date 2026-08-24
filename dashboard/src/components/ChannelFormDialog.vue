@@ -924,10 +924,15 @@ const submitForm = async () => {
     }
     if (isEdit.value) {
       let finalResponse = await channelApi.update(currentId.value, payload)
-      if (finalResponse.data?.data?.requires_confirmation) {
-        const confirmed = await confirmConfigImpact(finalResponse.data?.data)
+      while (finalResponse.data?.data?.requires_confirmation) {
+        const impactData = finalResponse.data?.data
+        const confirmed = await confirmConfigImpact(impactData)
         if (!confirmed) return
-        finalResponse = await channelApi.update(currentId.value, { ...payload, confirm_config_impact: true })
+        finalResponse = await channelApi.update(currentId.value, {
+          ...payload,
+          confirm_config_impact: true,
+          config_impact_token: impactData?.config_impact_token || null
+        })
       }
       ElMessage.success(t('channels.update_success'))
       await showConcurrentMemoryOrganizationDisabledNotice(finalResponse.data?.data)

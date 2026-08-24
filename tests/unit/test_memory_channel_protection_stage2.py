@@ -191,6 +191,13 @@ def _assert_update_impact(
     assert response.data["cleared_audit_refs"] == 0
 
 
+def _config_impact_token(response) -> str:
+    token = response.data.get("config_impact_token")
+    assert isinstance(token, str)
+    assert len(token) == 64
+    return token
+
+
 async def _create_active_memory_record(db: AsyncSession, *, uid: str, memory_key: str) -> LongTermMemoryRecord:
     return await memory_record_crud.create(
         db,
@@ -517,6 +524,99 @@ async def test_same_channel_only_protects_referenced_embedding_model(
         old_model_ids=old_models,
         new_model_ids=new_models,
     )
+
+
+@pytest.mark.asyncio
+async def test_update_channel_requires_reconfirmation_when_profile_impact_changes(
+    db_session: AsyncSession,
+) -> None:
+    old_models = [_organization_chat_model("reconfirm-chat")]
+    channel = await _create_channel(
+        db_session,
+        name="reconfirm-profile-impact-channel",
+        model_ids=old_models,
+    )
+    first_profile = Profile(
+        uid="reconfirm-profile-user-a",
+        name="reconfirm-profile-a",
+        configs={
+            "channel": {
+                "chat_channel": {
+                    "rules": [{"channel_id": channel.id, "model_id": "reconfirm-chat"}],
+                },
+            },
+        },
+    )
+    db_session.add(first_profile)
+    await db_session.commit()
+
+    preview = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=[]),
+        db=db_session,
+        admin={},
+    )
+    assert preview.code == 200
+    assert preview.data["requires_confirmation"] is True
+    assert preview.data["removed_profile_rules"] == 1
+    first_token = _config_impact_token(preview)
+    await db_session.commit()
+
+    second_profile = Profile(
+        uid="reconfirm-profile-user-b",
+        name="reconfirm-profile-b",
+        configs={
+            "channel": {
+                "chat_channel": {
+                    "rules": [{"channel_id": channel.id, "model_id": "reconfirm-chat"}],
+                },
+            },
+        },
+    )
+    db_session.add(second_profile)
+    await db_session.commit()
+
+    reconfirm = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(
+            model_ids=[],
+            confirm_config_impact=True,
+            config_impact_token=first_token,
+        ),
+        db=db_session,
+        admin={},
+    )
+    assert reconfirm.code == 200
+    assert reconfirm.data["requires_confirmation"] is True
+    assert reconfirm.data["removed_profile_rules"] == 2
+    second_token = _config_impact_token(reconfirm)
+    assert second_token != first_token
+
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+    await db_session.refresh(first_profile)
+    await db_session.refresh(second_profile)
+    assert first_profile.configs["channel"]["chat_channel"]["rules"]
+    assert second_profile.configs["channel"]["chat_channel"]["rules"]
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(
+            model_ids=[],
+            confirm_config_impact=True,
+            config_impact_token=second_token,
+        ),
+        db=db_session,
+        admin={},
+    )
+    assert response.code == 200
+    assert response.data["requires_confirmation"] is False
+    assert response.data["removed_profile_rules"] == 2
+    await db_session.refresh(first_profile)
+    await db_session.refresh(second_profile)
+    assert first_profile.configs["channel"]["chat_channel"]["rules"] == []
+    assert second_profile.configs["channel"]["chat_channel"]["rules"] == []
 
 
 @pytest.mark.asyncio
@@ -889,7 +989,11 @@ async def test_update_channel_previews_and_confirms_exact_chat_model_rename(
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -983,7 +1087,11 @@ async def test_update_channel_does_not_sync_ambiguous_many_to_one_chat_model_rep
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1111,7 +1219,11 @@ async def test_update_channel_previews_and_confirms_retained_chat_model_changes(
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1182,7 +1294,11 @@ async def test_update_channel_previews_and_confirms_disabling_invalid_chat_model
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1267,7 +1383,11 @@ async def test_update_channel_defers_chat_model_delete_until_organization_job_fi
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=[], confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=[],
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1377,12 +1497,29 @@ async def test_update_channel_base_url_validation_rolls_back_deferred_chat_model
     _patch_profile_sync_noops(monkeypatch)
     await db_session.commit()
 
+    preview = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(
+            base_url=None,
+            model_ids=[],
+        ),
+        db=db_session,
+        admin={},
+    )
+    _assert_update_impact(
+        preview,
+        requires_confirmation=True,
+        deferred=1,
+        pending_deletion_models=1,
+    )
+
     response = await channels.update_channel(
         channel.id,
         channels.ChannelUpdate(
             base_url=None,
             model_ids=[],
             confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
         ),
         db=db_session,
         admin={},
@@ -1427,6 +1564,14 @@ async def test_confirmed_chat_model_delete_does_not_overwrite_concurrent_store_s
     )
     _patch_profile_sync_noops(monkeypatch)
 
+    preview = await channels.update_channel(
+        original_channel.id,
+        channels.ChannelUpdate(model_ids=[]),
+        db=db_session,
+        admin={},
+    )
+    _assert_update_impact(preview, requires_confirmation=True, disabled=1)
+
     original_conditional_update = memory_store_crud.update_auto_organize_if_channel_and_model
     conditional_update_calls = 0
 
@@ -1452,7 +1597,11 @@ async def test_confirmed_chat_model_delete_does_not_overwrite_concurrent_store_s
 
     response = await channels.update_channel(
         original_channel.id,
-        channels.ChannelUpdate(model_ids=[], confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=[],
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1527,6 +1676,15 @@ async def test_confirmed_chat_model_update_handles_concurrent_same_channel_store
     )
     _patch_profile_sync_noops(monkeypatch)
 
+    new_models = [_organization_chat_model(model_id) for model_id in new_model_ids]
+    preview = await channels.update_channel(
+        original_channel.id,
+        channels.ChannelUpdate(model_ids=new_models),
+        db=db_session,
+        admin={},
+    )
+    _assert_update_impact(preview, requires_confirmation=True, disabled=1)
+
     original_conditional_update = memory_store_crud.update_auto_organize_if_channel_and_model
     conditional_update_calls = 0
 
@@ -1550,10 +1708,13 @@ async def test_confirmed_chat_model_update_handles_concurrent_same_channel_store
         switch_store_before_first_conditional_update,
     )
 
-    new_models = [_organization_chat_model(model_id) for model_id in new_model_ids]
     response = await channels.update_channel(
         original_channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1631,7 +1792,11 @@ async def test_update_channel_organization_budget_validation_uses_each_uid_activ
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1703,7 +1868,11 @@ async def test_update_channel_organization_budget_validation_rejects_real_input_
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )
@@ -1771,7 +1940,11 @@ async def test_update_channel_requires_context_window_for_output_safety_margin_a
 
     response = await channels.update_channel(
         channel.id,
-        channels.ChannelUpdate(model_ids=new_models, confirm_config_impact=True),
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
         db=db_session,
         admin={},
     )

@@ -471,6 +471,8 @@ async def _preview_channel_model_update_impacts(
     channel_id: int,
     old_model_ids: list[dict],
     new_model_ids: list[dict],
+    *,
+    confirmation_fingerprints: list[str] | None = None,
 ) -> dict[str, int]:
     impacts = {
         "synced_profile_rules": 0,
@@ -491,30 +493,51 @@ async def _preview_channel_model_update_impacts(
 
         for profile in profiles:
             configs = deepcopy(profile.configs or {})
-            impacts["synced_profile_rules"] += _sync_channel_model_id_renames_in_configs(
+            original_configs = deepcopy(configs) if confirmation_fingerprints is not None else None
+            synced_profile_rules = _sync_channel_model_id_renames_in_configs(
                 configs,
                 channel_id,
                 old_model_ids,
                 new_model_ids,
                 rename_index,
             )
-            impacts["removed_profile_rules"] += _clean_channel_rules_from_configs(
+            removed_profile_rules = _clean_channel_rules_from_configs(
                 configs,
                 channel_id,
                 new_model_ids,
             )
-            impacts["synced_audit_refs"] += _sync_audit_model_id_renames_in_configs(
+            synced_audit_refs = _sync_audit_model_id_renames_in_configs(
                 configs,
                 channel_id,
                 old_model_ids,
                 new_model_ids,
                 rename_index,
             )
-            impacts["cleared_audit_refs"] += _clear_unavailable_audit_model_refs_from_configs(
+            cleared_audit_refs = _clear_unavailable_audit_model_refs_from_configs(
                 configs,
                 channel_id,
                 available_chat_model_ids,
             )
+            impacts["synced_profile_rules"] += synced_profile_rules
+            impacts["removed_profile_rules"] += removed_profile_rules
+            impacts["synced_audit_refs"] += synced_audit_refs
+            impacts["cleared_audit_refs"] += cleared_audit_refs
+
+            profile_impact_count = synced_profile_rules + removed_profile_rules + synced_audit_refs + cleared_audit_refs
+            if confirmation_fingerprints is not None and profile_impact_count > 0:
+                confirmation_fingerprints.append(
+                    json.dumps(
+                        {
+                            "profile_id": profile.id,
+                            "before": original_configs,
+                            "after": configs,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                )
 
         last_id = profiles[-1].id or last_id
 
