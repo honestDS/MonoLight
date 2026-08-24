@@ -359,11 +359,33 @@ async def update_profile(
             await memory_store_crud.get_snapshot_by_uid(db, uid=db_profile.uid),
         )
     try:
+        old_channel_ids = []
+        old_cfg = ProfileConfig.model_validate(db_profile.configs or {})
+        for old_channel_config in (
+            old_cfg.channel.chat_channel,
+            old_cfg.channel.context_summary_channel,
+            old_cfg.channel.rerank_channel,
+            old_cfg.channel.image_generation_channel,
+        ):
+            for old_rule in old_channel_config.rules:
+                if old_rule.channel_id:
+                    old_channel_ids.append(old_rule.channel_id)
+        if old_cfg.security.audit_channel_id:
+            old_channel_ids.append(old_cfg.security.audit_channel_id)
+        if old_cfg.memory.embedding_channel_id:
+            old_channel_ids.append(old_cfg.memory.embedding_channel_id)
+
         locked_channels = await lock_profile_channel_references(
             db,
             configs=profile_in.configs,
             memory_organization=profile_in.memory_organization,
+            extra_channel_ids=old_channel_ids,
         )
+        db_profile = await profile_crud.get(db, profile_id)
+        if not db_profile:
+            raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+        if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
+            raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
         await validate_channel_configs(
             db,
             profile_in.configs.get("channel", {}),
