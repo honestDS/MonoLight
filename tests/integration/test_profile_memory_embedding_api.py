@@ -161,7 +161,13 @@ async def api_app(db_session: AsyncSession, monkeypatch) -> tuple[FastAPI, Simpl
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
 
-    async def fake_load(_db, channel_id: int, model_id: str) -> EmbeddingRuntimeConfig:
+    async def fake_load(
+        _db,
+        channel_id: int,
+        model_id: str,
+        *,
+        lock_for_reference_write: bool = False,
+    ) -> EmbeddingRuntimeConfig:
         return EmbeddingRuntimeConfig(
             channel_id=channel_id,
             channel_name=f"channel-{channel_id}",

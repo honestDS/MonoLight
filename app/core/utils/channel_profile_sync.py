@@ -157,11 +157,27 @@ def _build_model_id_rename_index(old_model_ids: list[dict], new_model_ids: list[
         signature = _model_entry_signature(item)
         new_by_usage_and_signature.setdefault((usage, signature), []).append(item)
 
+    disappeared_old_ids_by_group: dict[tuple[str, str], set[str]] = {}
+    for (usage, old_model_id), old_item in old_by_usage_and_id.items():
+        if usage not in new_ids_by_usage or old_model_id in new_ids_by_usage[usage]:
+            continue
+        signature = _model_entry_signature(old_item)
+        disappeared_old_ids_by_group.setdefault((usage, signature), set()).add(old_model_id)
+
+    added_new_ids_by_group: dict[tuple[str, str], set[str]] = {}
+    for (usage, signature), items in new_by_usage_and_signature.items():
+        for item in items:
+            new_model_id = str(item["model_id"])
+            if new_model_id not in old_ids_by_usage[usage]:
+                added_new_ids_by_group.setdefault((usage, signature), set()).add(new_model_id)
+
     return {
         "old_by_usage_and_id": old_by_usage_and_id,
         "old_ids_by_usage": old_ids_by_usage,
         "new_ids_by_usage": new_ids_by_usage,
         "new_by_usage_and_signature": new_by_usage_and_signature,
+        "disappeared_old_ids_by_group": disappeared_old_ids_by_group,
+        "added_new_ids_by_group": added_new_ids_by_group,
     }
 
 
@@ -171,12 +187,13 @@ def _compute_model_id_renames(
     referenced_model_ids: dict[str, set[str]] | None = None,
     rename_index: dict[str, dict] | None = None,
 ) -> dict[str, dict[str, str]]:
-    # 仅对配置实际引用且已消失的旧模型 ID，按非 model_id 配置精确匹配唯一新模型。
+    # 仅对配置实际引用且已消失的旧模型 ID，按变更组唯一匹配新模型。
     index = rename_index or _build_model_id_rename_index(old_model_ids, new_model_ids)
     old_by_usage_and_id = index["old_by_usage_and_id"]
     old_ids_by_usage = index["old_ids_by_usage"]
     new_ids_by_usage = index["new_ids_by_usage"]
-    new_by_usage_and_signature = index["new_by_usage_and_signature"]
+    disappeared_old_ids_by_group = index.get("disappeared_old_ids_by_group", {})
+    added_new_ids_by_group = index.get("added_new_ids_by_group", {})
 
     referenced_ids_by_usage = referenced_model_ids or old_ids_by_usage
     renames: dict[str, dict[str, str]] = {}
@@ -193,15 +210,13 @@ def _compute_model_id_renames(
                 continue
 
             signature = _model_entry_signature(old_item)
-            candidates = []
-            for item in new_by_usage_and_signature.get((usage, signature), []):
-                new_model_id = str(item.get("model_id"))
-                if new_model_id not in old_ids_by_usage[usage]:
-                    candidates.append(item)
-            if len(candidates) != 1:
+            group = (usage, signature)
+            old_ids = disappeared_old_ids_by_group.get(group, set())
+            new_ids = added_new_ids_by_group.get(group, set())
+            if len(old_ids) != 1 or len(new_ids) != 1:
                 continue
 
-            renames.setdefault(usage, {})[old_model_id] = str(candidates[0]["model_id"])
+            renames.setdefault(usage, {})[old_model_id] = next(iter(new_ids))
 
     return renames
 

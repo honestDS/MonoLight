@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_CHAT_INPUT_TOO_LONG,
@@ -213,7 +214,7 @@ class ContextManager:
         max_tokens: int,
         system_tokens: int = 0,
         tools: list[dict] | None = None,
-        safety_margin_tokens: int = 256,
+        safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     ) -> ContextRequestBudget:
         return build_context_request_budget(
             context_window_k=context_window_k,
@@ -235,7 +236,7 @@ class ContextManager:
         max_tokens: int,
         system_tokens: int = 0,
         tools: list[dict] | None = None,
-        safety_margin_tokens: int = 256,
+        safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     ) -> None:
         budget = cls.build_request_budget(
             context_window_k=context_window_k,
@@ -257,7 +258,7 @@ class ContextManager:
         context_window_k: int,
         max_tokens: int,
         tools: list[dict] | None = None,
-        safety_margin_tokens: int = 256,
+        safety_margin_tokens: int = CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
     ) -> list[InternalMessage]:
         """
         在每次模型请求前对完整内存上下文做统一预算裁剪。

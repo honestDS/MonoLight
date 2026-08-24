@@ -19,6 +19,7 @@ from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
     ERR_MEMORY_JOB_DELETE_CLEANUP_FAILED,
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
+    ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
     ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     MEMORY_CONTENT_MAX_TOKENS,
 )
@@ -854,6 +855,72 @@ async def test_organization_merge_update_publishes_version_and_replaces_vector(
         async with memory_session_factory() as db:
             assert await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP) == 0
             assert await memory_record_crud.count_active(db, uid=uid) == 1
+    finally:
+        await consumer.stop()
+
+
+@pytest.mark.asyncio
+async def test_organization_merge_suppressed_source_before_execution_fails_without_publication(
+    memory_session_factory: async_sessionmaker[AsyncSession],
+    vector_backend: _FakeVectorBackend,
+) -> None:
+    uid = "organization-merge-suppressed-source-worker"
+    _parent_id, child_id, source_ids = await _prepare_merge(
+        memory_session_factory,
+        vector_backend,
+        uid=uid,
+        memory_ids=(1, 2),
+        primary_memory_id=1,
+        action="merge",
+        pinned_ids=frozenset({1}),
+        target_content="suppressed source merge content",
+        target_memory_key="suppressed-source-merge-key",
+        max_attempts=1,
+    )
+    before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in source_ids}
+    assert all(record is not None for record in before.values())
+    source_identity = {memory_id: (record.content, record.memory_key, record.content_hash, record.vector_item_id) for memory_id, record in before.items() if record is not None}
+
+    async with memory_session_factory() as db:
+        suppressed = await db.execute(
+            update(LongTermMemoryRecord)
+            .where(
+                LongTermMemoryRecord.uid == uid,
+                LongTermMemoryRecord.id == 2,
+            )
+            .values(suppress_recall=True, suppressed_by_job_id=10_002)
+        )
+        assert suppressed.rowcount == 1
+        await db.commit()
+
+    consumer = _consumer(memory_session_factory)
+    try:
+        failed = await _run_child(
+            consumer,
+            memory_session_factory,
+            uid=uid,
+            child_id=child_id,
+            status=LongTermMemoryMutationStatus.FAILED,
+        )
+        assert failed.attempt_count == 1
+        assert failed.error == t(ERR_MEMORY_JOB_TARGET_STATE_CONFLICT)
+        assert failed.active_mutation_key is None
+        assert vector_backend.upsert_calls == []
+        for memory_id in source_ids:
+            record = await _get_record(memory_session_factory, uid=uid, memory_id=memory_id)
+            assert record is not None and before[memory_id] is not None
+            assert record.version == before[memory_id].version == 1
+            assert record.is_active is True
+            assert record.pending_mutation_job_id is None
+            assert (record.content, record.memory_key, record.content_hash, record.vector_item_id) == source_identity[memory_id]
+        async with memory_session_factory() as db:
+            recallable = await memory_record_crud.list_recallable_by_ids(db, uid=uid, memory_ids=source_ids)
+            active_count = await memory_record_crud.count_active(db, uid=uid)
+            cleanup_count = await memory_job_crud.count(db, uid=uid, operation=LongTermMemoryMutationOperation.DELETE_CLEANUP)
+        assert [record.id for record in recallable] == [1]
+        assert active_count == 2
+        assert cleanup_count == 0
+        assert await _get_all_deltas(memory_session_factory, uid=uid) == []
     finally:
         await consumer.stop()
 

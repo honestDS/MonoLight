@@ -108,8 +108,14 @@ async def _get_selection(db: AsyncSession, *, uid: str, profile_id: int, token: 
 def _patch_embedding_probe(monkeypatch, *, dimensions: int = 3) -> list[tuple[str, object]]:
     calls: list[tuple[str, object]] = []
 
-    async def fake_load(_db, channel_id: int, model_id: str) -> EmbeddingRuntimeConfig:
-        calls.append(("load", (channel_id, model_id)))
+    async def fake_load(
+        _db,
+        channel_id: int,
+        model_id: str,
+        *,
+        lock_for_reference_write: bool = False,
+    ) -> EmbeddingRuntimeConfig:
+        calls.append(("load", (channel_id, model_id, lock_for_reference_write)))
         return EmbeddingRuntimeConfig(
             channel_id=channel_id,
             channel_name=f"channel-{channel_id}",
@@ -396,7 +402,7 @@ async def test_preview_uses_detected_dimensions_stores_only_digest_and_is_user_i
     assert preview["dimensions"] == 3
     assert preview["actual_dimensions"] == 3
     assert preview["current_active"]["revision"] == 0
-    assert calls[0] == ("load", (7, "embed-v1"))
+    assert calls[0] == ("load", (7, "embed-v1", False))
     assert calls[1][0] == "detect"
 
     selection = await _get_selection(db_session, uid="user-a", profile_id=profile_id, token=token)
@@ -444,7 +450,7 @@ async def test_initial_confirm_updates_all_same_uid_profiles_atomically_and_keep
             memory=_memory_config(enabled=True, top_k=3, candidate_k=4, result_max_chars=2500),
         )
     ).id
-    _patch_embedding_probe(monkeypatch, dimensions=3)
+    calls = _patch_embedding_probe(monkeypatch, dimensions=3)
     preview = await embedding_service.preview_embedding_selection(
         db_session,
         uid="user-a",
@@ -461,6 +467,8 @@ async def test_initial_confirm_updates_all_same_uid_profiles_atomically_and_keep
         memory=_memory_config(enabled=True, top_k=7, candidate_k=11, result_max_chars=5000),
         embedding_selection_signature=token,
     )
+
+    assert ("load", (7, "embed-v1", True)) in calls
 
     store = await _get_store(db_session, "user-a")
     revisions = list((await db_session.execute(select(LongTermMemoryEmbeddingRevision).where(LongTermMemoryEmbeddingRevision.uid == "user-a"))).scalars().all())

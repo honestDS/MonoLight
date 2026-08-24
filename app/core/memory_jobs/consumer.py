@@ -88,6 +88,16 @@ def _validate_positive_integer(value: Any, *, field: str) -> int:
     return value
 
 
+async def _finalize_channel_model_deletions_if_organization(
+    db: Any,
+    job: LongTermMemoryMutationJob,
+) -> None:
+    if job.operation == LongTermMemoryMutationOperation.ORGANIZE:
+        from app.core.channel_model_protection import finalize_pending_channel_model_deletions_for_organization_job
+
+        await finalize_pending_channel_model_deletions_for_organization_job(db, job=job)
+
+
 class MemoryJobConsumer:
     __slots__ = (
         "_executor",
@@ -219,6 +229,7 @@ class MemoryJobConsumer:
                         job=terminal.job,
                         status=terminal.status,
                     )
+                    await _finalize_channel_model_deletions_if_organization(db, terminal.job)
                 await db.commit()
         except asyncio.CancelledError:
             raise
@@ -402,13 +413,18 @@ class MemoryJobConsumer:
         result: dict[str, Any] | None,
     ) -> bool:
         async with self._session_factory() as db:
-            return await memory_job_crud.mark_succeeded(
+            changed = await memory_job_crud.mark_succeeded(
                 db,
                 uid=job.uid,
                 job_id=job.id,
                 owner=worker_id,
                 result=result,
+                commit=False,
             )
+            if changed:
+                await _finalize_channel_model_deletions_if_organization(db, job)
+            await db.commit()
+            return changed
 
     async def _mark_failed(
         self,
@@ -440,6 +456,7 @@ class MemoryJobConsumer:
                     job=job,
                     status=LongTermMemoryMutationStatus.FAILED,
                 )
+                await _finalize_channel_model_deletions_if_organization(db, job)
             await db.commit()
             return changed
 
@@ -464,6 +481,7 @@ class MemoryJobConsumer:
                     job=job,
                     status=LongTermMemoryMutationStatus.CANCELLED,
                 )
+                await _finalize_channel_model_deletions_if_organization(db, job)
             await db.commit()
             return changed
 
@@ -528,6 +546,7 @@ class MemoryJobConsumer:
                         job=job,
                         status=current.status,
                     )
+                    await _finalize_channel_model_deletions_if_organization(db, current)
             await db.commit()
 
     def _on_task_done(self, job_id: int, task: asyncio.Task[None]) -> None:

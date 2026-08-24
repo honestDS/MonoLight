@@ -18,6 +18,7 @@ from app.core.channel_model_protection import (
     adapt_memory_organization_settings_for_channel_model_update,
     assert_channel_model_identity_update_allowed,
     assert_channel_not_referenced,
+    prepare_channel_model_update,
 )
 from app.core.constants import (
     ERR_CHANNEL_CHAT_TEST_EMPTY_RESPONSE,
@@ -25,6 +26,7 @@ from app.core.constants import (
     ERR_CHANNEL_CHAT_TEST_PROMPT_REQUIRED,
     ERR_CHANNEL_IMAGE_GENERATION_TEST_EMPTY_RESPONSE,
     ERR_CHANNEL_MODEL_IDS_ITEM_INVALID,
+    ERR_CHANNEL_MODEL_LIFECYCLE_MANAGED,
     ERR_CHANNEL_MODEL_LIST_FAILED,
     ERR_CHANNEL_MODEL_LIST_NO_API_KEY,
     ERR_CHANNEL_MODEL_LIST_NO_URL,
@@ -77,6 +79,7 @@ from app.models.channel import (
     ImageGenerationSize,
     ModelProtocol,
     ModelUsage,
+    is_channel_model_pending_delete,
     normalize_channel_model_ids,
     resolve_model_protocol,
     validate_channel_api_key,
@@ -165,7 +168,7 @@ def _prepare_channel_model_ids(model_ids: list[dict] | None) -> tuple[list[dict]
     try:
         return normalize_channel_model_ids(_clean_channel_model_ids_for_usage(model_ids)), None
     except ChannelModelIdsNormalizationError as exc:
-        return None, {"index": exc.index, "error": exc.error}
+        return None, {"index": exc.index, "model_id": exc.model_id, "error": exc.error}
 
 
 _CHANNEL_MODEL_UPDATE_PROFILE_IMPACT_KEYS = (
@@ -187,6 +190,9 @@ def _build_channel_model_update_impact_data(
         "synced_memory_organization_settings": memory_impact.synced_settings,
         "retained_memory_organization_settings": memory_impact.retained_settings,
         "disabled_memory_organization_settings": memory_impact.disabled_settings,
+        "deferred_memory_organization_settings": memory_impact.deferred_settings,
+        "concurrently_disabled_memory_organization_settings": memory_impact.concurrently_disabled_settings,
+        "pending_deletion_models": memory_impact.pending_deletion_models,
         "synced_profile_rules": profile_impacts.get("synced_profile_rules", 0),
         "removed_profile_rules": profile_impacts.get("removed_profile_rules", 0),
         "synced_audit_refs": profile_impacts.get("synced_audit_refs", 0),
@@ -213,6 +219,8 @@ async def create_channel(
     channel_in.model_ids, normalization_error = _prepare_channel_model_ids(channel_in.model_ids)
     if normalization_error:
         return StandardResponse.error(code=422, message=ERR_CHANNEL_MODEL_IDS_ITEM_INVALID, **normalization_error)
+    if any(is_channel_model_pending_delete(item) for item in channel_in.model_ids or []):
+        raise ParameterException(ERR_CHANNEL_MODEL_LIFECYCLE_MANAGED)
     validation_error, validation_kwargs = validate_channel_model_ids(channel_in.model_ids)
     if validation_error:
         return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
@@ -452,14 +460,6 @@ async def update_channel(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    db_obj = await channel_crud.get(db, channel_id)
-    if not db_obj:
-        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
-
-    if channel_in.name and channel_in.name != db_obj.name:
-        if await channel_crud.get_by_name(db, channel_in.name):
-            raise ParameterException(ERR_CHANNEL_NAME_EXISTS)
-
     # 校验 model_ids 合法性（如果传入）
     if channel_in.model_ids is not None:
         channel_in.model_ids, normalization_error = _prepare_channel_model_ids(channel_in.model_ids)
@@ -469,69 +469,99 @@ async def update_channel(
         if validation_error:
             return StandardResponse.error(code=422, message=validation_error, **validation_kwargs)
 
-    # 跨字段校验：所有可调用模型类型都依赖 base_url 拼接供应商接口路径。
-    final_model_ids = channel_in.model_ids if channel_in.model_ids is not None else db_obj.model_ids
-    final_base_url = channel_in.base_url if "base_url" in channel_in.model_fields_set else db_obj.base_url
     try:
-        validate_base_url(final_base_url, model_ids=final_model_ids)
-    except ValueError as exc:
-        return StandardResponse.error(code=422, message=str(exc))
+        db_obj = await channel_crud.lock_for_mutation(db, channel_id=channel_id, commit=False)
+        if not db_obj:
+            raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
 
-    # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
-    old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
-    update_data = channel_in.model_dump(exclude_unset=True)
-    confirm_config_impact = update_data.pop("confirm_config_impact", channel_in.confirm_config_impact)
-    api_key = update_data.pop("api_key", None)
-    memory_impact = MemoryOrganizationModelUpdateImpact()
-    profile_impacts = {key: 0 for key in _CHANNEL_MODEL_UPDATE_PROFILE_IMPACT_KEYS}
+        if channel_in.name and channel_in.name != db_obj.name:
+            if await channel_crud.get_by_name(db, channel_in.name):
+                raise ParameterException(ERR_CHANNEL_NAME_EXISTS)
 
-    if channel_in.model_ids is not None:
-        await assert_channel_model_identity_update_allowed(
-            db,
-            channel_id=channel_id,
-            old_model_ids=old_model_ids,
-            new_model_ids=channel_in.model_ids,
-            allow_adaptable_memory_organization_settings=True,
-        )
-
-        final_name = update_data.get("name", db_obj.name)
-        final_is_active = update_data.get("is_active", db_obj.is_active)
-        final_base_url = update_data.get("base_url", db_obj.base_url)
-        final_http_proxy = update_data.get("http_proxy", db_obj.http_proxy)
-        final_api_key = api_key
-        final_model_ids = channel_in.model_ids
-
-        if not confirm_config_impact:
-            memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
+        # 更新前捕获旧 model_ids，用于推断 model_id 重命名并同步到绑定的 profile
+        old_model_ids = copy.deepcopy(db_obj.model_ids) if db_obj.model_ids else []
+        persisted_model_ids = old_model_ids
+        available_model_ids = old_model_ids
+        profile_old_model_ids = old_model_ids
+        pending_deletion_uids_by_model_id = {}
+        pending_deletion_models = 0
+        if channel_in.model_ids is not None:
+            preparation = await prepare_channel_model_update(
                 db,
                 channel_id=channel_id,
-                channel_name=final_name,
-                channel_is_active=final_is_active,
-                base_url=final_base_url,
-                api_key=final_api_key,
-                api_key_loader=db_obj.get_decrypted_api_key,
-                http_proxy=final_http_proxy,
                 old_model_ids=old_model_ids,
-                new_model_ids=final_model_ids,
-                apply_changes=False,
+                requested_model_ids=channel_in.model_ids,
             )
-            profile_impacts = await _preview_channel_model_update_impacts(
-                db,
-                channel_id,
-                old_model_ids,
-                final_model_ids,
-            )
-            if _has_channel_model_update_impact(memory_impact, profile_impacts):
-                return StandardResponse.success(
-                    data=_build_channel_model_update_impact_data(
-                        memory_impact,
-                        profile_impacts,
-                        requires_confirmation=True,
-                    ),
-                    message=MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED,
-                )
+            persisted_model_ids = preparation.persisted_model_ids
+            available_model_ids = preparation.available_model_ids
+            profile_old_model_ids = preparation.profile_old_model_ids
+            pending_deletion_uids_by_model_id = preparation.active_job_uids_by_model_id
+            pending_deletion_models = preparation.newly_pending_model_count
 
-    try:
+        # 跨字段校验：所有可调用模型类型都依赖 base_url 拼接供应商接口路径。
+        final_model_ids = available_model_ids if channel_in.model_ids is not None else db_obj.model_ids
+        final_base_url = channel_in.base_url if "base_url" in channel_in.model_fields_set else db_obj.base_url
+        try:
+            validate_base_url(final_base_url, model_ids=final_model_ids)
+        except ValueError as exc:
+            return StandardResponse.error(code=422, message=str(exc))
+
+        update_data = channel_in.model_dump(exclude_unset=True)
+        confirm_config_impact = update_data.pop("confirm_config_impact", channel_in.confirm_config_impact)
+        api_key = update_data.pop("api_key", None)
+        if channel_in.model_ids is not None:
+            update_data["model_ids"] = persisted_model_ids
+        memory_impact = MemoryOrganizationModelUpdateImpact()
+        profile_impacts = {key: 0 for key in _CHANNEL_MODEL_UPDATE_PROFILE_IMPACT_KEYS}
+
+        if channel_in.model_ids is not None:
+            await assert_channel_model_identity_update_allowed(
+                db,
+                channel_id=channel_id,
+                old_model_ids=old_model_ids,
+                new_model_ids=persisted_model_ids,
+                allow_adaptable_memory_organization_settings=True,
+            )
+
+            final_name = update_data.get("name", db_obj.name)
+            final_is_active = update_data.get("is_active", db_obj.is_active)
+            final_base_url = update_data.get("base_url", db_obj.base_url)
+            final_http_proxy = update_data.get("http_proxy", db_obj.http_proxy)
+            final_api_key = api_key
+            final_model_ids = available_model_ids
+
+            if not confirm_config_impact:
+                memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
+                    db,
+                    channel_id=channel_id,
+                    channel_name=final_name,
+                    channel_is_active=final_is_active,
+                    base_url=final_base_url,
+                    api_key=final_api_key,
+                    api_key_loader=db_obj.get_decrypted_api_key,
+                    http_proxy=final_http_proxy,
+                    old_model_ids=old_model_ids,
+                    new_model_ids=final_model_ids,
+                    pending_deletion_uids_by_model_id=pending_deletion_uids_by_model_id,
+                    pending_deletion_models=pending_deletion_models,
+                    apply_changes=False,
+                )
+                profile_impacts = await _preview_channel_model_update_impacts(
+                    db,
+                    channel_id,
+                    profile_old_model_ids,
+                    available_model_ids,
+                )
+                if _has_channel_model_update_impact(memory_impact, profile_impacts):
+                    return StandardResponse.success(
+                        data=_build_channel_model_update_impact_data(
+                            memory_impact,
+                            profile_impacts,
+                            requires_confirmation=True,
+                        ),
+                        message=MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED,
+                    )
+
         if channel_in.model_ids is not None and confirm_config_impact:
             memory_impact = await adapt_memory_organization_settings_for_channel_model_update(
                 db,
@@ -544,6 +574,8 @@ async def update_channel(
                 http_proxy=final_http_proxy,
                 old_model_ids=old_model_ids,
                 new_model_ids=final_model_ids,
+                pending_deletion_uids_by_model_id=pending_deletion_uids_by_model_id,
+                pending_deletion_models=pending_deletion_models,
                 apply_changes=True,
             )
 
@@ -553,28 +585,33 @@ async def update_channel(
             profile_impacts["synced_profile_rules"] = await _sync_channel_model_id_renames(
                 db,
                 channel_id,
-                old_model_ids,
-                final_model_ids,
+                profile_old_model_ids,
+                available_model_ids,
             )
             profile_impacts["synced_audit_refs"] = await _sync_audit_model_id_renames(
                 db,
                 channel_id,
-                old_model_ids,
-                final_model_ids,
+                profile_old_model_ids,
+                available_model_ids,
             )
             profile_impacts["removed_profile_rules"] = await _remove_unavailable_channel_rules(
                 db,
                 channel_id,
-                final_model_ids,
+                available_model_ids,
             )
             profile_impacts["cleared_audit_refs"] = await _clear_unavailable_audit_model_refs(
                 db,
                 channel_id,
-                final_model_ids,
+                available_model_ids,
             )
 
         for field, value in update_data.items():
             setattr(db_obj, field, value)
+        try:
+            validate_base_url(db_obj.base_url, model_ids=db_obj.model_ids)
+        except ValueError as exc:
+            await db.rollback()
+            return StandardResponse.error(code=422, message=str(exc))
         if api_key is not None:
             db_obj.set_api_key_plaintext(api_key)
 
@@ -606,13 +643,13 @@ async def delete_channel(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(check_admin_privilege),
 ):
-    db_obj = await channel_crud.get(db, channel_id)
-    if not db_obj:
-        raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
-
-    await assert_channel_not_referenced(db, channel_id=channel_id)
-
     try:
+        db_obj = await channel_crud.lock_for_mutation(db, channel_id=channel_id, commit=False)
+        if not db_obj:
+            raise ResourceNotFoundException(ERR_CHANNEL_NOT_FOUND)
+
+        await assert_channel_not_referenced(db, channel_id=channel_id)
+
         removed_profile_rules = await _remove_unavailable_channel_rules(db, channel_id, [])
         cleared_audit_refs = await _clear_unavailable_audit_model_refs(db, channel_id, [])
         await db.delete(db_obj)

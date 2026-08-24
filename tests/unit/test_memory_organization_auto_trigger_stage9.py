@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
@@ -299,6 +300,28 @@ async def test_auto_organization_submits_complete_snapshot_and_updates_store(
     assert persisted_store.organization_last_job_id == submission.job.id
     assert persisted_store.organization_last_run_at is not None
     assert persisted_store.organization_error is None
+
+
+@pytest.mark.asyncio
+async def test_auto_organization_counts_suppressed_active_records_but_excludes_them_from_snapshot(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "auto-suppressed-threshold"
+    _, _ = await _setup_auto_user(memory_database, uid=uid, record_count=45)
+
+    async with memory_database() as db:
+        await db.execute(update(LongTermMemoryRecord).where(LongTermMemoryRecord.uid == uid).values(suppress_recall=True))
+        await db.commit()
+        assert await memory_record_crud.count_active(db, uid=uid) == 45
+
+        submission = await MemoryJobManager().submit_auto_organization(db, uid=uid)
+
+    assert submission is not None
+    assert submission.created
+    assert submission.job.payload["trigger"] == "auto"
+    snapshot = submission.job.payload["snapshot"]
+    assert snapshot["count"] == 0
+    assert snapshot["items"] == []
 
 
 @pytest.mark.asyncio

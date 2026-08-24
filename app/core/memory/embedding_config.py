@@ -280,6 +280,7 @@ async def _confirm_embedding_selection(
         db,
         selection.target_embedding_channel_id,
         selection.target_embedding_model_id,
+        lock_for_reference_write=True,
     )
     consumed = await memory_embedding_selection_token_crud.consume_if_available(
         db,
