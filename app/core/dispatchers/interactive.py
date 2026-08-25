@@ -540,7 +540,7 @@ class InteractiveDispatcherMixin:
                                 hidden_tool_round = bool(ai_msg.tool_calls) and not show_tool_calls
                                 if not hidden_tool_round:
                                     await _emit_agent_loop_output(stream_state)
-                                if stream_event_callback is not None and show_tool_calls and not hidden_tool_round and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content:
+                                if stream_event_callback is not None and show_tool_calls and not hidden_tool_round and expose_tool_call_content and not stream_state.emitted_stream_content and isinstance(ai_msg.content, str) and ai_msg.content.strip():
                                     await stream_event_callback(
                                         {
                                             "type": "content",
@@ -552,15 +552,16 @@ class InteractiveDispatcherMixin:
                                     stream_state.emitted_stream_content = True
                                 if stream_event_callback is not None and (not expose_tool_call_content or not show_tool_calls) and not ai_msg.tool_calls:
                                     buffered_content_chunks = stream_state.buffered_content_chunks or ([ai_msg.content] if isinstance(ai_msg.content, str) and ai_msg.content else [])
-                                    for content_chunk in buffered_content_chunks:
-                                        await stream_event_callback(
-                                            {
-                                                "type": "content",
-                                                "content": content_chunk,
-                                                "turn": current_turn,
-                                                "response_id": response_id,
-                                            }
-                                        )
+                                    if "".join(buffered_content_chunks).strip():
+                                        for content_chunk in buffered_content_chunks:
+                                            await stream_event_callback(
+                                                {
+                                                    "type": "content",
+                                                    "content": content_chunk,
+                                                    "turn": current_turn,
+                                                    "response_id": response_id,
+                                                }
+                                            )
                                 break
                             except ApiKeyException:
                                 raise
@@ -608,6 +609,8 @@ class InteractiveDispatcherMixin:
                             turn_end_content = saved_msg.content if saved_msg is not None else ai_msg.content
                             if ai_msg.tool_calls:
                                 turn_end_content = ai_msg.content if expose_tool_call_content else None
+                            if isinstance(turn_end_content, str) and not turn_end_content.strip():
+                                turn_end_content = None
                             turn_end_event: dict[str, Any] = {
                                 "type": "turn_end",
                                 "response_id": response_id,

@@ -252,6 +252,14 @@ async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> 
     if not state.expose_tool_call_content or not state.show_tool_calls:
         state.buffered_content_chunks.append(content)
         return
+
+    if not state.emitted_stream_content:
+        state.buffered_content_chunks.append(content)
+        buffered_content = "".join(state.buffered_content_chunks)
+        if not buffered_content.strip():
+            return
+        content = buffered_content
+
     await _emit_agent_loop_output(state)
     if state.callback is None:
         return
@@ -263,6 +271,7 @@ async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> 
             "response_id": state.response_id,
         }
     )
+    state.buffered_content_chunks.clear()
     state.emitted_stream_content = True
 
 
