@@ -54,8 +54,12 @@ from app.providers.database.time import get_database_time
 
 
 @pytest_asyncio.fixture
-async def db_session() -> AsyncGenerator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def db_session(tmp_path) -> AsyncGenerator[AsyncSession]:
+    database_path = tmp_path / "memory-organization-parent-child-stage10.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"timeout": 30},
+    )
     async with engine.begin() as connection:
         await connection.run_sync(
             lambda sync_connection: SQLModel.metadata.create_all(
