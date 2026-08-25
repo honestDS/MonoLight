@@ -5,12 +5,22 @@
       <div class="sidebar-header">
         <span>{{ $t('chat.sessions_title') }}</span>
         <div class="sidebar-actions">
-          <el-icon class="refresh-icon" :class="{ loading: sessionsLoading }" :title="$t('chat.refresh_sessions')" @click.stop="loadSessions"><Refresh /></el-icon>
+          <el-icon
+            class="sidebar-icon"
+            :title="$t('chat.new_session_title')"
+            @click.stop="createNewSession"
+          ><Plus /></el-icon>
+          <el-icon
+            class="sidebar-icon refresh-icon"
+            :class="{ loading: sessionsLoading }"
+            :title="$t('chat.refresh_sessions')"
+            @click.stop="loadSessions"
+          ><Refresh /></el-icon>
         </div>
       </div>
       <div class="sessions-list">
-        <div 
-          v-for="session in sessions" 
+        <div
+          v-for="session in sessions"
           :key="session.session_id"
           :data-session-id="session.session_id"
           :class="['session-item', { active: currentSessionId === session.session_id }]"
@@ -19,8 +29,8 @@
           <div class="session-content">
             <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
               <template v-if="typingSessionId === session.session_id">
-                <span 
-                  v-for="(char, index) in session.title" 
+                <span
+                  v-for="(char, index) in session.title"
                   :key="index"
                   class="typing-char"
                 >{{ char }}</span>
@@ -69,95 +79,20 @@
         :initial-history-loaded="initialHistoryLoaded"
         :context-summarizing="isContextSummarizing"
         :llm-request-metadata="llmRequestMetadata"
+        :hide-empty-tip="!currentSessionId"
         @audit-decision="handleAuditDecision"
       />
+
+      <!-- 新建会话 / 无会话时的欢迎区 -->
+      <div v-if="!currentSessionId" class="welcome-hero">
+        <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
+      </div>
+
       <div class="input-area">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
           <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
-        <div class="toolbar-row">
-          <el-button type="primary" @click="createNewSession" class="new-session-btn">
-            <i class="el-icon-plus"></i> {{ $t('chat.new_session') }}
-          </el-button>
 
-          <div class="session-profile-setting">
-            <span class="session-profile-setting-label">{{ $t('chat.profile') }}</span>
-            <el-select
-              class="session-profile-setting-select"
-              :model-value="currentSessionProfileDisplayId"
-              clearable
-              filterable
-              :loading="profilesLoading"
-              :disabled="profileSettingSubmitting"
-              :placeholder="currentSessionProfilePlaceholder"
-              @change="updateSessionProfileOverride"
-            >
-              <el-option
-                v-for="profile in currentSessionProfileOptions"
-                :key="profile.id"
-                :label="formatProfileOptionLabel(profile, $t('chat.default_profile_suffix'))"
-                :value="profile.id"
-              />
-            </el-select>
-          </div>
-
-          <div class="tool-output-setting">
-            <span class="tool-output-setting-label">{{ $t('chat.tool_output') }}</span>
-            <el-switch
-              :model-value="currentSessionShowToolCalls"
-              :disabled="toolOutputSettingSubmitting || loading"
-              @update:model-value="updateSessionShowToolCalls"
-            />
-          </div>
-
-          <el-checkbox v-if="isCurrentSessionReadOnly" v-model="externalSessionAutoPullEnabled">
-            {{ $t('chat.external_session_auto_pull') }}
-          </el-checkbox>
-
-          <!-- 上传按钮移到模式选择之前 -->
-          <div class="upload-trigger-btn">
-            <el-upload
-              action=""
-              :http-request="handleUpload"
-              :show-file-list="false"
-              multiple
-              :disabled="isCurrentSessionReadOnly"
-              :before-upload="() => !isCurrentSessionReadOnly"
-            >
-              <el-button :title="$t('chat.upload')">{{ $t('chat.upload') }}</el-button>
-            </el-upload>
-          </div>
-
-          <div class="mode-selector">
-            <button 
-              type="button" 
-              :class="['mode-btn', { active: !currentSessionEnableMarkdown }]"
-              @click="toggleMarkdown(false)"
-              :disabled="loading || isCurrentSessionReadOnly"
-            >{{ $t('chat.plain_text') }}</button>
-            <button 
-              type="button" 
-              :class="['mode-btn', { active: currentSessionEnableMarkdown }]"
-              @click="toggleMarkdown(true)"
-              :disabled="loading || isCurrentSessionReadOnly"
-            >{{ $t('chat.md_render') }}</button>
-          </div>
-
-          <div class="mode-selector">
-            <button 
-              type="button" 
-              :class="['mode-btn', { active: !isWsModeComputed }]"
-              @click="handleModeChange(false)"
-              :disabled="loading || isCurrentSessionReadOnly"
-            >{{ $t('chat.non_stream') }}</button>
-            <button 
-              type="button" 
-              :class="['mode-btn', { active: isWsModeComputed }]"
-              @click="handleModeChange(true)"
-              :disabled="loading || isCurrentSessionReadOnly"
-            >{{ $t('chat.stream') }}</button>
-          </div>
-        </div>
         <div class="input-wrapper">
           <div class="input-controls">
             <div class="chat-input-box">
@@ -165,10 +100,10 @@
               <div class="upload-container" v-show="uploadFileList.length > 0">
                 <div class="custom-upload-list">
                   <div class="custom-upload-item" v-for="file in uploadFileList" :key="file.uid">
-                    <el-image 
+                    <el-image
                       v-if="file.url"
-                      class="custom-upload-img" 
-                      :src="file.url" 
+                      class="custom-upload-img"
+                      :src="file.url"
                       fit="contain"
                       :preview-src-list="[file.url]"
                       preview-teleported
@@ -186,32 +121,184 @@
                 </div>
               </div>
 
-              <el-input
-                v-model="inputMsg" 
-                :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
-                :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
-                :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
-                :show-word-limit="false"
-                @keyup.enter="send"
-                @paste="handlePaste"
-                type="textarea"
-                :autosize="{ minRows: 2, maxRows: 6 }"
-                class="chat-input"
-                :resize="'none'"
-              />
-
-              <div class="action-btn-container">
-                <el-button 
-                  type="primary" 
-                  @click="send" 
-                  :loading="isCurrentSessionReadOnly && guidanceSubmitting"
-                  :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : !inputMsg.trim() && attachments.length === 0"
-                  class="action-btn"                  
-                  circle
+              <div class="chat-input-row">
+                <el-popover
+                  v-model:visible="moreOptionsVisible"
+                  placement="bottom-start"
+                  :width="280"
+                  :show-arrow="false"
+                  popper-class="chat-more-options-popover"
+                  :disabled="isCurrentSessionReadOnly"
                 >
-                  <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
-                </el-button>
+                  <template #reference>
+                    <el-button
+                      class="more-options-trigger"
+                      :disabled="isCurrentSessionReadOnly"
+                      :title="$t('chat.more_options')"
+                      circle
+                    >
+                      <el-icon><Plus /></el-icon>
+                    </el-button>
+                  </template>
+
+                  <div class="more-options-content">
+                    <div
+                      class="more-option-row"
+                      :class="{ 'is-disabled': isCurrentSessionReadOnly }"
+                      @click="!isCurrentSessionReadOnly && openUploadPicker()"
+                    >
+                      <el-icon class="more-option-icon"><UploadFilled /></el-icon>
+                      <span class="more-option-label">{{ $t('chat.more_options_upload') }}</span>
+                    </div>
+
+                    <el-upload
+                      ref="uploadTriggerRef"
+                      action=""
+                      :http-request="handleUpload"
+                      :show-file-list="false"
+                      multiple
+                      :disabled="isCurrentSessionReadOnly"
+                      :before-upload="() => !isCurrentSessionReadOnly"
+                      class="more-option-upload-hidden"
+                    />
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-segment">
+                      <span class="more-option-label">{{ $t('chat.more_options_plain') }} / {{ $t('chat.more_options_markdown') }}</span>
+                      <el-radio-group
+                        :model-value="currentSessionEnableMarkdown ? 'md' : 'plain'"
+                        :disabled="isCurrentSessionReadOnly"
+                        size="small"
+                        @update:model-value="val => toggleMarkdown(val === 'md')"
+                      >
+                        <el-radio-button label="plain">{{ $t('chat.more_options_plain') }}</el-radio-button>
+                        <el-radio-button label="md">{{ $t('chat.more_options_markdown') }}</el-radio-button>
+                      </el-radio-group>
+                    </div>
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-segment">
+                      <span class="more-option-label">{{ $t('chat.more_options_non_stream') }} / {{ $t('chat.more_options_stream') }}</span>
+                      <el-radio-group
+                        :model-value="isWsModeComputed ? 'stream' : 'non_stream'"
+                        :disabled="isCurrentSessionReadOnly"
+                        size="small"
+                        @update:model-value="val => handleModeChange(val === 'stream')"
+                      >
+                        <el-radio-button label="non_stream">{{ $t('chat.more_options_non_stream') }}</el-radio-button>
+                        <el-radio-button label="stream">{{ $t('chat.more_options_stream') }}</el-radio-button>
+                      </el-radio-group>
+                    </div>
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-row more-option-profile">
+                      <span class="more-option-label more-option-label--profile">{{ $t('chat.more_options_profile') }}</span>
+                      <el-select
+                        class="more-option-profile-select"
+                        :model-value="currentSessionProfileDisplayId"
+                        clearable
+                        filterable
+                        :loading="profilesLoading"
+                        :disabled="isCurrentSessionReadOnly || profileSettingSubmitting"
+                        :placeholder="currentSessionProfilePlaceholder"
+                        @change="updateSessionProfileOverride"
+                        size="small"
+                      >
+                        <el-option
+                          v-for="profile in currentSessionProfileOptions"
+                          :key="profile.id"
+                          :label="formatProfileOptionLabel(profile, $t('chat.default_profile_suffix'))"
+                          :value="profile.id"
+                        />
+                      </el-select>
+                    </div>
+
+                    <div class="more-option-divider"></div>
+
+                    <div class="more-option-toggle">
+                      <span class="more-option-label">{{ $t('chat.more_options_tool_output') }}</span>
+                      <el-switch
+                        :model-value="currentSessionShowToolCalls"
+                        :disabled="isCurrentSessionReadOnly || toolOutputSettingSubmitting || loading"
+                        @update:model-value="updateSessionShowToolCalls"
+                      />
+                    </div>
+                  </div>
+                </el-popover>
+
+                <el-input
+                  v-model="inputMsg"
+                  :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
+                  :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
+                  :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
+                  :show-word-limit="false"
+                  @keyup.enter="send"
+                  @paste="handlePaste"
+                  @input="onInputChange"
+                  ref="chatInputRef"
+                  type="textarea"
+                  :autosize="{ minRows: 1, maxRows: 6 }"
+                  class="chat-input"
+                  :resize="'none'"
+                />
+
+                <div class="action-btn-container">
+                  <el-button
+                    type="primary"
+                    @click="send"
+                    :loading="isCurrentSessionReadOnly && guidanceSubmitting"
+                    :disabled="isCurrentSessionReadOnly ? guidanceSubmitting || !inputMsg.trim() : !inputMsg.trim() && attachments.length === 0"
+                    class="action-btn"
+                    circle
+                  >
+                    <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
+                  </el-button>
+                </div>
+
+                <button
+                  v-if="isOverflowExpanded"
+                  class="input-expand-btn"
+                  :title="$t('chat.expand_input')"
+                  @click="expandedDialogVisible = true"
+                >
+                  <el-icon><FullScreen /></el-icon>
+                </button>
               </div>
+
+              <el-dialog
+                v-model="expandedDialogVisible"
+                :title="$t('chat.expand_input')"
+                width="560px"
+                :show-close="true"
+                :close-on-click-modal="true"
+                class="chat-input-expand-dialog"
+              >
+                <el-input
+                  v-model="inputMsg"
+                  type="textarea"
+                  :rows="10"
+                  :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
+                  :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
+                  :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
+                  :show-word-limit="false"
+                  class="chat-input-expanded"
+                  :resize="'none'"
+                  @keyup.enter="send"
+                />
+                <template #footer>
+                  <el-button @click="expandedDialogVisible = false">{{ $t('chat.close') }}</el-button>
+                  <el-button
+                    type="primary"
+                    @click="send(); expandedDialogVisible = false"
+                    :disabled="!inputMsg.trim() && attachments.length === 0"
+                  >
+                    {{ $t('chat.send') }}
+                  </el-button>
+                </template>
+              </el-dialog>
             </div>
           </div>
         </div>
@@ -222,9 +309,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Delete, FullScreen, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
@@ -245,6 +332,27 @@ const currentUid = ref(null)
 const profilesLoading = ref(false)
 const profileSettingSubmitting = ref(false)
 const toolOutputSettingSubmitting = ref(false)
+const moreOptionsVisible = ref(false)
+const uploadTriggerRef = ref(null)
+const chatInputRef = ref(null)
+const isOverflowExpanded = ref(false)
+const expandedDialogVisible = ref(false)
+
+const onInputChange = () => {
+  nextTick(() => {
+    const el = chatInputRef.value?.$el?.querySelector?.('textarea')
+    if (!el) return
+    const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20
+    const rows = Math.max(1, Math.round(el.scrollHeight / lineHeight))
+    isOverflowExpanded.value = rows >= 6 || el.scrollHeight >= el.clientHeight + lineHeight
+  })
+}
+
+const openUploadPicker = () => {
+  const triggerEl = uploadTriggerRef.value?.$el || uploadTriggerRef.value
+  const input = triggerEl?.querySelector?.('input[type="file"]')
+  if (input) input.click()
+}
 
 // 获取当前会话的 Markdown 开关状态
 const currentSessionEnableMarkdown = computed({
@@ -274,11 +382,11 @@ const toggleMarkdown = async (val) => {
 
   // 先更新本地状态
   currentSessionEnableMarkdown.value = val
-  
+
   if (!currentSessionId.value) {
     return
   }
-  
+
   try {
     await chatApi.updateSessionSetting(currentSessionId.value, { enable_markdown: val })
   } catch (error) {
@@ -317,6 +425,17 @@ const {
   newSessionProfileOverrideId,
   currentSessionShowToolCalls
 } = chat
+
+watch(inputMsg, () => {
+  isOverflowExpanded.value = false
+  onInputChange()
+})
+
+watch(expandedDialogVisible, (v) => {
+  if (!v) {
+    nextTick(() => onInputChange())
+  }
+})
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
   currentSession.value,
@@ -448,15 +567,15 @@ const send = async () => {
     // LLM响应中，加入前端队列并显示临时消息
     const tempMsg = inputMsg.value
     const tempAttachments = [...attachments.value]
-    
+
     // 如果没有内容直接返回
     if (!tempMsg.trim() && tempAttachments.length === 0) return
-    
+
     // 清空输入框和附件
     inputMsg.value = ''
     uploadFileList.value = []
     attachments.value = []
-    
+
     // 加入队列视觉状态并直接发送
     chat.enqueueMessage(tempMsg, tempAttachments)
     return
@@ -507,17 +626,17 @@ const handleUpload = async (options) => {
   try {
     // 允许 session_id 为空，由后端分配未绑定的临时目录
     const res = await fileApi.upload(file, currentSessionId.value || '')
-    
+
     // 维护后端真实路径
     attachments.value.push({
       uid: file.uid, // 用于和 el-upload 的 file_list 关联
       name: res.data?.filename || file.name,
       path: res.data?.path
     })
-    
+
     // 通知 el-upload 组件该文件上传成功
     if (onSuccess) onSuccess(res.data)
-      
+
     // 将文件添加到 el-upload 维护的文件列表中（如果是通过独立按钮触发的话需要手动 push）
     const isImage = file.type.startsWith('image/')
     const newFileItem = {
@@ -526,7 +645,7 @@ const handleUpload = async (options) => {
       status: 'success',
       url: isImage ? URL.createObjectURL(file) : '' // 仅图片生成本地预览图 URL
     }
-    
+
     // 防止重复添加（el-upload 自身的 picture-card 也会触发 push，这里做去重）
     const exists = uploadFileList.value.find(f => f.uid === file.uid)
     if (!exists) {
@@ -559,7 +678,7 @@ const handlePaste = (e) => {
 
   const clipboardData = e.clipboardData || window.clipboardData
   if (!clipboardData) return
-  
+
   const items = clipboardData.items
   if (!items) return
 
