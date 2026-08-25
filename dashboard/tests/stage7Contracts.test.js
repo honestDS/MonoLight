@@ -629,6 +629,11 @@ test('MemoriesView keeps runtime settings and organization actions read-only', (
   assert.match(memoriesSource, /settings\.organization\?\.recent_job\?\.status/)
 })
 
+test('MemoriesView disables reindex while maintenance is blocked', () => {
+  assert.match(memoriesSource, /const reindexBlocked = computed\(\(\) => !configured\.value \|\| Boolean\(settings\.blocking\?\.maintenance\?\.blocked\)\)/)
+  assert.match(memoriesSource, /@click="reindex"[^>]*:disabled="reindexBlocked"/)
+})
+
 test('MemoriesView polls settings and memories while limiting tab-specific polling', () => {
   const refreshStart = memoriesSource.indexOf('const refreshAll =')
   const scheduleStart = memoriesSource.indexOf('const scheduleRefresh =', refreshStart)
