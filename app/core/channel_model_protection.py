@@ -238,7 +238,7 @@ async def prepare_channel_model_update(
     profile_old_model_ids = []
     for old_item in persisted_old_model_ids:
         key = _model_key(old_item)
-        if key is not None and key[1] == ModelUsage.CHAT.value and (is_channel_model_pending_delete(old_item) or key[0] in newly_pending_model_ids):
+        if key is not None and key[1] == ModelUsage.CHAT.value and is_channel_model_pending_delete(old_item):
             continue
         profile_old_model_ids.append(deepcopy(old_item))
 
@@ -431,7 +431,7 @@ async def adapt_memory_organization_settings_for_channel_model_update(
             confirmation_fingerprints=tuple(sorted(confirmation_fingerprints)),
         )
 
-    referenced_model_ids = {store.organization_model_id for store in channel_stores if store.organization_model_id not in pending_deletion_uids_by_model_id}
+    referenced_model_ids = {store.organization_model_id for store in channel_stores}
     renames = _compute_memory_organization_model_id_renames(
         referenced_model_ids,
         old_model_ids,
@@ -441,14 +441,14 @@ async def adapt_memory_organization_settings_for_channel_model_update(
     affected_stores: list[tuple[Any, str, str, str]] = []
     for store in channel_stores:
         expected_model_id = store.organization_model_id
-        if expected_model_id in pending_deletion_uids_by_model_id:
-            impact_type = "deferred" if store.uid in pending_deletion_uids_by_model_id[expected_model_id] else "disable"
-            affected_stores.append((store, impact_type, expected_model_id, expected_model_id))
-            continue
-
         new_model_id = renames.get(expected_model_id)
         if new_model_id is not None:
             affected_stores.append((store, "synced", expected_model_id, new_model_id))
+            continue
+
+        if expected_model_id in pending_deletion_uids_by_model_id:
+            impact_type = "deferred" if store.uid in pending_deletion_uids_by_model_id[expected_model_id] else "disable"
+            affected_stores.append((store, impact_type, expected_model_id, expected_model_id))
             continue
 
         old_signature = _unique_memory_organization_model_runtime_signature(

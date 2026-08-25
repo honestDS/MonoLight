@@ -1439,6 +1439,156 @@ async def test_update_channel_defers_chat_model_delete_until_organization_job_fi
 
 
 @pytest.mark.asyncio
+async def test_active_organization_job_exact_chat_model_rename_preserves_and_syncs_business_configs(
+    db_session: AsyncSession,
+) -> None:
+    old_model_id = "organization-active-rename-old"
+    new_model_id = "organization-active-rename-new"
+    uid = "organization-active-rename-user"
+    old_models = [_organization_chat_model(old_model_id)]
+    new_models = [{**old_models[0], "model_id": new_model_id}]
+    channel = await _create_channel(
+        db_session,
+        name="organization-active-rename-channel",
+        model_ids=old_models,
+    )
+    store = await _create_store(
+        db_session,
+        uid=uid,
+        auto_organize_enabled=True,
+        organization_channel_id=channel.id,
+        organization_model_id=old_model_id,
+    )
+    job = await _create_organization_job(
+        db_session,
+        uid=uid,
+        dedupe_key="organization-active-rename",
+        status=LongTermMemoryMutationStatus.PENDING,
+        channel_id=channel.id,
+        model_id=old_model_id,
+    )
+    profile = Profile(
+        uid="organization-active-rename-profile-user",
+        name="organization-active-rename-profile",
+        configs={
+            "channel": {
+                "chat_channel": {
+                    "rules": [{"channel_id": channel.id, "model_id": old_model_id}],
+                },
+            },
+            "security": {
+                "audit_channel_id": channel.id,
+                "audit_model_id": old_model_id,
+            },
+        },
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    preview = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=new_models),
+        db=db_session,
+        admin={},
+    )
+
+    assert preview.code == 200
+    assert preview.data["requires_confirmation"] is True
+    assert preview.data["synced_memory_organization_settings"] == 1
+    assert preview.data["deferred_memory_organization_settings"] == 0
+    assert preview.data["disabled_memory_organization_settings"] == 0
+    assert preview.data["pending_deletion_models"] == 1
+    assert preview.data["synced_profile_rules"] == 1
+    assert preview.data["removed_profile_rules"] == 0
+    assert preview.data["synced_audit_refs"] == 1
+    assert preview.data["cleared_audit_refs"] == 0
+    await db_session.refresh(store)
+    await db_session.refresh(profile)
+    await db_session.refresh(job)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == old_model_id
+    assert profile.configs["channel"]["chat_channel"]["rules"] == [{"channel_id": channel.id, "model_id": old_model_id}]
+    assert profile.configs["security"]["audit_channel_id"] == channel.id
+    assert profile.configs["security"]["audit_model_id"] == old_model_id
+    assert job.status == LongTermMemoryMutationStatus.PENDING
+    assert job.payload["model_config"]["channel_id"] == channel.id
+    assert job.payload["model_config"]["model_id"] == old_model_id
+    unchanged = await channel_crud.get(db_session, channel.id)
+    assert unchanged is not None
+    assert unchanged.model_ids == old_models
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(
+            model_ids=new_models,
+            confirm_config_impact=True,
+            config_impact_token=_config_impact_token(preview),
+        ),
+        db=db_session,
+        admin={},
+    )
+
+    assert response.code == 200
+    assert response.data["requires_confirmation"] is False
+    assert response.data["synced_memory_organization_settings"] == 1
+    assert response.data["deferred_memory_organization_settings"] == 0
+    assert response.data["disabled_memory_organization_settings"] == 0
+    assert response.data["pending_deletion_models"] == 1
+    assert response.data["synced_profile_rules"] == 1
+    assert response.data["removed_profile_rules"] == 0
+    assert response.data["synced_audit_refs"] == 1
+    assert response.data["cleared_audit_refs"] == 0
+    await db_session.refresh(store)
+    await db_session.refresh(profile)
+    await db_session.refresh(job)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == new_model_id
+    assert profile.configs["channel"]["chat_channel"]["rules"] == [{"channel_id": channel.id, "model_id": new_model_id}]
+    assert profile.configs["security"]["audit_channel_id"] == channel.id
+    assert profile.configs["security"]["audit_model_id"] == new_model_id
+    assert job.status == LongTermMemoryMutationStatus.PENDING
+    assert job.payload["model_config"]["channel_id"] == channel.id
+    assert job.payload["model_config"]["model_id"] == old_model_id
+    pending = await channel_crud.get(db_session, channel.id)
+    assert pending is not None
+    assert {model["model_id"] for model in pending.model_ids} == {old_model_id, new_model_id}
+    models_by_id = {model["model_id"]: model for model in pending.model_ids}
+    assert models_by_id[new_model_id]["is_enabled"] is True
+    assert models_by_id[old_model_id]["is_enabled"] is False
+    assert models_by_id[old_model_id]["lifecycle_status"] == "pending_delete"
+
+    completed_job = await memory_job_crud.update_status(
+        db_session,
+        uid=uid,
+        job_id=job.id,
+        status=LongTermMemoryMutationStatus.SUCCEEDED,
+        commit=False,
+        clear_active_mutation_key=True,
+    )
+    assert completed_job is not None
+    deleted_count = await finalize_pending_channel_model_deletions_for_organization_job(
+        db_session,
+        job=completed_job,
+    )
+    await db_session.commit()
+
+    assert deleted_count == 1
+    finalized = await channel_crud.get(db_session, channel.id)
+    assert finalized is not None
+    assert finalized.model_ids == normalize_channel_model_ids(new_models)
+    await db_session.refresh(store)
+    await db_session.refresh(profile)
+    assert store.auto_organize_enabled is True
+    assert store.organization_channel_id == channel.id
+    assert store.organization_model_id == new_model_id
+    assert profile.configs["channel"]["chat_channel"]["rules"] == [{"channel_id": channel.id, "model_id": new_model_id}]
+    assert profile.configs["security"]["audit_channel_id"] == channel.id
+    assert profile.configs["security"]["audit_model_id"] == new_model_id
+
+
+@pytest.mark.asyncio
 async def test_pending_delete_chat_model_rejects_submitted_modification(
     db_session: AsyncSession,
 ) -> None:
