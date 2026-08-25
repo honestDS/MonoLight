@@ -252,7 +252,7 @@
         </div>
       </template>
     </VList>
-    <div v-if="!currentSessionId && messages.length === 0" class="empty-chat">
+    <div v-if="!currentSessionId && messages.length === 0 && !hideEmptyTip" class="empty-chat">
       <p>{{ $t('chat.empty_chat_tip') }}</p>
     </div>
     <Transition name="new-message-indicator">
@@ -318,7 +318,8 @@ const props = defineProps({
   historyLoading: { type: Boolean, default: false },
   initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false },
-  llmRequestMetadata: { type: Object, default: null }
+  llmRequestMetadata: { type: Object, default: null },
+  hideEmptyTip: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
 const { t } = useI18n()
