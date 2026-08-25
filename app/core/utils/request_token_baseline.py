@@ -5,6 +5,11 @@ from app.core.utils.context_messages import is_context_summary_message, message_
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
 
+PROVIDER_REQUEST_ID_METADATA_KEY = "_provider_request_id"
+PROVIDER_INPUT_TOKENS_METADATA_KEY = "_provider_input_tokens"
+PROVIDER_CACHED_TOKENS_METADATA_KEY = "_provider_cached_tokens"
+PROVIDER_OUTPUT_TOKENS_METADATA_KEY = "_provider_output_tokens"
+
 
 def _is_non_negative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
@@ -12,6 +17,49 @@ def _is_non_negative_int(value: Any) -> bool:
 
 def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def build_provider_request_usage_metadata(provider_request_id: str, provider_metrics: dict[str, Any]) -> dict[str, str | int]:
+    request_id = provider_request_id.strip() if isinstance(provider_request_id, str) else ""
+    if not request_id or len(request_id) > 64:
+        raise ValueError("provider_request_id must be a non-empty string of at most 64 characters")
+
+    input_tokens = provider_metrics.get("input_tokens")
+    if provider_metrics.get("input_tokens_source") != "provider" or not _is_positive_int(input_tokens):
+        input_tokens = 0
+
+    cached_tokens = provider_metrics.get("cached_tokens")
+    cached_tokens = min(cached_tokens, input_tokens) if _is_non_negative_int(cached_tokens) and input_tokens > 0 else 0
+
+    output_tokens = provider_metrics.get("output_tokens")
+    output_tokens = output_tokens if _is_non_negative_int(output_tokens) else 0
+
+    return {
+        PROVIDER_REQUEST_ID_METADATA_KEY: request_id,
+        PROVIDER_INPUT_TOKENS_METADATA_KEY: input_tokens,
+        PROVIDER_CACHED_TOKENS_METADATA_KEY: cached_tokens,
+        PROVIDER_OUTPUT_TOKENS_METADATA_KEY: output_tokens,
+    }
+
+
+def extract_provider_request_usage(metadata: Any) -> tuple[str, int, int, int] | None:
+    if not isinstance(metadata, dict):
+        return None
+
+    request_id = metadata.get(PROVIDER_REQUEST_ID_METADATA_KEY)
+    request_id = request_id.strip() if isinstance(request_id, str) else ""
+    if not request_id or len(request_id) > 64:
+        return None
+
+    input_tokens = metadata.get(PROVIDER_INPUT_TOKENS_METADATA_KEY)
+    cached_tokens = metadata.get(PROVIDER_CACHED_TOKENS_METADATA_KEY)
+    output_tokens = metadata.get(PROVIDER_OUTPUT_TOKENS_METADATA_KEY)
+    if not (_is_non_negative_int(input_tokens) and _is_non_negative_int(cached_tokens) and _is_non_negative_int(output_tokens)):
+        return None
+    if cached_tokens > input_tokens or (input_tokens == 0 and cached_tokens == 0 and output_tokens == 0):
+        return None
+
+    return request_id, input_tokens, cached_tokens, output_tokens
 
 
 def extract_provider_token_metrics(usage: Any) -> dict[str, int | float]:
@@ -33,6 +81,71 @@ def extract_provider_token_metrics(usage: Any) -> dict[str, int | float]:
     if _is_non_negative_int(cached_tokens):
         metrics["cached_tokens"] = cached_tokens
     return metrics
+
+
+def extract_session_cache_token_totals(metadata: Any) -> tuple[int, int]:
+    if not isinstance(metadata, dict):
+        return 0, 0
+
+    total_input_tokens = metadata.get("total_input_tokens")
+    total_cached_tokens = metadata.get("total_cached_tokens")
+    if _is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens:
+        return total_input_tokens, total_cached_tokens
+
+    input_tokens = metadata.get("input_tokens")
+    if metadata.get("input_tokens_source") != "provider" or not _is_positive_int(input_tokens):
+        return 0, 0
+
+    cached_tokens = metadata.get("cached_tokens")
+    cached_tokens = cached_tokens if _is_non_negative_int(cached_tokens) else 0
+    return input_tokens, min(cached_tokens, input_tokens)
+
+
+def merge_session_cache_token_totals(
+    metadata: Any,
+    *,
+    total_input_tokens: Any = 0,
+    total_cached_tokens: Any = 0,
+) -> tuple[int, int]:
+    persisted_input_tokens, persisted_cached_tokens = extract_session_cache_token_totals(metadata)
+    if not (_is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens):
+        total_input_tokens, total_cached_tokens = 0, 0
+
+    return (
+        max(persisted_input_tokens, total_input_tokens),
+        max(persisted_cached_tokens, total_cached_tokens),
+    )
+
+
+def build_session_cache_metrics(total_input_tokens: Any, total_cached_tokens: Any) -> dict[str, int | float]:
+    if not (_is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens):
+        total_input_tokens, total_cached_tokens = 0, 0
+
+    return {
+        "total_input_tokens": total_input_tokens,
+        "total_cached_tokens": total_cached_tokens,
+        "cache_hit_rate": total_cached_tokens / total_input_tokens if total_input_tokens > 0 else 0.0,
+    }
+
+
+def accumulate_session_cache_metrics(
+    provider_metrics: dict[str, Any],
+    *,
+    total_input_tokens: Any = 0,
+    total_cached_tokens: Any = 0,
+) -> tuple[int, int]:
+    if not (_is_non_negative_int(total_input_tokens) and _is_non_negative_int(total_cached_tokens) and total_cached_tokens <= total_input_tokens):
+        total_input_tokens, total_cached_tokens = 0, 0
+
+    input_tokens = provider_metrics.get("input_tokens")
+    if provider_metrics.get("input_tokens_source") == "provider" and _is_positive_int(input_tokens):
+        cached_tokens = provider_metrics.get("cached_tokens")
+        cached_tokens = cached_tokens if _is_non_negative_int(cached_tokens) else 0
+        total_input_tokens += input_tokens
+        total_cached_tokens += min(cached_tokens, input_tokens)
+
+    provider_metrics.update(build_session_cache_metrics(total_input_tokens, total_cached_tokens))
+    return total_input_tokens, total_cached_tokens
 
 
 def extract_reusable_token_metrics(metadata: Any) -> dict[str, int | float]:

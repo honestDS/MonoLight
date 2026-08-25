@@ -92,25 +92,47 @@ class _TrackingSession:
 
 
 @pytest.mark.asyncio
-async def test_channel_call_releases_connection_before_model_request(monkeypatch):
+async def test_channel_call_releases_connection_and_reports_empty_response_usage_before_fallback(monkeypatch):
     db = _TrackingSession()
     model_call_commit_counts = []
+    request_metadata = []
     channel = SimpleNamespace(
+        id=1,
+        name="channel-1",
         base_url="https://example.invalid",
         get_decrypted_api_key=lambda: "secret",
     )
 
-    async def select_channel(*_args, **_kwargs):
+    async def select_channel(*_args, **kwargs):
+        if "excluded_priorities" in kwargs:
+            assert kwargs["excluded_priorities"] == {1}
+            return channel, {"model_id": "model-2", "protocol": "OPENAI"}, SimpleNamespace(priority=2)
         return channel, {"model_id": "model-1", "protocol": "OPENAI"}, SimpleNamespace(priority=1)
+
+    responses = [
+        InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content=""),
+            model="model-1",
+            usage={"prompt_tokens": 100, "cached_tokens": 100, "completion_tokens": 0},
+        ),
+        InternalResponse(
+            message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"),
+            model="model-2",
+            usage={"prompt_tokens": 100, "cached_tokens": 0, "completion_tokens": 10},
+        ),
+    ]
 
     async def generate(**_kwargs):
         model_call_commit_counts.append(db.commit_count)
-        return InternalResponse(message=InternalMessage(role=MessageRole.ASSISTANT, content="ok"), model="model-1")
+        return responses.pop(0)
+
+    async def request_metadata_callback(metadata):
+        request_metadata.append(metadata)
 
     monkeypatch.setattr(channel_call, "select_channel", select_channel)
     monkeypatch.setattr(channel_call.LLMClient, "generate", generate)
 
-    await channel_call.generate_chat_with_fallback(
+    response, *_ = await channel_call.generate_chat_with_fallback(
         db,
         chat_channel=SimpleNamespace(rules=[], chat_timeout=30),
         request_builder=lambda _params: [InternalMessage(role=MessageRole.USER, content="hello")],
@@ -118,6 +140,21 @@ async def test_channel_call_releases_connection_before_model_request(monkeypatch
         cursor_key="profile:CHAT",
         uid="user-1",
         session_id="session-1",
+        request_metadata_callback=request_metadata_callback,
     )
 
-    assert model_call_commit_counts == [1]
+    assert model_call_commit_counts == [1, 2]
+    assert response.model == "model-2"
+    assert [metadata["input_tokens"] for metadata in request_metadata] == [100, 100]
+    assert [metadata["cached_tokens"] for metadata in request_metadata] == [100, 0]
+    provider_request_ids = [metadata["_provider_request_id"] for metadata in request_metadata]
+    assert all(isinstance(request_id, str) and request_id for request_id in provider_request_ids)
+    assert provider_request_ids[0] != provider_request_ids[1]
+    assert [
+        (
+            metadata["_provider_input_tokens"],
+            metadata["_provider_cached_tokens"],
+            metadata["_provider_output_tokens"],
+        )
+        for metadata in request_metadata
+    ] == [(100, 100, 0), (100, 0, 10)]

@@ -38,6 +38,8 @@ class MemoryRecallContext:
     latest_llm_request_metadata: dict[str, Any] | None = None
     total_output_tokens: int = 0
     session_total_output_tokens: int | None = None
+    session_total_input_tokens: int = 0
+    session_total_cached_tokens: int = 0
     allowed_knowledge_base_ids: list[int] = field(default_factory=list)
 
 
@@ -55,6 +57,8 @@ class MemoryRecallPrecheckResult:
     latest_llm_request_metadata: dict[str, Any] | None
     total_output_tokens: int
     session_total_output_tokens: int | None
+    session_total_input_tokens: int
+    session_total_cached_tokens: int
     error_type: str | None = None
 
 
@@ -83,6 +87,8 @@ def build_result(
         latest_llm_request_metadata=context.latest_llm_request_metadata,
         total_output_tokens=context.total_output_tokens,
         session_total_output_tokens=context.session_total_output_tokens,
+        session_total_input_tokens=context.session_total_input_tokens,
+        session_total_cached_tokens=context.session_total_cached_tokens,
         error_type=error_type,
     )
 

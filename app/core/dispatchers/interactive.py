@@ -72,11 +72,15 @@ from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.message_assembler import MessageAssembler
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
+    accumulate_session_cache_metrics,
+    build_provider_request_usage_metadata,
     build_request_token_baseline,
+    build_session_cache_metrics,
     estimate_incremental_input_tokens,
     extract_provider_token_metrics,
     extract_reusable_token_metrics,
     extract_session_total_output_tokens,
+    merge_session_cache_token_totals,
 )
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
@@ -138,6 +142,7 @@ class InteractiveDispatcherMixin:
         show_tool_calls: bool = True,
         additional_system_prompt: str | None = None,
         dispatcher_mode: Literal["non_stream", "stream"] = "non_stream",
+        request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
         try:
             dispatch_logger = logger if dispatcher_mode == "non_stream" else get_logger("app.core.dispatchers.stream")
@@ -181,6 +186,11 @@ class InteractiveDispatcherMixin:
             is_first_iter = execution_resume_state is None
             resumed_total_output_tokens = execution_resume_state.get("total_output_tokens", 0) if execution_resume_state else 0
             resumed_session_total_output_tokens = execution_resume_state.get("session_total_output_tokens") if execution_resume_state else None
+            resumed_session_total_input_tokens, resumed_session_total_cached_tokens = merge_session_cache_token_totals(
+                None,
+                total_input_tokens=(execution_resume_state.get("session_total_input_tokens", 0) if execution_resume_state is not None else 0),
+                total_cached_tokens=(execution_resume_state.get("session_total_cached_tokens", 0) if execution_resume_state is not None else 0),
+            )
             initial_memory_recall_boundary = max(frozen_user_message_ids) if frozen_user_message_ids else initial_msg.id
             resumed_memory_recall_boundary = execution_resume_state.get("memory_recall_boundary_message_id") if execution_resume_state else None
             resumed_memory_recall_status = execution_resume_state.get("memory_recall_status") if execution_resume_state else None
@@ -198,6 +208,8 @@ class InteractiveDispatcherMixin:
                 memory_recall_boundary_message_id=initial_memory_recall_boundary,
                 memory_recall_status=(resumed_memory_recall_status if resumed_memory_recall_boundary == initial_memory_recall_boundary else None),
                 total_output_tokens=(resumed_total_output_tokens if isinstance(resumed_total_output_tokens, int) and not isinstance(resumed_total_output_tokens, bool) and resumed_total_output_tokens >= 0 else 0),
+                session_total_input_tokens=resumed_session_total_input_tokens,
+                session_total_cached_tokens=resumed_session_total_cached_tokens,
                 session_total_output_tokens=(resumed_session_total_output_tokens if isinstance(resumed_session_total_output_tokens, int) and not isinstance(resumed_session_total_output_tokens, bool) and resumed_session_total_output_tokens >= 0 else None),
             )
             if execution_resume_state is not None:
@@ -309,6 +321,8 @@ class InteractiveDispatcherMixin:
                                     latest_llm_request_metadata=latest_llm_request_metadata,
                                     total_output_tokens=checkpoint_state.total_output_tokens,
                                     session_total_output_tokens=checkpoint_state.session_total_output_tokens,
+                                    session_total_input_tokens=checkpoint_state.session_total_input_tokens,
+                                    session_total_cached_tokens=checkpoint_state.session_total_cached_tokens,
                                 )
                             )
                             messages = memory_recall_result.messages
@@ -323,6 +337,8 @@ class InteractiveDispatcherMixin:
                             latest_llm_request_metadata = memory_recall_result.latest_llm_request_metadata
                             checkpoint_state.total_output_tokens = memory_recall_result.total_output_tokens
                             checkpoint_state.session_total_output_tokens = memory_recall_result.session_total_output_tokens
+                            checkpoint_state.session_total_input_tokens = memory_recall_result.session_total_input_tokens
+                            checkpoint_state.session_total_cached_tokens = memory_recall_result.session_total_cached_tokens
                             img_understanding, audio_understanding, video_understanding = get_multimodal_from_entry(model_entry)
                             checkpoint_state.memory_recall_status = memory_recall_result.status
                             await _save_execution_checkpoint(checkpoint_state, messages, current_turn)
@@ -421,6 +437,11 @@ class InteractiveDispatcherMixin:
                                 context_summary_revision = session.context_summary_revision if session is not None else 0
                                 context_content_revision = session.context_content_revision if session is not None else 0
                                 previous_session_llm_request_metadata = session.llm_request_metadata if session is not None else None
+                                checkpoint_state.session_total_input_tokens, checkpoint_state.session_total_cached_tokens = merge_session_cache_token_totals(
+                                    previous_session_llm_request_metadata,
+                                    total_input_tokens=checkpoint_state.session_total_input_tokens,
+                                    total_cached_tokens=checkpoint_state.session_total_cached_tokens,
+                                )
                                 persisted_session_total_output_tokens = extract_session_total_output_tokens(previous_session_llm_request_metadata)
                                 if checkpoint_state.session_total_output_tokens is None:
                                     checkpoint_state.session_total_output_tokens = persisted_session_total_output_tokens
@@ -460,10 +481,15 @@ class InteractiveDispatcherMixin:
                                         context_content_revision=context_content_revision,
                                     ),
                                     **extract_reusable_token_metrics(previous_display_token_metadata),
+                                    **build_session_cache_metrics(
+                                        checkpoint_state.session_total_input_tokens,
+                                        checkpoint_state.session_total_cached_tokens,
+                                    ),
                                 }
                                 if stream_event_callback is not None:
                                     await stream_event_callback(dict(latest_llm_request_metadata))
                                 await db.commit()
+                                provider_request_id = str(uuid.uuid4())
                                 attempt_started_at = get_local_time()
                                 if stream_event_callback is None:
                                     response = await LLMClient.generate(**generation_kwargs)
@@ -489,11 +515,12 @@ class InteractiveDispatcherMixin:
                                 ai_refusal = getattr(ai_msg, "refusal", None)
                                 ai_provider_metadata = getattr(ai_msg, "provider_metadata", None)
                                 provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
-                                has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
-                                has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
-                                legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
-                                if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
-                                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+                                provider_request_usage_metadata = build_provider_request_usage_metadata(provider_request_id, provider_token_metrics)
+                                checkpoint_state.session_total_input_tokens, checkpoint_state.session_total_cached_tokens = accumulate_session_cache_metrics(
+                                    provider_token_metrics,
+                                    total_input_tokens=checkpoint_state.session_total_input_tokens,
+                                    total_cached_tokens=checkpoint_state.session_total_cached_tokens,
+                                )
                                 if "output_tokens" in provider_token_metrics:
                                     checkpoint_state.total_output_tokens += provider_token_metrics["output_tokens"]
                                     checkpoint_state.session_total_output_tokens += provider_token_metrics["output_tokens"]
@@ -501,8 +528,15 @@ class InteractiveDispatcherMixin:
                                     provider_token_metrics["total_output_tokens"] = checkpoint_state.session_total_output_tokens
                                 metadata_changed = any(latest_llm_request_metadata.get(field) != value for field, value in provider_token_metrics.items())
                                 latest_llm_request_metadata.update(provider_token_metrics)
+                                if request_metadata_callback is not None:
+                                    await request_metadata_callback({**latest_llm_request_metadata, **provider_request_usage_metadata})
                                 if metadata_changed and stream_event_callback is not None:
                                     await stream_event_callback(dict(latest_llm_request_metadata))
+                                has_content = bool(ai_msg.content.strip()) if isinstance(ai_msg.content, str) else bool(ai_msg.content)
+                                has_refusal = bool(ai_refusal.strip()) if isinstance(ai_refusal, str) else False
+                                legal_empty_finish_reasons = {"length", "content_filter", "refusal", "incomplete"}
+                                if not ai_msg.tool_calls and not has_content and not has_refusal and response_finish_reason not in legal_empty_finish_reasons:
+                                    raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
                                 hidden_tool_round = bool(ai_msg.tool_calls) and not show_tool_calls
                                 if not hidden_tool_round:
                                     await _emit_agent_loop_output(stream_state)

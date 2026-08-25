@@ -358,7 +358,7 @@ async def test_hidden_stream_content_does_not_prevent_channel_retry(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel(monkeypatch):
+async def test_non_stream_retry_accumulates_empty_response_usage_and_refreshes_max_tokens_context(monkeypatch):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
         channel=SimpleNamespace(chat_channel=SimpleNamespace(chat_timeout=60)),
@@ -371,6 +371,8 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     model_requests = []
     persisted_environment_prompts = []
     saved_created_at = []
+    request_metadatas = []
+    callback_order = []
     logger = _Logger()
 
     async def get_user(db, uid):
@@ -403,21 +405,38 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     async def generate(**kwargs):
         model_requests.append(kwargs)
         if kwargs["model_id"] == "model-1":
-            raise LLMException(message="ERR_LLM_UNEXPECTED_ERROR")
+            return SimpleNamespace(
+                message=InternalMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                ),
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 0,
+                    "total_tokens": 100,
+                    "cached_tokens": 100,
+                },
+            )
         return SimpleNamespace(
             message=InternalMessage(
                 role=MessageRole.ASSISTANT,
                 content="ok",
             ),
             usage={
-                "prompt_tokens": 777,
+                "prompt_tokens": 100,
                 "completion_tokens": 10,
-                "total_tokens": 787,
-                "cached_tokens": 222,
+                "total_tokens": 110,
+                "cached_tokens": 0,
             },
         )
 
+    async def request_metadata_callback(metadata):
+        metadata_copy = dict(metadata)
+        request_metadatas.append(metadata_copy)
+        callback_order.append(("metadata", metadata_copy))
+
     async def save_assistant(db, session_id, uid, profile_id, ai_msg, dedupe_key=None, created_at=None):
+        callback_order.append(("message", ai_msg))
         saved_created_at.append(created_at)
         return SimpleNamespace(content="ok")
 
@@ -478,9 +497,17 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
         ),
         persisted_profile_id=1,
         additional_user_messages_fetcher=fetch_additional,
+        request_metadata_callback=request_metadata_callback,
     )
 
     assert [request["model_id"] for request in model_requests] == ["model-1", "model-2"]
+    assert [event_type for event_type, _ in callback_order] == ["metadata", "metadata", "message"]
+    assert len(request_metadatas) == 2
+    assert request_metadatas[0]["total_input_tokens"] == 100
+    assert request_metadatas[0]["total_cached_tokens"] == 100
+    assert request_metadatas[1]["total_input_tokens"] == 200
+    assert request_metadatas[1]["total_cached_tokens"] == 100
+    assert request_metadatas[1]["cache_hit_rate"] == pytest.approx(0.5)
     assert "The hard maximum for this response is 1024 output tokens." in model_requests[0]["messages"][0].content
     assert "The hard maximum for this response is 256 output tokens." in model_requests[1]["messages"][0].content
     assert "The hard maximum for this response is 1024 output tokens." not in model_requests[1]["messages"][0].content
@@ -488,12 +515,14 @@ async def test_non_stream_retry_refreshes_max_tokens_instruction_for_new_channel
     assert model_requests[1]["max_tokens"] == 256
     assert saved_created_at == [None]
     assert LLMResponse.model_validate(response).choices[0].message.content == "ok"
-    assert response["llm_request_metadata"]["input_tokens"] == 777
+    assert response["llm_request_metadata"]["input_tokens"] == 100
     assert response["llm_request_metadata"]["context_window_tokens"] == 4000
     assert response["llm_request_metadata"]["max_output_tokens"] == 256
     assert response["llm_request_metadata"]["output_tokens"] == 10
-    assert response["llm_request_metadata"]["cached_tokens"] == 222
-    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(222 / 777)
+    assert response["llm_request_metadata"]["cached_tokens"] == 0
+    assert response["llm_request_metadata"]["total_input_tokens"] == 200
+    assert response["llm_request_metadata"]["total_cached_tokens"] == 100
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
@@ -1006,7 +1035,7 @@ async def test_interactive_persists_handoff_binding_when_round_is_not_complete(m
 
 
 @pytest.mark.asyncio
-async def test_interactive_accumulates_output_tokens_and_preserves_latest_cache_metrics(monkeypatch):
+async def test_interactive_accumulates_output_tokens_and_session_cache_metrics(monkeypatch):
     checkpoints = []
     events = []
 
@@ -1048,7 +1077,8 @@ async def test_interactive_accumulates_output_tokens_and_preserves_latest_cache_
     ]
     provider_metadata_events = [event for event in metadata_events if event["input_tokens_source"] == "provider"]
     assert [event["input_tokens"] for event in provider_metadata_events] == [1000, 1100]
-    assert all("total_input_tokens" not in event for event in metadata_events)
+    assert [event["total_input_tokens"] for event in metadata_events] == [0, 1000, 1000, 2100]
+    assert [event["total_cached_tokens"] for event in metadata_events] == [0, 200, 200, 640]
     assert metadata_events[1]["output_tokens"] == 12
     assert metadata_events[1]["total_output_tokens"] == 12
     assert metadata_events[2]["output_tokens"] == 12
@@ -1058,12 +1088,13 @@ async def test_interactive_accumulates_output_tokens_and_preserves_latest_cache_
     assert metadata_events[3]["output_tokens"] == 32
     assert metadata_events[3]["total_output_tokens"] == 32
     assert metadata_events[3]["cached_tokens"] == 440
-    assert metadata_events[3]["cache_hit_rate"] == pytest.approx(0.4)
+    assert metadata_events[3]["cache_hit_rate"] == pytest.approx(640 / 2100)
     assert any(checkpoint["total_output_tokens"] == 12 for checkpoint in checkpoints)
     assert any(checkpoint["session_total_output_tokens"] == 12 for checkpoint in checkpoints)
+    assert any(checkpoint["session_total_input_tokens"] == 1000 and checkpoint["session_total_cached_tokens"] == 200 for checkpoint in checkpoints)
     assert response["llm_request_metadata"]["output_tokens"] == 32
     assert response["llm_request_metadata"]["total_output_tokens"] == 32
-    assert "total_input_tokens" not in response["llm_request_metadata"]
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(640 / 2100)
     assert unknown_calls == []
 
 
@@ -1143,16 +1174,23 @@ async def test_interactive_resume_continues_total_output_tokens(monkeypatch):
             "current_turn": 0,
             "total_output_tokens": 50,
             "session_total_output_tokens": 12,
+            "session_total_input_tokens": 500,
+            "session_total_cached_tokens": 100,
         },
     )
 
     provider_metadata_events = [event for event in events if event["type"] == "llm_request_metadata" and event["input_tokens_source"] == "provider"]
     assert [event["output_tokens"] for event in provider_metadata_events] == [57, 60]
     assert [event["total_output_tokens"] for event in provider_metadata_events] == [19, 22]
+    assert [event["total_input_tokens"] for event in provider_metadata_events] == [600, 720]
+    assert [event["total_cached_tokens"] for event in provider_metadata_events] == [120, 150]
+    assert provider_metadata_events[0]["cache_hit_rate"] == pytest.approx(120 / 600)
+    assert provider_metadata_events[1]["cache_hit_rate"] == pytest.approx(150 / 720)
     assert response["llm_request_metadata"]["output_tokens"] == 60
     assert response["llm_request_metadata"]["total_output_tokens"] == 22
-    assert all("total_input_tokens" not in event for event in events if event["type"] == "llm_request_metadata")
-    assert "total_input_tokens" not in response["llm_request_metadata"]
+    assert response["llm_request_metadata"]["total_input_tokens"] == 720
+    assert response["llm_request_metadata"]["total_cached_tokens"] == 150
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(150 / 720)
     assert unknown_calls == []
 
 
