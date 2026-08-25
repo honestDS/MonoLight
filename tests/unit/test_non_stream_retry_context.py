@@ -84,6 +84,39 @@ class _Logger:
 
 
 @pytest.mark.asyncio
+async def test_handle_stream_content_buffers_leading_whitespace_until_text():
+    emitted_events = []
+
+    async def publish_event(event):
+        emitted_events.append(event)
+
+    stream_state = interactive_helpers_module._AgentLoopStreamState(
+        callback=publish_event,
+        current_turn=1,
+        response_id="response-1",
+        expose_tool_call_content=True,
+        show_tool_calls=True,
+    )
+
+    await interactive_helpers_module._handle_stream_content(stream_state, " ")
+    await interactive_helpers_module._handle_stream_content(stream_state, "\n")
+
+    assert emitted_events == []
+
+    await interactive_helpers_module._handle_stream_content(stream_state, "hello")
+
+    assert [event["type"] for event in emitted_events] == ["agent_loop_output", "content"]
+    assert emitted_events[-1]["content"] == " \nhello"
+
+    await interactive_helpers_module._handle_stream_content(stream_state, " ")
+    await interactive_helpers_module._handle_stream_content(stream_state, "world")
+
+    content_events = [event for event in emitted_events if event["type"] == "content"]
+    assert [event["content"] for event in content_events] == [" \nhello", " ", "world"]
+    assert "".join(event["content"] for event in content_events) == " \nhello world"
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_message(monkeypatch):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
@@ -980,6 +1013,55 @@ async def _run_audited_interactive_dispatch(
             execution_resume_state=execution_resume_state,
         )
     return response, unknown_calls
+
+
+@pytest.mark.asyncio
+async def test_interactive_omits_whitespace_only_tool_turn_content_events(monkeypatch):
+    emitted_events = []
+    tool_call = InternalToolCall(
+        id="call-whitespace",
+        name="execute_shell",
+        arguments={"command": "echo 1"},
+    )
+
+    async def save_checkpoint(_checkpoint):
+        return None
+
+    async def process_tool(current_tool_call, *args, **kwargs):
+        return InternalMessage(
+            role=MessageRole.TOOL,
+            tool_call_id=current_tool_call.id,
+            content='{"status":"success"}',
+        )
+
+    async def publish_event(event):
+        emitted_events.append(event)
+
+    response, _unknown_calls = await _run_audited_interactive_dispatch(
+        monkeypatch,
+        save_checkpoint,
+        process_tool,
+        audit_result=None,
+        stream_event_callback=publish_event,
+        tool_call=tool_call,
+        response_messages=[
+            InternalMessage(
+                role=MessageRole.ASSISTANT,
+                content=" \n\t",
+                tool_calls=[tool_call],
+            ),
+            InternalMessage(role=MessageRole.ASSISTANT, content="finished"),
+        ],
+    )
+
+    tool_start_events = [event for event in emitted_events if event["type"] == "tool_start"]
+    assert len(tool_start_events) == 1
+    tool_round_response_id = tool_start_events[0]["response_id"]
+    tool_round_turn_end_events = [event for event in emitted_events if event["type"] == "turn_end" and event["response_id"] == tool_round_response_id]
+    assert len(tool_round_turn_end_events) == 1
+    assert "content" not in tool_round_turn_end_events[0]
+    assert [event["content"] for event in emitted_events if event["type"] == "content"] == ["finished"]
+    assert response["choices"][0]["message"]["content"] == "finished"
 
 
 @pytest.mark.asyncio

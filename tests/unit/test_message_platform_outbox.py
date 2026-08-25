@@ -608,6 +608,104 @@ async def test_notifier_keeps_external_event_unchanged_when_tool_calls_are_hidde
 
 
 @pytest.mark.asyncio
+async def test_notifier_does_not_enqueue_blank_external_proactive_reply_without_files(monkeypatch):
+    enqueue_calls = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
+
+    async def enqueue(db, **kwargs):
+        enqueue_calls.append(kwargs)
+        return SimpleNamespace(id=7), True
+
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+    await notifier_module.send_session_event(
+        "uid-1",
+        "weixin-openclaw:user-1",
+        {"type": "proactive_reply", "content": " \n\t", "files": []},
+    )
+
+    assert enqueue_calls == []
+
+
+@pytest.mark.asyncio
+async def test_notifier_enqueues_blank_external_proactive_reply_with_files(monkeypatch):
+    enqueued_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "weixin-openclaw:user-1"
+        return SimpleNamespace(source="weixin-openclaw", show_tool_calls=True)
+
+    async def enqueue(db, **kwargs):
+        enqueued_events.append(kwargs["event"])
+        return SimpleNamespace(id=7), True
+
+    content = " \n\t"
+    files = [{"id": "file-1"}]
+    event = {"type": "proactive_reply", "content": content, "files": files}
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module, "get_outbound_text_policy_registry", lambda: {})
+    monkeypatch.setattr(notifier_module.message_platform_outbox_crud, "enqueue", enqueue)
+
+    await notifier_module.send_session_event("uid-1", "weixin-openclaw:user-1", event)
+
+    assert len(enqueued_events) == 1
+    assert enqueued_events[0]["content"] == content
+    assert enqueued_events[0]["files"] == files
+
+
+@pytest.mark.asyncio
+async def test_notifier_notifies_web_blank_proactive_reply_without_outbox_filter(monkeypatch):
+    notified_events = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return SimpleNamespace()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def get_session(db, session_id):
+        assert session_id == "session-1"
+        return SimpleNamespace(source="http", show_tool_calls=True)
+
+    async def notify(uid, session_id, event, **kwargs):
+        assert (uid, session_id) == ("uid-1", "session-1")
+        notified_events.append(event)
+        return True
+
+    content = " \n\t"
+    event = {"type": "proactive_reply", "content": content, "files": []}
+    monkeypatch.setattr(notifier_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(notifier_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(notifier_module.session_notifier, "notify", notify)
+
+    await notifier_module.send_session_event("uid-1", "session-1", event)
+
+    assert notified_events == [event]
+    assert notified_events[0]["content"] == content
+
+
+@pytest.mark.asyncio
 async def test_notifier_enqueues_sanitized_stream_tool_summary_for_external_session(monkeypatch):
     enqueued_events = []
 

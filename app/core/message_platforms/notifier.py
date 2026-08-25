@@ -41,6 +41,16 @@ def _has_proactive_reply_tool_history(event: dict[str, Any]) -> bool:
     return any(item.get("role") == "assistant" and isinstance(item.get("tool_calls"), list) and any(isinstance(tool_call, dict) for tool_call in item["tool_calls"]) for item in history if isinstance(item, dict))
 
 
+def _has_deliverable_reply_payload(event: dict[str, Any]) -> bool:
+    content = event.get("content")
+    if isinstance(content, str):
+        if content.strip():
+            return True
+    elif content:
+        return True
+    return isinstance(event.get("files"), list) and bool(event["files"])
+
+
 async def _get_message_platform_language(uid: str, session_id: str, source: str) -> str:
     async with AsyncSessionLocal() as db:
         platform = await message_platform_crud.get_platform_for_session(
@@ -99,6 +109,8 @@ async def _send_session_event_for_session(uid: str, session_id: str, event: dict
     policy = get_outbound_text_policy_registry().get(source)
     if policy is not None:
         normalized_event = await process_outbound_text_event(uid, session_id, source, normalized_event, policy)
+    if not is_web_session_source(source) and normalized_event.get("type") == "proactive_reply" and not _has_deliverable_reply_payload(normalized_event):
+        return
     dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
     if is_web_session_source(source):
         created = await session_notifier.notify(
