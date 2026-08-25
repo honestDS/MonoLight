@@ -201,6 +201,7 @@ async def test_profile_creation_and_channel_deletion_serialize_on_channel_lock(t
                 pass
         await engine.dispose()
 
+
 @pytest.mark.asyncio
 async def test_profile_update_lock_includes_previous_and_new_channel_references(monkeypatch):
     locked_ids = []
