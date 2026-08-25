@@ -25,6 +25,7 @@ from app.core.utils.time import get_local_time
 from app.models.message import InternalMessage, MessageRole, MessageType
 from app.models.message_platform import MessagePlatform, MessagePlatformType
 from app.models.message_platform_outbox import MessagePlatformOutbox, MessagePlatformOutboxStatus
+from app.models.session import ChatSession
 from app.providers.database import AsyncSessionLocal, engine
 
 
@@ -121,13 +122,21 @@ def _patch_outbound_text_message_persistence(monkeypatch):
 @pytest.fixture(autouse=True)
 async def clean_outbox_table():
     async with engine.begin() as connection:
-        await connection.run_sync(lambda sync_connection: MessagePlatformOutbox.__table__.create(sync_connection, checkfirst=True))
+        await connection.run_sync(
+            lambda sync_connection: ChatSession.metadata.create_all(
+                sync_connection,
+                tables=[ChatSession.__table__, MessagePlatformOutbox.__table__],
+            )
+        )
     async with AsyncSessionLocal() as db:
         await db.execute(delete(MessagePlatformOutbox))
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == "session"))
+        db.add(ChatSession(session_id="session", uid="uid"))
         await db.commit()
     yield
     async with AsyncSessionLocal() as db:
         await db.execute(delete(MessagePlatformOutbox))
+        await db.execute(delete(ChatSession).where(ChatSession.session_id == "session"))
         await db.commit()
 
 

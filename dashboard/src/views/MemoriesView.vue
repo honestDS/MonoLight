@@ -25,7 +25,7 @@
         <div class="heading-actions">
           <el-button size="small" @click="loadSettings()" :loading="settingsLoading">{{ $t('memories.refresh') }}</el-button>
           <el-button type="success" size="small" @click="organize" :loading="actionLoading === 'organize'" :disabled="organizeBlocked">{{ $t('memories.organize_now') }}</el-button>
-          <el-button type="warning" size="small" @click="reindex" :loading="actionLoading === 'reindex'" :disabled="!configured">{{ $t('memories.reindex') }}</el-button>
+          <el-button type="warning" size="small" @click="reindex" :loading="actionLoading === 'reindex'" :disabled="reindexBlocked">{{ $t('memories.reindex') }}</el-button>
           <el-button
             v-if="cleanupRetryId"
             type="danger"
@@ -337,6 +337,7 @@ const activeRecordCount = computed(() => settings.activeRecordCount ?? Number(se
 const maxActiveRecords = computed(() => settings.maxActiveRecords ?? Number(settings.capacity?.max_active_records ?? numericSetting('max_active_records', 50)))
 const capacityOverLimit = computed(() => ['over_limit', 'full'].includes(settings.capacity?.status) || activeRecordCount.value > maxActiveRecords.value)
 const organizeBlocked = computed(() => Boolean(settings.blocking?.organize?.blocked))
+const reindexBlocked = computed(() => !configured.value || Boolean(settings.blocking?.maintenance?.blocked))
 const cleanupRetryId = computed(() => {
   const status = settings.old_collection_cleanup?.status ?? settings.store?.old_collection_cleanup_status
   if (status !== 'failed') return null
