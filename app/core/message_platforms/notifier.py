@@ -97,10 +97,13 @@ def build_outbox_dedupe_key(uid: str, session_id: str, source: str, event: dict[
 
 async def _send_session_event_for_session(uid: str, session_id: str, event: dict[str, Any], session: Any) -> None:
     source = session.source if session and session.source else "http"
+    is_web_source = is_web_session_source(source)
     normalized_event = normalize_outbox_event(event)
     stream_requested = normalized_event.pop("_stream_requested", False) is True
+    if not is_web_source and normalized_event.get("type") == "proactive_reply" and not _has_deliverable_reply_payload(normalized_event):
+        return
     if normalized_event.get("type") == "proactive_reply":
-        if not is_web_session_source(source):
+        if not is_web_source:
             if stream_requested:
                 normalized_event.pop("history", None)
             elif session is not None and session.show_tool_calls and _has_proactive_reply_tool_history(normalized_event):
@@ -109,10 +112,10 @@ async def _send_session_event_for_session(uid: str, session_id: str, event: dict
     policy = get_outbound_text_policy_registry().get(source)
     if policy is not None:
         normalized_event = await process_outbound_text_event(uid, session_id, source, normalized_event, policy)
-    if not is_web_session_source(source) and normalized_event.get("type") == "proactive_reply" and not _has_deliverable_reply_payload(normalized_event):
+    if not is_web_source and normalized_event.get("type") == "proactive_reply" and not _has_deliverable_reply_payload(normalized_event):
         return
     dedupe_key = build_outbox_dedupe_key(uid, session_id, source, normalized_event)
-    if is_web_session_source(source):
+    if is_web_source:
         created = await session_notifier.notify(
             uid,
             session_id,

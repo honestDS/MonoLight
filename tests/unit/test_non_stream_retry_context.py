@@ -117,6 +117,50 @@ async def test_handle_stream_content_buffers_leading_whitespace_until_text():
 
 
 @pytest.mark.asyncio
+async def test_llm_stream_callback_preserves_first_visible_character_after_whitespace(monkeypatch):
+    emitted_events = []
+    chunks = [
+        {"choices": [{"delta": {"content": " "}}]},
+        {"choices": [{"delta": {"content": "政"}}]},
+        {"choices": [{"delta": {"content": "策"}, "finish_reason": "stop"}]},
+    ]
+
+    async def generate_stream(cls, **_kwargs):
+        for chunk in chunks:
+            yield chunk
+
+    async def publish_event(event):
+        emitted_events.append(event)
+
+    stream_state = interactive_helpers_module._AgentLoopStreamState(
+        callback=publish_event,
+        current_turn=1,
+        response_id="response-1",
+        expose_tool_call_content=True,
+        show_tool_calls=True,
+    )
+
+    async def on_content(content):
+        await interactive_helpers_module._handle_stream_content(stream_state, content)
+
+    monkeypatch.setattr(interactive_module.LLMClient, "generate_stream", classmethod(generate_stream))
+
+    response = await interactive_module.LLMClient.generate_with_stream_callback(
+        api_key="key",
+        base_url="https://example.invalid",
+        model_id="model",
+        messages=[InternalMessage(role=MessageRole.USER, content="test")],
+        on_content=on_content,
+        protocol="openai",
+    )
+
+    content_events = [event for event in emitted_events if event["type"] == "content"]
+    assert [event["content"] for event in content_events] == [" 政", "策"]
+    assert "".join(event["content"] for event in content_events) == " 政策"
+    assert response.message.content == " 政策"
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_resume_uses_checkpoint_without_replaying_initial_message(monkeypatch):
     profile = SimpleNamespace(id=1)
     cfg = SimpleNamespace(
