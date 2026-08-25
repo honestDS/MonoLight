@@ -286,6 +286,7 @@ app/core/crud/
 ├── session.py              # 会话数据访问
 ├── session_event.py        # 会话事件数据访问
 ├── session_reply_stream_event.py # 回复流事件数据访问
+├── session_reply_provider_usage.py # 回复请求 Provider Usage 幂等持久化
 ├── session_reply_work_item.py # 回复工作数据访问
 ├── system_setting.py       # 系统设置数据访问
 ├── terminal_session.py     # 终端会话数据访问
@@ -408,6 +409,7 @@ app/models/
 ├── session.py              # 会话模型
 ├── session_event.py        # 会话事件模型
 ├── session_reply_stream_event.py # 回复流事件模型
+├── session_reply_provider_usage.py # 回复请求 Provider Usage 去重模型
 ├── session_reply_work_item.py # 回复工作模型
 ├── system_log.py           # 系统日志模型
 ├── system_setting.py       # 系统设置模型

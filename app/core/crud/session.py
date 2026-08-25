@@ -14,6 +14,17 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
         result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))
         return result.scalars().first()
 
+    async def get_by_session_id_for_update(self, db: AsyncSession, *, session_id: str, uid: str) -> ChatSession | None:
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.session_id == session_id,
+                ChatSession.uid == uid,
+            )
+            .with_for_update()
+        )
+        return result.scalars().first()
+
     async def has_profile_override(self, db: AsyncSession, profile_id: int) -> bool:
         result = await db.execute(select(ChatSession.session_id).where(ChatSession.profile_override_id == profile_id).limit(1))
         return result.scalar() is not None
@@ -111,6 +122,8 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             "tools_tokens",
             "output_tokens",
             "total_output_tokens",
+            "total_input_tokens",
+            "total_cached_tokens",
             "cached_tokens",
         )
         for field in optional_int_fields:
@@ -121,6 +134,13 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
                 return False
             persisted_metadata[field] = value
+
+        has_total_input_tokens = "total_input_tokens" in metadata
+        has_total_cached_tokens = "total_cached_tokens" in metadata
+        if has_total_input_tokens != has_total_cached_tokens:
+            return False
+        if has_total_input_tokens and metadata["total_cached_tokens"] > metadata["total_input_tokens"]:
+            return False
 
         if "cache_hit_rate" in metadata:
             cache_hit_rate = metadata["cache_hit_rate"]
