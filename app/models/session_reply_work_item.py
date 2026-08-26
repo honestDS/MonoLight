@@ -33,6 +33,12 @@ class SessionReplyWorkStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+SESSION_REPLY_ACTIVE_STATUSES = {
+    SessionReplyWorkStatus.READY_FOR_LLM,
+    SessionReplyWorkStatus.RUNNING,
+    SessionReplyWorkStatus.WAITING_EXTERNAL_WORK,
+}
+
 SESSION_REPLY_TERMINAL_STATUSES = {
     SessionReplyWorkStatus.MERGED,
     SessionReplyWorkStatus.SUCCEEDED,

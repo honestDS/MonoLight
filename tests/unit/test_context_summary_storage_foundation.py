@@ -12,6 +12,7 @@ from app.models.audit import AuditToolResultVersion
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.user import User
 
 
@@ -25,6 +26,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                 tables=[
                     Message.__table__,
                     ChatSession.__table__,
+                    SessionReplyWorkItem.__table__,
                     ContextSummaryStage.__table__,
                     ContextSummaryFragment.__table__,
                     AuditToolResultVersion.__table__,

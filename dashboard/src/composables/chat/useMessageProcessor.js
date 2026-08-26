@@ -581,20 +581,14 @@ export function useMessageProcessor() {
   // 按 thinking 位置插入 AI 消息
   const _insertAiMessagesByThinking = (messagesRef, aiMessages, thinkingId, requestId = null, workId = null) => {
     if (!aiMessages || aiMessages.length === 0) return
-    const existingKeys = new Set(messagesRef.value.flatMap(getToolMessageDedupeKeys))
-    let dedupedMessages = []
 
+    let orderedMessages = []
+    const pendingToolKeys = new Set()
     for (const message of aiMessages) {
       if (isAssistantResponse(message)) {
-        const replacementIndex = findAssistantResponseReplacementIndex(messagesRef.value, message)
-        if (replacementIndex !== -1) {
-          messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, message)
-          continue
-        }
-
-        const pendingReplacementIndex = findAssistantResponseReplacementIndex(dedupedMessages, message)
+        const pendingReplacementIndex = findAssistantResponseReplacementIndex(orderedMessages, message)
         if (pendingReplacementIndex !== -1) {
-          dedupedMessages = mergeAssistantResponseIntoList(dedupedMessages, message)
+          orderedMessages = mergeAssistantResponseIntoList(orderedMessages, message)
           continue
         }
 
@@ -609,33 +603,68 @@ export function useMessageProcessor() {
             : displayContent !== undefined && displayContent !== null
           const hasFiles = Array.isArray(message.files) && message.files.length > 0
           if (!hasDisplayContent && !hasFiles) continue
-
-          dedupedMessages.push(message)
-          continue
         }
       }
 
       const messageKeys = getToolMessageDedupeKeys(message)
-      if ([...messageKeys].some(key => existingKeys.has(key))) continue
-      messageKeys.forEach(key => existingKeys.add(key))
-      dedupedMessages.push(message)
+      if ([...messageKeys].some(key => pendingToolKeys.has(key))) continue
+      messageKeys.forEach(key => pendingToolKeys.add(key))
+      orderedMessages.push(message)
     }
 
-    if (dedupedMessages.length === 0) {
-      return
-    }
+    if (orderedMessages.length === 0) return
 
-    const insertAt = findThinkingIndex(messagesRef.value, thinkingId, requestId)
-
-    if (insertAt !== -1) {
-      messagesRef.value.splice(insertAt, 0, ...dedupedMessages)
-    } else {
-      const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
-      if (lastRelatedIdx !== -1) {
-        messagesRef.value.splice(lastRelatedIdx + 1, 0, ...dedupedMessages)
-      } else {
-        messagesRef.value.push(...dedupedMessages)
+    const findExistingMessageIndex = message => {
+      const messageKeys = getToolMessageDedupeKeys(message)
+      if (messageKeys.length > 0) {
+        return messagesRef.value.findIndex(existingMessage => {
+          const existingKeys = getToolMessageDedupeKeys(existingMessage)
+          return messageKeys.some(key => existingKeys.includes(key))
+        })
       }
+
+      if (isAssistantResponse(message)) {
+        return findAssistantResponseReplacementIndex(messagesRef.value, message)
+      }
+      return -1
+    }
+
+    const findNextExistingMessageIndex = startIndex => {
+      for (let index = startIndex; index < orderedMessages.length; index += 1) {
+        const existingIndex = findExistingMessageIndex(orderedMessages[index])
+        if (existingIndex !== -1) return existingIndex
+      }
+      return -1
+    }
+
+    let insertionCursor = null
+    for (let index = 0; index < orderedMessages.length; index += 1) {
+      const message = orderedMessages[index]
+      let existingIndex = findExistingMessageIndex(message)
+      if (existingIndex !== -1) {
+        if (getToolMessageDedupeKeys(message).length === 0 && isAssistantResponse(message)) {
+          messagesRef.value = mergeAssistantResponseIntoList(messagesRef.value, message)
+          existingIndex = findExistingMessageIndex(message)
+        }
+        if (existingIndex !== -1) insertionCursor = existingIndex + 1
+        continue
+      }
+
+      const nextExistingIndex = findNextExistingMessageIndex(index + 1)
+      let insertAt = nextExistingIndex
+      if (insertAt === -1 && insertionCursor !== null) {
+        insertAt = insertionCursor
+      }
+      if (insertAt === -1) {
+        insertAt = findThinkingIndex(messagesRef.value, thinkingId, requestId)
+      }
+      if (insertAt === -1) {
+        const lastRelatedIdx = findLastRelatedStreamMessageIndex(messagesRef.value, workId, requestId)
+        insertAt = lastRelatedIdx !== -1 ? lastRelatedIdx + 1 : messagesRef.value.length
+      }
+
+      messagesRef.value.splice(insertAt, 0, message)
+      insertionCursor = insertAt + 1
     }
   }
 
