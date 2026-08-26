@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +14,8 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.memory import memory_record_crud
+from app.core.crud.channel import channel_crud
+from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     build_memory_active_mutation_key,
@@ -35,6 +37,7 @@ from app.core.memory_jobs import organization_handler
 from app.core.memory_jobs.consumer import MemoryJobConsumer
 from app.core.memory_jobs.executor import MemoryJobExecutionContext, MemoryJobExecutor, MemoryJobRetryableError
 from app.core.memory_jobs.manager import MemoryJobManager, MemoryJobValidationError
+from app.models.channel import ModelChannel
 from app.models.memory import (
     LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
@@ -51,18 +54,31 @@ from app.providers.database.time import get_database_time
 
 
 @pytest_asyncio.fixture
-async def db_session() -> AsyncGenerator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def db_session(tmp_path) -> AsyncGenerator[AsyncSession]:
+    database_path = tmp_path / "memory-organization-parent-child-stage10.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path}",
+        connect_args={"timeout": 30},
+    )
     async with engine.begin() as connection:
         await connection.run_sync(
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
-                tables=[LongTermMemoryStore.__table__, LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__],
+                tables=[ModelChannel.__table__, LongTermMemoryStore.__table__, LongTermMemoryMutationJob.__table__, LongTermMemoryRecord.__table__],
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
+            session.add(
+                ModelChannel(
+                    id=7,
+                    name="memory-organization-parent-child-stage10-channel",
+                    api_key="enc:v1:test-api-key",
+                    model_ids=[],
+                )
+            )
+            await session.commit()
             yield session
     finally:
         await engine.dispose()
@@ -121,7 +137,7 @@ def _request(*, snapshot_count: int = 5) -> MemoryOrganizationExecutionRequest:
     return MemoryOrganizationExecutionRequest(
         trigger="manual",
         snapshot=snapshot,
-        organization_model=object(),  # type: ignore[arg-type]
+        organization_model=SimpleNamespace(channel_id=7),  # type: ignore[arg-type]
         messages=(InternalMessage(role=MessageRole.SYSTEM, content="system"),),
         budget=MemoryOrganizationExecutionBudget(
             required_input_tokens=10,
@@ -682,6 +698,20 @@ async def test_organization_parent_submits_only_mutation_groups_and_finishes_ato
         final_record_count=3,
     )
     _install_handler_plan(monkeypatch, request, plan)
+    lock_order: list[str] = []
+    original_channel_lock = channel_crud.lock_for_mutation
+    original_store_lock = memory_store_crud.lock_for_mutation
+
+    async def record_channel_lock(*args: Any, **kwargs: Any) -> Any:
+        lock_order.append("channel")
+        return await original_channel_lock(*args, **kwargs)
+
+    async def record_store_lock(*args: Any, **kwargs: Any) -> Any:
+        lock_order.append("store")
+        return await original_store_lock(*args, **kwargs)
+
+    monkeypatch.setattr(channel_crud, "lock_for_mutation", record_channel_lock)
+    monkeypatch.setattr(memory_store_crud, "lock_for_mutation", record_store_lock)
     context = MemoryJobExecutionContext(
         job=parent,
         worker_id="organization-worker",
@@ -690,6 +720,9 @@ async def test_organization_parent_submits_only_mutation_groups_and_finishes_ato
 
     execution = await organization_handler.handle_memory_organization(context)
 
+    assert lock_order.count("channel") >= 1
+    assert lock_order.count("store") >= 1
+    assert lock_order.index("channel") < lock_order.index("store")
     assert execution.finalized is True
     assert execution.result["completion_scope"] == "plan_submitted"
     assert execution.result["child_job_ids"]

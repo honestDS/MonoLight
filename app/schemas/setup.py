@@ -47,7 +47,7 @@ class SetupChannelInput(BaseModel):
     image_understanding: bool = Field(False, description="是否支持图像理解")
     audio_understanding: bool = Field(False, description="是否支持音频理解")
     video_understanding: bool = Field(False, description="是否支持视频理解")
-    context_window_k: int | None = Field(None, ge=1, description="上下文窗口大小（K）")
+    context_window_k: int = Field(..., ge=1, description="上下文窗口大小（K）")
     temperature: float | None = Field(None, ge=0, le=2, description="采样温度")
     top_p: float | None = Field(None, ge=0, le=1, description="核采样概率")
     max_tokens: int | None = Field(None, ge=0, description="最大生成 Token 数")

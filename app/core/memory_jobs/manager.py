@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED,
     ERR_MEMORY_JOB_ACTIVE_TARGET_BUSY,
     ERR_MEMORY_JOB_CANCELLATION_REQUESTED,
     ERR_MEMORY_JOB_CREATE_VERSION_FORBIDDEN,
@@ -28,6 +29,7 @@ from app.core.constants import (
     LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED,
     MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS,
 )
+from app.core.crud.channel import channel_crud
 from app.core.crud.memory import memory_record_crud, memory_store_crud
 from app.core.crud.memory_job import MemoryJobCancelResult, memory_job_crud
 from app.core.exceptions import BaseBusinessException
@@ -347,6 +349,31 @@ def _safe_auto_organization_error(exc: Exception) -> tuple[str, str]:
 
 
 class MemoryJobManager:
+    async def _lock_organization_store(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+    ) -> LongTermMemoryStore:
+        from app.core.memory.errors import MemoryConflictError
+
+        snapshot_store = await memory_store_crud.get_snapshot_by_uid(db, uid=uid)
+        if snapshot_store is None:
+            raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+        snapshot_channel_id = snapshot_store.organization_channel_id
+        if _is_integer(snapshot_channel_id) and snapshot_channel_id > 0:
+            await channel_crud.lock_for_mutation(
+                db,
+                channel_id=snapshot_channel_id,
+                commit=False,
+            )
+        store = await memory_store_crud.lock_for_mutation(db, uid=uid, commit=False)
+        if store is None:
+            raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+        if store.organization_channel_id != snapshot_channel_id:
+            raise MemoryConflictError(ERR_MEMORY_JOB_ACTIVE_CONFIG_CHANGED)
+        return store
+
     async def submit(
         self,
         db: AsyncSession,
@@ -534,13 +561,15 @@ class MemoryJobManager:
     ) -> MemoryJobSubmissionResult:
         from app.core.memory.identifiers import build_memory_organization_active_mutation_key
         from app.core.memory.organization import (
+            MemoryOrganizationContextExceededError,
             build_organization_dedupe_key,
+            build_organization_execution_request,
             build_organization_job_payload,
             build_organization_snapshot,
             load_organization_model_config_for_store,
         )
 
-        records = await memory_record_crud.list_recallable_for_organization(db, uid=uid)
+        records = await memory_record_crud.list_for_organization(db, uid=uid)
         snapshot = build_organization_snapshot(
             records,
             active_embedding_revision=store.active_embedding_revision,
@@ -611,6 +640,9 @@ class MemoryJobManager:
             snapshot_count=snapshot.count,
         )
         payload = build_organization_job_payload(snapshot, organization_model, trigger=trigger)
+        request = build_organization_execution_request(payload)
+        if request.budget.exceeds_hard_window:
+            raise MemoryOrganizationContextExceededError(request.budget)
         return await self.submit(
             db,
             uid=uid,
@@ -629,7 +661,6 @@ class MemoryJobManager:
         dedupe_key: str | None = None,
         commit: bool = True,
     ) -> MemoryJobSubmissionResult:
-        from app.core.memory.errors import MemoryConflictError
         from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _validate_commit
         from app.core.memory.organization import validate_organization_submission_store
 
@@ -637,9 +668,7 @@ class MemoryJobManager:
         try:
             normalized_uid = _normalize_uid(uid)
             normalized_dedupe_key = _normalize_dedupe_key(dedupe_key) if dedupe_key is not None else None
-            store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
-            if store is None:
-                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+            store = await self._lock_organization_store(db, uid=normalized_uid)
             validate_organization_submission_store(store)
             submission = await self._submit_organization_locked(
                 db,
@@ -681,9 +710,7 @@ class MemoryJobManager:
 
         try:
             normalized_uid = _normalize_uid(uid)
-            store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
-            if store is None:
-                raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
+            store = await self._lock_organization_store(db, uid=normalized_uid)
             if store.auto_organize_enabled is not True:
                 await skip()
                 return None
@@ -1451,6 +1478,13 @@ class MemoryJobManager:
                     job=cancellation.job,
                     status=LongTermMemoryMutationStatus.CANCELLED,
                 )
+                if cancellation.job.operation == LongTermMemoryMutationOperation.ORGANIZE:
+                    from app.core.channel_model_protection import finalize_pending_channel_model_deletions_for_organization_job
+
+                    await finalize_pending_channel_model_deletions_for_organization_job(
+                        db,
+                        job=cancellation.job,
+                    )
             if commit:
                 await db.commit()
             else:

@@ -704,6 +704,37 @@ def calculate_organization_required_output_tokens(snapshot_count: int) -> int:
     return snapshot_count * (MEMORY_CONTENT_MAX_TOKENS + MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS)
 
 
+def _build_organization_execution_messages(
+    snapshot_items: Iterable[MemoryOrganizationSnapshotItem],
+) -> tuple[InternalMessage, ...]:
+    return (
+        InternalMessage(role=MessageRole.SYSTEM, content=MEMORY_ORGANIZATION_SYSTEM_PROMPT),
+        InternalMessage(
+            role=MessageRole.USER,
+            content=json.dumps(
+                [item.model_dump(mode="json") for item in snapshot_items],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+
+
+def calculate_organization_required_input_tokens(
+    snapshot_items: Iterable[MemoryOrganizationSnapshotItem],
+) -> int:
+    items = tuple(snapshot_items)
+    messages = _build_organization_execution_messages(items)
+    usage = measure_context_request_usage(
+        messages=list(messages),
+        context_window_k=1,
+        max_tokens=0,
+        tools=None,
+        safety_margin_tokens=0,
+    )
+    return usage.required_input_tokens
+
+
 _ORGANIZATION_PAYLOAD_FIELDS = frozenset({"trigger", "snapshot", "organization_model"})
 _ORGANIZATION_PLAN_CHECKPOINT_FIELDS = frozenset({"model_output", "usage", "finish_reason"})
 _ORGANIZATION_TRIGGERS = frozenset({"manual", "auto"})
@@ -965,17 +996,7 @@ def restore_organization_execution_payload(payload: Any) -> MemoryOrganizationEx
 
 def build_organization_execution_request(payload: Any) -> MemoryOrganizationExecutionRequest:
     restored = restore_organization_execution_payload(payload)
-    messages = (
-        InternalMessage(role=MessageRole.SYSTEM, content=MEMORY_ORGANIZATION_SYSTEM_PROMPT),
-        InternalMessage(
-            role=MessageRole.USER,
-            content=json.dumps(
-                [item.model_dump(mode="json") for item in restored.snapshot.items],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        ),
-    )
+    messages = _build_organization_execution_messages(restored.snapshot.items)
     usage = measure_context_request_usage(
         messages=list(messages),
         context_window_k=restored.organization_model.context_window_k,
@@ -1333,26 +1354,44 @@ def _is_positive_integer(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value > 0
 
 
-async def _load_organization_model_config_for_selection(
-    db: AsyncSession,
-    *,
+def _raise_organization_context_exceeded(*, required_tokens: int, available_tokens: int) -> None:
+    raise MemoryValidationError(
+        ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
+        params={"required_tokens": required_tokens, "available_tokens": available_tokens},
+        data={
+            "required_tokens": required_tokens,
+            "available_tokens": available_tokens,
+        },
+    )
+
+
+def build_organization_model_config_for_channel_values(
     store: LongTermMemoryStore,
+    *,
     channel_id: Any,
+    channel_name: Any,
+    channel_is_active: Any,
+    base_url: Any,
+    api_key: Any,
+    http_proxy: Any,
+    model_ids: Any,
     model_id: Any,
     snapshot_count: int,
+    snapshot_items: Iterable[MemoryOrganizationSnapshotItem] | None = None,
 ) -> MemoryOrganizationModelConfig:
     normalized_channel_id, normalized_model_id = _validate_organization_selection(channel_id, model_id)
     if normalized_channel_id is None or normalized_model_id is None:
         raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
+    normalized_snapshot_items = tuple(snapshot_items) if snapshot_items is not None else None
     required_output_tokens = calculate_organization_required_output_tokens(snapshot_count)
+    if normalized_snapshot_items is not None and len(normalized_snapshot_items) != snapshot_count:
+        _raise_organization_config_invalid()
 
-    channel = await channel_crud.get(db, normalized_channel_id)
-    if channel is None or channel.is_active is not True or not _is_valid_organization_base_url(channel.base_url):
+    if channel_is_active is not True or not _is_valid_organization_base_url(base_url):
         _raise_organization_config_invalid()
 
     try:
-        api_key = channel.get_decrypted_api_key()
-        http_proxy = get_channel_http_proxy(channel)
+        normalized_http_proxy = get_channel_http_proxy({"http_proxy": http_proxy})
     except Exception:
         _raise_organization_config_invalid()
     if not isinstance(api_key, str) or not api_key.strip():
@@ -1361,7 +1400,7 @@ async def _load_organization_model_config_for_selection(
     selected_item: ChannelModelItem | None = None
     context_window_k: Any = None
     max_tokens: Any = None
-    for raw_item in channel.model_ids or []:
+    for raw_item in model_ids or []:
         if not isinstance(raw_item, dict) or raw_item.get("model_id") != normalized_model_id:
             continue
         try:
@@ -1382,25 +1421,26 @@ async def _load_organization_model_config_for_selection(
     if selected_item is None:
         _raise_organization_config_invalid()
     if max_tokens < required_output_tokens:
-        raise MemoryValidationError(
-            ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
-            params={"required_tokens": required_output_tokens, "available_tokens": max_tokens},
-            data={
-                "required_tokens": required_output_tokens,
-                "available_tokens": max_tokens,
-            },
-        )
+        _raise_organization_context_exceeded(required_tokens=required_output_tokens, available_tokens=max_tokens)
 
     context_window_tokens = context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+    if normalized_snapshot_items is not None:
+        required_input_tokens = calculate_organization_required_input_tokens(normalized_snapshot_items)
+        available_input_tokens = context_window_tokens - required_output_tokens - MEMORY_ORGANIZE_CONTEXT_SAFETY_MARGIN_TOKENS
+        if required_input_tokens > available_input_tokens:
+            _raise_organization_context_exceeded(
+                required_tokens=required_input_tokens,
+                available_tokens=available_input_tokens,
+            )
     return MemoryOrganizationModelConfig(
         channel_id=normalized_channel_id,
-        channel_name=channel.name,
+        channel_name=channel_name,
         model_id=selected_item.model_id,
         usage=selected_item.usage.value,
         protocol=resolve_model_protocol({"protocol": selected_item.protocol.value}),
-        base_url=channel.base_url,
+        base_url=base_url,
         api_key=api_key,
-        http_proxy=http_proxy,
+        http_proxy=normalized_http_proxy,
         custom_headers=selected_item.advanced_settings.custom_headers,
         temperature=selected_item.temperature if selected_item.temperature is not None else 0.7,
         top_p=selected_item.top_p,
@@ -1411,6 +1451,43 @@ async def _load_organization_model_config_for_selection(
         snapshot_count=snapshot_count,
         required_output_tokens=required_output_tokens,
         policy_version=store.organization_policy_version,
+    )
+
+
+async def _load_organization_model_config_for_selection(
+    db: AsyncSession,
+    *,
+    store: LongTermMemoryStore,
+    channel_id: Any,
+    model_id: Any,
+    snapshot_count: int,
+) -> MemoryOrganizationModelConfig:
+    normalized_channel_id, normalized_model_id = _validate_organization_selection(channel_id, model_id)
+    if normalized_channel_id is None or normalized_model_id is None:
+        raise MemoryValidationError(ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED)
+
+    channel = await channel_crud.get(db, normalized_channel_id)
+    if channel is None:
+        _raise_organization_config_invalid()
+    if channel.is_active is not True or not _is_valid_organization_base_url(channel.base_url):
+        _raise_organization_config_invalid()
+
+    try:
+        api_key = channel.get_decrypted_api_key()
+        http_proxy = getattr(channel, "http_proxy", None)
+    except Exception:
+        _raise_organization_config_invalid()
+    return build_organization_model_config_for_channel_values(
+        store,
+        channel_id=normalized_channel_id,
+        channel_name=channel.name,
+        channel_is_active=channel.is_active,
+        base_url=channel.base_url,
+        api_key=api_key,
+        http_proxy=http_proxy,
+        model_ids=channel.model_ids,
+        model_id=normalized_model_id,
+        snapshot_count=snapshot_count,
     )
 
 
@@ -1515,6 +1592,14 @@ async def update_organization_settings(
         _validate_organization_selection(organization_channel_id, organization_model_id)
 
     try:
+        if organization_channel_id is not None and organization_model_id is not None:
+            channel = await channel_crud.lock_for_mutation(
+                db,
+                channel_id=organization_channel_id,
+                commit=False,
+            )
+            if channel is None:
+                _raise_organization_config_invalid()
         store = await memory_store_crud.lock_for_mutation(db, uid=normalized_uid, commit=False)
         if store is None:
             raise MemoryConflictError(ERR_MEMORY_NOT_CONFIGURED)
@@ -1628,6 +1713,7 @@ __all__ = [
     "MemoryOrganizationValidatedSource",
     "MemoryOrganizationValidatedTarget",
     "build_organization_execution_request",
+    "build_organization_model_config_for_channel_values",
     "calculate_organization_required_output_tokens",
     "build_organization_dedupe_key",
     "build_organization_job_payload",
@@ -1637,6 +1723,7 @@ __all__ = [
     "build_organization_snapshot_digest",
     "build_organization_snapshot_items",
     "call_organization_model",
+    "calculate_organization_required_input_tokens",
     "execute_organization_model",
     "evaluate_organization_merge_pins",
     "get_organization_settings",

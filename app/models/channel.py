@@ -6,6 +6,7 @@ import enum
 from pydantic import (
     BaseModel,
     ConfigDict,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -21,8 +22,14 @@ from sqlmodel import (
 )
 
 from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    CONTEXT_WINDOW_TOKENS_PER_K,
+    DEFAULT_CHAT_MAX_TOKENS,
     ERR_API_KEY_ENCRYPT_INPUT_EMPTY,
     ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID,
+    ERR_CHANNEL_MODEL_CONTEXT_WINDOW_REQUIRED,
+    ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+    ERR_CHANNEL_MODEL_PENDING_DELETE_ENABLED,
     ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED,
     ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID,
 )
@@ -50,6 +57,11 @@ class ModelProtocol(enum.StrEnum):
     OPENAI_EMBEDDING = "OPENAI_EMBEDDING"
     OPENAI_IMAGE = "OPENAI_IMAGE"
     COHERE_RERANK = "COHERE_RERANK"
+
+
+class ChannelModelLifecycleStatus(enum.StrEnum):
+    ACTIVE = "active"
+    PENDING_DELETE = "pending_delete"
 
 
 MODEL_PROTOCOLS_BY_USAGE: dict[ModelUsage, tuple[ModelProtocol, ...]] = {
@@ -107,10 +119,65 @@ class ChannelModelAdvancedSettings(BaseModel):
 class ChannelModelIdsNormalizationError(ValueError):
     """模型条目规范化失败，保留失败条目索引。"""
 
-    def __init__(self, index: int, error: str):
+    def __init__(self, index: int, error: str, model_id: str):
         self.index = index
         self.error = error
+        self.model_id = model_id
         super().__init__(error)
+
+
+def is_channel_model_pending_delete(item: object) -> bool:
+    """判断渠道模型条目是否处于待删除状态。"""
+    if isinstance(item, dict):
+        lifecycle_status = item.get("lifecycle_status")
+    else:
+        lifecycle_status = getattr(item, "lifecycle_status", None)
+
+    if isinstance(lifecycle_status, ChannelModelLifecycleStatus):
+        return lifecycle_status is ChannelModelLifecycleStatus.PENDING_DELETE
+    return isinstance(lifecycle_status, str) and lifecycle_status == ChannelModelLifecycleStatus.PENDING_DELETE.value
+
+
+def is_channel_model_available(item: object) -> bool:
+    """判断渠道模型条目是否可用。"""
+    if is_channel_model_pending_delete(item):
+        return False
+    if isinstance(item, dict):
+        return item.get("is_enabled", True) is not False
+    return getattr(item, "is_enabled", True) is not False
+
+
+def _get_channel_model_display_id(item: object, index: int) -> str:
+    """获取渠道模型条目的接口展示标识。"""
+    if isinstance(item, dict):
+        model_id = item.get("model_id")
+        if isinstance(model_id, str):
+            model_id = model_id.strip()
+            if model_id:
+                return model_id
+    return f"#{index + 1}"
+
+
+def _format_channel_model_validation_error(exc: Exception) -> str:
+    """将渠道模型校验异常转换为适合接口展示的纯文本。"""
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+
+    messages = []
+    for error in exc.errors(include_url=False, include_input=False):
+        context = error.get("ctx")
+        underlying_error = context.get("error") if isinstance(context, dict) else None
+        message = str(underlying_error) if underlying_error is not None else str(error.get("msg", ""))
+        if message.startswith("Value error, "):
+            message = message[len("Value error, ") :]
+
+        loc = error.get("loc")
+        if loc:
+            location = ".".join(str(part) for part in loc)
+            message = f"[{location}] {message}"
+        messages.append(message)
+
+    return " | ".join(messages)
 
 
 class ChannelModelItem(BaseModel):
@@ -132,6 +199,10 @@ class ChannelModelItem(BaseModel):
     embedding_timeout: float | None = PydanticField(None, gt=0, le=600, description="嵌入模型调用超时（秒），EMBEDDING 专属")
     rerank_timeout: float | None = PydanticField(None, gt=0, le=120, description="重排模型调用超时（秒），RERANK 专属")
     is_enabled: bool = PydanticField(True, description="是否启用该模型条目")
+    lifecycle_status: ChannelModelLifecycleStatus = PydanticField(
+        ChannelModelLifecycleStatus.ACTIVE,
+        description="模型条目生命周期状态",
+    )
     description: str | None = PydanticField(None, description="模型描述")
     advanced_settings: ChannelModelAdvancedSettings = PydanticField(
         default_factory=ChannelModelAdvancedSettings,
@@ -140,12 +211,30 @@ class ChannelModelItem(BaseModel):
 
     @model_validator(mode="after")
     def validate_usage_specific_fields(self):
+        if is_channel_model_pending_delete(self) and self.is_enabled:
+            raise ValueError(ERR_CHANNEL_MODEL_PENDING_DELETE_ENABLED)
         if self.protocol is None:
             raise ValueError(t(ERR_CHANNEL_MODEL_PROTOCOL_REQUIRED))
         if self.protocol not in MODEL_PROTOCOLS_BY_USAGE[self.usage]:
             raise ValueError(t(ERR_CHANNEL_MODEL_PROTOCOL_USAGE_INVALID))
         if self.usage != ModelUsage.IMAGE_GENERATION and (self.size is not None or self.quality is not None):
             raise ValueError(t(ERR_CHANNEL_IMAGE_OPTIONS_USAGE_INVALID))
+        if self.usage == ModelUsage.CHAT:
+            if self.context_window_k is None:
+                raise ValueError(t(ERR_CHANNEL_MODEL_CONTEXT_WINDOW_REQUIRED))
+            effective_max_tokens = self.max_tokens if self.max_tokens is not None else DEFAULT_CHAT_MAX_TOKENS
+            max_context_tokens = self.context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+            input_budget_tokens = max_context_tokens - effective_max_tokens - CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS
+            if input_budget_tokens <= 0:
+                raise ValueError(
+                    t(
+                        ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+                        max_tokens=effective_max_tokens,
+                        context_window_k=self.context_window_k,
+                        context_window_tokens=max_context_tokens,
+                        safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+                    )
+                )
         return self
 
 
@@ -163,8 +252,12 @@ def validate_channel_model_ids(model_ids: list[dict] | None) -> tuple[str | None
     for i, item in enumerate(model_ids):
         try:
             validated = ChannelModelItem.model_validate(item)
-        except Exception as e:
-            return "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID", {"index": i, "error": str(e)}
+        except Exception as exc:
+            return "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID", {
+                "index": i,
+                "model_id": _get_channel_model_display_id(item, i),
+                "error": _format_channel_model_validation_error(exc),
+            }
 
         model_key = (validated.usage.value, validated.model_id)
         if model_key in seen_model_keys:
@@ -192,7 +285,11 @@ def normalize_channel_model_ids(model_ids: list[dict] | None) -> list[dict]:
         try:
             normalized_item["advanced_settings"] = ChannelModelAdvancedSettings.model_validate(advanced_settings).model_dump(mode="json")
         except Exception as exc:
-            raise ChannelModelIdsNormalizationError(index, str(exc)) from exc
+            raise ChannelModelIdsNormalizationError(
+                index,
+                _format_channel_model_validation_error(exc),
+                _get_channel_model_display_id(item, index),
+            ) from exc
 
         normalized_model_ids.append(normalized_item)
 
@@ -299,6 +396,8 @@ class ChannelUpdate(SQLModel):
     http_proxy: str | None = None
     is_active: bool | None = None
     model_ids: list[dict] | None = None
+    confirm_config_impact: bool = Field(default=False)
+    config_impact_token: str | None = Field(default=None, max_length=64)
 
     @field_validator("api_key", mode="before")
     @classmethod

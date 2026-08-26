@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.core.constants import (
+    ERR_MEMORY_CAPACITY_EXCEEDED,
     ERR_MEMORY_CAPACITY_FULL,
     ERR_MEMORY_CAPACITY_PENDING,
     ERR_MEMORY_MUTATION_PENDING,
@@ -290,6 +291,41 @@ async def test_full_capacity_create_accepts_replacement_and_reserves_candidate_w
         },
     }
     assert job.payload["store"]["active_collection_name"] == store.active_collection_name
+
+
+@pytest.mark.asyncio
+async def test_suppressed_active_record_still_consumes_configured_capacity(
+    memory_database: async_sessionmaker[AsyncSession],
+) -> None:
+    uid = "capacity-suppressed-active-owner"
+    async with memory_database() as db:
+        await _create_store(db, uid=uid, max_active_records=1)
+        record = await _create_record(
+            db,
+            uid=uid,
+            memory_key="suppressed-active-memory",
+            content="suppressed active memory",
+            suppress_recall=True,
+        )
+        assert record.is_active is True
+        assert record.index_status == LongTermMemoryRecordIndexStatus.READY
+        assert record.vector_item_id
+        await db.commit()
+
+    async with memory_database() as db:
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await memory_service.create(
+                db,
+                uid=uid,
+                dedupe_key="suppressed-active-capacity-create",
+                content="capacity-limited new memory",
+                memory_key="suppressed-active-new-memory",
+                memory_type=LongTermMemoryType.FACT,
+                source=LongTermMemorySource.USER_API,
+                source_id="stage8-suppressed-active-capacity",
+            )
+
+    assert exc_info.value.message == ERR_MEMORY_CAPACITY_EXCEEDED
 
 
 @pytest.mark.asyncio

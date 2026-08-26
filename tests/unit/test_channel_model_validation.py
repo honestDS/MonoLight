@@ -1,6 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
+from app.core.constants import (
+    CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    DEFAULT_CHAT_MAX_TOKENS,
+    ERR_CHANNEL_MODEL_CONTEXT_WINDOW_REQUIRED,
+    ERR_CHANNEL_MODEL_CUSTOM_HEADERS_INVALID,
+    ERR_CHANNEL_MODEL_IDS_ITEM_INVALID,
+    ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+)
+from app.core.i18n import t
 from app.core.utils.model_request_headers import (
     build_model_request_headers,
     get_model_custom_headers,
@@ -9,6 +18,7 @@ from app.core.utils.model_request_headers import (
 from app.models.channel import (
     ChannelCreate,
     ChannelModelAdvancedSettings,
+    ChannelModelIdsNormalizationError,
     ChannelModelItem,
     ChannelResponse,
     ChannelUpdate,
@@ -16,7 +26,9 @@ from app.models.channel import (
     ModelUsage,
     normalize_channel_model_ids,
     resolve_model_protocol,
+    validate_channel_model_ids,
 )
+from app.schemas.response import StandardResponse
 
 HTTP_PROXY_FORMAT_HINT = "仅支持 http://host:port 或 http://username:password@host:port"
 
@@ -65,15 +77,134 @@ def test_model_requires_protocol(usage: ModelUsage) -> None:
     ],
 )
 def test_model_accepts_matching_protocol(usage: ModelUsage, protocol: ModelProtocol) -> None:
+    payload = {
+        "model_id": "model",
+        "usage": usage,
+        "protocol": protocol,
+    }
+    if usage == ModelUsage.CHAT:
+        payload["context_window_k"] = 4
+
+    model_entry = ChannelModelItem.model_validate(payload)
+
+    assert model_entry.protocol == protocol
+
+
+@pytest.mark.parametrize("max_tokens", [744, 1000, 1001])
+def test_chat_model_rejects_non_positive_input_budget(max_tokens: int) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ChannelModelItem.model_validate(
+            {
+                "model_id": "model",
+                "usage": ModelUsage.CHAT,
+                "protocol": ModelProtocol.OPENAI,
+                "context_window_k": 1,
+                "max_tokens": max_tokens,
+            }
+        )
+
+    expected_error = t(
+        ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+        max_tokens=max_tokens,
+        context_window_k=1,
+        context_window_tokens=1000,
+        safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    )
+    assert expected_error in str(exc_info.value)
+
+
+def test_chat_model_rejects_missing_context_window() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ChannelModelItem.model_validate(
+            {
+                "model_id": "model",
+                "usage": ModelUsage.CHAT,
+                "protocol": ModelProtocol.OPENAI,
+                "max_tokens": 4096,
+            }
+        )
+
+    assert t(ERR_CHANNEL_MODEL_CONTEXT_WINDOW_REQUIRED) in str(exc_info.value)
+
+
+def test_chat_model_rejects_default_max_tokens_for_small_context_window() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ChannelModelItem.model_validate(
+            {
+                "model_id": "model",
+                "usage": ModelUsage.CHAT,
+                "protocol": ModelProtocol.OPENAI,
+                "context_window_k": 1,
+            }
+        )
+
+    expected_error = t(
+        ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+        max_tokens=DEFAULT_CHAT_MAX_TOKENS,
+        context_window_k=1,
+        context_window_tokens=1000,
+        safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    )
+    assert expected_error in str(exc_info.value)
+
+
+def test_validate_channel_model_ids_returns_plain_text_context_window_error() -> None:
+    model_id = "gemini-3-flash"
+    error_key, kwargs = validate_channel_model_ids(
+        [
+            {
+                "model_id": model_id,
+                "usage": ModelUsage.CHAT,
+                "protocol": ModelProtocol.OPENAI,
+                "context_window_k": 1,
+                "max_tokens": 1000,
+            }
+        ]
+    )
+
+    expected_error = t(
+        ERR_CHANNEL_MODEL_MAX_TOKENS_EXCEEDS_CONTEXT_WINDOW,
+        max_tokens=1000,
+        context_window_k=1,
+        context_window_tokens=1000,
+        safety_margin_tokens=CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS,
+    )
+    assert error_key == ERR_CHANNEL_MODEL_IDS_ITEM_INVALID
+    assert kwargs["index"] == 0
+    assert kwargs["model_id"] == model_id
+    assert kwargs["error"] == expected_error
+    assert all(str(value) in kwargs["error"] for value in (1000, 1, CONTEXT_REQUEST_SAFETY_MARGIN_TOKENS))
+
+    response = StandardResponse.error(code=422, message=error_key, **kwargs)
+
+    assert response.message == t(ERR_CHANNEL_MODEL_IDS_ITEM_INVALID, **kwargs)
+    assert model_id in response.message
+    assert expected_error in response.message
+    for forbidden in ("model_ids", "[0]"):
+        assert forbidden not in response.message
+    for forbidden in ("validation error for", "input_value", "input_type", "pydantic.dev", "\n"):
+        assert forbidden not in response.message
+
+
+@pytest.mark.parametrize(
+    "model_settings",
+    [
+        {"context_window_k": 1, "max_tokens": 743},
+        {"context_window_k": 1, "max_tokens": 0},
+        {"context_window_k": 4},
+    ],
+)
+def test_chat_model_accepts_valid_input_budget_configurations(model_settings: dict[str, int]) -> None:
     model_entry = ChannelModelItem.model_validate(
         {
             "model_id": "model",
-            "usage": usage,
-            "protocol": protocol,
+            "usage": ModelUsage.CHAT,
+            "protocol": ModelProtocol.OPENAI,
+            **model_settings,
         }
     )
 
-    assert model_entry.protocol == protocol
+    assert model_entry.max_tokens == model_settings.get("max_tokens")
 
 
 @pytest.mark.parametrize(
@@ -259,6 +390,18 @@ def test_model_advanced_settings_migrates_legacy_user_agent() -> None:
 def test_normalize_model_custom_headers_rejects_invalid_values(custom_headers: object) -> None:
     with pytest.raises(ValueError):
         normalize_model_custom_headers(custom_headers)
+
+
+def test_normalize_channel_model_ids_returns_plain_text_custom_headers_error() -> None:
+    model_id = "gemini-3-flash"
+    with pytest.raises(ChannelModelIdsNormalizationError) as exc_info:
+        normalize_channel_model_ids([{"model_id": model_id, "advanced_settings": {"custom_headers": "invalid"}}])
+
+    assert exc_info.value.index == 0
+    assert exc_info.value.model_id == model_id
+    assert exc_info.value.error == f"[custom_headers] {t(ERR_CHANNEL_MODEL_CUSTOM_HEADERS_INVALID)}"
+    for forbidden in ("validation error for", "input_value", "input_type", "pydantic.dev", "\n"):
+        assert forbidden not in exc_info.value.error
 
 
 @pytest.mark.parametrize(

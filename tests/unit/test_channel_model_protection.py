@@ -17,6 +17,8 @@ from app.models.memory import (
     LongTermMemoryMutationJob,
     LongTermMemoryStore,
 )
+from app.models.profile import Profile
+from app.models.prompt import PromptLibrary
 
 PROTECTION_TABLES = [
     ModelChannel.__table__,
@@ -24,6 +26,8 @@ PROTECTION_TABLES = [
     LongTermMemoryStore.__table__,
     LongTermMemoryEmbeddingRevision.__table__,
     LongTermMemoryMutationJob.__table__,
+    PromptLibrary.__table__,
+    Profile.__table__,
 ]
 
 
@@ -66,6 +70,8 @@ def _chat_model(model_id: str = "embedding-a") -> dict:
         "model_id": model_id,
         "usage": "CHAT",
         "protocol": "OPENAI",
+        "context_window_k": 128,
+        "max_tokens": 4096,
         "is_enabled": True,
         "description": "chat model",
         "advanced_settings": {"custom_headers": {"x-test": "one"}},
@@ -125,7 +131,8 @@ async def test_kb_referenced_embedding_model_identity_changes_are_rejected(
 ) -> None:
     old_models = [_embedding_model("embedding-a")]
     channel = await _create_channel(db_session, model_ids=old_models)
-    await _create_knowledge_base(db_session, channel_id=channel.id, model_id="embedding-a")
+    channel_id = channel.id
+    await _create_knowledge_base(db_session, channel_id=channel_id, model_id="embedding-a")
 
     if change == "remove":
         new_models = []
@@ -138,7 +145,7 @@ async def test_kb_referenced_embedding_model_identity_changes_are_rejected(
 
     with pytest.raises(ParameterException) as exc_info:
         await channels.update_channel(
-            channel.id,
+            channel_id,
             channels.ChannelUpdate(model_ids=new_models),
             db=db_session,
             admin={},
@@ -146,7 +153,7 @@ async def test_kb_referenced_embedding_model_identity_changes_are_rejected(
 
     assert exc_info.value.message == ERR_KB_MODEL_IDENTITY_IN_USE
     assert exc_info.value.kwargs == {"model_id": "embedding-a"}
-    unchanged = await channel_crud.get(db_session, channel.id)
+    unchanged = await channel_crud.get(db_session, channel_id)
     assert unchanged is not None
     assert unchanged.model_ids == old_models
 
@@ -246,7 +253,8 @@ async def test_kb_channel_reference_rejects_delete_before_profile_and_audit_clea
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     channel = await _create_channel(db_session)
-    await _create_knowledge_base(db_session, channel_id=channel.id, model_id="embedding-a")
+    channel_id = channel.id
+    await _create_knowledge_base(db_session, channel_id=channel_id, model_id="embedding-a")
     cleanup_calls: list[str] = []
 
     async def unexpected_cleanup(*_args, **_kwargs) -> int:
@@ -257,11 +265,11 @@ async def test_kb_channel_reference_rejects_delete_before_profile_and_audit_clea
     monkeypatch.setattr(channels, "_clear_unavailable_audit_model_refs", unexpected_cleanup)
 
     with pytest.raises(ParameterException) as exc_info:
-        await channels.delete_channel(channel.id, db=db_session, admin={})
+        await channels.delete_channel(channel_id, db=db_session, admin={})
 
     assert exc_info.value.message == ERR_KB_CHANNEL_IN_USE
     assert cleanup_calls == []
-    assert await channel_crud.get(db_session, channel.id) is not None
+    assert await channel_crud.get(db_session, channel_id) is not None
 
 
 @pytest.mark.asyncio
@@ -300,7 +308,8 @@ async def test_kb_identity_protection_runs_before_all_update_cleanup_and_sync(
 ) -> None:
     old_models = [_embedding_model("embedding-a"), _chat_model("chat-a")]
     channel = await _create_channel(db_session, model_ids=old_models)
-    await _create_knowledge_base(db_session, channel_id=channel.id, model_id="embedding-a")
+    channel_id = channel.id
+    await _create_knowledge_base(db_session, channel_id=channel_id, model_id="embedding-a")
     cleanup_calls: list[str] = []
 
     async def unexpected_sync_or_cleanup(*_args, **_kwargs) -> int:
@@ -314,7 +323,7 @@ async def test_kb_identity_protection_runs_before_all_update_cleanup_and_sync(
 
     with pytest.raises(ParameterException) as exc_info:
         await channels.update_channel(
-            channel.id,
+            channel_id,
             channels.ChannelUpdate(model_ids=[_chat_model("chat-a")]),
             db=db_session,
             admin={},
@@ -323,6 +332,6 @@ async def test_kb_identity_protection_runs_before_all_update_cleanup_and_sync(
     assert exc_info.value.message == ERR_KB_MODEL_IDENTITY_IN_USE
     assert exc_info.value.kwargs == {"model_id": "embedding-a"}
     assert cleanup_calls == []
-    unchanged = await channel_crud.get(db_session, channel.id)
+    unchanged = await channel_crud.get(db_session, channel_id)
     assert unchanged is not None
     assert unchanged.model_ids == old_models
