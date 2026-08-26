@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.constants import LOG_MEMORY_RECALL_CHANNEL_FAILED
 from app.core.dispatchers.memory import persistence as persistence_module
 from app.core.dispatchers.memory import recall as precheck_module
 from app.core.dispatchers.memory.types import MemoryRecallContext
@@ -55,7 +56,13 @@ def _response(message):
 
 
 def _context(*, messages=None, turn_messages=None, boundary=42):
-    channel = SimpleNamespace(base_url="https://example.invalid", chat_timeout=60, get_decrypted_api_key=lambda: "api-key")
+    channel = SimpleNamespace(
+        id=11,
+        name="primary",
+        base_url="https://example.invalid",
+        chat_timeout=60,
+        get_decrypted_api_key=lambda: "api-key",
+    )
     return MemoryRecallContext(
         db=_FakeDb(),
         uid="uid-1",
@@ -307,8 +314,18 @@ async def test_precheck_two_invalid_responses_fails_without_execution(monkeypatc
 async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
     context = _context()
     fallback_calls = []
+    warnings = []
+    translations = []
     generated = 0
     saved = []
+
+    class FakeLogger:
+        def bind(self, **fields):
+            return SimpleNamespace(warning=lambda message: warnings.append((fields, message)))
+
+    def translate(key, **params):
+        translations.append((key, params))
+        return "translated warning"
 
     async def load(_context):
         return None, None, "assistant-key", "tool-key"
@@ -327,6 +344,8 @@ async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
         return _response(_assistant())
 
     async def fallback(context_arg, excluded):
+        assert len(warnings) == 1
+        assert warnings[0][0]["priority"] == context_arg.channel_rule.priority == 1
         fallback_calls.append(set(excluded))
         context_arg.channel_rule = SimpleNamespace(priority=2)
         return True
@@ -344,6 +363,8 @@ async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
     monkeypatch.setattr(precheck_module, "fallback_channel", fallback)
     monkeypatch.setattr(precheck_module, "update_output_metadata", update)
     monkeypatch.setattr(precheck_module, "save_and_execute_recall", save)
+    monkeypatch.setattr(precheck_module, "logger", FakeLogger())
+    monkeypatch.setattr(precheck_module, "t", translate)
 
     result = await precheck_module.run_memory_recall_precheck(context)
 
@@ -351,6 +372,18 @@ async def test_precheck_llm_exception_falls_back_by_priority(monkeypatch):
     assert generated == 2
     assert fallback_calls == [{1}]
     assert len(saved) == 1
+    assert len(warnings) == 1
+    assert translations == [(LOG_MEMORY_RECALL_CHANNEL_FAILED, {"error": "network"})]
+    warning_fields, warning_message = warnings[0]
+    assert warning_message == "translated warning"
+    assert warning_fields["uid"] == "uid-1"
+    assert warning_fields["session_id"] == "session-1"
+    assert warning_fields["priority"] == 1
+    assert warning_fields["call_context"] == "chat_dispatch_non_stream_memory_recall"
+    assert warning_fields["channel_id"] == 11
+    assert warning_fields["channel_name"] == "primary / model-1"
+    assert warning_fields["model_id"] == "model-1"
+    assert warning_fields["model_name"] == "model-1"
 
 
 @pytest.mark.asyncio

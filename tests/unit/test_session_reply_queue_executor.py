@@ -4,16 +4,25 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel, select
 
-from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.constants import ERR_LLM_EMPTY_RESPONSE, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
+from app.core.exceptions import LLMException
 from app.core.session_reply_queue import executor as executor_module
 from app.core.terminal.schemas import (
     ShellInteractiveHandoffResult,
     TerminalOutputBufferState,
     TerminalSessionStatus,
 )
+from app.core.utils.request_token_baseline import build_provider_request_usage_metadata
 from app.models.audit import AuditExecutionStatus, AuditRecordStatus
 from app.models.message import InternalMessage, InternalToolCall, MessageRole, MessageType
+from app.models.profile import Profile
+from app.models.session import ChatSession
+from app.models.session_reply_provider_usage import SessionReplyProviderUsage
+from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
     SessionReplySourceType,
     SessionReplyWorkItem,
@@ -140,6 +149,286 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_interactive_work_delegates_provider_usage_persistence(monkeypatch):
+    work = SessionReplyWorkItem(
+        id=7,
+        uid="user-1",
+        session_id="session-1",
+        profile_id=1,
+        sequence_no=3,
+        work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+        source_type=SessionReplySourceType.USER_MESSAGE,
+        source_id="1",
+        dedupe_key="foreground-message:1",
+        status=SessionReplyWorkStatus.RUNNING,
+        locked_by="worker-1",
+        input_message_ids=[1],
+        execution_state={"stream_requested": False},
+    )
+    dispatch_kwargs = {}
+    persistence_calls = []
+    request_metadata = {
+        "type": "llm_request_metadata",
+        "input_tokens": 100,
+        "input_tokens_source": "provider",
+        "cached_tokens": 25,
+        "_provider_request_id": "provider-request-1",
+        "_provider_input_tokens": 100,
+        "_provider_cached_tokens": 25,
+        "_provider_output_tokens": 0,
+        "total_input_tokens": 1000,
+        "total_cached_tokens": 250,
+        "cache_hit_rate": 0.25,
+        "context_window_tokens": 4096,
+        "max_output_tokens": 512,
+    }
+
+    class EventDb:
+        pass
+
+    class SessionContext:
+        async def __aenter__(self):
+            return EventDb()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    async def latest_sequence(db, *, work_id):
+        assert isinstance(db, EventDb)
+        assert work_id == 7
+        return 0
+
+    async def dispatch(**kwargs):
+        dispatch_kwargs.update(kwargs)
+        await kwargs["request_metadata_callback"](request_metadata)
+        return {"choices": []}
+
+    async def persist_provider_usage(metadata, *, work):
+        persistence_calls.append((dict(metadata), work))
+        return None
+
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
+    monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(
+        executor_module,
+        "_persist_session_reply_provider_usage_reliably",
+        persist_provider_usage,
+    )
+
+    response = await executor_module._dispatch_interactive_work(
+        object(),
+        work=work,
+        worker_id="worker-1",
+        message="original",
+        initial_message=InternalMessage(id=1, role=MessageRole.USER, content="original"),
+        history_before_id=1,
+        frozen_user_message_ids=[1],
+        attachments=None,
+        allow_additional_user_messages=False,
+        execution_resume_state=None,
+    )
+
+    assert response == {"choices": []}
+    assert callable(dispatch_kwargs["request_metadata_callback"])
+    assert len(persistence_calls) == 1
+    metadata, persisted_work = persistence_calls[0]
+    assert metadata == request_metadata
+    assert persisted_work is work
+
+
+@pytest.mark.asyncio
+async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_idempotent(tmp_path, monkeypatch):
+    database_path = tmp_path / "session-reply-provider-usage.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path.as_posix()}",
+        connect_args={"timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def configure_sqlite_connection(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: SQLModel.metadata.create_all(
+                    sync_connection,
+                    tables=[
+                        Profile.__table__,
+                        ChatSession.__table__,
+                        SessionReplyWorkItem.__table__,
+                        SessionReplyProviderUsage.__table__,
+                        SessionReplyStreamEvent.__table__,
+                    ],
+                )
+            )
+
+        async with session_factory() as seed_db:
+            seed_db.add(ChatSession(session_id="session-1", uid="user-1", profile_id=1))
+            seed_db.add(
+                SessionReplyWorkItem(
+                    id=7,
+                    uid="user-1",
+                    session_id="session-1",
+                    profile_id=1,
+                    sequence_no=3,
+                    work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+                    source_type=SessionReplySourceType.USER_MESSAGE,
+                    source_id="1",
+                    dedupe_key="foreground-message:session-1:1",
+                    status=SessionReplyWorkStatus.RUNNING,
+                    locked_by="worker-1",
+                    input_message_ids=[1],
+                    execution_state={"stream_requested": False},
+                )
+            )
+            await seed_db.commit()
+
+        monkeypatch.setattr(executor_module, "AsyncSessionLocal", session_factory)
+
+        provider_metrics = {
+            "input_tokens": 100,
+            "input_tokens_source": "provider",
+            "cached_tokens": 100,
+            "output_tokens": 0,
+        }
+
+        def metadata(request_id):
+            return {
+                "type": "llm_request_metadata",
+                "input_tokens": 100,
+                "input_tokens_source": "provider",
+                "cached_tokens": 100,
+                "output_tokens": 0,
+                "total_input_tokens": 100,
+                "total_cached_tokens": 100,
+                "total_output_tokens": 0,
+                "cache_hit_rate": 1,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+                **build_provider_request_usage_metadata(request_id, provider_metrics),
+            }
+
+        request_attempts = [
+            ("provider-request-1", "empty"),
+            ("provider-request-1", "empty"),
+            ("provider-request-2", "empty"),
+            ("provider-request-3", "cancelled"),
+        ]
+
+        async def dispatch(**kwargs):
+            request_id, outcome = request_attempts.pop(0)
+            await kwargs["request_metadata_callback"](metadata(request_id))
+            if outcome == "cancelled":
+                raise asyncio.CancelledError
+            raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+
+        monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+
+        async def run_attempt(*, cancelled: bool = False) -> None:
+            async with session_factory() as reply_db:
+                work = (await reply_db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == 7))).scalar_one()
+                if cancelled:
+                    with pytest.raises(asyncio.CancelledError):
+                        await executor_module._dispatch_interactive_work(
+                            reply_db,
+                            work=work,
+                            worker_id="worker-1",
+                            message="original",
+                            initial_message=InternalMessage(id=1, role=MessageRole.USER, content="original"),
+                            history_before_id=1,
+                            frozen_user_message_ids=[1],
+                            attachments=None,
+                            allow_additional_user_messages=False,
+                            execution_resume_state=None,
+                        )
+                else:
+                    with pytest.raises(LLMException):
+                        await executor_module._dispatch_interactive_work(
+                            reply_db,
+                            work=work,
+                            worker_id="worker-1",
+                            message="original",
+                            initial_message=InternalMessage(id=1, role=MessageRole.USER, content="original"),
+                            history_before_id=1,
+                            frozen_user_message_ids=[1],
+                            attachments=None,
+                            allow_additional_user_messages=False,
+                            execution_resume_state=None,
+                        )
+                await reply_db.rollback()
+
+        await run_attempt()
+        async with session_factory() as check_db:
+            session = (await check_db.execute(select(ChatSession).where(ChatSession.session_id == "session-1"))).scalar_one()
+            usages = (await check_db.execute(select(SessionReplyProviderUsage))).scalars().all()
+
+            assert session.llm_request_metadata["total_input_tokens"] == 100
+            assert session.llm_request_metadata["total_cached_tokens"] == 100
+            assert session.llm_request_metadata["cache_hit_rate"] == 1
+            assert len(usages) == 1
+            assert all(
+                key not in session.llm_request_metadata
+                for key in (
+                    "_provider_request_id",
+                    "_provider_input_tokens",
+                    "_provider_cached_tokens",
+                    "_provider_output_tokens",
+                )
+            )
+
+        await run_attempt()
+        async with session_factory() as check_db:
+            session = (await check_db.execute(select(ChatSession).where(ChatSession.session_id == "session-1"))).scalar_one()
+            usages = (await check_db.execute(select(SessionReplyProviderUsage))).scalars().all()
+
+            assert session.llm_request_metadata["total_input_tokens"] == 100
+            assert session.llm_request_metadata["total_cached_tokens"] == 100
+            assert session.llm_request_metadata["cache_hit_rate"] == 1
+            assert len(usages) == 1
+
+        await run_attempt()
+        async with session_factory() as check_db:
+            session = (await check_db.execute(select(ChatSession).where(ChatSession.session_id == "session-1"))).scalar_one()
+            usages = (await check_db.execute(select(SessionReplyProviderUsage))).scalars().all()
+
+            assert session.llm_request_metadata["total_input_tokens"] == 200
+            assert session.llm_request_metadata["total_cached_tokens"] == 200
+            assert session.llm_request_metadata["cache_hit_rate"] == 1
+            assert len(usages) == 2
+            assert {usage.provider_request_id for usage in usages} == {
+                "provider-request-1",
+                "provider-request-2",
+            }
+
+        await run_attempt(cancelled=True)
+        async with session_factory() as check_db:
+            session = (await check_db.execute(select(ChatSession).where(ChatSession.session_id == "session-1"))).scalar_one()
+            usages = (await check_db.execute(select(SessionReplyProviderUsage))).scalars().all()
+
+            assert session.llm_request_metadata["total_input_tokens"] == 300
+            assert session.llm_request_metadata["total_cached_tokens"] == 300
+            assert session.llm_request_metadata["cache_hit_rate"] == 1
+            assert len(usages) == 3
+            assert {usage.provider_request_id for usage in usages} == {
+                "provider-request-1",
+                "provider-request-2",
+                "provider-request-3",
+            }
+
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_rejected_foreground_reply_uses_history_without_decision_user_input(monkeypatch):
     work = SessionReplyWorkItem(
         id=7,
@@ -201,6 +490,9 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
         **request_metadata,
         "output_tokens": 0,
         "total_output_tokens": 0,
+        "total_input_tokens": 123,
+        "total_cached_tokens": 0,
+        "cache_hit_rate": 0.0,
         "work_id": 7,
         "work_sequence_no": 1,
     }
@@ -865,6 +1157,8 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     request_metadata = {
         "type": "llm_request_metadata",
         "input_tokens": 123,
+        "input_tokens_source": "provider",
+        "cached_tokens": 23,
         "output_tokens": 7,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
@@ -873,6 +1167,8 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
     second_request_metadata = {
         "type": "llm_request_metadata",
         "input_tokens": 456,
+        "input_tokens_source": "provider",
+        "cached_tokens": 156,
         "output_tokens": 11,
         "context_window_tokens": 4096,
         "max_output_tokens": 512,
@@ -899,6 +1195,8 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
         return SimpleNamespace(
             llm_request_metadata={
                 "total_output_tokens": 200,
+                "total_input_tokens": 1000,
+                "total_cached_tokens": 250,
             }
         )
 
@@ -918,26 +1216,34 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
         **second_request_metadata,
         "output_tokens": 18,
         "total_output_tokens": 218,
+        "total_input_tokens": 1579,
+        "total_cached_tokens": 429,
+        "cache_hit_rate": 429 / 1579,
+        "work_id": 7,
+        "work_sequence_no": 1,
+    }
+    expected_first_request_metadata = {
+        **request_metadata,
+        "output_tokens": 7,
+        "total_output_tokens": 207,
+        "total_input_tokens": 1123,
+        "total_cached_tokens": 273,
+        "cache_hit_rate": 273 / 1123,
         "work_id": 7,
         "work_sequence_no": 1,
     }
     assert callable(captured["request_metadata_callback"])
     assert response["llm_request_metadata"] == expected_request_metadata
     assert response["llm_request_metadata"]["input_tokens"] == 456
-    assert "total_input_tokens" not in response["llm_request_metadata"]
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(429 / 1579)
     assert metadata_updates[-1] == {
         "session_id": "session-1",
         "uid": "user-1",
         "metadata": expected_request_metadata,
         "commit": False,
     }
-    assert metadata_updates[0]["metadata"] == {
-        **request_metadata,
-        "output_tokens": 7,
-        "total_output_tokens": 207,
-        "work_id": 7,
-        "work_sequence_no": 1,
-    }
+    assert metadata_updates[0]["metadata"] == expected_first_request_metadata
+    assert metadata_updates[0]["metadata"]["cache_hit_rate"] == pytest.approx(273 / 1123)
     assert len(metadata_updates) == 2
 
 
@@ -959,6 +1265,8 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
     request_metadata = {
         "type": "llm_request_metadata",
         "input_tokens": 456,
+        "input_tokens_source": "provider",
+        "cached_tokens": 156,
         "output_tokens": 21,
         "context_window_tokens": 8192,
         "max_output_tokens": 1024,
@@ -981,6 +1289,8 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         return SimpleNamespace(
             llm_request_metadata={
                 "total_output_tokens": 200,
+                "total_input_tokens": 1000,
+                "total_cached_tokens": 250,
             }
         )
 
@@ -999,13 +1309,16 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         **request_metadata,
         "output_tokens": 21,
         "total_output_tokens": 221,
+        "total_input_tokens": 1456,
+        "total_cached_tokens": 406,
+        "cache_hit_rate": 406 / 1456,
         "work_id": 8,
         "work_sequence_no": 2,
     }
     assert callable(captured["request_metadata_callback"])
     assert response["llm_request_metadata"] == expected_request_metadata
     assert response["llm_request_metadata"]["input_tokens"] == 456
-    assert "total_input_tokens" not in response["llm_request_metadata"]
+    assert response["llm_request_metadata"]["cache_hit_rate"] == pytest.approx(406 / 1456)
     assert metadata_updates == [
         {
             "session_id": "session-1",

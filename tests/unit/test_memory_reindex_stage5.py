@@ -21,10 +21,12 @@ class _ImportSafePersistentClient:
 
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
+    from app.core.constants import ERR_MEMORY_MAINTENANCE_STATE_CONFLICT
     from app.core.crud.memory import memory_store_crud
     from app.core.crud.memory_job import memory_job_crud
     from app.core.crud.memory_maintenance import memory_maintenance_job_crud
     from app.core.memory import submit_memory_reindex
+    from app.core.memory.errors import MemoryConflictError
     from app.core.memory_jobs import reindex_handler
     from app.core.memory_jobs.executor import (
         MemoryJobExecutionContext,
@@ -40,6 +42,7 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         LongTermMemoryMutationOperation,
         LongTermMemoryMutationStatus,
         LongTermMemoryOldCollectionCleanupStatus,
+        LongTermMemorySource,
     )
     from app.providers.database.time import get_database_time
 
@@ -106,6 +109,108 @@ async def test_submit_memory_reindex_creates_pending_job_and_is_idempotent(
 
     assert not second.created
     assert second.job.id == first.job.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "payload"),
+    [
+        (LongTermMemoryMutationOperation.ORGANIZE, {}),
+        (LongTermMemoryMutationOperation.ORGANIZE_MERGE, {}),
+        (
+            LongTermMemoryMutationOperation.DELETE_CLEANUP,
+            {"source": LongTermMemorySource.AUTO_ORGANIZE.value},
+        ),
+    ],
+)
+async def test_submit_memory_reindex_rejects_active_organization_chain(
+    memory_session_factory,
+    operation: LongTermMemoryMutationOperation,
+    payload: dict[str, Any],
+) -> None:
+    uid = f"stage5-reindex-organization-block-{operation.value}"
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=31,
+        model_id="stage5-organization-block-model",
+        dimensions=3,
+        signature="stage5-organization-block-signature",
+        active_revision=2,
+        index_revision=4,
+        collection_name=f"stage5-organization-block-{operation.value}",
+    )
+
+    async with memory_session_factory() as db:
+        active_job, created = await memory_job_crud.create(
+            db,
+            uid=uid,
+            operation=operation,
+            dedupe_key=f"stage5-active-organization-{operation.value}",
+            payload=payload,
+            commit=True,
+        )
+    assert created
+    assert active_job.status == LongTermMemoryMutationStatus.PENDING
+
+    async with memory_session_factory() as db:
+        with pytest.raises(MemoryConflictError) as exc_info:
+            await submit_memory_reindex(
+                db,
+                uid=uid,
+                dedupe_key=f"stage5-blocked-reindex-{operation.value}",
+            )
+    assert exc_info.value.message == ERR_MEMORY_MAINTENANCE_STATE_CONFLICT
+
+    async with memory_session_factory() as db:
+        store = await memory_store_crud.get_by_uid(db, uid=uid)
+        blocked_job = await memory_job_crud.get_by_dedupe_key(
+            db,
+            uid=uid,
+            dedupe_key=f"stage5-blocked-reindex-{operation.value}",
+        )
+    assert store is not None
+    assert store.index_status == LongTermMemoryIndexStatus.READY
+    assert blocked_job is None
+
+
+@pytest.mark.asyncio
+async def test_submit_memory_reindex_does_not_block_on_unrelated_delete_cleanup(
+    memory_session_factory,
+) -> None:
+    uid = "stage5-reindex-unrelated-delete-cleanup"
+    await configure_store(
+        memory_session_factory,
+        uid=uid,
+        channel_id=32,
+        model_id="stage5-unrelated-cleanup-model",
+        dimensions=3,
+        signature="stage5-unrelated-cleanup-signature",
+        active_revision=2,
+        index_revision=4,
+        collection_name="stage5-unrelated-cleanup",
+    )
+
+    async with memory_session_factory() as db:
+        cleanup_job, created = await memory_job_crud.create(
+            db,
+            uid=uid,
+            operation=LongTermMemoryMutationOperation.DELETE_CLEANUP,
+            dedupe_key="stage5-unrelated-delete-cleanup-job",
+            payload={"source": LongTermMemorySource.USER_API.value},
+            commit=True,
+        )
+    assert created
+    assert cleanup_job.status == LongTermMemoryMutationStatus.PENDING
+
+    async with memory_session_factory() as db:
+        submission = await submit_memory_reindex(
+            db,
+            uid=uid,
+            dedupe_key="stage5-reindex-with-unrelated-cleanup",
+        )
+    assert submission.created
+    assert submission.job.operation == LongTermMemoryMutationOperation.REINDEX
 
 
 @pytest.mark.asyncio

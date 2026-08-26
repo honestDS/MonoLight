@@ -220,6 +220,8 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "max_output_tokens": 512,
             "output_tokens": 77,
             "total_output_tokens": 567,
+            "total_input_tokens": 1000,
+            "total_cached_tokens": 325,
             "cached_tokens": 40,
             "cache_hit_rate": 0.325,
             "request_message_min_id": 10,
@@ -247,6 +249,8 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "tools_tokens": 60,
         "output_tokens": 77,
         "total_output_tokens": 567,
+        "total_input_tokens": 1000,
+        "total_cached_tokens": 325,
         "cached_tokens": 40,
         "cache_hit_rate": 0.325,
         "model_id": "grok-4.5",
@@ -297,12 +301,49 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
             "total_output_tokens": True,
         },
     )
+    invalid_total_input_tokens_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "total_input_tokens": 1000,
+        },
+    )
+    invalid_total_cached_tokens_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "total_cached_tokens": 325,
+        },
+    )
+    invalid_total_cached_tokens_exceed_input_updated = await session_crud.update_llm_request_metadata(
+        db_session,
+        session_id="session-1",
+        uid="user-1",
+        metadata={
+            "input_tokens": 123,
+            "context_window_tokens": 4096,
+            "max_output_tokens": 512,
+            "total_input_tokens": 1000,
+            "total_cached_tokens": 1001,
+        },
+    )
     await db_session.refresh(session)
 
     assert invalid_updated is False
     assert invalid_cache_hit_rate_updated is False
     assert invalid_total_output_updated is False
     assert invalid_total_output_bool_updated is False
+    assert invalid_total_input_tokens_updated is False
+    assert invalid_total_cached_tokens_updated is False
+    assert invalid_total_cached_tokens_exceed_input_updated is False
     assert session.llm_request_metadata == {
         "input_tokens": 123,
         "context_window_tokens": 4096,
@@ -315,6 +356,8 @@ async def test_llm_request_metadata_update_persists_supported_baseline_fields(db
         "tools_tokens": 60,
         "output_tokens": 77,
         "total_output_tokens": 567,
+        "total_input_tokens": 1000,
+        "total_cached_tokens": 325,
         "cached_tokens": 40,
         "cache_hit_rate": 0.325,
         "model_id": "grok-4.5",

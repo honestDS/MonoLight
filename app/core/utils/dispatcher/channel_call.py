@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,7 +12,7 @@ from app.core.log import channel_log_extra, get_logger
 from app.core.utils.dispatcher.helpers import resolve_chat_params
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
-from app.core.utils.request_token_baseline import extract_provider_token_metrics
+from app.core.utils.request_token_baseline import build_provider_request_usage_metadata, extract_provider_token_metrics
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel, resolve_model_protocol
 from app.models.message import InternalMessage, InternalResponse
 from app.providers.llm.client import LLMClient, estimate_request_context_tokens
@@ -60,6 +61,7 @@ async def generate_chat_with_fallback(
                 estimated_input_tokens = estimate_request_context_tokens(request_messages, tools)
                 request_context_kwargs["request_context_tokens"] = estimated_input_tokens
             await db.commit()
+            provider_request_id = str(uuid.uuid4())
             response = await LLMClient.generate(
                 api_key=chat_channel_obj.get_decrypted_api_key(),
                 base_url=chat_channel_obj.base_url,
@@ -76,11 +78,8 @@ async def generate_chat_with_fallback(
                 **request_context_kwargs,
             )
             ai_msg = response.message
-            if require_content and not (ai_msg.content or "").strip():
-                raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
-            if require_content_or_tools and not ai_msg.tool_calls and not (ai_msg.content or "").strip():
-                raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             if request_metadata_callback is not None:
+                provider_token_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
                 await request_metadata_callback(
                     {
                         "type": "llm_request_metadata",
@@ -88,9 +87,14 @@ async def generate_chat_with_fallback(
                         "input_tokens_source": "estimated",
                         "context_window_tokens": max(1, int(chat_params["context_window_k"]) * CONTEXT_WINDOW_TOKENS_PER_K),
                         "max_output_tokens": max(0, int(chat_params["max_tokens"])),
-                        **extract_provider_token_metrics(getattr(response, "usage", None)),
+                        **provider_token_metrics,
+                        **build_provider_request_usage_metadata(provider_request_id, provider_token_metrics),
                     }
                 )
+            if require_content and not (ai_msg.content or "").strip():
+                raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
+            if require_content_or_tools and not ai_msg.tool_calls and not (ai_msg.content or "").strip():
+                raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
             return response, chat_channel_obj, model_entry, channel_rule, chat_params
         except ApiKeyException:
             raise

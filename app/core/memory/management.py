@@ -52,7 +52,7 @@ from app.core.memory.normalization import _normalize_uid, _require_positive, nor
 from app.core.memory.organization import get_organization_settings, update_organization_settings
 from app.core.memory.service import memory_service
 from app.core.memory_jobs.executor import MemoryJobExecutionError
-from app.core.memory_jobs.manager import MemoryJobSubmissionError, memory_job_manager
+from app.core.memory_jobs.manager import MemoryJobSubmissionError, is_organization_chain_job, memory_job_manager
 from app.core.memory_jobs.vector_cleanup import retry_vector_cleanup_job
 from app.core.utils.time import get_local_time
 from app.models.memory import (
@@ -684,6 +684,7 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
     unfinished_jobs = await memory_job_crud.list_unfinished_by_uid(db, uid=normalized_uid)
     current_job = unfinished_jobs[0] if unfinished_jobs else None
     active_organization_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.ORGANIZE]
+    active_organization_chain_jobs = [job for job in unfinished_jobs if is_organization_chain_job(job)]
     active_reindex_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.REINDEX]
     active_migration_jobs = [job for job in unfinished_jobs if _job_operation(job) == LongTermMemoryMutationOperation.EMBEDDING_MIGRATION]
     recent_organization_jobs = await memory_job_crud.get_page(
@@ -720,6 +721,7 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
     if store is not None and store.old_collection_cleanup_status in _BLOCKING_CLEANUP_STATUSES:
         cleanup_job_reference = await load_related_job(store.old_collection_cleanup_job_id)
     reindex_job_reference = active_reindex_jobs[0] if active_reindex_jobs else None
+    organization_chain_job_reference = active_organization_chain_jobs[0] if active_organization_chain_jobs else None
 
     active_store_ready = False
     if store is not None:
@@ -745,13 +747,15 @@ async def get_memory_settings(db: AsyncSession, *, uid: str) -> dict[str, Any]:
             "old_collection_cleanup_active",
             job=cleanup_job_reference,
         )
+    elif organization_chain_job_reference is not None:
+        maintenance_blocking = _blocking_state("organization_active", job=organization_chain_job_reference)
 
     organize_blocking = _blocking_state(None)
     if not active_store_ready:
         organize_blocking = _blocking_state("active_store_not_configured")
     elif current_organization_job is not None:
         organize_blocking = _blocking_state("organization_active", job=current_organization_job)
-    elif maintenance_blocking["blocked"]:
+    elif maintenance_blocking["blocked"] and maintenance_blocking["reason"] != "organization_active":
         organize_blocking = maintenance_blocking
     elif organization.get("channel_id") is None or organization.get("model_id") is None:
         organize_blocking = _blocking_state("organization_model_not_configured")

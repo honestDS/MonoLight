@@ -7,7 +7,7 @@ from typing import (
 from app.core.constants import (
     ERR_LLM_EMPTY_RESPONSE,
 )
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
@@ -29,6 +29,40 @@ logger = get_logger(__name__)
 class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_chat_completions"
     _TOOL_CALL_PLACEHOLDER = "[tool_call]"
+    _CONTEXT_LENGTH_ERROR_CODE = "context_length_exceeded"
+
+    @classmethod
+    def _extract_provider_error(cls, provider_error: Any) -> dict[str, Any]:
+        payload = cls._decode_json_payload(provider_error)
+        if not isinstance(payload, dict):
+            return {}
+        error = payload.get("error")
+        return error if isinstance(error, dict) else payload
+
+    @classmethod
+    def _build_provider_exception(
+        cls,
+        provider_error: Any,
+        *,
+        message: str,
+        status: int | None,
+    ) -> LLMException:
+        error = cls._extract_provider_error(provider_error)
+        code = error.get("code")
+        if isinstance(code, str) and code.strip().lower() == cls._CONTEXT_LENGTH_ERROR_CODE:
+            provider_message = error.get("message")
+            kwargs: dict[str, Any] = {"detail": provider_error}
+            if status is not None:
+                kwargs["status"] = status
+            return LLMContextLengthException(
+                provider_message=provider_message if isinstance(provider_message, str) else None,
+                **kwargs,
+            )
+        return super()._build_provider_exception(
+            provider_error,
+            message=message,
+            status=status,
+        )
 
     @classmethod
     def _normalize_usage(cls, usage: Any) -> dict[str, Any]:
@@ -126,6 +160,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             model_id=model_id,
             base_url=base_url,
         )
+        if parsed.get("error"):
+            self._raise_provider_error(parsed)
         parsed["usage"] = self._normalize_usage(parsed.get("usage"))
         return parsed
 
@@ -179,6 +215,8 @@ class OpenAIChatCompletionsTransformer(BaseOpenAITransformer):
             return None, False
 
         parsed = dict(event)
+        if parsed.get("error"):
+            cls._raise_provider_error(parsed)
         if "usage" in parsed:
             parsed["usage"] = cls._normalize_usage(parsed.get("usage"))
         return parsed, cls._stream_chunk_has_payload(parsed)
