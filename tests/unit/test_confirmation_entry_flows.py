@@ -1281,6 +1281,7 @@ async def test_websocket_route_active_task_appends_approval_through_unified_subm
     assert (await get_confirmation_payload(db_session))["status"] == AuditRecordStatus.EXECUTING.value
     assert len(works) == 1
     assert works[0].work_type == SessionReplyWorkType.CONFIRMED_TOOL_EXECUTION
+    assert works[0].status == SessionReplyWorkStatus.READY_FOR_LLM
     assert [event["type"] for event in websocket.sent] == ["audit_confirmation_status", "audit_tool_results_update"]
     assert websocket.sent[0]["session_id"] == session_id
     assert websocket.sent[0]["audit_record_id"] == record.id
