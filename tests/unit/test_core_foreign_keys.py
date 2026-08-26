@@ -74,6 +74,20 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     ),
     ("knowledge_base_collection_owner", ("knowledge_base_id",), "knowledge_base", ("id",), "SET NULL"),
     ("knowledge_base_document", ("knowledge_base_id",), "knowledge_base", ("id",), "CASCADE"),
+    (
+        "managed_knowledge_item",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    (
+        "managed_knowledge_revision",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
     # session, profile, platform, and scheduled task
     ("profile", ("prompt_id",), "prompt", ("id",), "RESTRICT"),
     ("chat_session", ("profile_override_id",), "profile", ("id",), "RESTRICT"),

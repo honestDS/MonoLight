@@ -116,6 +116,7 @@ app/core/
 ├── dispatchers/            # 对话分发应用服务
 ├── embedding/              # 知识库嵌入能力
 ├── i18n/                   # 后端多语言
+├── knowledge/              # 托管知识关系主数据领域服务
 ├── memory/                 # 长期记忆领域与管理服务
 ├── memory_jobs/            # 长期记忆作业组件
 ├── message_platforms/      # 消息平台应用服务
@@ -175,6 +176,18 @@ app/core/background_tasks/
 ├── scheduler.py            # 定时任务调度
 └── schemas.py              # 后台任务内部数据结构
 ```
+
+### 托管知识领域：`app/core/knowledge/`
+
+```text
+app/core/knowledge/
+├── __init__.py             # 托管知识领域能力导出
+├── errors.py               # 托管知识领域异常
+├── managed.py              # 托管知识条目、版本与维护边界领域服务
+└── results.py              # 托管知识领域操作结果与状态
+```
+
+该目录承载 LLM 托管知识的关系型主数据领域能力。托管知识完整正文与版本历史以关系数据库为持久化事实源，向量分块属于可重建的派生索引数据，不作为知识主数据。
 
 ### 长期记忆作业：`app/core/memory_jobs/`
 
@@ -273,6 +286,7 @@ app/core/crud/
 ├── context_summary_fragment.py # 上下文总结片段数据访问
 ├── context_summary_stage.py # 上下文总结阶段数据访问
 ├── knowledge_base.py       # 知识库数据访问
+├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
 ├── log.py                  # 系统日志数据访问
 ├── message.py              # 消息数据访问
 ├── message_platform.py     # 消息平台数据访问
@@ -398,7 +412,7 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、文档与分块模型
+├── knowledge_base.py       # 知识库、用户文档、托管知识条目与版本历史模型
 ├── memory.py               # 长期记忆模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
@@ -419,6 +433,8 @@ app/models/
 ```
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
+
+`app/models/knowledge_base.py` 同时承载知识库容器、用户知识库文档、托管知识条目和托管知识版本历史。托管知识条目保存完整正文、稳定知识标识、版本、来源与维护状态；版本历史保存发布前后快照并独立于可清理的当前条目行。托管知识的向量分块仅作为派生检索索引，由后续知识作业能力维护。
 
 ## 外部能力封装：`app/providers/`
 
