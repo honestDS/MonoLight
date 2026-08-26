@@ -4,6 +4,7 @@ MESSAGES = {
     "ERR_LLM_UNEXPECTED_ERROR": "Unexpected exception occurred when calling the large model interface",
     "ERR_LLM_UNEXPECTED_ERROR_WITH_DETAIL": "Unexpected exception occurred when calling the large model interface: {detail}",
     "ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS": "Large model API returned an abnormal response [Status: {status}]: {detail}",
+    "ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH": "The model provider reported that the context length was exceeded. Check whether this channel's configured context window matches the model's actual capability.",
     "ERR_LLM_CHANNEL_NOT_CONFIGURED": "No valid model channel config or API Key detected. Check that a Profile with valid keys is set as default or selected for the current session or message platform.",
     "ERR_LLM_EMPTY_RESPONSE": "Large model returned an empty response, please try sending the instruction again or check the model configuration",
     "ERR_LLM_FIRST_CHAR_TIMEOUT": "Timeout waiting for the dialog model's first character response ({timeout} seconds)",

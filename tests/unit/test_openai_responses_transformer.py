@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-from app.core.constants import ERR_LLM_EMPTY_RESPONSE
-from app.core.exceptions import LLMException
+from app.core.constants import ERR_LLM_CONNECTION_FAILED, ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH, ERR_LLM_EMPTY_RESPONSE
+from app.core.exceptions import LLMContextLengthException, LLMException
 from app.models.message import (
     FilePart,
     ImagePart,
@@ -36,8 +36,8 @@ class _AsyncBytesIterator:
 
 
 class _FakeAiohttpResponse:
-    def __init__(self, *, text: str = "", chunks: list[bytes] | None = None):
-        self.status = 200
+    def __init__(self, *, text: str = "", chunks: list[bytes] | None = None, status: int = 200):
+        self.status = status
         self._text = text
         self.content = self
         self._chunks = chunks or []
@@ -130,6 +130,88 @@ def test_openai_transformers_share_base_without_inheriting_each_other() -> None:
 
 def test_base_transformer_generate_returns_provider_response() -> None:
     assert typing.get_type_hints(BaseTransformer.generate)["return"] is Any
+
+
+def test_context_length_exception_remains_llm_exception_for_channel_fallback() -> None:
+    assert issubclass(LLMContextLengthException, LLMException)
+
+
+def test_chat_completions_classifies_only_explicit_context_length_code() -> None:
+    with pytest.raises(LLMContextLengthException) as exc_info:
+        OpenAIChatCompletionsTransformer._raise_provider_error(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "maximum context length is 8192 tokens",
+                    }
+                }
+            ),
+            status=400,
+        )
+
+    assert exc_info.value.message == ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH
+    assert exc_info.value.code == 400
+    assert exc_info.value.provider_message == "maximum context length is 8192 tokens"
+    assert exc_info.value.kwargs["status"] == 400
+
+    with pytest.raises(LLMException) as ordinary_error:
+        OpenAIChatCompletionsTransformer._raise_provider_error(
+            {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "maximum context length appeared only in text",
+                }
+            },
+            status=400,
+        )
+
+    assert not isinstance(ordinary_error.value, LLMContextLengthException)
+
+
+def test_responses_classifies_nested_context_length_error_and_preserves_other_errors() -> None:
+    with pytest.raises(LLMContextLengthException) as exc_info:
+        OpenAIResponsesTransformer._raise_response_error(
+            {
+                "status": "failed",
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "input exceeds the model context window",
+                },
+            }
+        )
+
+    assert exc_info.value.message == ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH
+    assert exc_info.value.provider_message == "input exceeds the model context window"
+
+    with pytest.raises(LLMException) as ordinary_error:
+        OpenAIResponsesTransformer._raise_response_error(
+            {
+                "status": "failed",
+                "error": {
+                    "code": "server_error",
+                    "message": "provider failed",
+                },
+            }
+        )
+
+    assert not isinstance(ordinary_error.value, LLMContextLengthException)
+    assert ordinary_error.value.message == ERR_LLM_CONNECTION_FAILED
+
+
+def test_responses_stream_failed_event_classifies_nested_context_length_error() -> None:
+    with pytest.raises(LLMContextLengthException):
+        OpenAIResponsesTransformer._raise_event_error(
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "too much input",
+                    }
+                },
+            }
+        )
 
 
 @pytest.mark.asyncio
