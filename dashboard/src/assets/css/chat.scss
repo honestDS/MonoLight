@@ -721,9 +721,9 @@
           .chat-input-row {
             position: relative;
             display: flex;
-            align-items: flex-start;
+            align-items: center;
             gap: 6px;
-            padding: 0 60px 0 4px;
+            padding: 6px 44px 6px 4px;
           }
 
           .more-options-trigger {
@@ -732,13 +732,12 @@
             height: 36px !important;
             min-width: 36px !important;
             padding: 0 !important;
-            margin: 4px 0 0 0;
+            margin: 0;
             border-radius: 50% !important;
             background: #f4f4f5;
             border: none;
             color: #606266;
             transition: background 0.2s ease, color 0.2s ease;
-            align-self: flex-start;
 
             &:hover {
               background: #e9e9eb;
@@ -839,20 +838,13 @@
             flex: 1;
             min-width: 0;
 
-            .el-textarea {
-              line-height: 1.5;
-            }
-
             .el-textarea__inner {
               min-height: 36px !important;
-              height: 36px !important;
               padding: 8px 4px;
               border: none !important;
               box-shadow: none !important;
               background: transparent;
               border-radius: 0;
-              resize: none !important;
-              transition: none !important;
 
               &:focus {
                 box-shadow: none !important;
@@ -862,8 +854,9 @@
 
           .action-btn-container {
             position: absolute;
-            top: 4px;
+            top: 50%;
             right: 8px;
+            transform: translateY(-50%);
 
             .action-btn {
               width: 32px !important;
@@ -878,33 +871,6 @@
               .el-icon {
                 font-size: 16px;
               }
-            }
-          }
-
-          .input-expand-btn {
-            position: absolute;
-            top: 4px;
-            right: 46px;
-            width: 28px;
-            height: 28px;
-            border: none;
-            background: rgba(255, 255, 255, 0.95);
-            color: #606266;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: background 0.15s ease, color 0.15s ease;
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-
-            &:hover {
-              background: #f4f4f5;
-              color: #303133;
-            }
-
-            .el-icon {
-              font-size: 16px;
             }
           }
         }
@@ -1298,20 +1264,6 @@
         flex: 1 1 auto;
         min-width: 0;
       }
-    }
-  }
-}
-
-.chat-input-expand-dialog {
-  .el-dialog__body {
-    padding: 12px 20px;
-  }
-
-  .chat-input-expanded {
-    .el-textarea__inner {
-      font-size: 14px;
-      line-height: 1.6;
-      min-height: 220px !important;
     }
   }
 }

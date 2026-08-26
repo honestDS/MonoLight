@@ -235,10 +235,8 @@
                   :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
                   :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
                   :show-word-limit="false"
-                  @keyup.enter="send"
+                  @keydown.enter="(e) => { if (e.shiftKey) return; e.preventDefault(); send(); }"
                   @paste="handlePaste"
-                  @input="onInputChange"
-                  ref="chatInputRef"
                   type="textarea"
                   :autosize="{ minRows: 1, maxRows: 6 }"
                   class="chat-input"
@@ -257,48 +255,7 @@
                     <el-icon style="margin-left: -2px;margin-top: 2px;"><Position /></el-icon>
                   </el-button>
                 </div>
-
-                <button
-                  v-if="isOverflowExpanded"
-                  class="input-expand-btn"
-                  :title="$t('chat.expand_input')"
-                  @click="expandedDialogVisible = true"
-                >
-                  <el-icon><FullScreen /></el-icon>
-                </button>
               </div>
-
-              <el-dialog
-                v-model="expandedDialogVisible"
-                :title="$t('chat.expand_input')"
-                width="560px"
-                :show-close="true"
-                :close-on-click-modal="true"
-                class="chat-input-expand-dialog"
-              >
-                <el-input
-                  v-model="inputMsg"
-                  type="textarea"
-                  :rows="10"
-                  :placeholder="isCurrentSessionReadOnly ? $t('chat.guidance_placeholder') : $t('chat.input_placeholder')"
-                  :disabled="isCurrentSessionReadOnly && guidanceSubmitting"
-                  :maxlength="isCurrentSessionReadOnly ? 500 : undefined"
-                  :show-word-limit="false"
-                  class="chat-input-expanded"
-                  :resize="'none'"
-                  @keyup.enter="send"
-                />
-                <template #footer>
-                  <el-button @click="expandedDialogVisible = false">{{ $t('chat.close') }}</el-button>
-                  <el-button
-                    type="primary"
-                    @click="send(); expandedDialogVisible = false"
-                    :disabled="!inputMsg.trim() && attachments.length === 0"
-                  >
-                    {{ $t('chat.send') }}
-                  </el-button>
-                </template>
-              </el-dialog>
             </div>
           </div>
         </div>
@@ -309,9 +266,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, FullScreen, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
+import { Delete, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
@@ -334,19 +291,6 @@ const profileSettingSubmitting = ref(false)
 const toolOutputSettingSubmitting = ref(false)
 const moreOptionsVisible = ref(false)
 const uploadTriggerRef = ref(null)
-const chatInputRef = ref(null)
-const isOverflowExpanded = ref(false)
-const expandedDialogVisible = ref(false)
-
-const onInputChange = () => {
-  nextTick(() => {
-    const el = chatInputRef.value?.$el?.querySelector?.('textarea')
-    if (!el) return
-    const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20
-    const rows = Math.max(1, Math.round(el.scrollHeight / lineHeight))
-    isOverflowExpanded.value = rows >= 6 || el.scrollHeight >= el.clientHeight + lineHeight
-  })
-}
 
 const openUploadPicker = () => {
   const triggerEl = uploadTriggerRef.value?.$el || uploadTriggerRef.value
@@ -425,17 +369,6 @@ const {
   newSessionProfileOverrideId,
   currentSessionShowToolCalls
 } = chat
-
-watch(inputMsg, () => {
-  isOverflowExpanded.value = false
-  onInputChange()
-})
-
-watch(expandedDialogVisible, (v) => {
-  if (!v) {
-    nextTick(() => onInputChange())
-  }
-})
 
 const currentSessionProfileDisplayId = computed(() => resolveSessionProfileDisplayId(
   currentSession.value,
