@@ -6,6 +6,7 @@ from app.core.constants import (
     ERR_GENERIC_ERROR,
     ERR_INTERNAL_SERVER_ERROR,
     ERR_KB_NOT_FOUND,
+    ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_PROFILE_EMBEDDING_CALL_FAILED,
     ERR_PROFILE_RERANK_CALL_FAILED,
@@ -94,6 +95,21 @@ class ApiKeyException(BaseBusinessException):
 class LLMException(BaseBusinessException):
     def __init__(self, message: str = ERR_LLM_UNEXPECTED_ERROR, code: int = 502, **kwargs):
         super().__init__(code=code, message=message, **kwargs)
+
+
+class LLMContextLengthException(LLMException):
+    """模型供应商明确返回请求上下文长度超限。"""
+
+    def __init__(
+        self,
+        message: str = ERR_LLM_CONTEXT_LENGTH_CONFIG_MISMATCH,
+        code: int = 400,
+        *,
+        provider_message: str | None = None,
+        **kwargs,
+    ):
+        self.provider_message = provider_message
+        super().__init__(message=message, code=code, **kwargs)
 
 
 class EmbeddingException(LLMException):

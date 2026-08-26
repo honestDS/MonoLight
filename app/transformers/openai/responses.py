@@ -6,7 +6,7 @@ from app.core.constants import (
     ERR_LLM_CONNECTION_FAILED,
     ERR_LLM_EMPTY_RESPONSE,
 )
-from app.core.exceptions import LLMException
+from app.core.exceptions import LLMContextLengthException, LLMException
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.model_request_headers import build_model_request_headers
@@ -19,6 +19,47 @@ logger = get_logger(__name__)
 
 class OpenAIResponsesTransformer(BaseOpenAITransformer):
     _PROTOCOL_METADATA = "openai_responses"
+    _CONTEXT_LENGTH_ERROR_CODE = "context_length_exceeded"
+
+    @classmethod
+    def _extract_provider_error(cls, provider_error: Any) -> dict[str, Any]:
+        payload = cls._decode_json_payload(provider_error)
+        if not isinstance(payload, dict):
+            return {}
+
+        response = payload.get("response")
+        if isinstance(response, dict):
+            response_error = response.get("error")
+            if isinstance(response_error, dict):
+                return response_error
+
+        error = payload.get("error")
+        return error if isinstance(error, dict) else payload
+
+    @classmethod
+    def _build_provider_exception(
+        cls,
+        provider_error: Any,
+        *,
+        message: str,
+        status: int | None,
+    ) -> LLMException:
+        error = cls._extract_provider_error(provider_error)
+        code = error.get("code")
+        if isinstance(code, str) and code.strip().lower() == cls._CONTEXT_LENGTH_ERROR_CODE:
+            provider_message = error.get("message")
+            kwargs: dict[str, Any] = {"detail": provider_error}
+            if status is not None:
+                kwargs["status"] = status
+            return LLMContextLengthException(
+                provider_message=provider_message if isinstance(provider_message, str) else None,
+                **kwargs,
+            )
+        return super()._build_provider_exception(
+            provider_error,
+            message=message,
+            status=status,
+        )
 
     async def generate(
         self,
@@ -343,8 +384,12 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
                 return True
         return False
 
-    @staticmethod
-    def _raise_response_error(response: dict[str, Any]) -> None:
+    @classmethod
+    def _raise_response_error(cls, response: dict[str, Any]) -> None:
+        provider_error = cls._extract_provider_error(response)
+        provider_code = provider_error.get("code")
+        if isinstance(provider_code, str) and provider_code.strip().lower() == cls._CONTEXT_LENGTH_ERROR_CODE:
+            cls._raise_provider_error(response)
         official_error = response.get("error") or response.get("status") or response
         raise LLMException(ERR_LLM_CONNECTION_FAILED, error=official_error, detail=response.get("error") or response)
 
@@ -666,8 +711,13 @@ class OpenAIResponsesTransformer(BaseOpenAITransformer):
             content_index = str(content_index)
         return cls._output_index(event), content_index
 
-    @staticmethod
-    def _raise_event_error(event: dict[str, Any]) -> None:
+    @classmethod
+    def _raise_event_error(cls, event: dict[str, Any]) -> None:
+        provider_error = cls._extract_provider_error(event)
+        provider_code = provider_error.get("code")
+        if isinstance(provider_code, str) and provider_code.strip().lower() == cls._CONTEXT_LENGTH_ERROR_CODE:
+            cls._raise_provider_error(event)
+
         event_type = event.get("type")
         response = event.get("response") if isinstance(event.get("response"), dict) else {}
         if event_type == "response.failed":
