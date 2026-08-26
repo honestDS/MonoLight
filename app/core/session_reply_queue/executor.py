@@ -27,6 +27,10 @@ from app.core.constants import (
     ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND,
     ERR_SESSION_REPLY_FINAL_MESSAGE_NOT_PERSISTED,
     ERR_SESSION_REPLY_LEASE_LOST_SAVING_CHECKPOINT,
+    ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED,
+    ERR_SESSION_REPLY_PROVIDER_USAGE_MISSING,
+    ERR_SESSION_REPLY_PROVIDER_USAGE_SESSION_NOT_FOUND,
+    ERR_SESSION_REPLY_PROVIDER_USAGE_WORK_ID_INVALID,
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
@@ -243,7 +247,7 @@ async def _persist_session_reply_provider_usage(
 
     work_id = work.id
     if not isinstance(work_id, int) or isinstance(work_id, bool) or work_id <= 0:
-        raise RuntimeError("Invalid work id")
+        raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_WORK_ID_INVALID))
 
     request_id, input_tokens, cached_tokens, output_tokens = provider_usage
     async with AsyncSessionLocal() as usage_db:
@@ -263,7 +267,7 @@ async def _persist_session_reply_provider_usage(
             uid=work.uid,
         )
         if session is None:
-            raise RuntimeError("Session not found")
+            raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_SESSION_NOT_FOUND))
 
         total_input_tokens, total_cached_tokens = extract_session_cache_token_totals(session.llm_request_metadata)
         total_output_tokens = extract_session_total_output_tokens(session.llm_request_metadata)
@@ -298,7 +302,7 @@ async def _persist_session_reply_provider_usage(
             commit=False,
         )
         if not updated:
-            raise RuntimeError("Session metadata update failed")
+            raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_METADATA_UPDATE_FAILED))
         await usage_db.commit()
         return _ProviderUsagePersistenceResult(
             created=True,
@@ -753,7 +757,7 @@ async def _generate_reply_with_request_metadata(
         if provider_usage is not None:
             result = await _persist_session_reply_provider_usage_reliably(ordered_metadata, work=work)
             if result is None:
-                raise RuntimeError("Provider usage missing")
+                raise RuntimeError(t(ERR_SESSION_REPLY_PROVIDER_USAGE_MISSING))
             session_total_input_tokens = result.total_input_tokens
             session_total_cached_tokens = result.total_cached_tokens
             session_total_output_tokens = result.total_output_tokens
