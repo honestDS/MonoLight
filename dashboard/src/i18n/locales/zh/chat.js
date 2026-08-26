@@ -12,6 +12,7 @@ export default {
   session_last_active: '活跃',
   session_source: '来源',
   refresh_sessions: '刷新会话列表',
+  session_reply_in_progress: '正在生成回复',
   no_sessions: '暂无会话',
   empty_chat_tip: '请选择左侧会话或新建会话开始聊天',
   tool_activity: '工具调用',
