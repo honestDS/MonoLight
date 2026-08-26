@@ -17,6 +17,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_NON_TARGET_FIELDS_FORBIDDEN,
     ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
+    ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED,
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED,
 )
@@ -31,6 +32,7 @@ from app.core.memory import (
 )
 from app.core.memory.normalization import build_memory_content_hash
 from app.core.memory.organization import (
+    MemoryOrganizationContextExceededError,
     MemoryOrganizationPlanInvalidError,
     MemoryOrganizationSnapshotItem,
     build_organization_dedupe_key,
@@ -389,6 +391,46 @@ async def test_snapshot_filters_ready_records_sorts_and_isolates_uid(
             "pinned": False,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_organization_submission_rejects_actual_snapshot_context_overflow_before_job_creation(
+    db_session: AsyncSession,
+) -> None:
+    channel, store = await _create_ready_setup(db_session, uid="organization-context-overflow")
+    uid = store.uid
+    channel.model_ids = [{**_chat_model(max_tokens=700), "context_window_k": 1}]
+    content = "word " * 100
+    assert estimate_tokens(content) <= 160
+    await _create_record(
+        db_session,
+        uid=uid,
+        memory_key="long-context",
+        content=content,
+    )
+    await db_session.commit()
+
+    with pytest.raises(MemoryOrganizationContextExceededError) as exc_info:
+        await MemoryJobManager().submit_organization(db_session, uid=uid)
+
+    error = exc_info.value
+    assert error.message == ERR_MEMORY_ORGANIZATION_CONTEXT_EXCEEDED
+    assert error.data["status"] == "organization_context_exceeded"
+    assert error.data["available_tokens"] == 488
+    assert error.data["required_tokens"] > error.data["available_tokens"]
+    assert error.data["budget"]["max_output_tokens"] == 256
+    assert error.data["budget"]["safety_margin_tokens"] == 256
+    assert (
+        await memory_job_crud.get_by_active_mutation_key(
+            db_session,
+            uid=uid,
+            active_mutation_key=build_memory_organization_active_mutation_key(uid),
+        )
+        is None
+    )
+    current_store = await memory_store_crud.get_by_uid(db_session, uid=uid)
+    assert current_store is not None
+    assert current_store.organization_last_job_id is None
 
 
 @pytest.mark.asyncio

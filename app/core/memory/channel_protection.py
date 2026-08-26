@@ -19,6 +19,7 @@ class LongTermMemoryChannelModelReference:
     channel_id: int
     model_id: str | None
     usage: str
+    is_adaptable: bool = False
 
 
 def _value(value: object) -> object:
@@ -130,18 +131,19 @@ def _organization_payload_pairs(payload: object) -> list[tuple[int, str | None]]
 
 
 def _add_reference(
-    references: set[tuple[str, int, str | None, str]],
+    references: set[tuple[str, int, str | None, str, bool]],
     *,
     uid: str,
     raw_channel_id: object,
     raw_model_id: object,
     channel_id: int | None,
     usage: str,
+    is_adaptable: bool = False,
 ) -> None:
     current_channel_id = _as_channel_id(raw_channel_id)
     if current_channel_id is None or (channel_id is not None and current_channel_id != channel_id):
         return
-    references.add((uid, current_channel_id, _as_model_id(raw_model_id), usage))
+    references.add((uid, current_channel_id, _as_model_id(raw_model_id), usage, is_adaptable))
 
 
 def _group_by_uid(items: list[Any]) -> dict[str, list[Any]]:
@@ -160,7 +162,7 @@ async def list_memory_channel_references(
     stores_by_uid = {store.uid: store for store in stores}
     revisions_by_uid = _group_by_uid(await memory_reference_crud.list_all_embedding_revisions_for_admin(db))
     jobs_by_uid = _group_by_uid(await memory_reference_crud.list_all_memory_jobs_for_admin(db))
-    references: set[tuple[str, int, str | None, str]] = set()
+    references: set[tuple[str, int, str | None, str, bool]] = set()
     cleanup_statuses = {"pending", "running", "failed"}
     embedding_migration_statuses = {
         LongTermMemoryMutationStatus.PENDING.value,
@@ -225,6 +227,7 @@ async def list_memory_channel_references(
             raw_model_id=store.organization_model_id,
             channel_id=channel_id,
             usage=ModelUsage.CHAT.value,
+            is_adaptable=True,
         )
 
         for job in jobs:
@@ -290,4 +293,13 @@ async def list_memory_channel_references(
                 usage=ModelUsage.EMBEDDING.value,
             )
 
-    return [LongTermMemoryChannelModelReference(uid=uid, channel_id=current_channel_id, model_id=model_id, usage=usage) for uid, current_channel_id, model_id, usage in references]
+    return [
+        LongTermMemoryChannelModelReference(
+            uid=uid,
+            channel_id=current_channel_id,
+            model_id=model_id,
+            usage=usage,
+            is_adaptable=is_adaptable,
+        )
+        for uid, current_channel_id, model_id, usage, is_adaptable in references
+    ]

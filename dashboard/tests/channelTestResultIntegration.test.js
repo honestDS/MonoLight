@@ -56,3 +56,65 @@ test('ChannelModelEntry keeps metadata detection and result viewing as separate 
     modelEntrySource.indexOf("emit('view-test-result')"),
   )
 })
+
+test('ChannelFormDialog renders config impact messages as block VNodes', () => {
+  assert.match(channelFormSource, /import\s+\{[^}]*\bh\b[^}]*\}\s+from\s+['"]vue['"]/)
+  assert.match(channelFormSource, /import\s+\{[^}]*\bElMessageBox\b[^}]*\}\s+from\s+['"]element-plus['"]/)
+  assert.match(channelFormSource, /ElMessageBox\.confirm\(/)
+  assert.match(channelFormSource, /const syncedMemoryOrganizationSettings = data\?\.synced_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const retainedMemoryOrganizationSettings = data\?\.retained_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const disabledMemoryOrganizationSettings = data\?\.disabled_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const deferredMemoryOrganizationSettings = data\?\.deferred_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /const pendingDeletionModels = data\?\.pending_deletion_models \|\| 0/)
+  assert.match(
+    channelFormSource,
+    /messages\.push\(t\(['"]channels\.pending_deletion_models_warning['"],\s*\{\s*count:\s*pendingDeletionModels\s*\}\)\)/,
+  )
+  assert.match(
+    channelFormSource,
+    /messages\.push\(t\(['"]channels\.memory_organization_deferred['"],\s*\{\s*count:\s*deferredMemoryOrganizationSettings\s*\}\)\)/,
+  )
+  assert.match(channelFormSource, /h\(\s*['"]div['"]\s*,\s*\{\s*class:\s*['"]config-impact-warning['"]\s*\}\s*,\s*messages\.map/)
+  assert.match(
+    channelFormSource,
+    /h\(\s*['"]div['"]\s*,\s*\{\s*class:\s*['"]config-impact-warning__item['"]\s*,\s*key:\s*index\s*\}\s*,\s*message\s*\)/,
+  )
+  assert.equal(channelFormSource.replaceAll('ElMessageBox.alert(', '').includes('alert('), false)
+  assert.equal(channelFormSource.includes('showConfigImpactWarning'), false)
+  assert.equal(channelFormSource.includes("messages.join('\\n')"), false)
+})
+
+test('ChannelFormDialog locks pending-delete model entries', () => {
+  assert.match(channelFormSource, /:locked="entry\.lifecycle_status === 'pending_delete'"/)
+  assert.match(modelEntrySource, /<el-button v-if="props\.showRemove"[^>]*class="remove"[^>]*:disabled="props\.locked"/)
+  assert.match(modelEntrySource, /<el-input v-model="props\.entry\.model_id"[^>]*:disabled="props\.locked"/)
+  assert.match(modelEntrySource, /<el-select v-model="props\.entry\.usage"[^>]*:disabled="props\.locked"/)
+  assert.match(
+    modelEntrySource,
+    /<el-tag v-if="props\.locked"[^>]*>\s*\{\{ \$t\(['"]channels\.model_pending_delete['"]\) \}\}\s*<\/el-tag>/,
+  )
+})
+
+test('ChannelFormDialog confirms config impact before the final edit update', () => {
+  assert.match(
+    channelFormSource,
+    /if \(isEdit\.value\) \{[\s\S]*?let finalResponse = await channelApi\.update\(currentId\.value, payload\)[\s\S]*?while \(finalResponse\.data\?\.data\?\.requires_confirmation\) \{[\s\S]*?const impactData = finalResponse\.data\?\.data[\s\S]*?const confirmed = await confirmConfigImpact\(impactData\)[\s\S]*?if \(!confirmed\) return[\s\S]*?confirm_config_impact: true,[\s\S]*?config_impact_token: impactData\?\.config_impact_token \|\| null/,
+  )
+})
+
+test('ChannelFormDialog shows concurrent memory organization disabled notice after a successful edit', () => {
+  assert.match(channelFormSource, /data\?\.concurrently_disabled_memory_organization_settings \|\| 0/)
+  assert.match(channelFormSource, /ElMessageBox\.alert\(/)
+  assert.match(
+    channelFormSource,
+    /t\(['"]channels\.memory_organization_concurrently_disabled_notice['"],\s*\{\s*count\s*\}\)/,
+  )
+  assert.match(
+    channelFormSource,
+    /t\(['"]channels\.memory_organization_concurrently_disabled_title['"]\)/,
+  )
+  assert.match(
+    channelFormSource,
+    /ElMessage\.success\(t\(['"]channels\.update_success['"]\)\)[\s\S]*?await showConcurrentMemoryOrganizationDisabledNotice\(finalResponse\.data\?\.data\)/,
+  )
+})

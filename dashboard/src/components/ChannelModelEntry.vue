@@ -2,20 +2,23 @@
   <div class="model-entry-card">
     <div class="model-entry-header">
       <span>{{ $t('channels.model_entry') }} #{{ props.index + 1 }}</span>
+      <el-tag v-if="props.locked" type="warning" size="small">
+        {{ $t('channels.model_pending_delete') }}
+      </el-tag>
       <div class="model-entry-actions">
-        <el-button v-if="props.entry.usage === 'CHAT'" type="text" :loading="props.testing" :disabled="props.testing" @click="emit('test-chat')">
+        <el-button v-if="props.entry.usage === 'CHAT'" type="text" :loading="props.testing" :disabled="props.testing || props.locked" @click="emit('test-chat')">
           {{ $t('channels.test') }}
         </el-button>
-        <el-button v-else-if="props.entry.usage === 'IMAGE_GENERATION'" type="text" :loading="props.testing" :disabled="props.testing" @click="emit('test-image-generation')">
+        <el-button v-else-if="props.entry.usage === 'IMAGE_GENERATION'" type="text" :loading="props.testing" :disabled="props.testing || props.locked" @click="emit('test-image-generation')">
           {{ $t('channels.test') }}
         </el-button>
         <el-button v-else type="text" disabled>
           {{ $t('channels.test') }}
         </el-button>
-        <el-button type="text" :loading="props.detectingMetadata" :disabled="props.entry.usage !== 'CHAT' || props.metadataDetectionDisabled" @click="emit('detect-metadata')">
+        <el-button type="text" :loading="props.detectingMetadata" :disabled="props.entry.usage !== 'CHAT' || props.metadataDetectionDisabled || props.locked" @click="emit('detect-metadata')">
           {{ $t('channels.model_metadata_detect') }}
         </el-button>
-        <el-button v-if="props.showRemove" type="text" class="remove" @click="emit('remove')">
+        <el-button v-if="props.showRemove" type="text" class="remove" :disabled="props.locked" @click="emit('remove')">
           {{ $t('channels.remove') }}
         </el-button>
         <template v-if="props.testState">
@@ -32,64 +35,64 @@
     <div class="model-entry-fields">
       <div class="model-entry-field model-entry-field-half">
         <el-form-item :label="$t('channels.model_id_label')" :error="props.modelIdError" :prop="props.modelIdProp || undefined">
-          <el-input v-model="props.entry.model_id" :placeholder="$t('channels.model_id_placeholder')" @input="handleModelIdInput" />
+          <el-input v-model="props.entry.model_id" :placeholder="$t('channels.model_id_placeholder')" :disabled="props.locked" @input="handleModelIdInput" />
         </el-form-item>
       </div>
       <div class="model-entry-field model-entry-field-half">
         <el-form-item :label="$t('channels.model_type_label')" >
-          <el-select v-model="props.entry.usage" class="full-width-input" @change="handleUsageChange">
+          <el-select v-model="props.entry.usage" class="full-width-input" :disabled="props.locked" @change="handleUsageChange">
             <el-option v-for="item in props.modelUsages" :key="item" :label="getModelUsageLabel(item)" :value="item" />
           </el-select>
         </el-form-item>
       </div>
       <div class="model-entry-field model-entry-field-half">
         <el-form-item :label="$t('channels.model_protocol')" :error="props.protocolError" :prop="props.protocolProp || undefined">
-          <el-select v-model="props.entry.protocol" class="full-width-input" @change="handleProtocolChange">
+          <el-select v-model="props.entry.protocol" class="full-width-input" :disabled="props.locked" @change="handleProtocolChange">
             <el-option v-for="item in props.modelProtocols" :key="item" :label="getModelProtocolLabel(item)" :value="item" />
           </el-select>
         </el-form-item>
       </div>
       <div v-if="props.showEnabled" class="model-entry-field model-entry-field-half">
         <el-form-item :label="$t('channels.is_enabled')">
-          <el-switch v-model="props.entry.is_enabled" @change="emit('test-config-change')" />
+          <el-switch v-model="props.entry.is_enabled" :disabled="props.locked" @change="emit('test-config-change')" />
         </el-form-item>
       </div>
 
       <template v-if="props.entry.usage === 'CHAT'">
         <div class="model-entry-field">
           <el-form-item :label="$t('channels.temperature')" >
-            <el-input-number v-model="props.entry.temperature" :min="0" :max="2" :step="0.1" controls-position="right" @change="emit('test-config-change')" />
+            <el-input-number v-model="props.entry.temperature" :min="0" :max="2" :step="0.1" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
         <div class="model-entry-field">
           <el-form-item :label="$t('channels.top_p')" >
-            <el-input-number v-model="props.entry.top_p" :min="0" :max="1" :step="0.05" controls-position="right" @change="emit('test-config-change')" />
+            <el-input-number v-model="props.entry.top_p" :min="0" :max="1" :step="0.05" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
         <div class="model-entry-field">
           <el-form-item :label="$t('channels.max_tokens')">
-            <el-input-number v-model="props.entry.max_tokens" :min="0" controls-position="right" @change="emit('test-config-change')" />
+            <el-input-number v-model="props.entry.max_tokens" :min="0" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
         <div class="model-entry-field">
           <el-form-item :label="$t('channels.context_window_k')">
-            <el-input-number v-model="props.entry.context_window_k" :min="1" controls-position="right" />
+            <el-input-number v-model="props.entry.context_window_k" :min="1" controls-position="right" :disabled="props.locked" />
           </el-form-item>
         </div>
         <div class="model-entry-understanding-row">
           <div class="model-entry-field model-entry-field-third">
             <el-form-item :label="$t('channels.image_understanding')">
-              <el-switch v-model="props.entry.image_understanding" />
+              <el-switch v-model="props.entry.image_understanding" :disabled="props.locked" />
             </el-form-item>
           </div>
           <div class="model-entry-field model-entry-field-third">
             <el-form-item :label="$t('channels.audio_understanding')">
-              <el-switch v-model="props.entry.audio_understanding" />
+              <el-switch v-model="props.entry.audio_understanding" :disabled="props.locked" />
             </el-form-item>
           </div>
           <div class="model-entry-field model-entry-field-third">
             <el-form-item :label="$t('channels.video_understanding')">
-              <el-switch v-model="props.entry.video_understanding" />
+              <el-switch v-model="props.entry.video_understanding" :disabled="props.locked" />
             </el-form-item>
           </div>
         </div>
@@ -99,8 +102,8 @@
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.embedding_dimensions')">
             <div class="embedding-dimension-row">
-              <el-input-number v-model="props.entry.embedding_dimensions" :min="1" controls-position="right" @change="emit('test-config-change')" />
-              <el-button type="primary" plain :loading="props.detectingDimension" @click="emit('detect-dimension')">
+              <el-input-number v-model="props.entry.embedding_dimensions" :min="1" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
+              <el-button type="primary" plain :loading="props.detectingDimension" :disabled="props.locked" @click="emit('detect-dimension')">
                 {{ $t('channels.auto_detect') }}
               </el-button>
             </div>
@@ -108,7 +111,7 @@
         </div>
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.embedding_timeout')">
-            <el-input-number v-model="props.entry.embedding_timeout" :min="0.1" :max="600" :step="0.1" controls-position="right" @change="emit('test-config-change')" />
+            <el-input-number v-model="props.entry.embedding_timeout" :min="0.1" :max="600" :step="0.1" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
       </template>
@@ -116,7 +119,7 @@
       <template v-if="props.entry.usage === 'RERANK'">
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.rerank_timeout')">
-            <el-input-number v-model="props.entry.rerank_timeout" :min="0.1" :max="120" :step="0.1" controls-position="right" @change="emit('test-config-change')" />
+            <el-input-number v-model="props.entry.rerank_timeout" :min="0.1" :max="120" :step="0.1" controls-position="right" :disabled="props.locked" @change="emit('test-config-change')" />
           </el-form-item>
         </div>
       </template>
@@ -124,7 +127,7 @@
       <template v-if="props.entry.usage === 'IMAGE_GENERATION'">
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.image_generation_size')">
-            <el-select v-model="props.entry.size" class="full-width-input" @change="emit('test-config-change')">
+            <el-select v-model="props.entry.size" class="full-width-input" :disabled="props.locked" @change="emit('test-config-change')">
               <el-option label="1024x1024" value="1024x1024" />
               <el-option label="1024x1536" value="1024x1536" />
               <el-option label="1536x1024" value="1536x1024" />
@@ -133,7 +136,7 @@
         </div>
         <div class="model-entry-field model-entry-field-half">
           <el-form-item :label="$t('channels.image_generation_quality')">
-            <el-select v-model="props.entry.quality" class="full-width-input" @change="emit('test-config-change')">
+            <el-select v-model="props.entry.quality" class="full-width-input" :disabled="props.locked" @change="emit('test-config-change')">
               <el-option :label="$t('channels.image_generation_quality_auto')" value="auto" />
               <el-option :label="$t('channels.image_generation_quality_low')" value="low" />
               <el-option :label="$t('channels.image_generation_quality_medium')" value="medium" />
@@ -145,7 +148,7 @@
 
       <div class="model-entry-field model-entry-field-half">
         <el-form-item :label="$t('channels.description')">
-          <el-input v-model="props.entry.description" :placeholder="$t('channels.description_placeholder')" />
+          <el-input v-model="props.entry.description" :placeholder="$t('channels.description_placeholder')" :disabled="props.locked" />
         </el-form-item>
       </div>
     </div>
@@ -162,7 +165,7 @@
         </template>
         <div class="custom-request-headers-heading">
           <span class="custom-request-headers-title">{{ $t('channels.custom_request_headers') }}</span>
-          <el-button size="small" type="primary" plain @click="emit('fill-headers-template')">
+          <el-button size="small" type="primary" plain :disabled="props.locked" @click="emit('fill-headers-template')">
             {{ $t('channels.fill_headers_template') }}
           </el-button>
         </div>
@@ -172,6 +175,7 @@
             type="textarea"
             :rows="4"
             :placeholder="props.customHeadersPlaceholder"
+            :disabled="props.locked"
             @input="handleAdvancedSettingsInput"
             @update:model-value="value => emit('update:advanced-settings-draft', value)" />
         </el-form-item>
@@ -209,6 +213,7 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
+  locked: Boolean,
   modelIdProp: {
     type: String,
     default: ''

@@ -179,6 +179,24 @@ class CRUDLongTermMemoryMutationJob:
         )
         return list(result.scalars().all())
 
+    async def list_active_organization_jobs_for_admin(self, db: AsyncSession) -> list[LongTermMemoryMutationJob]:
+        result = await db.execute(
+            select(LongTermMemoryMutationJob)
+            .where(
+                LongTermMemoryMutationJob.operation == LongTermMemoryMutationOperation.ORGANIZE,
+                LongTermMemoryMutationJob.status.in_(
+                    [
+                        LongTermMemoryMutationStatus.PENDING,
+                        LongTermMemoryMutationStatus.RUNNING,
+                        LongTermMemoryMutationStatus.RETRY,
+                    ]
+                ),
+            )
+            .order_by(LongTermMemoryMutationJob.uid.asc(), LongTermMemoryMutationJob.id.asc())
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def list_children_by_parent_job_id(
         self,
         db: AsyncSession,

@@ -104,13 +104,19 @@ async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> 
     return response
 
 
-async def load_embedding_model(db: AsyncSession, channel_id: int, model_id: str) -> tuple[EmbeddingRuntimeConfig, dict[str, Any]]:
+async def load_embedding_model(
+    db: AsyncSession,
+    channel_id: int,
+    model_id: str,
+    lock_for_reference_write: bool = False,
+) -> tuple[EmbeddingRuntimeConfig, dict[str, Any]]:
     config = await load_embedding_runtime_config(
         db,
         channel_id,
         model_id,
         channel_not_found_status_code=404,
         model_not_found_status_code=404,
+        lock_for_reference_write=lock_for_reference_write,
     )
     return config, {"model_id": config.model_id, "embedding_dimensions": config.declared_dimensions}
 
@@ -159,6 +165,7 @@ async def create_knowledge_base(
 
     _channel, embedding_model = await load_embedding_model(db, kb_in.embedding_channel_id, kb_in.embedding_model_id)
     embedding_dimensions = embedding_model.get("embedding_dimensions")
+    await db.commit()
 
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
@@ -169,29 +176,44 @@ async def create_knowledge_base(
     except Exception as e:
         raise HTTPException(status_code=500, detail=t(ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
-    # 存入关系型数据库
-    db_kb = KnowledgeBase(
-        uid=current_user.uid,
-        name=kb_in.name,
-        description=kb_in.description,
-        embedding_channel_id=kb_in.embedding_channel_id,
-        embedding_model_id=kb_in.embedding_model_id,
-        embedding_dimensions=embedding_dimensions,
-        collection_name=collection_name,
-        knowledge_base_type=KnowledgeBaseType.USER,
-        managed_profile_id=None,
-        active_embedding_channel_id=kb_in.embedding_channel_id,
-        active_embedding_model_id=kb_in.embedding_model_id,
-        active_embedding_dimensions=embedding_dimensions,
-        active_embedding_revision=1,
-        active_collection_name=collection_name,
-        index_revision=1,
-        index_status=KnowledgeBaseIndexStatus.READY,
-    )
-    db.add(db_kb)
     try:
+        _channel, embedding_model = await load_embedding_model(
+            db,
+            kb_in.embedding_channel_id,
+            kb_in.embedding_model_id,
+            lock_for_reference_write=True,
+        )
+        embedding_dimensions = embedding_model.get("embedding_dimensions")
+
+        # 存入关系型数据库
+        db_kb = KnowledgeBase(
+            uid=current_user.uid,
+            name=kb_in.name,
+            description=kb_in.description,
+            embedding_channel_id=kb_in.embedding_channel_id,
+            embedding_model_id=kb_in.embedding_model_id,
+            embedding_dimensions=embedding_dimensions,
+            collection_name=collection_name,
+            knowledge_base_type=KnowledgeBaseType.USER,
+            managed_profile_id=None,
+            active_embedding_channel_id=kb_in.embedding_channel_id,
+            active_embedding_model_id=kb_in.embedding_model_id,
+            active_embedding_dimensions=embedding_dimensions,
+            active_embedding_revision=1,
+            active_collection_name=collection_name,
+            index_revision=1,
+            index_status=KnowledgeBaseIndexStatus.READY,
+        )
+        db.add(db_kb)
         await db.commit()
         await db.refresh(db_kb)
+    except HTTPException:
+        await db.rollback()
+        try:
+            delete_collection(collection_name)
+        except Exception:
+            pass
+        raise
     except Exception as e:
         await db.rollback()
         try:

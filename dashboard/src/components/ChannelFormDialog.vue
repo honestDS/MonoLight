@@ -67,6 +67,7 @@
           v-for="(entry, idx) in form.model_ids"
           :key="idx"
           :entry="entry"
+          :locked="entry.lifecycle_status === 'pending_delete'"
           :index="idx"
           :model-usages="modelUsages"
           :model-protocols="getModelProtocols(entry.usage)"
@@ -143,7 +144,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
+import { h, reactive, ref, computed, watch, onBeforeUnmount } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -338,6 +339,7 @@ const beginModelTest = (entry, state) => {
 
 const removeModelEntry = (idx) => {
   const entry = form.model_ids[idx]
+  if (entry?.lifecycle_status === 'pending_delete') return
   clearModelTest(entry)
   form.model_ids.splice(idx, 1)
   modelIdErrors.value.splice(idx, 1)
@@ -449,15 +451,35 @@ const detectModelList = async () => {
   }
 }
 
-const showConfigImpactWarning = async (data) => {
+const confirmConfigImpact = async (data) => {
+  const syncedMemoryOrganizationSettings = data?.synced_memory_organization_settings || 0
+  const retainedMemoryOrganizationSettings = data?.retained_memory_organization_settings || 0
+  const disabledMemoryOrganizationSettings = data?.disabled_memory_organization_settings || 0
+  const deferredMemoryOrganizationSettings = data?.deferred_memory_organization_settings || 0
+  const pendingDeletionModels = data?.pending_deletion_models || 0
   const syncedProfileRules = data?.synced_profile_rules || 0
   const removedProfileRules = data?.removed_profile_rules || 0
   const syncedAuditRefs = data?.synced_audit_refs || 0
   const clearedAuditRefs = data?.cleared_audit_refs || 0
 
-  if (!syncedProfileRules && !removedProfileRules && !syncedAuditRefs && !clearedAuditRefs) return
+  if (!syncedMemoryOrganizationSettings && !retainedMemoryOrganizationSettings && !disabledMemoryOrganizationSettings && !deferredMemoryOrganizationSettings && !pendingDeletionModels && !syncedProfileRules && !removedProfileRules && !syncedAuditRefs && !clearedAuditRefs) return true
 
   const messages = []
+  if (syncedMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_synced', { count: syncedMemoryOrganizationSettings }))
+  }
+  if (retainedMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_retained', { count: retainedMemoryOrganizationSettings }))
+  }
+  if (disabledMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_disabled', { count: disabledMemoryOrganizationSettings }))
+  }
+  if (pendingDeletionModels) {
+    messages.push(t('channels.pending_deletion_models_warning', { count: pendingDeletionModels }))
+  }
+  if (deferredMemoryOrganizationSettings) {
+    messages.push(t('channels.memory_organization_deferred', { count: deferredMemoryOrganizationSettings }))
+  }
   if (syncedProfileRules) {
     messages.push(t('channels.profile_rules_synced', { count: syncedProfileRules }))
   }
@@ -472,14 +494,40 @@ const showConfigImpactWarning = async (data) => {
   }
 
   try {
-    await ElMessageBox.alert(messages.join('\n'), t('channels.config_refs_changed_title'), {
-      type: 'warning',
-      confirmButtonText: t('channels.confirm')
-    })
+    await ElMessageBox.confirm(
+      h('div', { class: 'config-impact-warning' }, messages.map((message, index) => (
+        h('div', { class: 'config-impact-warning__item', key: index }, message)
+      ))),
+      t('channels.config_refs_changed_title'),
+      {
+        type: 'warning',
+        confirmButtonText: t('channels.confirm'),
+        cancelButtonText: t('channels.cancel'),
+        showCancelButton: true
+      }
+    )
+    return true
   } catch (action) {
-    if (action !== 'cancel' && action !== 'close') {
-      console.error(t('channels.config_refs_changed_title'), action)
-    }
+    if (action === 'cancel' || action === 'close') return false
+    return false
+  }
+}
+
+const showConcurrentMemoryOrganizationDisabledNotice = async (data) => {
+  const count = data?.concurrently_disabled_memory_organization_settings || 0
+  if (count <= 0) return
+
+  try {
+    await ElMessageBox.alert(
+      t('channels.memory_organization_concurrently_disabled_notice', { count }),
+      t('channels.memory_organization_concurrently_disabled_title'),
+      {
+        type: 'warning',
+        confirmButtonText: t('channels.confirm')
+      }
+    )
+  } catch {
+    return
   }
 }
 
@@ -802,7 +850,9 @@ const initializeForm = () => {
     form.http_proxy = props.channel.http_proxy || ''
     form.is_active = props.channel.is_active
     form.model_ids = props.channel.model_ids && props.channel.model_ids.length > 0
-      ? JSON.parse(JSON.stringify(props.channel.model_ids)).map(entry => normalizeModelEntry(entry))
+      ? JSON.parse(JSON.stringify(props.channel.model_ids)).map(entry => (
+        entry.lifecycle_status === 'pending_delete' ? entry : normalizeModelEntry(entry)
+      ))
       : []
   }
   if (props.channel) syncModelEntryStates()
@@ -873,9 +923,19 @@ const submitForm = async () => {
       model_ids: form.model_ids.map(buildModelEntryPayload)
     }
     if (isEdit.value) {
-      const res = await channelApi.update(currentId.value, payload)
+      let finalResponse = await channelApi.update(currentId.value, payload)
+      while (finalResponse.data?.data?.requires_confirmation) {
+        const impactData = finalResponse.data?.data
+        const confirmed = await confirmConfigImpact(impactData)
+        if (!confirmed) return
+        finalResponse = await channelApi.update(currentId.value, {
+          ...payload,
+          confirm_config_impact: true,
+          config_impact_token: impactData?.config_impact_token || null
+        })
+      }
       ElMessage.success(t('channels.update_success'))
-      await showConfigImpactWarning(res.data?.data)
+      await showConcurrentMemoryOrganizationDisabledNotice(finalResponse.data?.data)
     } else {
       await channelApi.create(payload)
       ElMessage.success(t('channels.create_success'))

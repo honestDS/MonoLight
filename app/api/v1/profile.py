@@ -54,6 +54,7 @@ from app.core.memory.embedding_config import (
     preview_embedding_selection,
 )
 from app.core.profile_validation import (
+    lock_profile_channel_references,
     validate_audit_model_config,
     validate_channel_configs,
     validate_profile_for_assignment,
@@ -214,20 +215,32 @@ async def create_profile(
         profile_in.configs,
         await memory_store_crud.get_snapshot_by_uid(db, uid=profile_in.uid),
     )
-    channel_config = profile_in.configs.get("channel", {})
-    await validate_channel_configs(db, channel_config)
-    await validate_audit_model_config(db, profile_in.configs.get("security", {}))
-
-    if await profile_crud.get_by_name(db, profile_in.name, uid=profile_in.uid):
-        raise ParameterException(ERR_PROFILE_NAME_EXISTS)
-
-    if profile_in.prompt_id:
-        if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=profile_in.uid):
-            raise ParameterException(ERR_PROMPT_NOT_FOUND)
-
-    knowledge_base_ids = profile_in.knowledge_base_ids
-    memory_organization = profile_in.memory_organization
     try:
+        locked_channels = await lock_profile_channel_references(
+            db,
+            configs=profile_in.configs,
+            memory_organization=profile_in.memory_organization,
+        )
+        await validate_channel_configs(
+            db,
+            profile_in.configs.get("channel", {}),
+            locked_channels=locked_channels,
+        )
+        await validate_audit_model_config(
+            db,
+            profile_in.configs.get("security", {}),
+            locked_channels=locked_channels,
+        )
+
+        if await profile_crud.get_by_name(db, profile_in.name, uid=profile_in.uid):
+            raise ParameterException(ERR_PROFILE_NAME_EXISTS)
+
+        if profile_in.prompt_id:
+            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=profile_in.uid):
+                raise ParameterException(ERR_PROMPT_NOT_FOUND)
+
+        knowledge_base_ids = profile_in.knowledge_base_ids
+        memory_organization = profile_in.memory_organization
         db_profile = await profile_crud.create(
             db,
             obj_in=profile_in.model_dump(
@@ -339,27 +352,61 @@ async def update_profile(
             profile_in.configs,
             await memory_store_crud.get_by_uid(db, uid=db_profile.uid),
         )
-        channel_config = profile_in.configs.get("channel", {})
-        await validate_channel_configs(db, channel_config)
-        await validate_audit_model_config(db, profile_in.configs.get("security", {}))
     else:
         profile_in.configs = normalize_profile_memory_for_update(
             db_profile,
             db_profile.configs or {},
             await memory_store_crud.get_snapshot_by_uid(db, uid=db_profile.uid),
         )
-
-    if profile_in.name and profile_in.name != db_profile.name:
-        if await profile_crud.get_by_name(db, profile_in.name, uid=db_profile.uid):
-            raise ParameterException(ERR_PROFILE_NAME_EXISTS)
-
-    if profile_in.prompt_id:
-        if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=db_profile.uid):
-            raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
-
-    knowledge_base_ids = profile_in.knowledge_base_ids
-    memory_organization = profile_in.memory_organization
     try:
+        old_channel_ids = []
+        old_cfg = ProfileConfig.model_validate(db_profile.configs or {})
+        for old_channel_config in (
+            old_cfg.channel.chat_channel,
+            old_cfg.channel.context_summary_channel,
+            old_cfg.channel.rerank_channel,
+            old_cfg.channel.image_generation_channel,
+        ):
+            for old_rule in old_channel_config.rules:
+                if old_rule.channel_id:
+                    old_channel_ids.append(old_rule.channel_id)
+        if old_cfg.security.audit_channel_id:
+            old_channel_ids.append(old_cfg.security.audit_channel_id)
+        if old_cfg.memory.embedding_channel_id:
+            old_channel_ids.append(old_cfg.memory.embedding_channel_id)
+
+        locked_channels = await lock_profile_channel_references(
+            db,
+            configs=profile_in.configs,
+            memory_organization=profile_in.memory_organization,
+            extra_channel_ids=old_channel_ids,
+        )
+        db_profile = await profile_crud.get(db, profile_id)
+        if not db_profile:
+            raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+        if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
+            raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
+        await validate_channel_configs(
+            db,
+            profile_in.configs.get("channel", {}),
+            locked_channels=locked_channels,
+        )
+        await validate_audit_model_config(
+            db,
+            profile_in.configs.get("security", {}),
+            locked_channels=locked_channels,
+        )
+
+        if profile_in.name and profile_in.name != db_profile.name:
+            if await profile_crud.get_by_name(db, profile_in.name, uid=db_profile.uid):
+                raise ParameterException(ERR_PROFILE_NAME_EXISTS)
+
+        if profile_in.prompt_id:
+            if not await prompt_crud.get_visible(db, profile_in.prompt_id, uid=db_profile.uid):
+                raise ResourceNotFoundException(ERR_PROMPT_NOT_FOUND)
+
+        knowledge_base_ids = profile_in.knowledge_base_ids
+        memory_organization = profile_in.memory_organization
         db_profile = await profile_crud.update(
             db,
             db_obj=db_profile,

@@ -137,6 +137,7 @@ def make_setup_request(
                 "api_key": TEST_API_KEY,
                 "model_id": model_id,
                 "protocol": protocol,
+                "context_window_k": 4,
             },
             "profile": {"name": profile_name},
         }
@@ -254,6 +255,14 @@ def test_setup_schema_rejects_invalid_url(base_url: str) -> None:
 def test_setup_schema_rejects_missing_url() -> None:
     payload = make_setup_request().model_dump(mode="json")
     del payload["channel"]["base_url"]
+
+    with pytest.raises(ValidationError):
+        SetupCompleteRequest.model_validate(payload)
+
+
+def test_setup_schema_rejects_missing_context_window() -> None:
+    payload = make_setup_request().model_dump(mode="json")
+    del payload["channel"]["context_window_k"]
 
     with pytest.raises(ValidationError):
         SetupCompleteRequest.model_validate(payload)
@@ -441,6 +450,7 @@ async def test_complete_setup_rejects_existing_names_and_rolls_back(
                             model_id=request.channel.model_id,
                             usage=ModelUsage.CHAT,
                             protocol=request.channel.protocol,
+                            context_window_k=request.channel.context_window_k,
                         ).model_dump(mode="json")
                     ],
                 )

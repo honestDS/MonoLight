@@ -3,7 +3,7 @@ MESSAGES = {
     "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_MODELS": "base_url is required when model entries are configured",
     "ERR_CHANNEL_BASE_URL_REQUIRED_FOR_RERANK": "base_url is required when model_ids contains RERANK models",
     "ERR_CHANNEL_BASE_URL_SCHEME": "base_url must start with http:// or https://",
-    "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "model_ids[{index}] validation failed: {error}",
+    "ERR_CHANNEL_MODEL_IDS_ITEM_INVALID": "Model {model_id} validation failed: {error}",
     "ERR_CHANNEL_MODEL_IDS_DUPLICATED": "Model ID cannot be duplicated within the same usage: {usage}/{model_id}",
     "ERR_VALIDATION_FAILED": "Parameter validation failed",
     "ERR_SETUP_CONFLICT": "Setup is already completed or in progress",
