@@ -102,6 +102,19 @@ def _is_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def is_organization_chain_job(job: LongTermMemoryMutationJob) -> bool:
+    try:
+        operation = LongTermMemoryMutationOperation(job.operation)
+    except (TypeError, ValueError):
+        return False
+    if operation in {
+        LongTermMemoryMutationOperation.ORGANIZE,
+        LongTermMemoryMutationOperation.ORGANIZE_MERGE,
+    }:
+        return True
+    return operation == LongTermMemoryMutationOperation.DELETE_CLEANUP and isinstance(job.payload, dict) and job.payload.get("source") == LongTermMemorySource.AUTO_ORGANIZE.value
+
+
 def _require_non_empty_string(value: Any, *, field: str) -> str:
     if not isinstance(value, str):
         raise MemoryJobValidationError(t(ERR_MEMORY_JOB_FIELD_INVALID, field=field))
@@ -1630,5 +1643,6 @@ __all__ = [
     "MemoryJobTargetBusyError",
     "MemoryJobValidationError",
     "best_effort_submit_auto_organization_after_publication",
+    "is_organization_chain_job",
     "memory_job_manager",
 ]

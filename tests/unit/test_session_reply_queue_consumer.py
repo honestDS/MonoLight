@@ -477,6 +477,12 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
     async def get_work(db, work_id: int):
         return work
 
+    async def list_background_tasks(db, audit_record_id: int):
+        return []
+
+    async def list_active_audit_execution_record_ids(*args, **kwargs):
+        return set()
+
     async def mark_execution_unknown(db, **kwargs) -> bool:
         unknown_calls.append(kwargs)
         return True
@@ -485,8 +491,15 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
     monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(
+        executor_module.terminal_session_crud,
+        "list_active_audit_execution_record_ids",
+        list_active_audit_execution_record_ids,
+    )
     monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
     monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
 

@@ -154,6 +154,8 @@ class _ExecutionCheckpointState:
     memory_recall_boundary_message_id: int | None = None
     memory_recall_status: str | None = None
     total_output_tokens: int = 0
+    session_total_input_tokens: int = 0
+    session_total_cached_tokens: int = 0
     session_total_output_tokens: int | None = None
 
 
@@ -194,6 +196,8 @@ async def _save_execution_checkpoint(
         "context_summary_trigger_mode": ContextSummaryTriggerMode.USER_MESSAGE.value,
         "context_summary_fixed_upper_message_id": state.upper_message_id,
         "total_output_tokens": state.total_output_tokens,
+        "session_total_input_tokens": state.session_total_input_tokens,
+        "session_total_cached_tokens": state.session_total_cached_tokens,
     }
     if state.session_total_output_tokens is not None:
         checkpoint["session_total_output_tokens"] = state.session_total_output_tokens
@@ -248,6 +252,14 @@ async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> 
     if not state.expose_tool_call_content or not state.show_tool_calls:
         state.buffered_content_chunks.append(content)
         return
+
+    if not state.emitted_stream_content:
+        state.buffered_content_chunks.append(content)
+        buffered_content = "".join(state.buffered_content_chunks)
+        if not buffered_content.strip():
+            return
+        content = buffered_content
+
     await _emit_agent_loop_output(state)
     if state.callback is None:
         return
@@ -259,6 +271,7 @@ async def _handle_stream_content(state: _AgentLoopStreamState, content: str) -> 
             "response_id": state.response_id,
         }
     )
+    state.buffered_content_chunks.clear()
     state.emitted_stream_content = True
 
 

@@ -26,9 +26,12 @@ from app.core.utils.dispatcher.markdown_instruction import (
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers
 from app.core.utils.request_token_baseline import (
+    accumulate_session_cache_metrics,
     build_request_token_baseline,
+    build_session_cache_metrics,
     extract_provider_token_metrics,
     extract_session_total_output_tokens,
+    merge_session_cache_token_totals,
 )
 from app.models.channel import resolve_model_protocol
 from app.models.message import InternalMessage, MessageRole
@@ -129,6 +132,11 @@ async def prepare_request_messages(
     session = await session_crud.get_by_session_id(context.db, context.session_id)
     if session is not None and hasattr(context.db, "refresh"):
         await context.db.refresh(session)
+    context.session_total_input_tokens, context.session_total_cached_tokens = merge_session_cache_token_totals(
+        getattr(session, "llm_request_metadata", None),
+        total_input_tokens=context.session_total_input_tokens,
+        total_cached_tokens=context.session_total_cached_tokens,
+    )
     summary_revision = getattr(session, "context_summary_revision", 0) if session is not None else 0
     content_revision = getattr(session, "context_content_revision", 0) if session is not None else 0
     persisted_total = extract_session_total_output_tokens(
@@ -168,6 +176,10 @@ async def prepare_request_messages(
             protocol=protocol,
             context_summary_revision=summary_revision,
             context_content_revision=content_revision,
+        ),
+        **build_session_cache_metrics(
+            context.session_total_input_tokens,
+            context.session_total_cached_tokens,
         ),
     }
     context.latest_llm_request_metadata = metadata
@@ -213,6 +225,11 @@ async def generate(
 
 async def update_output_metadata(context: MemoryRecallContext, response: Any) -> None:
     provider_metrics = extract_provider_token_metrics(getattr(response, "usage", None))
+    context.session_total_input_tokens, context.session_total_cached_tokens = accumulate_session_cache_metrics(
+        provider_metrics,
+        total_input_tokens=context.session_total_input_tokens,
+        total_cached_tokens=context.session_total_cached_tokens,
+    )
     if "output_tokens" in provider_metrics:
         output_tokens = provider_metrics["output_tokens"]
         context.total_output_tokens += output_tokens

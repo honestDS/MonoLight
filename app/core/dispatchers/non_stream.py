@@ -35,6 +35,7 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
         expose_tool_call_content: bool = True,
         show_tool_calls: bool = True,
         additional_system_prompt: str | None = None,
+        request_metadata_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
         return await cls._dispatch_interactive(
             db=db,
@@ -58,5 +59,6 @@ class NonStreamDispatcherMixin(InteractiveDispatcherMixin):
             expose_tool_call_content=expose_tool_call_content,
             show_tool_calls=show_tool_calls,
             additional_system_prompt=additional_system_prompt,
+            request_metadata_callback=request_metadata_callback,
             dispatcher_mode="non_stream",
         )

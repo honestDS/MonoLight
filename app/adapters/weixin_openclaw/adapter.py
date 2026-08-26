@@ -136,12 +136,13 @@ class WeixinOpenClawAdapter(WeixinOpenClawMediaMixin, BaseChatAdapter):
             return False
 
         text, files = extract_event_reply(event)
-        if not text and not files:
+        has_visible_text = bool(text.strip())
+        if not has_visible_text and not files:
             logger.bind(uid=uid, session_id=session_id, event_type=event_type).warning(t("LOG_WEIXIN_OPENCLAW_SESSION_EVENT_EMPTY"))
-            return False
+            return True
 
         any_sent = False
-        if text:
+        if has_visible_text:
             text_parts = split_outbound_text_by_newline(
                 text,
                 utf8_byte_limit=WEIXIN_OPENCLAW_OUTBOUND_TEXT_UTF8_BYTE_LIMIT,

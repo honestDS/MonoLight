@@ -1052,7 +1052,9 @@ async def test_memory_stage11_settings_api_exposes_organization_state_without_se
         assert data["blocking"]["organize"]["blocked"] is True
         assert data["blocking"]["organize"]["reason"] == "organization_active"
         assert data["blocking"]["organize"]["job_id"] == organize_job_id
-        assert data["blocking"]["maintenance"]["blocked"] is False
+        assert data["blocking"]["maintenance"]["blocked"] is True
+        assert data["blocking"]["maintenance"]["reason"] == "organization_active"
+        assert data["blocking"]["maintenance"]["job_id"] == organize_job_id
 
 
 @pytest.mark.asyncio
