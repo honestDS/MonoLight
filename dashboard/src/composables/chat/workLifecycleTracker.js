@@ -243,13 +243,8 @@ const getEventSequenceNo = event => (
   Number.isFinite(event?.event_sequence_no) ? event.event_sequence_no : null
 )
 
-const getEventTurn = event => (
-  Number.isFinite(event?.turn) ? event.turn : null
-)
-
 const createWorkState = () => ({
   eventSequenceNo: null,
-  turn: null,
   outputResponseIds: new Set(),
   startedResponseIds: new Set(),
   terminal: false
@@ -272,13 +267,8 @@ export function createWorkLifecycleTracker() {
     const eventSequenceNo = getEventSequenceNo(event)
     if (eventSequenceNo !== null) {
       if (state.eventSequenceNo !== null && eventSequenceNo <= state.eventSequenceNo) return false
+      state.eventSequenceNo = eventSequenceNo
     }
-
-    const turn = getEventTurn(event)
-    if (turn !== null && state.turn !== null && turn < state.turn) return false
-
-    if (eventSequenceNo !== null) state.eventSequenceNo = eventSequenceNo
-    if (turn !== null && (state.turn === null || turn > state.turn)) state.turn = turn
     return true
   }
 
