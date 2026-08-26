@@ -38,7 +38,6 @@
               <template v-else>
                 {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
               </template>
-
             </div>
             <div class="session-meta" :title="`${$t('chat.session_created_at')}: ${session.created_at || '-'}\n${$t('chat.session_last_active')}: ${session.last_active || '-'}\n${$t('chat.session_source')}: ${session.source || '-'}`">
               <div class="session-meta-line">
@@ -58,6 +57,13 @@
           <div class="session-actions">
             <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
           </div>
+          <div
+            v-if="session.is_loading"
+            class="session-loading-indicator"
+            :title="$t('chat.session_reply_in_progress')"
+            role="status"
+            aria-live="polite"
+          ></div>
         </div>
         <div v-if="sessions.length === 0 && !sessionsLoading" class="empty-tip">
           {{ $t('chat.no_sessions') }}
