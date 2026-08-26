@@ -2,7 +2,6 @@ import asyncio
 import json
 import time
 import uuid
-import weakref
 from dataclasses import dataclass, field
 
 from fastapi import (
@@ -154,8 +153,7 @@ async def _create_new_web_session_with_profile_override(
 
 @dataclass
 class _WebSocketChatState:
-    active_task: asyncio.Task | None = None
-    active_tasks: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+    stream_task: asyncio.Task | None = None
     current_session_id: str | None = None
     notifier_queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
 
@@ -165,21 +163,13 @@ class NewSessionProfileSetting(BaseModel):
     show_tool_calls: bool | None = None
 
 
-async def _cancel_websocket_chat_tasks(state: _WebSocketChatState):
-    """取消所有当前任务及子任务并等待其结束"""
-    tasks_to_await = []
-    if state.active_task and not state.active_task.done():
-        state.active_task.cancel()
-        tasks_to_await.append(state.active_task)
-
-    for task in list(state.active_tasks):
-        if not task.done():
-            task.cancel()
-            tasks_to_await.append(task)
-
-    if tasks_to_await:
-        # 等待所有任务完成取消过程，忽略 CancelledError
-        await asyncio.gather(*tasks_to_await, return_exceptions=True)
+async def _cancel_websocket_stream_task(state: _WebSocketChatState) -> None:
+    """停止当前连接的流结果订阅，不影响已经持久化的会话回复工作。"""
+    stream_task = state.stream_task
+    if stream_task is None or stream_task.done():
+        return
+    stream_task.cancel()
+    await asyncio.gather(stream_task, return_exceptions=True)
 
 
 async def _run_websocket_chat(
@@ -192,7 +182,6 @@ async def _run_websocket_chat(
     request_id=None,
 ):
     running_task = asyncio.current_task()
-    state.active_tasks.clear()
     try:
         async with AsyncSessionLocal() as db:
             await ensure_web_session_writable(
@@ -207,7 +196,6 @@ async def _run_websocket_chat(
                 session_id=session_id,
                 attachments=attachments,
                 request_id=request_id,
-                active_tasks=state.active_tasks,
             ):
                 if session_id != state.current_session_id:
                     continue
@@ -225,14 +213,9 @@ async def _run_websocket_chat(
                 }
             )
     except RuntimeError as e:
-        # 拦截断开连接后的发送错误
-        if "websocket.send" in str(e) and "websocket.close" in str(e):
-            logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
-        else:
+        # WebSocket 已关闭时忽略传输层发送错误；其他运行时错误仍记录。
+        if not ("websocket.send" in str(e) and "websocket.close" in str(e)):
             logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_RUNTIME_ERROR", error=str(e)))
-    except asyncio.CancelledError:
-        logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_USER_DISCONNECTED"))
-        raise
     except Exception:
         logger.bind(uid=uid, session_id=session_id).error(t("LOG_CHAT_WS_TASK_EXCEPTION"), exc_info=True)
         if session_id == state.current_session_id:
@@ -248,8 +231,8 @@ async def _run_websocket_chat(
             except Exception:
                 pass
     finally:
-        if state.active_task is running_task:
-            state.active_task = None
+        if state.stream_task is running_task:
+            state.stream_task = None
 
 
 @router.post("/completions")
@@ -320,6 +303,7 @@ async def get_user_sessions(db: AsyncSession = Depends(get_db), current_user: di
                 "session_id": row.session_id,
                 "uid": row.uid,
                 "last_active": row.last_active.strftime("%Y-%m-%d %H:%M:%S") if row.last_active else None,
+                "is_loading": bool(row.is_loading),
                 "username": row.username,
                 "title": row.title,
                 "enable_markdown": row.enable_markdown,
@@ -633,13 +617,6 @@ async def chat_websocket(
             request_id = data.get("request_id")
             profile_override_id = data.get("profile_override_id")
 
-            action = data.get("action")
-
-            if action == "abort":
-                await _cancel_websocket_chat_tasks(state)
-                logger.bind(uid=uid, session_id=session_id).info(t("LOG_CHAT_WS_ABORT_CANCELLED"))
-                continue
-
             if not message and not attachments:
                 await websocket.send_json(
                     {
@@ -655,7 +632,7 @@ async def chat_websocket(
             old_session_id = state.current_session_id
             if not session_id:
                 # 如果收到空 session_id，决定是沿用当前会话还是开启新会话
-                if not state.active_task or state.active_task.done():
+                if not state.stream_task or state.stream_task.done():
                     try:
                         profile_setting = NewSessionProfileSetting.model_validate(
                             {
@@ -716,14 +693,14 @@ async def chat_websocket(
             # 判断是否发生了会话切换
             is_session_switched = old_session_id is not None and session_id != old_session_id
 
-            # 如果当前已有任务在运行
-            if state.active_task and not state.active_task.done():
+            # 如果当前连接已有流订阅在运行
+            if state.stream_task and not state.stream_task.done():
                 if is_session_switched:
-                    # 1. 切换会话场景：仅取消旧连接上的结果等待，持久化工作继续执行
-                    await _cancel_websocket_chat_tasks(state)
+                    # 1. 切换会话场景：停止旧会话流订阅；旧会话 work 由 SessionReplyConsumer 独立继续执行
+                    await _cancel_websocket_stream_task(state)
 
                     logger.bind(uid=uid, old_session=old_session_id, new_session=session_id).info(t("LOG_CHAT_WS_SESSION_SWITCHED"))
-                    state.active_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
+                    state.stream_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
                 else:
                     # 2. 同一会话场景：新消息仅需保存到数据库，由调度器动态追加
                     async with AsyncSessionLocal() as db:
@@ -768,14 +745,14 @@ async def chat_websocket(
                                     submission_status,
                                 )
                             )
-                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_TASK_SAVED", session_id=session_id))
+                        logger.bind(uid=uid, session_id=session_id).info(t("LOG_WS_ACTIVE_STREAM_MESSAGE_SUBMITTED", session_id=session_id))
             else:
-                # 3. 无活跃任务：启动新任务
-                state.active_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
+                # 3. 无流订阅：为当前会话启动结果订阅
+                state.stream_task = asyncio.create_task(_run_websocket_chat(websocket, state, uid, message, session_id, attachments, request_id))
 
     except WebSocketDisconnect:
-        # 连接正常关闭
-        await _cancel_websocket_chat_tasks(state)
+        # 连接关闭只结束传输层；持久化会话回复 work 不依赖 WebSocket 生命周期
+        pass
     except Exception:
         # 异常处理
         logger.bind(uid=uid).exception(t("LOG_CHAT_WS_EXCEPTION"))
@@ -783,7 +760,6 @@ async def chat_websocket(
             await websocket.send_json({"type": "error", "message": t(ERR_INTERNAL_SERVER_ERROR)})
         except Exception:
             pass
-        await _cancel_websocket_chat_tasks(state)
         try:
             await websocket.close()
         except RuntimeError:
@@ -793,8 +769,8 @@ async def chat_websocket(
             reset_system_log_locale(log_locale_token)
         reset_current_locale(locale_token)
 
-        # 连接断开只取消本地等待，不取消已经持久化的回复工作
-        await _cancel_websocket_chat_tasks(state)
+        # 连接断开只停止本连接的流订阅，不触碰 SessionReplyConsumer 正在执行的 work
+        await _cancel_websocket_stream_task(state)
 
         if state.current_session_id:
             await session_notifier.unregister(uid, state.current_session_id, state.notifier_queue)
