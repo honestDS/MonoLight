@@ -84,16 +84,16 @@
       />
 
       <!-- 新建会话 / 无会话时的欢迎区 -->
-      <div v-if="!currentSessionId" class="welcome-hero">
-        <h1 class="welcome-greeting">{{ $t('chat.welcome_greeting') }}</h1>
+      <div class="welcome-hero">
+        <h1 class="welcome-greeting" :class="{ 'is-exiting': !!currentSessionId }">{{ $t('chat.welcome_greeting') }}</h1>
       </div>
 
-      <div class="input-area">
+      <div class="input-area" :style="{ transform: !currentSessionId ? 'translateY(-300px)' : '' }">
         <div v-if="isCurrentSessionReadOnly" class="read-only-notice">
           <span class="read-only-notice-text">{{ $t('chat.external_session_read_only') }}</span>
         </div>
 
-        <div class="input-wrapper">
+        <div class="input-wrapper" :style="{ maxWidth: !currentSessionId ? '640px' : '100%' }">
           <div class="input-controls">
             <div class="chat-input-box">
               <!-- 自定义附件展示区域（取代 el-upload 原生列表） -->
