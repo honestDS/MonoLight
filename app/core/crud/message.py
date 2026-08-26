@@ -2,7 +2,7 @@ from typing import (
     Any,
 )
 
-from sqlalchemy import and_, update
+from sqlalchemy import and_, exists, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import (
@@ -22,6 +22,7 @@ from app.models.message import (
     MessageType,
 )
 from app.models.session import ChatSession
+from app.models.session_reply_work_item import SESSION_REPLY_ACTIVE_STATUSES, SessionReplyWorkItem
 from app.models.user import User
 
 
@@ -357,11 +358,19 @@ class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
             session_activity_stmt = session_activity_stmt.where(Message.uid == uid)
         session_activity = session_activity_stmt.group_by(Message.session_id, Message.uid).subquery()
         last_active = func.coalesce(session_activity.c.last_active, ChatSession.created_at).label("last_active")
+        is_loading = exists(
+            select(1).where(
+                SessionReplyWorkItem.session_id == ChatSession.session_id,
+                SessionReplyWorkItem.uid == ChatSession.uid,
+                SessionReplyWorkItem.status.in_(SESSION_REPLY_ACTIVE_STATUSES),
+            )
+        ).label("is_loading")
 
         stmt = (
             select(
                 ChatSession.session_id,
                 last_active,
+                is_loading,
                 ChatSession.uid,
                 User.username,
                 ChatSession.title,

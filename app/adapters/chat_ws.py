@@ -1,6 +1,5 @@
-import asyncio
 import time
-from collections.abc import AsyncGenerator, MutableSet
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,7 +36,6 @@ class WebSocketChatAdapter(BaseChatAdapter):
         session_id: str,
         attachments: list[str] | None = None,
         request_id: str | None = None,
-        active_tasks: MutableSet[asyncio.Task] | None = None,
     ) -> AsyncGenerator[dict[str, Any]]:
         if not session_id:
             raise BaseBusinessException(message=ERR_SESSION_ID_REQUIRED)

@@ -1,7 +1,6 @@
-import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, MutableSet
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -144,7 +143,6 @@ class WebChatAdapter(BaseChatAdapter):
         uid: str,
         session_id: str,
         attachments: list[str] | None = None,
-        active_tasks: MutableSet[asyncio.Task] | None = None,
         request_id: str | None = None,
     ):
         if not session_id:
