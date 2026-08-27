@@ -19,37 +19,52 @@
         </div>
       </div>
       <div class="sessions-list">
-        <template v-for="group in groupedSessions" :key="group.key">
-          <div v-if="group.items.length" class="session-group">
-            <div class="session-group-title">{{ $t(group.label) }}</div>
-            <div
-              v-for="session in group.items"
-              :key="session.session_id"
-              :data-session-id="session.session_id"
-              :class="['session-item', { active: currentSessionId === session.session_id }]"
-              @click="selectSession(session)"
-            >
-              <div class="session-content">
-                <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-                  <template v-if="typingSessionId === session.session_id">
-                    <span
-                      v-for="(char, index) in session.title"
-                      :key="index"
-                      class="typing-char"
-                    >{{ char }}</span>
-                  </template>
-                  <template v-else>
-                    {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-                  </template>
-                </div>
-                <div v-if="session.source" class="session-source">{{ session.source }}</div>
+        <div
+          v-for="session in sessions"
+          :key="session.session_id"
+          :data-session-id="session.session_id"
+          :class="['session-item', { active: currentSessionId === session.session_id }]"
+          @click="selectSession(session)"
+        >
+          <div class="session-content">
+            <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
+              <template v-if="typingSessionId === session.session_id">
+                <span
+                  v-for="(char, index) in session.title"
+                  :key="index"
+                  class="typing-char"
+                >{{ char }}</span>
+              </template>
+              <template v-else>
+                {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+              </template>
+            </div>
+            <div class="session-meta" :title="`${$t('chat.session_created_at')}: ${session.created_at || '-'}\n${$t('chat.session_last_active')}: ${session.last_active || '-'}\n${$t('chat.session_source')}: ${session.source || '-'}`">
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_created_at') }}</span>
+                <span class="session-meta-value">{{ session.created_at || '-' }}</span>
               </div>
-              <div class="session-actions">
-                <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_last_active') }}</span>
+                <span class="session-meta-value">{{ session.last_active || '-' }}</span>
+              </div>
+              <div class="session-meta-line">
+                <span class="session-meta-label">{{ $t('chat.session_source') }}</span>
+                <span class="session-meta-value">{{ session.source || '-' }}</span>
               </div>
             </div>
           </div>
-        </template>
+          <div class="session-actions">
+            <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+          </div>
+          <div
+            v-if="session.is_loading"
+            class="session-loading-indicator"
+            :title="$t('chat.session_reply_in_progress')"
+            role="status"
+            aria-live="polite"
+          ></div>
+        </div>
         <div v-if="sessions.length === 0 && !sessionsLoading" class="empty-tip">
           {{ $t('chat.no_sessions') }}
         </div>
@@ -260,7 +275,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, InfoFilled, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
+import { Delete, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
@@ -308,6 +323,16 @@ const currentSessionEnableMarkdown = computed({
     }
   }
 })
+
+// 当前会话的创建/活跃时间，供 ChatMessageList 显示
+const currentSessionInfo = computed(() => {
+  if (!currentSessionId.value) return null
+  return sessions.value.find(s => s.session_id === currentSessionId.value) || null
+})
+
+// 是否处于"会话已开始"状态：已有消息（已发送）或者正在加载（发送中）
+// 让用户点击发送的瞬间就触发输入框和欢迎区的过渡动画，避免等待接口响应
+const sessionEngaged = computed(() => !!currentSessionId.value || chat.loading.value || chat.messages.value.length > 0)
 
 // 切换 Markdown 状态
 const toggleMarkdown = async (val) => {
@@ -376,64 +401,6 @@ const currentSessionProfilePlaceholder = computed(() => resolveSessionProfilePla
   t('chat.default_profile_suffix'),
   t('chat.inherited_profile')
 ))
-
-// 把 sessions 按 last_active 活跃时间分成今天 / 昨天 / 以前
-const groupedSessions = computed(() => {
-  const now = new Date()
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const yesterdayStart = todayStart - 24 * 60 * 60 * 1000
-  const yesterdayEnd = todayStart - 1
-
-  const today = []
-  const yesterday = []
-  const earlier = []
-
-  for (const s of sessions.value) {
-    const t = s.last_active ? new Date(s.last_active).getTime() : null
-    if (t == null || isNaN(t)) {
-      earlier.push(s)
-    } else if (t >= todayStart) {
-      today.push(s)
-    } else if (t >= yesterdayStart && t <= yesterdayEnd) {
-      yesterday.push(s)
-    } else {
-      earlier.push(s)
-    }
-  }
-
-  const sortDesc = (a, b) => {
-    const ta = a.last_active ? new Date(a.last_active).getTime() : 0
-    const tb = b.last_active ? new Date(b.last_active).getTime() : 0
-    return tb - ta
-  }
-  today.sort(sortDesc)
-  yesterday.sort(sortDesc)
-  earlier.sort(sortDesc)
-
-  return [
-    { key: 'today', label: 'chat.session_group_today', items: today },
-    { key: 'yesterday', label: 'chat.session_group_yesterday', items: yesterday },
-    { key: 'earlier', label: 'chat.session_group_earlier', items: earlier }
-  ]
-})
-
-const formatSessionTooltip = (session) => {
-  return [
-    `${t('chat.session_last_active')}: ${session.last_active || '-'}`,
-    `${t('chat.session_created_at')}: ${session.created_at || '-'}`,
-    `${t('chat.session_source')}: ${session.source || '-'}`
-  ].join('\n')
-}
-
-// 当前会话的创建/活跃时间，供 ChatMessageList 显示
-const currentSessionInfo = computed(() => {
-  if (!currentSessionId.value) return null
-  return sessions.value.find(s => s.session_id === currentSessionId.value) || null
-})
-
-// 是否处于"会话已开始"状态：已有消息（已发送）或者正在加载（发送中）
-// 让用户点击发送的瞬间就触发输入框和欢迎区的过渡动画，避免等待接口响应
-const sessionEngaged = computed(() => !!currentSessionId.value || loading.value || messages.value.length > 0)
 
 const loadProfiles = async () => {
   profilesLoading.value = true

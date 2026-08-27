@@ -15,6 +15,7 @@ export default {
   session_group_yesterday: 'Yesterday',
   session_group_earlier: 'Earlier',
   refresh_sessions: 'Refresh session list',
+  session_reply_in_progress: 'Reply in progress',
   no_sessions: 'No sessions',
   empty_chat_tip: 'Select a session on the left or create a new one to start chatting',
   tool_activity: 'Tool calls',

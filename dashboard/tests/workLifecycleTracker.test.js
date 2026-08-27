@@ -226,7 +226,7 @@ test('ignores incomplete or unrelated lifecycle events and is idempotent', () =>
   assert.equal(repeatedOutput.some(message => message.role === 'thinking'), false)
 })
 
-test('stateful tracker blocks late lifecycle events without affecting other work', () => {
+test('orders persisted lifecycle events by sequence while allowing turn reset', () => {
   const tracker = createWorkLifecycleTracker()
   let messages = [userMessage('request-a'), userMessage('request-b'), userMessage('request-c')]
 
@@ -287,11 +287,20 @@ test('stateful tracker blocks late lifecycle events without affecting other work
   })
   messages = tracker.startAgentLoop(messages, {
     work_id: 'work-a',
-    response_id: 'response-a-late',
+    response_id: 'response-a-reset',
     turn: 1,
     event_sequence_no: 4
   })
-  assert.equal(messages.at(-1).response_id, 'response-a2')
+  assert.equal(messages.at(-1).response_id, 'response-a-reset')
+  assert.equal(messages.at(-1).turn, 1)
+
+  const afterOlderSequence = tracker.startAgentLoop(messages, {
+    work_id: 'work-a',
+    response_id: 'response-a-stale',
+    turn: 3,
+    event_sequence_no: 3
+  })
+  assert.deepEqual(afterOlderSequence, messages)
 
   messages = tracker.startAgentLoop(messages, {
     work_id: 'work-b',

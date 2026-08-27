@@ -11,7 +11,7 @@ from app.core.crud.memory_maintenance import memory_maintenance_store_crud
 from app.core.memory.errors import MemoryConflictError
 from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _require_positive, _validate_commit
-from app.core.memory_jobs.manager import MemoryJobSubmissionResult, memory_job_manager
+from app.core.memory_jobs.manager import MemoryJobSubmissionResult, is_organization_chain_job, memory_job_manager
 from app.models.memory import (
     LongTermMemoryIndexStatus,
     LongTermMemoryMigrationStatus,
@@ -137,6 +137,9 @@ async def submit_memory_reindex(
         if store is None:
             raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         _validate_active_embedding(store)
+        unfinished_jobs = await memory_job_crud.list_unfinished_by_uid(db, uid=normalized_uid)
+        if any(is_organization_chain_job(job) for job in unfinished_jobs):
+            raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         if _has_active_embedding_migration(store):
             raise MemoryConflictError(ERR_MEMORY_MAINTENANCE_STATE_CONFLICT)
         if store.old_collection_cleanup_status in {

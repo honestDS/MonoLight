@@ -1,10 +1,11 @@
 // 会话管理 composable：列表、选择与新建会话
-import { ref } from 'vue'
+import { onScopeDispose, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../../api'
 import { useDeleteConfirm } from '../useDeleteConfirm'
 import { PAGE_SIZE } from '../../constants'
 import i18n from '../../i18n'
+import { createSessionListLoadingPoller } from './sessionListLoading.js'
 
 const t = (key, ...args) => i18n.global.t(key, ...args)
 
@@ -37,20 +38,37 @@ export function useSessionManager() {
     loadHistoryCallback = callback
   }
 
-  /**
-   * 加载会话列表
-   */
-  const loadSessions = async () => {
-    sessionsLoading.value = true
+  const fetchSessions = async ({ showLoading = false, silentError = false } = {}) => {
+    if (showLoading) sessionsLoading.value = true
     try {
       const res = await chatApi.sessionsList()
       sessions.value = res.data.data || []
     } catch (err) {
-      ElMessage.error(err.message || t('chat.load_sessions_failed'))
+      if (!silentError) {
+        ElMessage.error(err.message || t('chat.load_sessions_failed'))
+      }
     } finally {
-      sessionsLoading.value = false
+      if (showLoading) sessionsLoading.value = false
     }
+    return sessions.value
   }
+
+  const sessionLoadingPoller = createSessionListLoadingPoller({
+    refreshSessions: () => fetchSessions({ silentError: true })
+  })
+
+  /**
+   * 加载会话列表。列表中存在后台回复时，自动保持轻量刷新直到全部完成。
+   */
+  const loadSessions = async () => {
+    const nextSessions = await fetchSessions({ showLoading: true })
+    sessionLoadingPoller.sync(nextSessions)
+    return nextSessions
+  }
+
+  const refreshSessionLoadingState = () => sessionLoadingPoller.refreshNow()
+
+  onScopeDispose(() => sessionLoadingPoller.dispose())
 
   // 使用删除确认组合式函数
   const { handleDelete: handleDeleteSession } = useDeleteConfirm(chatApi.deleteSession, loadSessions)
@@ -223,6 +241,7 @@ export function useSessionManager() {
     // 方法
     setLoadHistoryCallback,
     loadSessions,
+    refreshSessionLoadingState,
     selectSession,
     createNewSession,
     handleDeleteSession,

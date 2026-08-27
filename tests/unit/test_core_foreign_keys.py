@@ -23,9 +23,11 @@ from app.models import (
     PromptLibrary,
     ScheduledTask,
     SessionEvent,
+    SessionReplyProviderUsage,
     SessionReplyWorkItem,
 )
 from app.models.scheduled_task import ScheduledTaskStatus
+from app.models.session_reply_work_item import SessionReplySourceType, SessionReplyWorkType
 
 EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     # audit
@@ -114,6 +116,7 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("session_id", "uid"),
         "CASCADE",
     ),
+    ("session_reply_provider_usage", ("work_id", "session_id", "uid"), "session_reply_work_item", ("id", "session_id", "uid"), "CASCADE"),
     ("session_reply_sequence", ("session_id",), "chat_session", ("session_id",), "CASCADE"),
     # terminal
     (
@@ -183,6 +186,7 @@ async def db_session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession
                     Profile.__table__,
                     ChatSession.__table__,
                     SessionReplyWorkItem.__table__,
+                    SessionReplyProviderUsage.__table__,
                     ContextSummaryStage.__table__,
                     ContextSummaryFragment.__table__,
                     SessionEvent.__table__,
@@ -249,6 +253,66 @@ async def test_sqlite_enforces_session_owner_foreign_key_and_cascade(db_session_
         await db.delete(chat_session)
         await db.commit()
         assert await db.get(SessionEvent, session_event_id) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_usage_cascades_with_reply_work_but_session_totals_remain(db_session_factory):
+    async with db_session_factory() as db:
+        chat_session = ChatSession(
+            session_id="session-usage",
+            uid="user-1",
+            llm_request_metadata={
+                "input_tokens": 100,
+                "input_tokens_source": "provider",
+                "total_input_tokens": 100,
+                "total_cached_tokens": 25,
+                "cache_hit_rate": 0.25,
+                "context_window_tokens": 4096,
+                "max_output_tokens": 512,
+                "total_output_tokens": 7,
+            },
+        )
+        db.add(chat_session)
+        await db.flush()
+
+        work_item = SessionReplyWorkItem(
+            id=77,
+            uid="user-1",
+            session_id="session-usage",
+            profile_id=1,
+            sequence_no=1,
+            work_type=SessionReplyWorkType.FOREGROUND_REPLY,
+            source_type=SessionReplySourceType.USER_MESSAGE,
+            source_id="1",
+            dedupe_key="provider-usage-work-77",
+        )
+        db.add(work_item)
+        await db.flush()
+
+        provider_usage = SessionReplyProviderUsage(
+            provider_request_id="request-usage-1",
+            work_id=77,
+            session_id="session-usage",
+            uid="user-1",
+            input_tokens=100,
+            cached_tokens=25,
+            output_tokens=7,
+        )
+        db.add(provider_usage)
+        await db.commit()
+        provider_usage_id = provider_usage.id
+        assert provider_usage_id is not None
+
+        await db.delete(work_item)
+        await db.commit()
+
+    async with db_session_factory() as check_db:
+        assert await check_db.get(SessionReplyProviderUsage, provider_usage_id) is None
+        chat_session = await check_db.get(ChatSession, "session-usage")
+        assert chat_session is not None
+        assert chat_session.llm_request_metadata["total_input_tokens"] == 100
+        assert chat_session.llm_request_metadata["total_cached_tokens"] == 25
+        assert chat_session.llm_request_metadata["total_output_tokens"] == 7
 
 
 @pytest.mark.asyncio

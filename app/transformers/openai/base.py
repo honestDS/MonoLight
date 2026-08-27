@@ -31,6 +31,42 @@ class BaseOpenAITransformer(BaseTransformer):
         return isinstance(exc, (asyncio.TimeoutError, TimeoutError, socket.timeout, aiohttp.ServerTimeoutError))
 
     @staticmethod
+    def _decode_json_payload(payload: Any) -> Any:
+        if not isinstance(payload, str):
+            return payload
+        try:
+            return json.loads(payload)
+        except (TypeError, ValueError):
+            return payload
+
+    @classmethod
+    def _build_provider_exception(
+        cls,
+        provider_error: Any,
+        *,
+        message: str,
+        status: int | None,
+    ) -> LLMException:
+        kwargs: dict[str, Any] = {"detail": provider_error}
+        if status is not None:
+            kwargs["status"] = status
+        return LLMException(message, **kwargs)
+
+    @classmethod
+    def _raise_provider_error(
+        cls,
+        provider_error: Any,
+        *,
+        message: str = ERR_LLM_API_RESPONSE_ERROR,
+        status: int | None = None,
+    ) -> None:
+        raise cls._build_provider_exception(
+            provider_error,
+            message=message,
+            status=status,
+        )
+
+    @staticmethod
     def _nonnegative_token_count(value: Any) -> int:
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -138,7 +174,11 @@ class BaseOpenAITransformer(BaseTransformer):
                 async with session.post(url, headers=headers, json=payload, **proxy_kwargs) as resp:
                     text = await resp.text()
                     if resp.status != 200:
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=resp.status, detail=text)
+                        self._raise_provider_error(
+                            text,
+                            message=ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
+                            status=resp.status,
+                        )
                     parsed = json.loads(text)
                     if not isinstance(parsed, dict):
                         raise LLMException(ERR_LLM_API_RESPONSE_ERROR, detail=text)
@@ -182,7 +222,11 @@ class BaseOpenAITransformer(BaseTransformer):
                 try:
                     if response.status != 200:
                         text = await response.text()
-                        raise LLMException(ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS, status=response.status, detail=text)
+                        self._raise_provider_error(
+                            text,
+                            message=ERR_LLM_API_RESPONSE_ERROR_WITH_STATUS,
+                            status=response.status,
+                        )
 
                     buffer = ""
                     chunk_iter = response.content.iter_any().__aiter__()
