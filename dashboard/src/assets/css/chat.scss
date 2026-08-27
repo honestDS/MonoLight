@@ -5,7 +5,7 @@
 }
 
 .sessions-sidebar {
-  width: 280px;
+  width: 200px;
   flex-shrink: 0;
   background: #fff;
   display: flex;
@@ -66,6 +66,23 @@
     padding: 8px;
   }
 
+  .session-group {
+    margin-bottom: 8px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  .session-group-title {
+    padding: 8px 12px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #909399;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
   .session-item {
     display: flex;
     align-items: flex-start;
@@ -95,8 +112,15 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        margin-bottom: 6px;
         font-weight: 500;
+      }
+
+      .session-source {
+        font-size: 11px;
+        color: #a8abb2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .session-meta {
@@ -1277,5 +1301,11 @@
       }
     }
   }
+}
+
+// 会话列表 info tooltip 多行样式
+.session-info-tooltip.el-popper {
+  white-space: pre-line;
+  line-height: 1.6;
 }
 
