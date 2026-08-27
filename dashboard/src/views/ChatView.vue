@@ -19,56 +19,62 @@
         </div>
       </div>
       <div class="sessions-list">
-        <div
-          v-for="session in sessions"
-          :key="session.session_id"
-          :data-session-id="session.session_id"
-          :class="['session-item', { active: currentSessionId === session.session_id }]"
-          @click="selectSession(session)"
-        >
-          <div class="session-content">
-            <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
-              <template v-if="typingSessionId === session.session_id">
-                <span
-                  v-for="(char, index) in session.title"
-                  :key="index"
-                  class="typing-char"
-                >{{ char }}</span>
-              </template>
-              <template v-else>
-                {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
-              </template>
-            </div>
-            <div class="session-meta" :title="`${$t('chat.session_created_at')}: ${session.created_at || '-'}\n${$t('chat.session_last_active')}: ${session.last_active || '-'}\n${$t('chat.session_source')}: ${session.source || '-'}`">
-              <div class="session-meta-line">
-                <span class="session-meta-label">{{ $t('chat.session_created_at') }}</span>
-                <span class="session-meta-value">{{ session.created_at || '-' }}</span>
-              </div>
-              <div class="session-meta-line">
-                <span class="session-meta-label">{{ $t('chat.session_last_active') }}</span>
-                <span class="session-meta-value">{{ session.last_active || '-' }}</span>
-              </div>
-              <div class="session-meta-line">
-                <span class="session-meta-label">{{ $t('chat.session_source') }}</span>
-                <span class="session-meta-value">{{ session.source || '-' }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="session-actions">
-            <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+        <template v-for="group in groupedSessions" :key="group.key">
+          <div
+            :class="['session-group-title', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+            role="button"
+            tabindex="0"
+            @click="toggleGroup(group.key)"
+            @keydown.enter.prevent="toggleGroup(group.key)"
+            @keydown.space.prevent="toggleGroup(group.key)"
+          >
+            <span class="session-group-title-text">{{ group.label }}</span>
+            <el-icon class="session-group-chevron"><ArrowDown /></el-icon>
           </div>
           <div
-            v-if="session.is_loading"
-            class="session-loading-indicator"
-            :title="$t('chat.session_reply_in_progress')"
-            role="status"
-            aria-live="polite"
-          ></div>
-        </div>
-        <div v-if="sessions.length === 0 && !sessionsLoading" class="empty-tip">
+            :class="['session-group-body', { 'is-collapsed': collapsedGroups.has(group.key) }]"
+          >
+            <div
+              v-for="session in group.sessions"
+              v-show="!collapsedGroups.has(group.key)"
+              :key="session.session_id"
+              :data-session-id="session.session_id"
+              :class="['session-item', { active: currentSessionId === session.session_id }]"
+              @click="selectSession(session)"
+            >
+              <div class="session-content">
+                <div class="session-title" :title="session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) })">
+                  <template v-if="typingSessionId === session.session_id">
+                    <span
+                      v-for="(char, index) in session.title"
+                      :key="index"
+                      class="typing-char"
+                    >{{ char }}</span>
+                  </template>
+                  <template v-else>
+                    {{ session.title || $t('chat.session_prefix', { id: session.session_id.substring(0, 8) }) }}
+                  </template>
+                </div>
+                <div class="session-meta" :title="`${$t('chat.session_source')}: ${session.source || '-'}`">
+                  <span v-if="session.source" class="session-source">{{ session.source }}</span>
+                </div>
+              </div>
+              <div class="session-actions">
+                <el-icon class="delete-icon" @click.stop="handleDeleteSession(session.session_id, session.title || session.session_id)"><Delete /></el-icon>
+              </div>
+              <div
+                v-if="session.is_loading"
+                class="session-loading-indicator"
+                :title="$t('chat.session_reply_in_progress')"
+                role="status"
+                aria-live="polite"
+              ></div>
+            </div>
+          </div>
+        </template>
+        <div v-if="groupedSessions.length === 0 && !sessionsLoading" class="empty-tip">
           {{ $t('chat.no_sessions') }}
         </div>
-
       </div>
     </div>
 
@@ -275,7 +281,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, Plus, Refresh, UploadFilled } from '@element-plus/icons-vue'
+import { Delete, Plus, Refresh, UploadFilled, ArrowDown } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import ChatMessageList from '../components/ChatMessageList.vue'
 import { useChatSession } from '../composables/chat/useChatSession'
@@ -322,6 +328,50 @@ const currentSessionEnableMarkdown = computed({
       session.enable_markdown = val
     }
   }
+})
+
+// 折叠的会话分组 key（today / yesterday / earlier）
+const collapsedGroups = ref(new Set())
+const toggleGroup = (key) => {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsedGroups.value = next
+}
+
+// 会话列表分组：今天 / 昨天 / 以前，按 last_active 降序
+const groupedSessions = computed(() => {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+
+  const groups = {
+    today: [],
+    yesterday: [],
+    earlier: []
+  }
+
+  for (const session of sessions.value) {
+    if (!session.last_active) {
+      groups.earlier.push(session)
+      continue
+    }
+    const d = new Date(session.last_active)
+    if (d >= today) {
+      groups.today.push(session)
+    } else if (d >= yesterday) {
+      groups.yesterday.push(session)
+    } else {
+      groups.earlier.push(session)
+    }
+  }
+
+  return [
+    { key: 'today', label: t('chat.session_group_today'), sessions: groups.today },
+    { key: 'yesterday', label: t('chat.session_group_yesterday'), sessions: groups.yesterday },
+    { key: 'earlier', label: t('chat.session_group_earlier'), sessions: groups.earlier }
+  ].filter(g => g.sessions.length > 0)
 })
 
 // 当前会话的创建/活跃时间，供 ChatMessageList 显示
