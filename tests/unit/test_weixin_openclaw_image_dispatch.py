@@ -433,6 +433,78 @@ async def test_send_session_event_sends_normal_short_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_session_event_consumes_whitespace_only_content_without_sending(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    reply_text_calls = []
+    reply_text_parts_calls = []
+    reply_file_item_calls = []
+
+    async def reply_text(*args, **kwargs):
+        reply_text_calls.append((args, kwargs))
+        return True
+
+    async def reply_text_parts(*args, **kwargs):
+        reply_text_parts_calls.append((args, kwargs))
+        return True
+
+    async def reply_file_item(*args, **kwargs):
+        reply_file_item_calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(adapter, "reply_text", reply_text)
+    monkeypatch.setattr(adapter, "reply_text_parts", reply_text_parts)
+    monkeypatch.setattr(adapter, "reply_file_item", reply_file_item)
+
+    sent = await adapter.send_session_event(
+        "owner",
+        "weixin-openclaw:weixin-user",
+        {"type": "proactive_reply", "content": " \n\t"},
+    )
+
+    assert sent is True
+    assert reply_text_calls == []
+    assert reply_text_parts_calls == []
+    assert reply_file_item_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_session_event_sends_file_for_whitespace_only_content(monkeypatch):
+    adapter = object.__new__(WeixinOpenClawAdapter)
+    reply_text_calls = []
+    reply_text_parts_calls = []
+    reply_file_item_calls = []
+    file_item = {"id": "file-id", "name": "result.txt", "url": "https://example.test/result.txt"}
+
+    async def reply_text(*args, **kwargs):
+        reply_text_calls.append((args, kwargs))
+        return True
+
+    async def reply_text_parts(*args, **kwargs):
+        reply_text_parts_calls.append((args, kwargs))
+        return True
+
+    async def reply_file_item(user_id, received_file_item, *, context_token=""):
+        reply_file_item_calls.append((user_id, received_file_item, context_token))
+        return True
+
+    monkeypatch.setattr(adapter, "reply_text", reply_text)
+    monkeypatch.setattr(adapter, "reply_text_parts", reply_text_parts)
+    monkeypatch.setattr(adapter, "reply_file_item", reply_file_item)
+
+    sent = await adapter.send_session_event(
+        "owner",
+        "weixin-openclaw:weixin-user",
+        {"type": "proactive_reply", "content": " \n\t", "files": [file_item]},
+    )
+
+    assert sent is True
+    assert reply_text_calls == []
+    assert reply_text_parts_calls == []
+    assert reply_file_item_calls == [("weixin-user", file_item, "")]
+    assert reply_file_item_calls[0][1] is file_item
+
+
+@pytest.mark.asyncio
 async def test_send_session_event_sends_oversized_newline_text_as_separate_requests(monkeypatch):
     adapter = object.__new__(WeixinOpenClawAdapter)
     adapter.context_tokens = {"weixin-user": "context-token"}

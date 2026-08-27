@@ -315,7 +315,11 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
     session = SimpleNamespace(
         context_summary_revision=4,
         context_content_revision=6,
-        llm_request_metadata={"total_output_tokens": 8},
+        llm_request_metadata={
+            "total_output_tokens": 8,
+            "total_input_tokens": 1000,
+            "total_cached_tokens": 250,
+        },
     )
 
     async def apply_checkpoint(_db, **kwargs):
@@ -364,7 +368,49 @@ async def test_prepare_request_messages_exposes_only_memory_tool_and_writes_summ
     assert metadata["turn"] == 0
     assert metadata["input_tokens"] == 321
     assert metadata["total_output_tokens"] == 8
+    assert metadata["total_input_tokens"] == 1000
+    assert metadata["total_cached_tokens"] == 250
+    assert metadata["cache_hit_rate"] == 0.25
     assert metadata["response_id"] == response_id
     assert "memory query secret" not in json.dumps(metadata)
     assert "retrieved memory body" not in json.dumps(metadata)
     assert context.latest_llm_request_metadata is metadata
+    assert context.session_total_input_tokens == 1000
+    assert context.session_total_cached_tokens == 250
+
+
+@pytest.mark.asyncio
+async def test_update_output_metadata_accumulates_session_cache_metrics_and_output_tokens():
+    context = _context()
+    context.session_total_input_tokens = 1000
+    context.session_total_cached_tokens = 250
+    context.total_output_tokens = 4
+    context.session_total_output_tokens = 8
+    metadata = {"total_output_tokens": 8}
+    context.latest_llm_request_metadata = metadata
+    events = []
+
+    async def stream_event_callback(event):
+        events.append(event)
+
+    context.stream_event_callback = stream_event_callback
+    response = SimpleNamespace(
+        usage={
+            "prompt_tokens": 500,
+            "cached_tokens": 300,
+            "completion_tokens": 10,
+        },
+    )
+
+    await request_module.update_output_metadata(context, response)
+
+    assert context.session_total_input_tokens == 1500
+    assert context.session_total_cached_tokens == 550
+    assert context.total_output_tokens == 14
+    assert context.session_total_output_tokens == 18
+    assert metadata["total_input_tokens"] == 1500
+    assert metadata["total_cached_tokens"] == 550
+    assert metadata["cache_hit_rate"] == pytest.approx(550 / 1500)
+    assert metadata["output_tokens"] == 14
+    assert metadata["total_output_tokens"] == 18
+    assert events[-1]["cache_hit_rate"] == pytest.approx(550 / 1500)

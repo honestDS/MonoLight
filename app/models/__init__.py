@@ -30,6 +30,7 @@ from app.models.prompt import PromptLibrary as PromptLibrary
 from app.models.scheduled_task import ScheduledTask as ScheduledTask
 from app.models.session import ChatSession as ChatSession
 from app.models.session_event import SessionEvent as SessionEvent
+from app.models.session_reply_provider_usage import SessionReplyProviderUsage as SessionReplyProviderUsage
 from app.models.session_reply_stream_event import SessionReplyStreamEvent as SessionReplyStreamEvent
 from app.models.session_reply_work_item import SessionReplySequence as SessionReplySequence
 from app.models.session_reply_work_item import SessionReplyWorkItem as SessionReplyWorkItem
