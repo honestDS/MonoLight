@@ -44,6 +44,18 @@
   border-bottom: 1px solid #dcdfe6;
 }
 
+.session-info-icon {
+  pointer-events: auto;
+  font-size: 14px;
+  color: #909399;
+  cursor: help;
+  transition: color 0.2s;
+
+  &:hover {
+    color: #409eff;
+  }
+}
+
 .llm-request-metadata-item {
   display: inline-flex;
   flex: 1 1 130px;

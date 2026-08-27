@@ -5,6 +5,15 @@
       role="status"
       :aria-label="$t('chat.llm_request_metadata_label')"
     >
+      <el-tooltip
+        v-if="currentSessionInfo"
+        :content="formatSessionTooltip(currentSessionInfo)"
+        placement="bottom"
+        :show-after="100"
+        popper-class="session-info-tooltip"
+      >
+        <el-icon class="session-info-icon"><InfoFilled /></el-icon>
+      </el-tooltip>
       <span class="llm-request-metadata-item">
         <span>{{ $t('chat.input_tokens') }}</span>
         <strong>{{ formatTokenCount(llmRequestMetadata?.input_tokens) }}</strong>
@@ -287,7 +296,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { VList } from 'virtua/vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
-import { WarningFilled } from '@element-plus/icons-vue'
+import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
@@ -319,6 +328,7 @@ const props = defineProps({
   initialHistoryLoaded: { type: Boolean, default: true },
   contextSummarizing: { type: Boolean, default: false },
   llmRequestMetadata: { type: Object, default: null },
+  currentSessionInfo: { type: Object, default: null },
   hideEmptyTip: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:activeCollapse', 'audit-decision'])
@@ -327,6 +337,13 @@ const tokenNumberFormatter = new Intl.NumberFormat()
 const percentNumberFormatter = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 2 })
 const formatTokenCount = value => Number.isFinite(value) ? tokenNumberFormatter.format(value) : '-'
 const formatCacheHitRate = value => Number.isFinite(value) ? percentNumberFormatter.format(value) : '-'
+const formatSessionTooltip = (info) => {
+  if (!info) return ''
+  return [
+    `${t('chat.session_last_active')}: ${info.last_active || '-'}`,
+    `${t('chat.session_created_at')}: ${info.created_at || '-'}`
+  ].join('\n')
+}
 const pendingAuditDecisions = ref(new Set())
 const auditDecisionStatuses = ref(new Map())
 const auditCountdownNow = ref(Date.now())
