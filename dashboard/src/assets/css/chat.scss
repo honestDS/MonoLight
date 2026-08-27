@@ -75,12 +75,54 @@
   }
 
   .session-group-title {
-    padding: 8px 12px 6px;
-    font-size: 11px;
-    font-weight: 600;
-    color: #909399;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 6px 4px 8px;
+    padding: 6px 12px 6px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #303133;
     letter-spacing: 0.5px;
     text-transform: uppercase;
+    background: #ebeef5;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.2s ease, color 0.2s ease;
+
+    &:hover {
+      background: #dcdfe6;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #409eff;
+      outline-offset: 2px;
+    }
+
+    .session-group-title-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .session-group-chevron {
+      flex-shrink: 0;
+      font-size: 14px;
+      color: #606266;
+      transition: transform 0.25s ease;
+    }
+
+    &.is-collapsed .session-group-chevron {
+      transform: rotate(-90deg);
+    }
+  }
+
+  .session-group-body {
+    overflow: hidden;
   }
 
   .session-item {
@@ -89,7 +131,8 @@
     align-items: flex-start;
     justify-content: space-between;
     padding: 10px 12px;
-    margin-bottom: 4px;
+    margin: 0 4px 4px;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.2s;
 
@@ -99,7 +142,6 @@
 
     &.active {
       background: #ecf5ff;
-      border-left: 3px solid #409eff;
     }
 
     .session-content {
@@ -1335,5 +1377,29 @@
 .session-info-tooltip.el-popper {
   white-space: pre-line;
   line-height: 1.6;
+}
+
+// 会话分组展开/收起过渡（通过 .session-group-body 的 max-height + opacity 控制）
+.session-group-body {
+  max-height: 2000px;
+  opacity: 1;
+  overflow: hidden;
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  > .session-item {
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+.session-group-body.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+
+  > .session-item {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
