@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
 from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND, ERR_SESSION_NOT_FOUND, MSG_GENERIC_SUCCESS
+from app.core.crud.profile import profile_crud
 from app.core.crud.scheduled_task import scheduled_task_crud
 from app.core.crud.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
@@ -27,7 +28,14 @@ async def _get_session_profile_id(db: AsyncSession, session_id: str, uid: str) -
     session = await session_crud.get_by_session_id(db, session_id)
     if not session or session.uid != uid:
         return None
-    return session.profile_id
+    if session.profile_id is None:
+        return None
+    profile = await profile_crud.lock_for_runtime_use(
+        db,
+        profile_id=session.profile_id,
+        uid=uid,
+    )
+    return profile.id if profile is not None else None
 
 
 @router.get("/list")

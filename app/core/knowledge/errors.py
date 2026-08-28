@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.constants import ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG, ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID, ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND, ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT, MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
+from app.core.constants import (
+    ERR_MANAGED_KNOWLEDGE_CONTAINER_CONFLICT,
+    ERR_MANAGED_KNOWLEDGE_CONTENT_TOO_LONG,
+    ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID,
+    ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
+    ERR_MANAGED_KNOWLEDGE_RUNTIME_UNAVAILABLE,
+    ERR_MANAGED_KNOWLEDGE_VERSION_CONFLICT,
+    MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
+)
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 
 
@@ -26,9 +34,36 @@ class ManagedKnowledgeConflictError(ParameterException):
         super().__init__(message=message, code=code, **kwargs)
 
 
+class ManagedKnowledgeRuntimeUnavailableError(ManagedKnowledgeConflictError):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(
+            message=ERR_MANAGED_KNOWLEDGE_RUNTIME_UNAVAILABLE,
+            code=409,
+            data={"status": "runtime_unavailable", "retryable": True},
+            **kwargs,
+        )
+
+
+class ManagedKnowledgeContainerConflictError(ManagedKnowledgeConflictError):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(
+            message=ERR_MANAGED_KNOWLEDGE_CONTAINER_CONFLICT,
+            code=409,
+            data={"status": "container_conflict", "retryable": True},
+            **kwargs,
+        )
+
+
 class ManagedKnowledgeNotFoundError(ResourceNotFoundException):
     def __init__(self, message: str = ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND, code: int = 404, **kwargs: Any) -> None:
         super().__init__(message=message, code=code, **kwargs)
 
 
-__all__ = ["ManagedKnowledgeConflictError", "ManagedKnowledgeContentTooLongError", "ManagedKnowledgeNotFoundError", "ManagedKnowledgeValidationError"]
+__all__ = [
+    "ManagedKnowledgeConflictError",
+    "ManagedKnowledgeContainerConflictError",
+    "ManagedKnowledgeContentTooLongError",
+    "ManagedKnowledgeNotFoundError",
+    "ManagedKnowledgeRuntimeUnavailableError",
+    "ManagedKnowledgeValidationError",
+]

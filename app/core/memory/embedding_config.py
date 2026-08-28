@@ -31,6 +31,7 @@ from app.core.embedding.common import detect_embedding_dimensions, load_embeddin
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory_jobs.manager import memory_job_manager
+from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.core.utils.time import get_local_time
 from app.models.memory import (
     LongTermMemoryEmbeddingRevisionStatus,
@@ -77,21 +78,17 @@ def _migration_is_active(store: LongTermMemoryStore | None) -> bool:
 
 
 def _is_memory_confirmation_unique_integrity_error(exc: IntegrityError) -> bool:
-    known_constraints = {
-        "uq_long_term_memory_store_uid",
-        "uq_long_term_memory_embedding_revision_uid_revision",
-    }
-    original = getattr(exc, "orig", None)
-    constraint_name = str(getattr(original, "constraint_name", None) or getattr(exc, "constraint_name", None) or "").lower()
-    detail = " ".join(part.lower() for part in (str(original or ""), str(exc)))
-    if constraint_name in known_constraints or any(name in detail for name in known_constraints):
-        return True
-    is_unique_violation = any(marker in detail for marker in ("unique", "duplicate key", "duplicate entry"))
-    if not is_unique_violation:
-        return False
-    is_store_uid_conflict = "long_term_memory_store" in detail and "uid" in detail
-    is_revision_conflict = "long_term_memory_embedding_revision" in detail and "uid" in detail and "revision" in detail
-    return is_store_uid_conflict or is_revision_conflict
+    return is_unique_constraint_violation(
+        exc,
+        constraint_names=(
+            "uq_long_term_memory_store_uid",
+            "uq_long_term_memory_embedding_revision_uid_revision",
+        ),
+        fallback_marker_groups=(
+            ("long_term_memory_store", "uid"),
+            ("long_term_memory_embedding_revision", "uid", "revision"),
+        ),
+    )
 
 
 async def _preview_embedding_selection(

@@ -40,6 +40,7 @@ from app.core.memory_jobs.maintenance_lifecycle import (
     finalize_maintenance_terminal_state,
     mark_cancelled_target_cleanup_failure,
 )
+from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.models.memory import (
     LongTermMemoryMigrationStatus,
     LongTermMemoryMutationJob,
@@ -140,12 +141,11 @@ def _validate_source_ids(
 
 
 def _is_active_mutation_key_integrity_error(exc: IntegrityError) -> bool:
-    original = getattr(exc, "orig", None)
-    constraint_name = str(getattr(original, "constraint_name", None) or getattr(exc, "constraint_name", None) or "").lower()
-    detail = " ".join(part.lower() for part in (str(original or ""), str(exc)))
-    if _ACTIVE_MUTATION_KEY_CONSTRAINT in constraint_name or _ACTIVE_MUTATION_KEY_CONSTRAINT in detail:
-        return True
-    return "active_mutation_key" in detail and "unique" in detail
+    return is_unique_constraint_violation(
+        exc,
+        constraint_names=(_ACTIVE_MUTATION_KEY_CONSTRAINT,),
+        fallback_marker_groups=(("active_mutation_key",),),
+    )
 
 
 def _organization_job_target_identity(

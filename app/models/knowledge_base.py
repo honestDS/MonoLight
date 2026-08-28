@@ -148,6 +148,7 @@ class KnowledgeBase(KnowledgeBaseCore, table=True):
             "(knowledge_base_type = 'USER' AND managed_profile_id IS NULL) OR (knowledge_base_type = 'LLM_MANAGED' AND managed_profile_id IS NOT NULL)",
             name="ck_knowledge_base_type_profile_owner",
         ),
+        {"sqlite_autoincrement": True},
     )
 
     id: int | None = Field(default=None, primary_key=True, index=True)
@@ -312,6 +313,10 @@ def _collection_owner_trigger_statements(connection) -> list[str]:
 
 @event.listens_for(KnowledgeBaseCollectionOwner.__table__, "after_create")
 def _install_collection_owner_triggers(target, connection, **kwargs) -> None:
+    install_knowledge_base_collection_owner_triggers(connection)
+
+
+def install_knowledge_base_collection_owner_triggers(connection) -> None:
     if connection.dialect.name not in {"sqlite", "mysql"}:
         return
 

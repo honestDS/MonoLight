@@ -304,7 +304,14 @@ async def update_profile_knowledge_base_bindings(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
-    profile = await db.get(Profile, profile_id)
+    snapshot = await db.get(Profile, profile_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
+    profile = await profile_crud.lock_for_runtime_use(
+        db,
+        profile_id=profile_id,
+        uid=snapshot.uid,
+    )
     if not profile:
         raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):

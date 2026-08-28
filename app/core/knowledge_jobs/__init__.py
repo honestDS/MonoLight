@@ -16,6 +16,7 @@ from app.core.knowledge_jobs.manager import (
     KnowledgeJobSubmissionResult,
     KnowledgeJobTargetBusyError,
     KnowledgeJobValidationError,
+    ProfileKnowledgeJobSubmissionResult,
     knowledge_job_manager,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     "KnowledgeJobSubmissionResult",
     "KnowledgeJobTargetBusyError",
     "KnowledgeJobValidationError",
+    "ProfileKnowledgeJobSubmissionResult",
     "create_default_knowledge_job_executor",
     "create_knowledge_job_consumer",
     "knowledge_job_manager",

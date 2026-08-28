@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crud.base import CRUDBase
@@ -18,6 +18,48 @@ _PROFILE_NON_PERSISTED_FIELDS = {
 
 
 class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
+    async def count_by_uid(self, db: AsyncSession, *, uid: str | None) -> int:
+        result = await db.execute(
+            select(func.count()).select_from(Profile).where(Profile.uid == uid)
+        )
+        return int(result.scalar() or 0)
+
+    async def lock_for_runtime_use(
+        self,
+        db: AsyncSession,
+        *,
+        profile_id: int,
+        uid: str | None,
+    ) -> Profile | None:
+        locked = await db.execute(
+            update(Profile)
+            .where(Profile.id == profile_id, Profile.uid == uid)
+            .values(name=Profile.name)
+            .execution_options(synchronize_session=False)
+        )
+        if (locked.rowcount or 0) != 1:
+            return None
+        await db.flush()
+        result = await db.execute(
+            select(Profile)
+            .where(Profile.id == profile_id, Profile.uid == uid)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def delete_locked(
+        self,
+        db: AsyncSession,
+        *,
+        profile: Profile,
+        commit: bool = False,
+    ) -> None:
+        await db.delete(profile)
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+
     async def create(
         self,
         db: AsyncSession,

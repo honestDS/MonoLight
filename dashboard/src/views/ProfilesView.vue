@@ -146,13 +146,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { h, ref, reactive, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { profileApi, channelApi, promptApi, systemApi, adminApi, knowledgeBaseApi } from '../api'
 import BaseDataTable from '../components/BaseDataTable.vue'
 import StatusTag from '../components/StatusTag.vue'
-import { useDeleteConfirm } from '../composables/useDeleteConfirm'
 import ProfileFormDialog from '../components/ProfileFormDialog.vue'
 import MemoryEmbeddingDialog from '../components/MemoryEmbeddingDialog.vue'
 import { defaultProfileConfigs } from '../constants'
@@ -427,7 +426,94 @@ const loadProfiles = async () => {
   }
 }
 
-const { handleDelete } = useDeleteConfirm(profileApi.delete, loadProfiles)
+const confirmProfileDeleteImpact = async (data) => {
+  const messages = [t('profiles.delete_impact_intro', { name: data?.profile?.name || '' })]
+  const sessions = data?.sessions || {}
+  if (sessions.count) {
+    messages.push(t('profiles.delete_impact_sessions', {
+      count: sessions.count,
+      messages: sessions.message_count || 0
+    }))
+    for (const session of sessions.items || []) {
+      messages.push(t('profiles.delete_impact_session_item', {
+        name: session.title || session.session_id
+      }))
+    }
+    if (sessions.omitted_count) {
+      messages.push(t('profiles.delete_impact_more', { count: sessions.omitted_count }))
+    }
+  }
+
+  const managedKnowledgeBase = data?.managed_knowledge_base
+  if (managedKnowledgeBase?.count) {
+    const item = managedKnowledgeBase.items?.[0]
+    messages.push(t('profiles.delete_impact_managed_kb', {
+      name: item?.name || '',
+      count: item?.knowledge_count || 0
+    }))
+  }
+  if (data?.scheduled_tasks?.count) {
+    messages.push(t('profiles.delete_impact_scheduled_tasks', { count: data.scheduled_tasks.count }))
+    for (const item of data.scheduled_tasks.items || []) {
+      messages.push(t('profiles.delete_impact_scheduled_task_item', { name: item.name }))
+    }
+    if (data.scheduled_tasks.omitted_count) {
+      messages.push(t('profiles.delete_impact_more', { count: data.scheduled_tasks.omitted_count }))
+    }
+  }
+  if (data?.message_platforms?.count) {
+    messages.push(t('profiles.delete_impact_message_platforms', { count: data.message_platforms.count }))
+    for (const item of data.message_platforms.items || []) {
+      messages.push(t('profiles.delete_impact_message_platform_item', { name: item.name }))
+    }
+    if (data.message_platforms.omitted_count) {
+      messages.push(t('profiles.delete_impact_more', { count: data.message_platforms.omitted_count }))
+    }
+  }
+  if (data?.user_knowledge_base_bindings?.count) {
+    messages.push(t('profiles.delete_impact_user_kbs', { count: data.user_knowledge_base_bindings.count }))
+    for (const item of data.user_knowledge_base_bindings.items || []) {
+      messages.push(t('profiles.delete_impact_user_kb_item', { name: item.name }))
+    }
+    if (data.user_knowledge_base_bindings.omitted_count) {
+      messages.push(t('profiles.delete_impact_more', { count: data.user_knowledge_base_bindings.omitted_count }))
+    }
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      h('div', messages.map((message, index) => h('div', { key: index }, message))),
+      t('profiles.delete_impact_title'),
+      {
+        type: 'warning',
+        confirmButtonText: t('profiles.delete_impact_confirm'),
+        cancelButtonText: t('common.cancel'),
+        showCancelButton: true
+      }
+    )
+    return true
+  } catch (action) {
+    return false
+  }
+}
+
+const handleDelete = async (id) => {
+  try {
+    let response = await profileApi.delete(id)
+    while (response.data?.data?.requires_confirmation) {
+      const impact = response.data.data
+      if (!await confirmProfileDeleteImpact(impact)) return
+      response = await profileApi.delete(id, {
+        confirm_impact: true,
+        impact_token: impact.impact_token
+      })
+    }
+    ElMessage.success(t('common.delete_success'))
+    await loadProfiles()
+  } catch (err) {
+    ElMessage.error(err.message || t('common.delete_failed'))
+  }
+}
 
 const fetchPrompts = async () => {
   try {

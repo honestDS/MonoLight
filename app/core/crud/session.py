@@ -5,11 +5,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
+from app.core.crud.profile import profile_crud
 from app.core.session_source import default_show_tool_calls_for_source
 from app.models.session import ChatSession
 
 
 class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
+    async def list_by_profile_reference(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+    ) -> list[ChatSession]:
+        result = await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.uid == uid,
+                or_(
+                    ChatSession.profile_id == profile_id,
+                    ChatSession.profile_override_id == profile_id,
+                ),
+            )
+            .order_by(ChatSession.created_at.asc(), ChatSession.session_id.asc())
+        )
+        return list(result.scalars().all())
+
     async def get_by_session_id(self, db: AsyncSession, session_id: str) -> ChatSession | None:
         result = await db.execute(select(ChatSession).where(ChatSession.session_id == session_id))
         return result.scalars().first()
@@ -220,7 +241,14 @@ class CRUDSession(CRUDBase[ChatSession, ChatSession, ChatSession]):
             await db.commit()
         return result.rowcount or 0
 
-    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http") -> ChatSession:
+    async def upsert_profile(self, db: AsyncSession, *, session_id: str, uid: str, profile_id: int, source: str = "http") -> ChatSession | None:
+        profile = await profile_crud.lock_for_runtime_use(
+            db,
+            profile_id=profile_id,
+            uid=uid,
+        )
+        if profile is None:
+            return None
         session = await self.get_by_session_id(db, session_id)
         if session:
             if session.uid != uid:
