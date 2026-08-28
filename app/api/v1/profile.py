@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import (
-    ERR_DELETE_BOUND_PROFILE,
     ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
     ERR_KB_NOT_FOUND,
@@ -25,19 +24,16 @@ from app.core.constants import (
     ERR_SESSION_NO_PERMISSION,
     MSG_MEMORY_SETTINGS_SUCCESS,
     MSG_PROFILE_CREATED,
+    MSG_PROFILE_DELETE_CONFIRMATION_REQUIRED,
     MSG_PROFILE_DELETED,
     MSG_PROFILE_MEMORY_EMBEDDING_CONFIRMED,
     MSG_PROFILE_MEMORY_EMBEDDING_PREVIEW_READY,
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
-from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
 from app.core.crud.memory import memory_store_crud
-from app.core.crud.message_platform import message_platform_crud
 from app.core.crud.profile import profile_crud
 from app.core.crud.prompt import prompt_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
-from app.core.crud.session import session_crud
 from app.core.crud.user import user_crud
 from app.core.exceptions import (
     ForbiddenException,
@@ -53,6 +49,7 @@ from app.core.memory.embedding_config import (
     normalize_profile_memory_for_update,
     preview_embedding_selection,
 )
+from app.core.profile_deletion import build_profile_deletion_impact, execute_profile_deletion
 from app.core.profile_validation import (
     lock_profile_channel_references,
     validate_audit_model_config,
@@ -316,7 +313,11 @@ async def set_default_profile(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    profile = await profile_crud.get(db, profile_id)
+    profile = await profile_crud.lock_for_runtime_use(
+        db,
+        profile_id=profile_id,
+        uid=current_user.uid,
+    )
     if not profile:
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     if profile.uid != current_user.uid:
@@ -381,7 +382,11 @@ async def update_profile(
             memory_organization=profile_in.memory_organization,
             extra_channel_ids=old_channel_ids,
         )
-        db_profile = await profile_crud.get(db, profile_id)
+        db_profile = await profile_crud.lock_for_runtime_use(
+            db,
+            profile_id=profile_id,
+            uid=db_profile.uid,
+        )
         if not db_profile:
             raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
         if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
@@ -494,6 +499,8 @@ async def profile_memory_embedding_confirm(
 @router.post("/delete")
 async def delete_profile(
     profile_id: int,
+    confirm_impact: bool = False,
+    impact_token: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -503,41 +510,50 @@ async def delete_profile(
     if not getattr(current_user, "is_superuser", False) and db_profile.uid != current_user.uid:
         raise ForbiddenException(ERR_SESSION_NO_PERMISSION)
 
-    count = len(await profile_crud.get_multi(db, uid=db_profile.uid))
-    if count <= 1:
+    if await profile_crud.count_by_uid(db, uid=db_profile.uid) <= 1:
         raise ParameterException(ERR_DELETE_LAST_PROFILE)
-
     if db_profile.is_default:
         raise ParameterException(ERR_DELETE_DEFAULT_PROFILE)
-    has_session_override = await session_crud.has_profile_override(db, profile_id)
-    has_platform_assignment = await message_platform_crud.has_profile_assignment(db, profile_id)
-    has_scheduled_assignment = await scheduled_task_crud.has_profile_assignment(db, profile_id)
-    if has_session_override or has_platform_assignment or has_scheduled_assignment:
-        raise ParameterException(ERR_DELETE_BOUND_PROFILE)
 
-    managed_kb_result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.managed_profile_id == profile_id))
-    managed_knowledge_bases = list(managed_kb_result.scalars().all())
+    impact = await build_profile_deletion_impact(db, profile=db_profile)
+    if not confirm_impact or impact_token != impact["impact_token"]:
+        return StandardResponse.success(
+            data={"requires_confirmation": True, **impact},
+            message=MSG_PROFILE_DELETE_CONFIRMATION_REQUIRED,
+        )
 
     try:
-        for knowledge_base in managed_knowledge_bases:
-            await knowledge_base_collection_owner_crud.enqueue(
-                db,
-                knowledge_base_id=knowledge_base.id,
-                collection_names=(
-                    knowledge_base.collection_name,
-                    knowledge_base.active_collection_name,
-                    knowledge_base.target_collection_name,
-                    knowledge_base.old_collection_name,
-                ),
-                commit=False,
+        locked_profile = await profile_crud.lock_for_runtime_use(
+            db,
+            profile_id=profile_id,
+            uid=db_profile.uid,
+        )
+        if locked_profile is None:
+            raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+        if locked_profile.is_default:
+            raise ParameterException(ERR_DELETE_DEFAULT_PROFILE)
+        if await profile_crud.count_by_uid(db, uid=locked_profile.uid) <= 1:
+            raise ParameterException(ERR_DELETE_LAST_PROFILE)
+
+        current_impact = await build_profile_deletion_impact(db, profile=locked_profile)
+        if impact_token != current_impact["impact_token"]:
+            await db.rollback()
+            return StandardResponse.success(
+                data={"requires_confirmation": True, **current_impact},
+                message=MSG_PROFILE_DELETE_CONFIRMATION_REQUIRED,
             )
-        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
-        for binding in binding_result.scalars().all():
-            await db.delete(binding)
-        await db.delete(db_profile)
-        await db.flush()
+
+        await execute_profile_deletion(
+            db,
+            profile=locked_profile,
+            impact=current_impact,
+        )
         await db.commit()
     except Exception:
         await db.rollback()
         raise
-    return StandardResponse.success(message=MSG_PROFILE_DELETED)
+
+    return StandardResponse.success(
+        data={"requires_confirmation": False},
+        message=MSG_PROFILE_DELETED,
+    )

@@ -57,7 +57,7 @@ app/workers/
 ├── __init__.py             # Worker 包标识
 ├── background_task.py      # 通用后台任务 Worker
 ├── lease.py                # Worker 协调支持
-├── memory.py               # 长期记忆作业 Worker
+├── memory.py               # 长期记忆与知识作业 Worker
 ├── message_platform.py     # 消息平台与定时任务 Worker
 ├── session_reply.py        # 会话回复 Worker
 ├── terminal.py             # 交互终端 Worker
@@ -106,6 +106,8 @@ app/api/v1/
 
 接口层负责对外协议和访问入口，业务能力由 `app/core/` 提供，接口数据结构由 `app/schemas/` 描述。
 
+Profile 删除采用影响预览和确认 token。确认后删除当前绑定会话、定时任务和托管知识库；消息平台与用户知识库仅解除绑定。Profile 行锁阻止删除期间新增运行引用，会话清理由 `session_cleanup.py` 统一执行。
+
 ## 核心层：`app/core/`
 
 ```text
@@ -117,6 +119,7 @@ app/core/
 ├── embedding/              # 知识库嵌入能力
 ├── i18n/                   # 后端多语言
 ├── knowledge/              # 托管知识关系主数据领域服务
+├── knowledge_jobs/         # 知识异步发布与清理作业组件
 ├── memory/                 # 长期记忆领域与管理服务
 ├── memory_jobs/            # 长期记忆作业组件
 ├── message_platforms/      # 消息平台应用服务
@@ -139,6 +142,7 @@ app/core/
 ├── log_broadcaster.py      # 日志广播
 ├── knowledge_base_collection_cleanup.py # 知识库 collection 持久化清理队列处理服务
 ├── paths.py                # 数据和临时目录定义
+├── profile_deletion.py     # Profile 删除影响预览、确认与级联清理
 ├── profile_selection.py    # Profile 选择服务
 ├── profile_validation.py   # Profile 配置检查
 ├── prompts.py              # 内置提示内容
@@ -184,10 +188,28 @@ app/core/knowledge/
 ├── __init__.py             # 托管知识领域能力导出
 ├── errors.py               # 托管知识领域异常
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
+├── managed_container.py    # 按 Profile 懒创建/复用托管知识库并复制长期记忆当前嵌入运行态
+├── recall.py               # 托管知识召回状态过滤
 └── results.py              # 托管知识领域操作结果与状态
 ```
 
-该目录承载 LLM 托管知识的关系型主数据领域能力。托管知识完整正文与版本历史以关系数据库为持久化事实源，向量分块属于可重建的派生索引数据，不作为知识主数据。
+该目录承载 LLM 托管知识主数据。正文和版本历史以关系库为事实源，向量仅作派生索引。首次写入按 Profile 懒创建唯一托管知识库并绑定 Profile；容器、绑定、首条知识和发布作业在同一短事务提交。召回最终由关系库版本、墓碑和 `is_recallable` 判定。
+
+知识库运行时嵌入配置由 `knowledge_base_runtime.py` 统一解析。`active_*` 是当前生效配置，legacy 字段仅作旧数据回退。查询、写入、发布和清理必须使用同一解析结果；渠道与模型删除保护同时覆盖当前和目标迁移配置。
+
+### 知识作业：`app/core/knowledge_jobs/`
+
+```text
+app/core/knowledge_jobs/
+├── __init__.py             # 知识作业能力导出
+├── manager.py              # 短事务提交、幂等与活动变更占用
+├── consumer.py             # 作业消费、租约续期、恢复与重试
+├── executor.py             # 租约栅栏与处理器执行器
+├── handlers.py             # 托管知识异步嵌入、发布和删除清理
+└── vector_cleanup.py       # staged/superseded 向量的持久化独立清理作业
+```
+
+知识作业与长期记忆作业模型独立，但复用租约、重试和旧 Worker 栅栏原则。数据库短事务只负责预留、校验和发布；嵌入与向量调用在事务外执行。staged/superseded 清理均持久化为可恢复作业，Consumer 启动时恢复过期租约。删除先墓碑化停止召回，再异步清理向量与条目。
 
 ### 长期记忆作业：`app/core/memory_jobs/`
 
@@ -286,6 +308,7 @@ app/core/crud/
 ├── context_summary_fragment.py # 上下文总结片段数据访问
 ├── context_summary_stage.py # 上下文总结阶段数据访问
 ├── knowledge_base.py       # 知识库数据访问
+├── knowledge_job.py        # 知识作业租约、重试与状态数据访问
 ├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
 ├── log.py                  # 系统日志数据访问
 ├── message.py              # 消息数据访问
@@ -412,7 +435,7 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、用户文档、托管知识条目与版本历史模型
+├── knowledge_base.py       # 知识库、用户文档、托管知识、版本历史与知识作业模型
 ├── memory.py               # 长期记忆模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
@@ -434,7 +457,7 @@ app/models/
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
 
-`app/models/knowledge_base.py` 同时承载知识库容器、用户知识库文档、托管知识条目和托管知识版本历史。托管知识条目保存完整正文、稳定知识标识、版本、来源与维护状态；版本历史保存发布前后快照并独立于可清理的当前条目行。托管知识的向量分块仅作为派生检索索引，由后续知识作业能力维护。
+`app/models/knowledge_base.py` 定义知识库容器、用户文档、托管知识、版本历史和知识作业。托管条目保存正文、稳定标识、版本、来源和维护状态；版本历史独立保存快照。知识作业保存幂等、租约、重试和目标版本，不携带知识正文；向量分块仅作派生索引。
 
 ## 外部能力封装：`app/providers/`
 
@@ -552,6 +575,8 @@ scripts/                    # 数据库迁移和运行维护脚本
 ```
 
 测试目录和脚本目录只作为工程支持层，不在架构文档中展开文件清单。
+
+数据库一次性迁移由 `app/providers/database/bootstrap.py` 按 `migration_*.py` 文件名顺序逐个执行并在成功后登记。历史迁移不得依赖未来版本 ORM 的表结构；表重建类迁移应基于执行时数据库自描述结构或版本冻结的迁移 schema 工作，保证用户可以从较老版本直接跨多个版本升级而不被后续模型字段反向阻塞。
 
 ## 持久化目录：`data/` 与 `temp/`
 

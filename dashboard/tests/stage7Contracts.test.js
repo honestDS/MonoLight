@@ -134,6 +134,44 @@ test('profileApi exposes user memory settings through the profile GET endpoint',
   assert.match(apiSource, /memorySettings:\s*\(params\s*=\s*\{\}\)\s*=>\s*request\.get\('\/profiles\/memory-settings',\s*\{\s*params\s*\}\)/)
 })
 
+test('ProfilesView profile deletion requires a fresh impact confirmation', () => {
+  assert.match(
+    apiSource,
+    /delete:\s*\(id,\s*params\s*=\s*\{\}\)\s*=>\s*request\.post\('\/profiles\/delete',\s*null,\s*\{\s*params:\s*\{\s*profile_id:\s*id,\s*\.\.\.params\s*\}\s*\}\)/
+  )
+
+  const deleteStart = profilesSource.indexOf('const handleDelete = async')
+  const nextSection = profilesSource.indexOf('const fetchPrompts = async', deleteStart)
+  assert.notEqual(deleteStart, -1)
+  assert.notEqual(nextSection, -1)
+  const deleteSource = profilesSource.slice(deleteStart, nextSection)
+
+  assert.match(deleteSource, /let response = await profileApi\.delete\(id\)/)
+  assert.match(deleteSource, /while \(response\.data\?\.data\?\.requires_confirmation\)/)
+  assert.match(deleteSource, /confirmProfileDeleteImpact\(impact\)/)
+  assert.match(
+    deleteSource,
+    /profileApi\.delete\(id,\s*\{\s*confirm_impact:\s*true,\s*impact_token:\s*impact\.impact_token\s*\}\)/
+  )
+
+  const requiredKeys = [
+    'delete_impact_title',
+    'delete_impact_intro',
+    'delete_impact_sessions',
+    'delete_impact_managed_kb',
+    'delete_impact_scheduled_tasks',
+    'delete_impact_message_platforms',
+    'delete_impact_user_kbs',
+    'delete_impact_confirm'
+  ]
+  for (const key of requiredKeys) {
+    assert.equal(typeof enProfiles[key], 'string')
+    assert.equal(typeof zhProfiles[key], 'string')
+    assert.ok(enProfiles[key])
+    assert.ok(zhProfiles[key])
+  }
+})
+
 test('ProfileFormDialog separates profile memory settings from user auto organization settings', () => {
   const baseStart = profileFormSource.indexOf('<el-tab-pane :label="$t(\'profiles.base_settings\')"')
   const memoryStart = profileFormSource.indexOf('<el-tab-pane :label="$t(\'profiles.memory_settings\')"')

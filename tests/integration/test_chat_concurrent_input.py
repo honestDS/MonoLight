@@ -32,6 +32,7 @@ async def concurrent_queue_session_factory(tmp_path):
         connect_args={"timeout": 30},
     )
     tables = [
+        Profile.__table__,
         Message.__table__,
         ChatSession.__table__,
         AuditRecord.__table__,
@@ -43,6 +44,9 @@ async def concurrent_queue_session_factory(tmp_path):
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as setup_session:
+        setup_session.add(Profile(id=1, uid="owner", name="queue-test", configs={}))
+        await setup_session.commit()
     try:
         yield session_factory
     finally:

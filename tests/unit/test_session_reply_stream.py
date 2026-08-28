@@ -1024,7 +1024,13 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
                 instance.id = 11
 
     async def upsert_profile(*args, **kwargs):
-        return None
+        return SimpleNamespace(
+            session_id=kwargs["session_id"],
+            uid=kwargs["uid"],
+            profile_id=kwargs["profile_id"],
+            source=kwargs.get("source", "http"),
+            show_tool_calls=True,
+        )
 
     async def enqueue(*args, **kwargs):
         return work, True

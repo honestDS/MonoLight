@@ -62,6 +62,7 @@ from app.models.session_reply_work_item import (
 async def db_session() -> AsyncSession:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
+        Profile.__table__,
         Message.__table__,
         AuditRecord.__table__,
         AuditToolDetail.__table__,
@@ -76,6 +77,8 @@ async def db_session() -> AsyncSession:
         await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
+        session.add(Profile(id=1, uid="owner", name="test", configs={}))
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -87,6 +90,7 @@ async def concurrent_confirmation_session_factory(tmp_path):
         connect_args={"timeout": 30},
     )
     tables = [
+        Profile.__table__,
         Message.__table__,
         AuditRecord.__table__,
         AuditToolDetail.__table__,
@@ -100,6 +104,9 @@ async def concurrent_confirmation_session_factory(tmp_path):
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=tables))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as setup_session:
+        setup_session.add(Profile(id=1, uid="owner", name="test", configs={}))
+        await setup_session.commit()
     try:
         yield session_factory
     finally:
@@ -119,8 +126,13 @@ def entry_dependencies(monkeypatch):
     async def ensure_writable(*_args, **_kwargs):
         return None
 
-    async def upsert_profile(*_args, **_kwargs):
-        return None
+    async def upsert_profile(*_args, **kwargs):
+        return ChatSession(
+            session_id=kwargs["session_id"],
+            uid=kwargs["uid"],
+            profile_id=kwargs["profile_id"],
+            source=kwargs.get("source", "http"),
+        )
 
     async def send_event(*_args, **_kwargs):
         return None

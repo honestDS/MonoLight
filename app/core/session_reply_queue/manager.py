@@ -25,6 +25,7 @@ from app.core.constants import (
     ERR_AUDIT_HIGH_RISK_CONFIRMATION_INVALID_INPUT,
     ERR_LLM_UNEXPECTED_ERROR,
     ERR_PERSISTED_USER_MESSAGE_MISMATCH,
+    ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_REPLY_LEASE_LOST_FREEZING_INPUT,
     ERR_SESSION_REPLY_NO_FOREGROUND_INPUT,
     ERR_SESSION_REPLY_WORK_ENDED,
@@ -35,7 +36,7 @@ from app.core.crud.message import message_crud
 from app.core.crud.session import session_crud
 from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session_reply_work_item import session_reply_work_item_crud
-from app.core.exceptions import BaseBusinessException
+from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger
 from app.core.session_source import default_show_tool_calls_for_source
@@ -587,6 +588,8 @@ class SessionReplyQueueManager:
                 profile_id=profile_id,
                 source=source,
             )
+            if session is None:
+                raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
         else:
             session = await session_crud.get_by_session_id(db, session_id)
         show_tool_calls, expose_tool_call_content = get_tool_call_visibility(session, source)

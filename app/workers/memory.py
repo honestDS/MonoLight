@@ -2,6 +2,7 @@ import asyncio
 import os
 
 import app.warning_filters  # noqa: F401
+from app.core.knowledge_jobs import create_knowledge_job_consumer
 from app.core.log import LogManager, get_logger
 from app.core.memory_jobs import create_memory_job_consumer
 from app.core.paths import DEFAULT_LOG_FILE_PATH
@@ -18,13 +19,16 @@ async def run_memory_worker() -> None:
     install_shutdown_signal_handlers(stop_event)
     await create_database_tables()
 
-    consumer = create_memory_job_consumer()
-    consumer.start()
+    memory_consumer = create_memory_job_consumer()
+    knowledge_consumer = create_knowledge_job_consumer()
+    memory_consumer.start()
+    knowledge_consumer.start()
     logger.info(f"{MEMORY_WORKER_NAME.capitalize()} worker started")
     try:
         await stop_event.wait()
     finally:
-        await consumer.stop()
+        await knowledge_consumer.stop()
+        await memory_consumer.stop()
         logger.info(f"{MEMORY_WORKER_NAME.capitalize()} worker stopped")
 
 

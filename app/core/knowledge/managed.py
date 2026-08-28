@@ -51,7 +51,7 @@ def _positive_integer(value: Any, *, field: str) -> int:
     return value
 
 
-def _normalize_key(value: Any) -> str:
+def normalize_managed_knowledge_key(value: Any) -> str:
     if not isinstance(value, str):
         raise ManagedKnowledgeValidationError(ERR_MANAGED_KNOWLEDGE_FIELD_TYPE_INVALID, field="knowledge_key")
     normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).strip())
@@ -206,7 +206,7 @@ class ManagedKnowledgeService:
         try:
             normalized_uid = _normalize_uid(uid)
             normalized_kb_id = _positive_integer(knowledge_base_id, field="knowledge_base_id")
-            normalized_key = _normalize_key(knowledge_key)
+            normalized_key = normalize_managed_knowledge_key(knowledge_key)
             normalized_content, token_count, content_hash = _normalize_content(content)
             normalized_source = _normalize_enum(source_type, ManagedKnowledgeSourceType, field="source_type")
             normalized_actor = _normalize_enum(actor, ManagedKnowledgeActorType, field="actor")
@@ -301,7 +301,7 @@ class ManagedKnowledgeService:
             normalized_kb_id = _positive_integer(knowledge_base_id, field="knowledge_base_id")
             normalized_id = _positive_integer(knowledge_id, field="knowledge_id")
             normalized_version = _positive_integer(expected_version, field="expected_version")
-            normalized_key = _normalize_key(knowledge_key)
+            normalized_key = normalize_managed_knowledge_key(knowledge_key)
             normalized_content, token_count, content_hash = _normalize_content(content)
             normalized_source = _normalize_enum(source_type, ManagedKnowledgeSourceType, field="source_type")
             normalized_actor = _normalize_enum(actor, ManagedKnowledgeActorType, field="actor")
@@ -329,7 +329,7 @@ class ManagedKnowledgeService:
                 await _finish(db, commit=commit)
                 return duplicate
 
-            if item.knowledge_key == normalized_key and item.content == normalized_content and item.source_type == normalized_source and item.source_reference == normalized_reference and item.source_job_id == normalized_job_id and item.last_modified_by == normalized_actor and item.llm_maintainable == maintainable:
+            if item.knowledge_key == normalized_key and item.content == normalized_content and item.source_type == normalized_source and item.source_reference == normalized_reference and item.last_modified_by == normalized_actor and item.llm_maintainable == maintainable:
                 await _finish(db, commit=commit)
                 return ManagedKnowledgeMutationResult(ManagedKnowledgeMutationStatus.UNCHANGED, item)
 
