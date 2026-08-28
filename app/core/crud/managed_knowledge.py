@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -19,6 +19,23 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 
 class CRUDManagedKnowledgeItem:
+    async def count_by_knowledge_base(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return int(result.scalar() or 0)
+
     async def get_by_id(self, db: AsyncSession, *, uid: str, knowledge_base_id: int, knowledge_id: int) -> ManagedKnowledgeItem | None:
         result = await db.execute(select(ManagedKnowledgeItem).where(ManagedKnowledgeItem.uid == uid, ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id, ManagedKnowledgeItem.id == knowledge_id).execution_options(populate_existing=True))
         return result.scalars().first()

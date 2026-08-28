@@ -8,6 +8,7 @@ from sqlmodel import SQLModel
 
 from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem
 from app.models.message import Message, MessageRole, MessageType
+from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_stream_event import SessionReplyStreamEvent
 from app.models.session_reply_work_item import (
@@ -26,6 +27,7 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
                 tables=[
+                    Profile.__table__,
                     Message.__table__,
                     ChatSession.__table__,
                     SessionReplySequence.__table__,
@@ -36,6 +38,8 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
+        session.add(Profile(id=1, uid="user-1", name="queue-test", configs={}))
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -62,6 +66,7 @@ async def concurrent_session_factory(tmp_path) -> AsyncGenerator[async_sessionma
             lambda sync_connection: SQLModel.metadata.create_all(
                 sync_connection,
                 tables=[
+                    Profile.__table__,
                     Message.__table__,
                     ChatSession.__table__,
                     SessionReplySequence.__table__,
@@ -70,8 +75,12 @@ async def concurrent_session_factory(tmp_path) -> AsyncGenerator[async_sessionma
                 ],
             )
         )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as setup_session:
+        setup_session.add(Profile(id=1, uid="user-1", name="queue-test", configs={}))
+        await setup_session.commit()
     try:
-        yield async_sessionmaker(engine, expire_on_commit=False)
+        yield session_factory
     finally:
         await engine.dispose()
 

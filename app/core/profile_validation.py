@@ -168,8 +168,12 @@ async def validate_profile_for_assignment(db: AsyncSession, profile: Profile) ->
 
 
 async def get_validated_profile_for_assignment(db: AsyncSession, *, profile_id: int, uid: str | None) -> Profile:
-    profile = await profile_crud.get_with_relations(db, profile_id)
-    if not profile or profile.uid != uid:
+    profile = await profile_crud.lock_for_runtime_use(
+        db,
+        profile_id=profile_id,
+        uid=uid,
+    )
+    if not profile:
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
     await validate_profile_for_assignment(db, profile)
     return profile

@@ -252,6 +252,16 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         if published is None:
             await db.rollback()
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        ready = await knowledge_base_crud.mark_managed_initial_index_ready(
+            db,
+            uid=snapshot.uid,
+            knowledge_base_id=snapshot.knowledge_base_id,
+            active_collection_name=snapshot.collection_name,
+            commit=False,
+        )
+        if not ready:
+            await db.rollback()
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         stale_vector_ids = [
             item_id
             for item_id in snapshot.previous_vector_item_ids

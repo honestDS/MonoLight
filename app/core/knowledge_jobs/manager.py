@@ -20,8 +20,11 @@ from app.core.crud.managed_knowledge import managed_knowledge_item_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.knowledge.managed import managed_knowledge_service, normalize_managed_knowledge_key
+from app.core.knowledge.managed_container import get_or_create_managed_knowledge_base
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
+from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.models.knowledge_base import (
+    KnowledgeBase,
     KnowledgeJob,
     KnowledgeJobOperation,
     ManagedKnowledgeActorType,
@@ -34,16 +37,11 @@ _ACTIVE_CHANGE_KEY_CONSTRAINT = "uq_knowledge_job_uid_active_change"
 
 
 def _is_active_change_key_integrity_error(exc: IntegrityError) -> bool:
-    original = getattr(exc, "orig", None)
-    constraint_name = str(
-        getattr(original, "constraint_name", None)
-        or getattr(exc, "constraint_name", None)
-        or ""
-    ).lower()
-    detail = " ".join(part.lower() for part in (str(original or ""), str(exc)))
-    if _ACTIVE_CHANGE_KEY_CONSTRAINT in constraint_name or _ACTIVE_CHANGE_KEY_CONSTRAINT in detail:
-        return True
-    return "active_change_key" in detail and "unique" in detail
+    return is_unique_constraint_violation(
+        exc,
+        constraint_names=(_ACTIVE_CHANGE_KEY_CONSTRAINT,),
+        fallback_marker_groups=(("active_change_key",),),
+    )
 
 
 class KnowledgeJobError(BaseBusinessException):
@@ -67,6 +65,16 @@ class KnowledgeJobTargetBusyError(KnowledgeJobConflictError):
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeJobSubmissionResult:
+    status: ManagedKnowledgeMutationStatus
+    item: ManagedKnowledgeItem | None
+    job: KnowledgeJob | None
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileKnowledgeJobSubmissionResult:
+    knowledge_base: KnowledgeBase
+    knowledge_base_created: bool
     status: ManagedKnowledgeMutationStatus
     item: ManagedKnowledgeItem | None
     job: KnowledgeJob | None
@@ -121,6 +129,73 @@ def _safe_payload(*, content: str | None = None, knowledge_key: str | None = Non
 
 
 class KnowledgeJobManager:
+    async def submit_create_for_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        knowledge_key: str,
+        content: str,
+        source_type: ManagedKnowledgeSourceType | str,
+        actor: ManagedKnowledgeActorType | str,
+        dedupe_key: str,
+        source_reference: dict[str, Any] | None = None,
+        llm_maintainable: bool | None = None,
+        source_session_id: str | None = None,
+        source_message_id: int | None = None,
+        max_attempts: int = 3,
+        commit: bool = True,
+    ) -> ProfileKnowledgeJobSubmissionResult:
+        uid = _require_string(uid, field="uid")
+        profile_id = _positive_int(profile_id, field="profile_id")
+        try:
+            container = await get_or_create_managed_knowledge_base(
+                db,
+                uid=uid,
+                profile_id=profile_id,
+            )
+            if container.knowledge_base.id is None:
+                raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            submission = await self.submit_create(
+                db,
+                uid=uid,
+                knowledge_base_id=container.knowledge_base.id,
+                knowledge_key=knowledge_key,
+                content=content,
+                source_type=source_type,
+                actor=actor,
+                dedupe_key=dedupe_key,
+                source_reference=source_reference,
+                llm_maintainable=llm_maintainable,
+                source_session_id=source_session_id,
+                source_profile_id=profile_id,
+                source_message_id=source_message_id,
+                max_attempts=max_attempts,
+                commit=False,
+            )
+            if commit:
+                await db.commit()
+                await db.refresh(container.knowledge_base)
+                if submission.job is not None:
+                    await db.refresh(submission.job)
+                if submission.item is not None:
+                    await db.refresh(submission.item)
+            else:
+                await db.flush()
+            return ProfileKnowledgeJobSubmissionResult(
+                knowledge_base=container.knowledge_base,
+                knowledge_base_created=container.created,
+                status=submission.status,
+                item=submission.item,
+                job=submission.job,
+                created=submission.created,
+            )
+        except Exception:
+            if commit and db.in_transaction():
+                await db.rollback()
+            raise
+
     async def _create_job(
         self,
         db: AsyncSession,
@@ -548,6 +623,7 @@ __all__ = [
     "KnowledgeJobError",
     "KnowledgeJobManager",
     "KnowledgeJobSubmissionResult",
+    "ProfileKnowledgeJobSubmissionResult",
     "KnowledgeJobTargetBusyError",
     "KnowledgeJobValidationError",
     "knowledge_job_manager",

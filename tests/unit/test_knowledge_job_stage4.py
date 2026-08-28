@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.crud.knowledge_base import knowledge_base_crud
 from app.core.crud.knowledge_job import knowledge_job_crud
 from app.core.crud.managed_knowledge import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
@@ -39,6 +40,7 @@ from app.core.retrieval.schemas import RetrievalHit
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,
+    KnowledgeBaseIndexStatus,
     KnowledgeBaseType,
     KnowledgeJob,
     KnowledgeJobOperation,
@@ -484,15 +486,46 @@ async def test_managed_publication_runs_external_calls_without_database_session(
 
     async with knowledge_job_database() as db:
         item = await db.get(ManagedKnowledgeItem, submission.item.id)
+        current_knowledge_base = await db.get(KnowledgeBase, knowledge_base.id)
         job = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job_id)
     assert item is not None
     assert item.indexed_version == item.version == 1
     assert item.is_recallable is True
     assert item.pending_job_id is None
     assert len(item.vector_item_ids) == 1
+    assert current_knowledge_base is not None
+    assert current_knowledge_base.index_status == KnowledgeBaseIndexStatus.READY
     assert job is not None and job.status == KnowledgeJobStatus.SUCCEEDED
     assert job.active_change_key is None
     assert job.locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_managed_initial_ready_does_not_override_reindexing(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    async with knowledge_job_database() as db:
+        current = await db.get(KnowledgeBase, knowledge_base.id)
+        assert current is not None
+        current.index_status = KnowledgeBaseIndexStatus.REINDEXING
+        db.add(current)
+        await db.commit()
+
+    async with knowledge_job_database() as db:
+        valid_target = await knowledge_base_crud.mark_managed_initial_index_ready(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            active_collection_name=knowledge_base.active_collection_name,
+            commit=True,
+        )
+
+    assert valid_target is True
+    async with knowledge_job_database() as db:
+        current = await db.get(KnowledgeBase, knowledge_base.id)
+    assert current is not None
+    assert current.index_status == KnowledgeBaseIndexStatus.REINDEXING
 
 
 @pytest.mark.asyncio

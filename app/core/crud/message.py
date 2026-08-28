@@ -27,6 +27,22 @@ from app.models.user import User
 
 
 class CRUDMessage(CRUDBase[Message, MessageCreate, MessageCreate]):
+    async def count_by_sessions(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        session_ids: list[str],
+    ) -> int:
+        if not session_ids:
+            return 0
+        result = await db.execute(
+            select(func.count())
+            .select_from(Message)
+            .where(Message.uid == uid, Message.session_id.in_(session_ids))
+        )
+        return int(result.scalar() or 0)
+
     async def create_guidance(
         self,
         db: AsyncSession,

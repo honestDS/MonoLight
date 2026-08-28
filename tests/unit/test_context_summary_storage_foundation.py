@@ -11,6 +11,7 @@ from app.core.crud.session import session_crud
 from app.models.audit import AuditToolResultVersion
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
+from app.models.profile import Profile
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import SessionReplyWorkItem
 from app.models.user import User
@@ -31,11 +32,19 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
                     ContextSummaryFragment.__table__,
                     AuditToolResultVersion.__table__,
                     User.__table__,
+                    Profile.__table__,
                 ],
             )
         )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
+        session.add_all(
+            [
+                Profile(id=1, uid="user-1", name="profile-1", configs={}),
+                Profile(id=2, uid="user-1", name="profile-2", configs={}),
+            ]
+        )
+        await session.commit()
         yield session
     await engine.dispose()
 

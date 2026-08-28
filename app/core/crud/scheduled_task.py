@@ -10,6 +10,40 @@ from app.models.scheduled_task import ScheduledTask, ScheduledTaskCreate, Schedu
 
 
 class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTaskCreate]):
+    async def list_by_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+    ) -> list[ScheduledTask]:
+        result = await db.execute(
+            select(ScheduledTask)
+            .where(ScheduledTask.uid == uid, ScheduledTask.profile_id == profile_id)
+            .order_by(ScheduledTask.id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def delete_by_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        commit: bool = False,
+    ) -> int:
+        result = await db.execute(
+            delete(ScheduledTask).where(
+                ScheduledTask.uid == uid,
+                ScheduledTask.profile_id == profile_id,
+            )
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return result.rowcount or 0
+
     async def create_scheduled_task(
         self,
         db: AsyncSession,
