@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from app.core.constants import ERR_PROVIDER_REQUEST_ID_INVALID
+from app.core.i18n import t
 from app.core.utils.context_messages import is_context_summary_message, message_token_text
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.message import InternalMessage, MessageRole
@@ -22,7 +24,7 @@ def _is_positive_int(value: Any) -> bool:
 def build_provider_request_usage_metadata(provider_request_id: str, provider_metrics: dict[str, Any]) -> dict[str, str | int]:
     request_id = provider_request_id.strip() if isinstance(provider_request_id, str) else ""
     if not request_id or len(request_id) > 64:
-        raise ValueError("provider_request_id must be a non-empty string of at most 64 characters")
+        raise ValueError(t(ERR_PROVIDER_REQUEST_ID_INVALID))
 
     input_tokens = provider_metrics.get("input_tokens")
     if provider_metrics.get("input_tokens_source") != "provider" or not _is_positive_int(input_tokens):

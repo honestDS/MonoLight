@@ -12,6 +12,10 @@ from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseCollectionOwner as KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
+from app.models.knowledge_base import ManagedKnowledgeActorType as ManagedKnowledgeActorType
+from app.models.knowledge_base import ManagedKnowledgeItem as ManagedKnowledgeItem
+from app.models.knowledge_base import ManagedKnowledgeRevision as ManagedKnowledgeRevision
+from app.models.knowledge_base import ManagedKnowledgeSourceType as ManagedKnowledgeSourceType
 from app.models.memory import LongTermMemoryCapacityStatus as LongTermMemoryCapacityStatus
 from app.models.memory import LongTermMemoryEmbeddingDelta as LongTermMemoryEmbeddingDelta
 from app.models.memory import LongTermMemoryEmbeddingRevision as LongTermMemoryEmbeddingRevision
