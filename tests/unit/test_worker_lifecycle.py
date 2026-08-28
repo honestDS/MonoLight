@@ -181,7 +181,7 @@ async def test_terminal_worker_starts_and_stops_coordinator_inside_worker_lease(
 
 
 @pytest.mark.asyncio
-async def test_memory_worker_starts_and_stops_memory_job_consumer(monkeypatch):
+async def test_memory_worker_starts_and_stops_memory_and_knowledge_job_consumers(monkeypatch):
     events = []
     captured_stop_event = None
 
@@ -193,19 +193,27 @@ async def test_memory_worker_starts_and_stops_memory_job_consumer(monkeypatch):
         captured_stop_event = stop_event
 
     class FakeConsumer:
+        def __init__(self, name):
+            self.name = name
+
         def start(self):
-            events.append("consumer-start")
+            events.append(f"{self.name}-start")
 
         async def stop(self):
-            events.append("consumer-stop")
+            events.append(f"{self.name}-stop")
 
     def create_memory_job_consumer():
-        events.append("consumer-create")
-        return FakeConsumer()
+        events.append("memory-create")
+        return FakeConsumer("memory")
+
+    def create_knowledge_job_consumer():
+        events.append("knowledge-create")
+        return FakeConsumer("knowledge")
 
     monkeypatch.setattr(memory_worker, "install_shutdown_signal_handlers", install_shutdown_signal_handlers)
     monkeypatch.setattr(memory_worker, "create_database_tables", create_tables)
     monkeypatch.setattr(memory_worker, "create_memory_job_consumer", create_memory_job_consumer)
+    monkeypatch.setattr(memory_worker, "create_knowledge_job_consumer", create_knowledge_job_consumer)
 
     task = asyncio.create_task(memory_worker.run_memory_worker())
     await asyncio.sleep(0)
@@ -214,7 +222,15 @@ async def test_memory_worker_starts_and_stops_memory_job_consumer(monkeypatch):
     captured_stop_event.set()
     await task
 
-    assert events == ["tables", "consumer-create", "consumer-start", "consumer-stop"]
+    assert events == [
+        "tables",
+        "memory-create",
+        "knowledge-create",
+        "memory-start",
+        "knowledge-start",
+        "knowledge-stop",
+        "memory-stop",
+    ]
 
 
 @pytest.mark.asyncio

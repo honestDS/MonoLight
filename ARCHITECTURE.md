@@ -57,7 +57,7 @@ app/workers/
 ├── __init__.py             # Worker 包标识
 ├── background_task.py      # 通用后台任务 Worker
 ├── lease.py                # Worker 协调支持
-├── memory.py               # 长期记忆作业 Worker
+├── memory.py               # 长期记忆与知识作业 Worker
 ├── message_platform.py     # 消息平台与定时任务 Worker
 ├── session_reply.py        # 会话回复 Worker
 ├── terminal.py             # 交互终端 Worker
@@ -117,6 +117,7 @@ app/core/
 ├── embedding/              # 知识库嵌入能力
 ├── i18n/                   # 后端多语言
 ├── knowledge/              # 托管知识关系主数据领域服务
+├── knowledge_jobs/         # 知识异步发布与清理作业组件
 ├── memory/                 # 长期记忆领域与管理服务
 ├── memory_jobs/            # 长期记忆作业组件
 ├── message_platforms/      # 消息平台应用服务
@@ -184,10 +185,27 @@ app/core/knowledge/
 ├── __init__.py             # 托管知识领域能力导出
 ├── errors.py               # 托管知识领域异常
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
+├── recall.py               # 托管知识召回状态过滤
 └── results.py              # 托管知识领域操作结果与状态
 ```
 
-该目录承载 LLM 托管知识的关系型主数据领域能力。托管知识完整正文与版本历史以关系数据库为持久化事实源，向量分块属于可重建的派生索引数据，不作为知识主数据。
+该目录承载 LLM 托管知识的关系型主数据领域能力。托管知识完整正文与版本历史以关系数据库为持久化事实源，向量分块属于可重建的派生索引数据，不作为知识主数据。召回时关系库中的版本、墓碑和 `is_recallable` 状态作为托管知识是否允许返回的最终依据，避免异步向量清理失败时旧向量重新暴露。
+
+知识库运行时嵌入配置由 `app/core/embedding/knowledge_base_runtime.py` 统一解析。`active_embedding_*` 与 `active_collection_name` 是当前生效配置；legacy `embedding_*` 与 `collection_name` 仅用于旧数据尚未具备完整 active 快照时的兼容回退。查询、文档写入、托管知识发布和删除清理必须使用同一解析结果，禁止分别读取两套字段形成读写分叉。渠道和模型引用保护同时覆盖当前生效配置与目标迁移配置，避免迁移期间误删仍被当前或目标索引使用的渠道/模型。
+
+### 知识作业：`app/core/knowledge_jobs/`
+
+```text
+app/core/knowledge_jobs/
+├── __init__.py             # 知识作业能力导出
+├── manager.py              # 短事务提交、幂等与活动变更占用
+├── consumer.py             # 作业消费、租约续期、恢复与重试
+├── executor.py             # 租约栅栏与处理器执行器
+├── handlers.py             # 托管知识异步嵌入、发布和删除清理
+└── vector_cleanup.py       # staged/superseded 向量的持久化独立清理作业
+```
+
+知识作业与长期记忆作业保持独立的数据模型和生命周期，但复用相同的租约、重试和旧 Worker 栅栏原则。托管知识主数据预留和作业创建在短事务中完成；嵌入模型和向量存储调用在数据库会话外执行；向量写入后再以新的短事务校验租约、目标版本和 `pending_job_id` 后发布。写入向量前先持久化 staged cleanup 作业，成功发布时再为被替换向量创建 superseded cleanup 作业；清理与主发布状态分离并独立重试，cleanup 执行时会重新核对关系库当前引用，禁止删除仍被当前版本引用的向量。managed delete/vector cleanup 属于系统一致性任务，不接受业务取消；其可重试外部失败不会因普通 `max_attempts` 而永久终止。Knowledge Consumer 启动时立即恢复过期租约，因此 Worker/后端重启后继续消费同一批持久化 cleanup 作业，不在 `start.py` 维护第二套扫描清理实现。删除先在关系库墓碑化并立即停止召回，再由作业异步清理向量和当前条目。
 
 ### 长期记忆作业：`app/core/memory_jobs/`
 
@@ -286,6 +304,7 @@ app/core/crud/
 ├── context_summary_fragment.py # 上下文总结片段数据访问
 ├── context_summary_stage.py # 上下文总结阶段数据访问
 ├── knowledge_base.py       # 知识库数据访问
+├── knowledge_job.py        # 知识作业租约、重试与状态数据访问
 ├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
 ├── log.py                  # 系统日志数据访问
 ├── message.py              # 消息数据访问
@@ -412,7 +431,7 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、用户文档、托管知识条目与版本历史模型
+├── knowledge_base.py       # 知识库、用户文档、托管知识、版本历史与知识作业模型
 ├── memory.py               # 长期记忆模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型
@@ -434,7 +453,7 @@ app/models/
 
 `app/models/` 定义关系型持久化对象，由 `app/core/crud/` 提供访问，由 `app/providers/database/` 提供数据库连接和初始化能力。
 
-`app/models/knowledge_base.py` 同时承载知识库容器、用户知识库文档、托管知识条目和托管知识版本历史。托管知识条目保存完整正文、稳定知识标识、版本、来源与维护状态；版本历史保存发布前后快照并独立于可清理的当前条目行。托管知识的向量分块仅作为派生检索索引，由后续知识作业能力维护。
+`app/models/knowledge_base.py` 同时承载知识库容器、用户知识库文档、托管知识条目、托管知识版本历史和独立知识作业。托管知识条目保存完整正文、稳定知识标识、版本、来源与维护状态；版本历史保存发布前后快照并独立于可清理的当前条目行。知识作业保存幂等键、活动变更键、目标版本、租约、重试和取消状态，不在作业载荷中保存知识正文。托管知识的向量分块仅作为派生检索索引，由知识作业异步维护。
 
 ## 外部能力封装：`app/providers/`
 

@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import and_, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -16,8 +16,33 @@ from app.models.knowledge_base import (
 
 
 class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBaseUpdate]):
-    async def list_by_embedding_channel_id(self, db: AsyncSession, *, embedding_channel_id: int) -> list[KnowledgeBase]:
-        result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.embedding_channel_id == embedding_channel_id))
+    async def list_by_embedding_channel_reference(
+        self,
+        db: AsyncSession,
+        *,
+        embedding_channel_id: int,
+    ) -> list[KnowledgeBase]:
+        """列出当前生效或目标嵌入配置引用指定渠道的知识库。"""
+        active_incomplete = or_(
+            KnowledgeBase.active_embedding_channel_id.is_(None),
+            KnowledgeBase.active_embedding_model_id.is_(None),
+            KnowledgeBase.active_collection_name.is_(None),
+        )
+        result = await db.execute(
+            select(KnowledgeBase).where(
+                or_(
+                    and_(
+                        ~active_incomplete,
+                        KnowledgeBase.active_embedding_channel_id == embedding_channel_id,
+                    ),
+                    KnowledgeBase.target_embedding_channel_id == embedding_channel_id,
+                    and_(
+                        active_incomplete,
+                        KnowledgeBase.embedding_channel_id == embedding_channel_id,
+                    ),
+                )
+            )
+        )
         return list(result.scalars().all())
 
 

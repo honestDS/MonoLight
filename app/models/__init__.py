@@ -12,6 +12,9 @@ from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseCollectionOwner as KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
+from app.models.knowledge_base import KnowledgeJob as KnowledgeJob
+from app.models.knowledge_base import KnowledgeJobOperation as KnowledgeJobOperation
+from app.models.knowledge_base import KnowledgeJobStatus as KnowledgeJobStatus
 from app.models.knowledge_base import ManagedKnowledgeActorType as ManagedKnowledgeActorType
 from app.models.knowledge_base import ManagedKnowledgeItem as ManagedKnowledgeItem
 from app.models.knowledge_base import ManagedKnowledgeRevision as ManagedKnowledgeRevision

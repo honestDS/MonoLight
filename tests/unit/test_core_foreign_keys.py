@@ -88,6 +88,13 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("id", "uid"),
         "CASCADE",
     ),
+    (
+        "knowledge_job",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
     # session, profile, platform, and scheduled task
     ("profile", ("prompt_id",), "prompt", ("id",), "RESTRICT"),
     ("chat_session", ("profile_override_id",), "profile", ("id",), "RESTRICT"),
