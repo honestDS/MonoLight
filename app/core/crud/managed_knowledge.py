@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -19,6 +19,23 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 
 class CRUDManagedKnowledgeItem:
+    async def count_by_knowledge_base(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return int(result.scalar() or 0)
+
     async def get_by_id(self, db: AsyncSession, *, uid: str, knowledge_base_id: int, knowledge_id: int) -> ManagedKnowledgeItem | None:
         result = await db.execute(select(ManagedKnowledgeItem).where(ManagedKnowledgeItem.uid == uid, ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id, ManagedKnowledgeItem.id == knowledge_id).execution_options(populate_existing=True))
         return result.scalars().first()
@@ -102,6 +119,102 @@ class CRUDManagedKnowledgeItem:
 
     async def tombstone_if_version(self, db: AsyncSession, *, uid: str, knowledge_base_id: int, knowledge_id: int, expected_version: int, commit: bool = True, **values: Any) -> ManagedKnowledgeItem | None:
         return await self.update_if_version(db, uid=uid, knowledge_base_id=knowledge_base_id, knowledge_id=knowledge_id, expected_version=expected_version, commit=commit, **values)
+
+    async def bind_pending_job(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        job_id: int,
+        source_job_id: int | None = None,
+        commit: bool = True,
+    ) -> ManagedKnowledgeItem | None:
+        values: dict[str, Any] = {
+            "pending_job_id": job_id,
+            "updated_at": get_local_time(),
+        }
+        if source_job_id is not None:
+            values["source_job_id"] = source_job_id
+        result = await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.id == knowledge_id,
+                ManagedKnowledgeItem.version == expected_version,
+                ManagedKnowledgeItem.pending_job_id.is_(None),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        return await self.get_by_id(db, uid=uid, knowledge_base_id=knowledge_base_id, knowledge_id=knowledge_id)
+
+    async def publish_indexed_version(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        job_id: int,
+        vector_item_ids: list[str],
+        commit: bool = True,
+    ) -> ManagedKnowledgeItem | None:
+        result = await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.id == knowledge_id,
+                ManagedKnowledgeItem.version == expected_version,
+                ManagedKnowledgeItem.pending_job_id == job_id,
+                ManagedKnowledgeItem.deleted_at.is_(None),
+            )
+            .values(
+                indexed_version=expected_version,
+                vector_item_ids=vector_item_ids,
+                is_recallable=True,
+                pending_job_id=None,
+                updated_at=get_local_time(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        await _finish(db, commit=commit)
+        return await self.get_by_id(db, uid=uid, knowledge_base_id=knowledge_base_id, knowledge_id=knowledge_id)
+
+    async def hard_delete_tombstoned(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        job_id: int,
+        commit: bool = True,
+    ) -> bool:
+        result = await db.execute(
+            delete(ManagedKnowledgeItem).where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.id == knowledge_id,
+                ManagedKnowledgeItem.version == expected_version,
+                ManagedKnowledgeItem.pending_job_id == job_id,
+                ManagedKnowledgeItem.deleted_at.is_not(None),
+                ManagedKnowledgeItem.is_recallable.is_(False),
+            )
+        )
+        await _finish(db, commit=commit)
+        return (result.rowcount or 0) == 1
 
 
 class CRUDManagedKnowledgeRevision:

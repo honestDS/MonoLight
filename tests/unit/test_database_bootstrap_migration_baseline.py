@@ -126,3 +126,128 @@ async def migrate(session):
     assert setup_status is None
     assert marker_value == "executed"
     assert migration_record == (migration_id, script_name)
+
+
+@pytest.mark.asyncio
+async def test_historical_migrations_run_in_filename_order_and_commit_each_step(
+    isolated_database,
+):
+    session_factory, migration_scripts_dir = isolated_database
+    await bootstrap.create_database_tables()
+    async with session_factory() as session:
+        session.add(User(uid="ordered-admin", username="ordered-admin", is_superuser=True))
+        await session.commit()
+
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_010_first.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "ordered_010_v1"
+
+async def migrate(session):
+    await session.execute(text("CREATE TABLE ordered_migration_marker (value TEXT NOT NULL)"))
+    await session.execute(
+        text("INSERT INTO ordered_migration_marker (value) VALUES ('first')")
+    )
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_020_second.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "ordered_020_v1"
+
+async def migrate(session):
+    first = (
+        await session.execute(
+            text("SELECT value FROM ordered_migration_marker ORDER BY rowid LIMIT 1")
+        )
+    ).scalar_one()
+    if first != "first":
+        raise RuntimeError("previous migration is not visible")
+    await session.execute(
+        text("INSERT INTO ordered_migration_marker (value) VALUES ('second')")
+    )
+""",
+    )
+
+    async with session_factory() as session:
+        await bootstrap.init_database_schema(session)
+        values = (
+            await session.execute(
+                text("SELECT value FROM ordered_migration_marker ORDER BY rowid")
+            )
+        ).scalars().all()
+        records = (
+            await session.execute(
+                text("SELECT script_name FROM migration_record ORDER BY id")
+            )
+        ).scalars().all()
+
+    assert values == ["first", "second"]
+    assert records == ["migration_010_first.py", "migration_020_second.py"]
+
+
+@pytest.mark.asyncio
+async def test_historical_migrations_stop_at_first_failure(
+    isolated_database,
+):
+    session_factory, migration_scripts_dir = isolated_database
+    await bootstrap.create_database_tables()
+    async with session_factory() as session:
+        session.add(User(uid="failure-admin", username="failure-admin", is_superuser=True))
+        await session.commit()
+
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_010_ok.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "failure_010_v1"
+
+async def migrate(session):
+    await session.execute(text("CREATE TABLE failure_marker (value TEXT NOT NULL)"))
+    await session.execute(text("INSERT INTO failure_marker (value) VALUES ('first')"))
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_020_fail.py",
+        """
+MIGRATION_ID = "failure_020_v1"
+
+async def migrate(session):
+    raise RuntimeError("expected migration failure")
+""",
+    )
+    _write_migration_script(
+        migration_scripts_dir,
+        "migration_030_must_not_run.py",
+        """
+from sqlalchemy import text
+
+MIGRATION_ID = "failure_030_v1"
+
+async def migrate(session):
+    await session.execute(text("INSERT INTO failure_marker (value) VALUES ('third')"))
+""",
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(RuntimeError, match="expected migration failure"):
+            await bootstrap.init_database_schema(session)
+        await session.rollback()
+        values = (
+            await session.execute(text("SELECT value FROM failure_marker ORDER BY rowid"))
+        ).scalars().all()
+        records = (
+            await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))
+        ).scalars().all()
+
+    assert values == ["first"]
+    assert records == ["migration_010_ok.py"]

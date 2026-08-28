@@ -35,6 +35,7 @@ from app.core.embedding.knowledge_base import (
     embed_chunks_with_knowledge_base_config,
     query_knowledge_base,
 )
+from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
@@ -303,7 +304,14 @@ async def update_profile_knowledge_base_bindings(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
-    profile = await db.get(Profile, profile_id)
+    snapshot = await db.get(Profile, profile_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
+    profile = await profile_crud.lock_for_runtime_use(
+        db,
+        profile_id=profile_id,
+        uid=snapshot.uid,
+    )
     if not profile:
         raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
@@ -412,6 +420,7 @@ async def import_document(
     if not chunks:
         raise HTTPException(status_code=400, detail=ERR_KB_FILE_EMPTY)
 
+    active_embedding = resolve_active_knowledge_base_embedding(kb)
     embeddings = await embed_chunks_with_knowledge_base_config(db, kb, chunks, batch_size)
     document_uuid = uuid.uuid4().hex
     chunk_ids = []
@@ -428,7 +437,7 @@ async def import_document(
         )
 
     try:
-        collection = get_or_create_collection(kb.collection_name)
+        collection = get_or_create_collection(active_embedding.collection_name)
         collection.add(ids=chunk_ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
     except Exception as e:
         raise HTTPException(status_code=500, detail=t(ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
@@ -451,7 +460,7 @@ async def import_document(
     except Exception as e:
         await db.rollback()
         try:
-            delete_collection_items(kb.collection_name, chunk_ids)
+            delete_collection_items(active_embedding.collection_name, chunk_ids)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail=t(ERR_KB_DOC_SAVE_FAILED, message=str(e)))
@@ -516,10 +525,11 @@ async def delete_document(
     if not document or document.knowledge_base_id != kb_id:
         raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
 
+    active_embedding = resolve_active_knowledge_base_embedding(kb)
     await db.delete(document)
     try:
         await db.flush()
-        delete_collection_items(kb.collection_name, document.chunk_ids or [])
+        delete_collection_items(active_embedding.collection_name, document.chunk_ids or [])
         await db.commit()
     except Exception as e:
         await db.rollback()

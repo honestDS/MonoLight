@@ -20,6 +20,7 @@ from app.core.crud.channel import channel_crud
 from app.core.crud.knowledge_base import knowledge_base_crud
 from app.core.crud.memory import memory_reference_crud, memory_store_crud
 from app.core.crud.memory_job import memory_job_crud
+from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import ParameterException
 from app.core.memory.channel_protection import list_memory_channel_references
 from app.core.memory.errors import MemoryValidationError
@@ -383,8 +384,20 @@ async def assert_channel_model_identity_update_allowed(
     if conflict_model_id is not None:
         raise ParameterException(ERR_MEMORY_MODEL_IDENTITY_IN_USE, model_id=conflict_model_id)
 
-    knowledge_bases = await knowledge_base_crud.list_by_embedding_channel_id(db, embedding_channel_id=channel_id)
-    knowledge_base_model_ids = {knowledge_base.embedding_model_id for knowledge_base in knowledge_bases}
+    knowledge_bases = await knowledge_base_crud.list_by_embedding_channel_reference(
+        db,
+        embedding_channel_id=channel_id,
+    )
+    knowledge_base_model_ids: set[str] = set()
+    for knowledge_base in knowledge_bases:
+        active_embedding = resolve_active_knowledge_base_embedding(knowledge_base)
+        if active_embedding.channel_id == channel_id:
+            knowledge_base_model_ids.add(active_embedding.model_id)
+        if (
+            knowledge_base.target_embedding_channel_id == channel_id
+            and knowledge_base.target_embedding_model_id
+        ):
+            knowledge_base_model_ids.add(knowledge_base.target_embedding_model_id)
     conflict_model_id = find_model_identity_update_conflict(knowledge_base_model_ids, old_model_ids, new_model_ids)
     if conflict_model_id is not None:
         raise ParameterException(ERR_KB_MODEL_IDENTITY_IN_USE, model_id=conflict_model_id)
@@ -760,5 +773,8 @@ async def assert_channel_not_referenced(db: AsyncSession, channel_id: int) -> No
     if await list_memory_channel_references(db, channel_id=channel_id):
         raise ParameterException(ERR_MEMORY_CHANNEL_IN_USE)
 
-    if await knowledge_base_crud.list_by_embedding_channel_id(db, embedding_channel_id=channel_id):
+    if await knowledge_base_crud.list_by_embedding_channel_reference(
+        db,
+        embedding_channel_id=channel_id,
+    ):
         raise ParameterException(ERR_KB_CHANNEL_IN_USE)

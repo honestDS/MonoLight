@@ -101,6 +101,10 @@ async def _create_knowledge_base(
     channel_id: int,
     model_id: str,
     name: str = "protected-knowledge-base",
+    active_channel_id: int | None = None,
+    active_model_id: str | None = None,
+    target_channel_id: int | None = None,
+    target_model_id: str | None = None,
 ) -> KnowledgeBase:
     knowledge_base = KnowledgeBase(
         uid="knowledge-base-user",
@@ -108,6 +112,16 @@ async def _create_knowledge_base(
         embedding_channel_id=channel_id,
         embedding_model_id=model_id,
         collection_name=f"collection-{channel_id}-{model_id}",
+        active_embedding_channel_id=active_channel_id,
+        active_embedding_model_id=active_model_id,
+        active_collection_name=(
+            f"active-collection-{name}" if active_channel_id is not None else None
+        ),
+        target_embedding_channel_id=target_channel_id,
+        target_embedding_model_id=target_model_id,
+        target_collection_name=(
+            f"target-collection-{name}" if target_channel_id is not None else None
+        ),
     )
     db.add(knowledge_base)
     await db.flush()
@@ -270,6 +284,140 @@ async def test_kb_channel_reference_rejects_delete_before_profile_and_audit_clea
     assert exc_info.value.message == ERR_KB_CHANNEL_IN_USE
     assert cleanup_calls == []
     assert await channel_crud.get(db_session, channel_id) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference_kind", ["active", "target"])
+async def test_kb_active_or_target_channel_reference_rejects_delete(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    reference_kind: str,
+) -> None:
+    referenced = await _create_channel(
+        db_session,
+        name=f"referenced-{reference_kind}",
+        model_ids=[_embedding_model("embedding-active")],
+    )
+    legacy = await _create_channel(
+        db_session,
+        name=f"legacy-{reference_kind}",
+        model_ids=[_embedding_model("embedding-legacy")],
+    )
+    kwargs = (
+        {
+            "active_channel_id": referenced.id,
+            "active_model_id": "embedding-active",
+        }
+        if reference_kind == "active"
+        else {
+            "target_channel_id": referenced.id,
+            "target_model_id": "embedding-active",
+        }
+    )
+    await _create_knowledge_base(
+        db_session,
+        channel_id=legacy.id,
+        model_id="embedding-legacy",
+        name=f"kb-{reference_kind}",
+        **kwargs,
+    )
+
+    async def unexpected_cleanup(*_args, **_kwargs) -> int:
+        raise AssertionError("cleanup must not run before reference protection")
+
+    monkeypatch.setattr(channels, "_remove_unavailable_channel_rules", unexpected_cleanup)
+    monkeypatch.setattr(channels, "_clear_unavailable_audit_model_refs", unexpected_cleanup)
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.delete_channel(referenced.id, db=db_session, admin={})
+
+    assert exc_info.value.message == ERR_KB_CHANNEL_IN_USE
+
+
+@pytest.mark.asyncio
+async def test_kb_partial_active_snapshot_still_protects_legacy_runtime_channel(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = await _create_channel(
+        db_session,
+        name="partial-active-legacy",
+        model_ids=[_embedding_model("embedding-legacy")],
+    )
+    incomplete_active = await _create_channel(
+        db_session,
+        name="partial-active-incomplete",
+        model_ids=[_embedding_model("embedding-active")],
+    )
+    knowledge_base = await _create_knowledge_base(
+        db_session,
+        channel_id=legacy.id,
+        model_id="embedding-legacy",
+        name="partial-active-kb",
+    )
+    knowledge_base.active_embedding_channel_id = incomplete_active.id
+    knowledge_base.active_embedding_model_id = None
+    knowledge_base.active_collection_name = None
+    db_session.add(knowledge_base)
+    await db_session.commit()
+
+    async def unexpected_cleanup(*_args, **_kwargs) -> int:
+        raise AssertionError("legacy runtime reference must be protected")
+
+    monkeypatch.setattr(channels, "_remove_unavailable_channel_rules", unexpected_cleanup)
+    monkeypatch.setattr(channels, "_clear_unavailable_audit_model_refs", unexpected_cleanup)
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.delete_channel(legacy.id, db=db_session, admin={})
+
+    assert exc_info.value.message == ERR_KB_CHANNEL_IN_USE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference_kind", ["active", "target"])
+async def test_kb_active_or_target_embedding_model_identity_is_protected_when_legacy_differs(
+    db_session: AsyncSession,
+    reference_kind: str,
+) -> None:
+    active_models = [_embedding_model("embedding-active")]
+    active_channel = await _create_channel(
+        db_session,
+        name="active-channel",
+        model_ids=active_models,
+    )
+    legacy_channel = await _create_channel(
+        db_session,
+        name="legacy-channel",
+        model_ids=[_embedding_model("embedding-legacy")],
+    )
+    await _create_knowledge_base(
+        db_session,
+        channel_id=legacy_channel.id,
+        model_id="embedding-legacy",
+        name=f"{reference_kind}-model-protected",
+        **(
+            {
+                "active_channel_id": active_channel.id,
+                "active_model_id": "embedding-active",
+            }
+            if reference_kind == "active"
+            else {
+                "target_channel_id": active_channel.id,
+                "target_model_id": "embedding-active",
+            }
+        ),
+    )
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.update_channel(
+            active_channel.id,
+            channels.ChannelUpdate(model_ids=[]),
+            db=db_session,
+            admin={},
+        )
+
+    assert exc_info.value.message == ERR_KB_MODEL_IDENTITY_IN_USE
+    assert exc_info.value.kwargs == {"model_id": "embedding-active"}
 
 
 @pytest.mark.asyncio

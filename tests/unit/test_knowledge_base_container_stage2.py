@@ -20,9 +20,14 @@ from app.models.knowledge_base import (
     KnowledgeBaseProfileBinding,
     KnowledgeBaseResponse,
     KnowledgeBaseType,
+    ManagedKnowledgeItem,
 )
+from app.models.message import Message
+from app.models.message_platform import MessagePlatform
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.models.scheduled_task import ScheduledTask
+from app.models.session import ChatSession
 
 _TABLES = (
     PromptLibrary.__table__,
@@ -31,6 +36,11 @@ _TABLES = (
     KnowledgeBase.__table__,
     KnowledgeBaseCollectionOwner.__table__,
     KnowledgeBaseProfileBinding.__table__,
+    ManagedKnowledgeItem.__table__,
+    ChatSession.__table__,
+    Message.__table__,
+    ScheduledTask.__table__,
+    MessagePlatform.__table__,
 )
 
 
@@ -355,13 +365,6 @@ async def test_profile_delete_cascades_managed_knowledge_base(
     bindings = (await db_session.execute(select(KnowledgeBaseProfileBinding))).scalars().all()
     assert [(binding.uid, binding.profile_id, binding.knowledge_base_id) for binding in bindings] == [(profile.uid, profile.id, user.id)]
 
-    permission_checks = 0
-
-    async def _false_async(*_args: object, **_kwargs: object) -> bool:
-        nonlocal permission_checks
-        permission_checks += 1
-        return False
-
     deleted_collections: list[str] = []
     target_failure_pending = True
 
@@ -373,23 +376,30 @@ async def test_profile_delete_cascades_managed_knowledge_base(
             raise RuntimeError("temporary collection delete failure")
         return collection_name == managed.active_collection_name
 
-    monkeypatch.setattr(profile_api.session_crud, "has_profile_override", _false_async)
-    monkeypatch.setattr(profile_api.message_platform_crud, "has_profile_assignment", _false_async)
-    monkeypatch.setattr(profile_api.scheduled_task_crud, "has_profile_assignment", _false_async)
     monkeypatch.setattr(
         collection_cleanup,
         "async_delete_collection_if_exists",
         _delete_collection_if_exists,
     )
 
+    preview = await profile_api.delete_profile(
+        profile_id=profile.id,
+        db=db_session,
+        current_user=SimpleNamespace(uid="test-user", is_superuser=False),
+    )
+    assert preview.data["requires_confirmation"] is True
+    assert preview.data["managed_knowledge_base"]["count"] == 1
+    assert preview.data["user_knowledge_base_bindings"]["count"] == 1
+
     await profile_api.delete_profile(
         profile_id=profile.id,
+        confirm_impact=True,
+        impact_token=preview.data["impact_token"],
         db=db_session,
         current_user=SimpleNamespace(uid="test-user", is_superuser=False),
     )
 
     assert deleted_collections == []
-    assert permission_checks == 3
     remaining = (await db_session.execute(select(KnowledgeBase))).scalars().all()
     assert [knowledge_base.id for knowledge_base in remaining] == [user.id]
     assert managed.id not in [knowledge_base.id for knowledge_base in remaining]
