@@ -11,10 +11,13 @@ from app.core.constants import (
     ERR_KB_DENSE_RETRIEVAL_FAILED,
     ERR_KB_NOT_FOUND_FOR_QUERY,
     ERR_KB_NOT_IN_PROFILE,
+    LOG_KNOWLEDGE_RECALL_CANDIDATE_WINDOW_EXPANDED,
 )
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
+from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import LLMException
 from app.core.i18n import t
+from app.core.knowledge.recall import filter_recallable_managed_hits
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
@@ -45,12 +48,13 @@ async def embed_chunks_with_knowledge_base_config(
     *,
     release_connection: bool = False,
 ) -> list[list[float]]:
-    config = await load_embedding_runtime_config(db, kb.embedding_channel_id, kb.embedding_model_id)
+    active_embedding = resolve_active_knowledge_base_embedding(kb)
+    config = await load_embedding_runtime_config(db, active_embedding.channel_id, active_embedding.model_id)
     return await embed_texts_with_config(
         config,
         texts,
         batch_size=batch_size,
-        dimensions=kb.embedding_dimensions,
+        dimensions=active_embedding.dimensions,
         db=db,
         release_connection=release_connection,
     )
@@ -96,6 +100,60 @@ def build_knowledge_base_whitelist(kbs: list[KnowledgeBase]) -> list[int]:
     return whitelist_ids
 
 
+async def _query_recallable_candidates(
+    db: AsyncSession,
+    *,
+    profile_uid: str,
+    knowledge_base_id: int,
+    collection_name: str,
+    query_embedding: list[float],
+    query: str,
+    target_count: int,
+) -> list[Any]:
+    """逐步扩大候选窗口，避免失效 managed 向量占满 top-k 后造成有效结果缺失。"""
+    requested = max(target_count, 1)
+    previous_raw_count = -1
+    while True:
+        await db.commit()
+        raw_hits = await hybrid_query_collection(
+            collection_name,
+            query_embedding,
+            query,
+            limit=requested,
+            error_key=ERR_KB_DENSE_RETRIEVAL_FAILED,
+        )
+        filtered_hits = await filter_recallable_managed_hits(
+            db,
+            uid=profile_uid,
+            knowledge_base_id=knowledge_base_id,
+            hits=raw_hits,
+        )
+        await db.commit()
+        if len(filtered_hits) >= target_count:
+            return filtered_hits
+        raw_count = len(raw_hits)
+        if raw_count < requested or raw_count <= previous_raw_count:
+            return filtered_hits
+        previous_raw_count = raw_count
+        next_requested = requested * 2
+        logger.bind(
+            knowledge_base_id=knowledge_base_id,
+            previous_limit=requested,
+            next_limit=next_requested,
+            valid_count=len(filtered_hits),
+            target_count=target_count,
+        ).info(
+            t(
+                LOG_KNOWLEDGE_RECALL_CANDIDATE_WINDOW_EXPANDED,
+                previous_limit=requested,
+                next_limit=next_requested,
+                valid_count=len(filtered_hits),
+                target_count=target_count,
+            )
+        )
+        requested = next_requested
+
+
 async def query_knowledge_base(
     db: AsyncSession,
     profile: Profile,
@@ -118,6 +176,7 @@ async def query_knowledge_base(
         if not binding_result.scalars().first():
             raise HTTPException(status_code=403, detail=ERR_KB_NOT_IN_PROFILE)
 
+    active_embedding = resolve_active_knowledge_base_embedding(kb)
     query_embedding = (await embed_chunks_with_knowledge_base_config(db, kb, [query], 1, release_connection=True))[0]
     final_top_k = top_k
 
@@ -138,8 +197,15 @@ async def query_knowledge_base(
 
         rerank_attempted = True
         effective_candidate_k = max(rerank_config.candidate_k, final_top_k)
-        await db.commit()
-        fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=effective_candidate_k, error_key=ERR_KB_DENSE_RETRIEVAL_FAILED)
+        fused_hits = await _query_recallable_candidates(
+            db,
+            profile_uid=profile.uid,
+            knowledge_base_id=kb_id,
+            collection_name=active_embedding.collection_name,
+            query_embedding=query_embedding,
+            query=query,
+            target_count=effective_candidate_k,
+        )
 
         if len(fused_hits) <= final_top_k:
             return build_query_test_response(fused_hits[:final_top_k], retrieval_mode="hybrid")
@@ -173,8 +239,15 @@ async def query_knowledge_base(
     if rerank_attempted and rerank_error and expose_rerank_error:
         raise HTTPException(status_code=502, detail=rerank_error)
 
-    await db.commit()
-    fused_hits = await hybrid_query_collection(kb.collection_name, query_embedding, query, limit=final_top_k, error_key=ERR_KB_DENSE_RETRIEVAL_FAILED)
+    fused_hits = await _query_recallable_candidates(
+        db,
+        profile_uid=profile.uid,
+        knowledge_base_id=kb_id,
+        collection_name=active_embedding.collection_name,
+        query_embedding=query_embedding,
+        query=query,
+        target_count=final_top_k,
+    )
     return build_query_test_response(
         fused_hits[:final_top_k],
         retrieval_mode="hybrid",

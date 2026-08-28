@@ -1,9 +1,12 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.embedding import knowledge_base as embedding_knowledge_base
+from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.rerank import knowledge_base as rerank_knowledge_base
+from app.core.retrieval.schemas import RetrievalHit
 
 
 def test_get_profile_kb_query_top_k_reads_explicit_knowledge_config() -> None:
@@ -46,6 +49,26 @@ def test_get_profile_kb_query_top_k_falls_back_for_invalid_profile_config(config
     profile = SimpleNamespace(configs=configs)
 
     assert embedding_knowledge_base.get_profile_kb_query_top_k(profile) == embedding_knowledge_base.KNOWLEDGE_BASE_QUERY_TOP_K
+
+
+def test_active_knowledge_base_embedding_snapshot_overrides_legacy_fields() -> None:
+    knowledge_base = SimpleNamespace(
+        embedding_channel_id=1,
+        embedding_model_id="legacy-model",
+        embedding_dimensions=3,
+        collection_name="legacy-collection",
+        active_embedding_channel_id=2,
+        active_embedding_model_id="active-model",
+        active_embedding_dimensions=4,
+        active_collection_name="active-collection",
+    )
+
+    snapshot = resolve_active_knowledge_base_embedding(knowledge_base)
+
+    assert snapshot.channel_id == 2
+    assert snapshot.model_id == "active-model"
+    assert snapshot.dimensions == 4
+    assert snapshot.collection_name == "active-collection"
 
 
 @pytest.mark.asyncio
@@ -97,3 +120,52 @@ async def test_get_profile_rerank_config_uses_knowledge_candidate_k(monkeypatch)
 
     assert result is not None
     assert result.candidate_k == 31
+
+
+@pytest.mark.asyncio
+async def test_query_recallable_candidates_refills_after_stale_managed_hits(monkeypatch) -> None:
+    all_hits = [
+        RetrievalHit(id="stale-1", content="stale", metadata={"knowledge_type": "managed"}),
+        RetrievalHit(id="stale-2", content="stale", metadata={"knowledge_type": "managed"}),
+        RetrievalHit(id="stale-3", content="stale", metadata={"knowledge_type": "managed"}),
+        RetrievalHit(id="valid-1", content="valid", metadata={}),
+        RetrievalHit(id="valid-2", content="valid", metadata={}),
+    ]
+    requested_limits: list[int] = []
+    log_messages: list[str] = []
+
+    async def fake_query(_collection_name, _embedding, _query, limit, **_kwargs):
+        requested_limits.append(limit)
+        return all_hits[:limit]
+
+    async def fake_filter(_db, *, hits, **_kwargs):
+        return [hit for hit in hits if not hit.id.startswith("stale-")]
+
+    class _BoundLogger:
+        def info(self, message: str) -> None:
+            log_messages.append(message)
+
+    class _Logger:
+        def bind(self, **_kwargs):
+            return _BoundLogger()
+
+    db = SimpleNamespace(commit=AsyncMock())
+    monkeypatch.setattr(embedding_knowledge_base, "hybrid_query_collection", fake_query)
+    monkeypatch.setattr(embedding_knowledge_base, "filter_recallable_managed_hits", fake_filter)
+    monkeypatch.setattr(embedding_knowledge_base, "logger", _Logger())
+
+    result = await embedding_knowledge_base._query_recallable_candidates(
+        db,
+        profile_uid="user-1",
+        knowledge_base_id=1,
+        collection_name="collection",
+        query_embedding=[0.1, 0.2],
+        query="test",
+        target_count=2,
+    )
+
+    assert [hit.id for hit in result] == ["valid-1", "valid-2"]
+    assert requested_limits == [2, 4, 8]
+    assert len(log_messages) == 2
+    assert "2 -> 4" in log_messages[0]
+    assert "4 -> 8" in log_messages[1]
