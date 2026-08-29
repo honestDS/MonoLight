@@ -19,3 +19,4 @@ dashboard/dist/
 .clinerules/
 .kilo/
 skills/
+.agent_tmp/

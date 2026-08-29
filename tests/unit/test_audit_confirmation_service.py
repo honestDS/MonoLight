@@ -28,7 +28,7 @@ from app.core.audit.service import (
     classify_audit_score,
     is_audit_configured,
 )
-from app.core.constants import MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
+from app.core.constants import DEFAULT_CHAT_MAX_TOKENS, MSG_AUDIT_CONFIRMATION_IM, MSG_AUDIT_ROUND_SKIPPED
 from app.core.i18n import t
 from app.core.message_platforms.inbound_collector import InboundMessageCollector
 from app.core.prompts import AUDIT_BATCH_PROMPT
@@ -1151,7 +1151,7 @@ async def test_auditor_can_read_arbitrary_file_and_sees_complete_round_context(t
     assert len(calls) == 2
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
     assert all(tool["function"]["name"] == "read_text_file" for tool in calls[1]["tools"])
-    assert all(call["max_tokens"] == 2048 for call in calls)
+    assert all(call["max_tokens"] == DEFAULT_CHAT_MAX_TOKENS for call in calls)
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     assert json.loads(calls[0]["messages"][1].content)["working_directory"] == str(tmp_path)
     assert json.loads(calls[0]["messages"][1].content)["tool_calls"][0]["arguments"] == {"command": "python dynamic_target"}
@@ -1702,7 +1702,7 @@ async def test_pending_summary_can_read_shell_script_and_uses_configured_report_
     assert summary == "Run test.py, which deletes important.txt; execution is awaiting confirmation."
     assert len(calls) == 2
     assert calls[0]["tools"][0]["function"]["name"] == "read_text_file"
-    assert all(call["max_tokens"] == 2048 for call in calls)
+    assert all(call["max_tokens"] == DEFAULT_CHAT_MAX_TOKENS for call in calls)
     assert all(isinstance(call["request_context_tokens"], int) and call["request_context_tokens"] >= 0 for call in calls)
     tool_payload = json.loads(calls[1]["messages"][-1].content)
     assert "Path('important.txt').unlink()" in tool_payload["content"]
