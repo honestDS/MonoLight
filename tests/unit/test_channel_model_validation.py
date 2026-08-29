@@ -83,7 +83,7 @@ def test_model_accepts_matching_protocol(usage: ModelUsage, protocol: ModelProto
         "protocol": protocol,
     }
     if usage == ModelUsage.CHAT:
-        payload["context_window_k"] = 4
+        payload["context_window_k"] = 64
 
     model_entry = ChannelModelItem.model_validate(payload)
 
@@ -191,7 +191,7 @@ def test_validate_channel_model_ids_returns_plain_text_context_window_error() ->
     [
         {"context_window_k": 1, "max_tokens": 743},
         {"context_window_k": 1, "max_tokens": 0},
-        {"context_window_k": 4},
+        {"context_window_k": 64},
     ],
 )
 def test_chat_model_accepts_valid_input_budget_configurations(model_settings: dict[str, int]) -> None:

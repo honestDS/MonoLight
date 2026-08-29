@@ -137,7 +137,7 @@ def make_setup_request(
                 "api_key": TEST_API_KEY,
                 "model_id": model_id,
                 "protocol": protocol,
-                "context_window_k": 4,
+                "context_window_k": 64,
             },
             "profile": {"name": profile_name},
         }
