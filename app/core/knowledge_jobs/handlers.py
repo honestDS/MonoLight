@@ -15,7 +15,10 @@ from app.core.constants import (
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_OVERLAP,
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_SIZE,
 )
-from app.core.crud.knowledge_base import knowledge_base_crud
+from app.core.crud.knowledge_base import (
+    knowledge_base_collection_owner_crud,
+    knowledge_base_crud,
+)
 from app.core.crud.knowledge_job import knowledge_job_crud
 from app.core.crud.managed_knowledge import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, embed_texts_with_config, load_embedding_runtime_config
@@ -71,6 +74,20 @@ class _ManagedDeleteSnapshot:
     vector_item_ids: tuple[str, ...]
 
 
+async def _requeue_collection_cleanup_if_container_deleted(
+    context: KnowledgeJobExecutionContext,
+    snapshot: _ManagedPublicationSnapshot,
+) -> None:
+    async with context.session_factory() as db:
+        knowledge_base = await knowledge_base_crud.get(db, snapshot.knowledge_base_id)
+        if knowledge_base is not None:
+            return
+        await knowledge_base_collection_owner_crud.requeue_orphan(
+            db,
+            collection_name=snapshot.collection_name,
+        )
+
+
 def _positive_int(value) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         return None
@@ -79,11 +96,7 @@ def _positive_int(value) -> int | None:
 
 async def _load_container(db, *, uid: str, knowledge_base_id: int):
     knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
-    if (
-        knowledge_base is None
-        or knowledge_base.uid != uid
-        or knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED
-    ):
+    if knowledge_base is None or knowledge_base.uid != uid or knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
         raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
     return knowledge_base
 
@@ -106,12 +119,7 @@ async def _prepare_publication(
             knowledge_base_id=job.knowledge_base_id,
             knowledge_id=knowledge_id,
         )
-        if (
-            item is None
-            or item.deleted_at is not None
-            or item.version != expected_version
-            or item.pending_job_id != job_id
-        ):
+        if item is None or item.deleted_at is not None or item.version != expected_version or item.pending_job_id != job_id:
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         knowledge_base = await _load_container(db, uid=job.uid, knowledge_base_id=job.knowledge_base_id)
         active_embedding = resolve_active_knowledge_base_embedding(knowledge_base)
@@ -149,10 +157,7 @@ def _build_vector_items(snapshot: _ManagedPublicationSnapshot) -> tuple[list[str
     ).split(snapshot.content)
     if not chunks:
         raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
-    item_ids = [
-        f"managed_{snapshot.knowledge_base_id}_{snapshot.knowledge_id}_v{snapshot.version}_a{snapshot.attempt_count}_chunk_{index}"
-        for index in range(len(chunks))
-    ]
+    item_ids = [f"managed_{snapshot.knowledge_base_id}_{snapshot.knowledge_id}_v{snapshot.version}_a{snapshot.attempt_count}_chunk_{index}" for index in range(len(chunks))]
     metadatas = [
         {
             "knowledge_type": "managed",
@@ -187,14 +192,7 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         )
     except Exception as exc:
         raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_EMBEDDING_FAILED)) from exc
-    if len(embeddings) != len(chunks) or any(
-        not vector
-        or (
-            snapshot.embedding_dimensions is not None
-            and len(vector) != snapshot.embedding_dimensions
-        )
-        for vector in embeddings
-    ):
+    if len(embeddings) != len(chunks) or any(not vector or (snapshot.embedding_dimensions is not None and len(vector) != snapshot.embedding_dimensions) for vector in embeddings):
         raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_EMBEDDING_FAILED))
 
     await context.checkpoint()
@@ -227,9 +225,14 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
             batch_size=MANAGED_KNOWLEDGE_VECTOR_BATCH_SIZE,
         )
     except Exception as exc:
+        await _requeue_collection_cleanup_if_container_deleted(context, snapshot)
         raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_VECTOR_WRITE_FAILED)) from exc
 
-    await context.checkpoint()
+    try:
+        await context.checkpoint()
+    except Exception:
+        await _requeue_collection_cleanup_if_container_deleted(context, snapshot)
+        raise
     async with context.session_factory() as db:
         current = await knowledge_job_crud.get_active_claim(
             db,
@@ -262,11 +265,7 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         if not ready:
             await db.rollback()
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
-        stale_vector_ids = [
-            item_id
-            for item_id in snapshot.previous_vector_item_ids
-            if item_id not in set(vector_item_ids)
-        ]
+        stale_vector_ids = [item_id for item_id in snapshot.previous_vector_item_ids if item_id not in set(vector_item_ids)]
         if stale_vector_ids:
             await create_managed_vector_cleanup_job(
                 db,
@@ -315,13 +314,7 @@ async def _prepare_delete(context: KnowledgeJobExecutionContext) -> _ManagedDele
             knowledge_base_id=job.knowledge_base_id,
             knowledge_id=knowledge_id,
         )
-        if (
-            item is None
-            or item.deleted_at is None
-            or item.is_recallable
-            or item.version != expected_version
-            or item.pending_job_id != job_id
-        ):
+        if item is None or item.deleted_at is None or item.is_recallable or item.version != expected_version or item.pending_job_id != job_id:
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         knowledge_base = await _load_container(db, uid=job.uid, knowledge_base_id=job.knowledge_base_id)
         collection_name = resolve_active_knowledge_base_embedding(knowledge_base).collection_name

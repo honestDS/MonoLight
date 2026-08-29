@@ -130,11 +130,19 @@ async def test_collection_owner_crud_covers_active_and_pending_lifecycle(sqlite_
             await knowledge_base_collection_owner_crud.mark_failed(
                 session,
                 collection_name="collection-b",
+                expected_revision=0,
                 error="active failure should be ignored",
             )
             is False
         )
-        assert await knowledge_base_collection_owner_crud.mark_succeeded(session, collection_name="collection-b") is False
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="collection-b",
+                expected_revision=0,
+            )
+            is False
+        )
         active_owner = await _get_owner(session, "collection-b")
         assert active_owner is not None
         assert active_owner.knowledge_base_id == knowledge_base_b.id
@@ -159,6 +167,7 @@ async def test_collection_owner_crud_covers_active_and_pending_lifecycle(sqlite_
             await knowledge_base_collection_owner_crud.mark_failed(
                 session,
                 collection_name="queued-a",
+                expected_revision=0,
                 error="first cleanup error",
             )
             is True
@@ -167,6 +176,7 @@ async def test_collection_owner_crud_covers_active_and_pending_lifecycle(sqlite_
             await knowledge_base_collection_owner_crud.mark_failed(
                 session,
                 collection_name="queued-a",
+                expected_revision=0,
                 error="latest cleanup error",
             )
             is True
@@ -177,8 +187,22 @@ async def test_collection_owner_crud_covers_active_and_pending_lifecycle(sqlite_
         assert failed_owner.cleanup_attempt_count == 2
         assert failed_owner.cleanup_error == "latest cleanup error"
 
-        assert await knowledge_base_collection_owner_crud.mark_succeeded(session, collection_name="queued-a") is True
-        assert await knowledge_base_collection_owner_crud.mark_succeeded(session, collection_name="queued-a") is False
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="queued-a",
+                expected_revision=0,
+            )
+            is True
+        )
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="queued-a",
+                expected_revision=0,
+            )
+            is False
+        )
         assert await _get_owner(session, "queued-a") is None
         assert await _get_owner(session, "collection-b") is not None
 
@@ -202,6 +226,7 @@ async def test_pending_collection_name_cannot_be_reassigned_after_failure(sqlite
             await knowledge_base_collection_owner_crud.mark_failed(
                 session,
                 collection_name="retained-collection",
+                expected_revision=0,
                 error="preserve this failure",
             )
             is True
@@ -222,3 +247,91 @@ async def test_pending_collection_name_cannot_be_reassigned_after_failure(sqlite
         assert retained_owner.knowledge_base_id is None
         assert retained_owner.cleanup_attempt_count == 1
         assert retained_owner.cleanup_error == "preserve this failure"
+
+
+@pytest.mark.asyncio
+async def test_collection_cleanup_revision_fences_stale_completion(sqlite_database) -> None:
+    _engine, session_factory = sqlite_database
+
+    async with session_factory() as session:
+        knowledge_base = await _create_knowledge_base(session, "revision-collection")
+        await session.commit()
+        await session.delete(knowledge_base)
+        await session.commit()
+
+        pending = await _get_owner(session, "revision-collection")
+        assert pending is not None
+        stale_revision = pending.cleanup_revision
+
+        new_revision = await knowledge_base_collection_owner_crud.requeue_orphan(
+            session,
+            collection_name="revision-collection",
+        )
+        assert new_revision == stale_revision + 1
+
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="revision-collection",
+                expected_revision=stale_revision,
+            )
+            is False
+        )
+        assert (
+            await knowledge_base_collection_owner_crud.mark_failed(
+                session,
+                collection_name="revision-collection",
+                expected_revision=stale_revision,
+                error="stale failure",
+            )
+            is False
+        )
+
+        current = await _get_owner(session, "revision-collection")
+        assert current is not None
+        assert current.cleanup_revision == new_revision
+        assert current.cleanup_attempt_count == 0
+        assert current.cleanup_error is None
+
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="revision-collection",
+                expected_revision=new_revision,
+            )
+            is True
+        )
+        assert await _get_owner(session, "revision-collection") is None
+
+
+@pytest.mark.asyncio
+async def test_requeue_orphan_recreates_consumed_cleanup_marker(sqlite_database) -> None:
+    _engine, session_factory = sqlite_database
+
+    async with session_factory() as session:
+        knowledge_base = await _create_knowledge_base(session, "requeued-collection")
+        await session.commit()
+        await session.delete(knowledge_base)
+        await session.commit()
+
+        owner = await _get_owner(session, "requeued-collection")
+        assert owner is not None
+        assert (
+            await knowledge_base_collection_owner_crud.mark_succeeded(
+                session,
+                collection_name="requeued-collection",
+                expected_revision=owner.cleanup_revision,
+            )
+            is True
+        )
+        assert await _get_owner(session, "requeued-collection") is None
+
+        revision = await knowledge_base_collection_owner_crud.requeue_orphan(
+            session,
+            collection_name="requeued-collection",
+        )
+        assert revision == 1
+        requeued = await _get_owner(session, "requeued-collection")
+        assert requeued is not None
+        assert requeued.knowledge_base_id is None
+        assert requeued.cleanup_revision == 1

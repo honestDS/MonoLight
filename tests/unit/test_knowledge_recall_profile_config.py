@@ -169,3 +169,164 @@ async def test_query_recallable_candidates_refills_after_stale_managed_hits(monk
     assert len(log_messages) == 2
     assert "2 -> 4" in log_messages[0]
     assert "4 -> 8" in log_messages[1]
+
+
+@pytest.mark.asyncio
+async def test_query_reranks_managed_chunks_before_materializing_full_content(monkeypatch) -> None:
+    knowledge_base = SimpleNamespace(
+        id=7,
+        uid="user-1",
+        active_embedding_channel_id=1,
+        active_embedding_model_id="embedding-model",
+        active_embedding_dimensions=3,
+        active_embedding_revision=1,
+        active_collection_name="managed-collection",
+        embedding_channel_id=1,
+        embedding_model_id="embedding-model",
+        embedding_dimensions=3,
+        collection_name="managed-collection",
+    )
+    profile = SimpleNamespace(id=9, uid="user-1", configs={})
+    db = SimpleNamespace(get=AsyncMock(return_value=knowledge_base))
+    candidate_hits = [
+        RetrievalHit(
+            id="managed-chunk-0",
+            content="partial managed chunk",
+            metadata={
+                "knowledge_type": "managed",
+                "managed_knowledge_id": 31,
+                "managed_knowledge_version": 4,
+            },
+            fusion_score=0.9,
+        ),
+        RetrievalHit(
+            id="user-document",
+            content="user document chunk",
+            metadata={"filename": "manual.md"},
+            fusion_score=0.8,
+        ),
+    ]
+
+    async def fake_embed(*_args, **_kwargs):
+        return [[0.1, 0.2, 0.3]]
+
+    async def fake_rerank_config(*_args, **_kwargs):
+        return SimpleNamespace(
+            candidate_k=2,
+            priority=1,
+            channel_id=2,
+            channel_name="rerank",
+            model_id="rerank-model",
+        )
+
+    async def fake_candidates(*_args, **_kwargs):
+        return candidate_hits
+
+    async def fake_rerank(_config, _query, hits, _final_top_k):
+        assert [hit.content for hit in hits] == [
+            "partial managed chunk",
+            "user document chunk",
+        ]
+        return hits
+
+    async def fake_materialize(_db, *, hits, **_kwargs):
+        assert _db is db
+        assert hits[0].content == "partial managed chunk"
+        return [
+            RetrievalHit(
+                id=hits[0].id,
+                content="complete managed relation content",
+                metadata={
+                    **hits[0].metadata,
+                    "managed_knowledge_llm_maintainable": True,
+                },
+                fusion_score=hits[0].fusion_score,
+            )
+        ]
+
+    def fake_build_response(hits, **_kwargs):
+        return SimpleNamespace(items=hits)
+
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "embed_chunks_with_knowledge_base_config",
+        fake_embed,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "get_profile_rerank_config",
+        fake_rerank_config,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "_query_recallable_candidates",
+        fake_candidates,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "rerank_retrieval_hits",
+        fake_rerank,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "materialize_recallable_managed_hits",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "build_query_test_response",
+        fake_build_response,
+    )
+
+    result = await embedding_knowledge_base.query_knowledge_base(
+        db,
+        profile,
+        7,
+        "managed topic",
+        top_k=1,
+        require_binding=False,
+    )
+
+    assert result.items[0].content == "complete managed relation content"
+
+
+@pytest.mark.asyncio
+async def test_final_query_response_materializes_before_top_k(monkeypatch) -> None:
+    hits = [
+        RetrievalHit(id="stale-first", content="stale", metadata={}),
+        RetrievalHit(id="valid-second", content="second", metadata={}),
+        RetrievalHit(id="valid-third", content="third", metadata={}),
+    ]
+
+    async def fake_materialize(_db, *, hits, **_kwargs):
+        assert [hit.id for hit in hits] == [
+            "stale-first",
+            "valid-second",
+            "valid-third",
+        ]
+        return hits[1:]
+
+    def fake_build_response(hits, **_kwargs):
+        return SimpleNamespace(items=hits)
+
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "materialize_recallable_managed_hits",
+        fake_materialize,
+    )
+    monkeypatch.setattr(
+        embedding_knowledge_base,
+        "build_query_test_response",
+        fake_build_response,
+    )
+
+    result = await embedding_knowledge_base._build_final_query_response(
+        SimpleNamespace(),
+        profile_uid="user-1",
+        knowledge_base_id=7,
+        hits=hits,
+        final_top_k=2,
+        retrieval_mode="hybrid",
+    )
+
+    assert [hit.id for hit in result.items] == ["valid-second", "valid-third"]

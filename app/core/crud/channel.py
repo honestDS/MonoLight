@@ -13,6 +13,10 @@ from app.models.channel import (
 
 
 class CRUDChannel(CRUDBase[ModelChannel, ChannelCreate, ChannelUpdate]):
+    async def list_active(self, db: AsyncSession) -> list[ModelChannel]:
+        result = await db.execute(select(ModelChannel).where(ModelChannel.is_active))
+        return list(result.scalars().all())
+
     async def get_by_name(self, db: AsyncSession, name: str) -> ModelChannel | None:
         result = await db.execute(select(ModelChannel).where(ModelChannel.name == name))
         return result.scalars().first()
