@@ -77,7 +77,7 @@ def _setup_payload(
             "api_key": api_key,
             "model_id": model_id,
             "protocol": "OPENAI",
-            "context_window_k": 4,
+            "context_window_k": 64,
         },
         "profile": {"name": profile_name},
     }
