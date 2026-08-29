@@ -17,11 +17,15 @@ from app.core.embedding.common import embed_texts_with_config, load_embedding_ru
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import LLMException
 from app.core.i18n import t
-from app.core.knowledge.recall import filter_recallable_managed_hits
+from app.core.knowledge.recall import (
+    filter_recallable_managed_hits,
+    materialize_recallable_managed_hits,
+)
 from app.core.log import get_logger
 from app.core.rerank.knowledge_base import get_profile_rerank_config, rerank_retrieval_hits
 from app.core.retrieval.hybrid import build_query_test_response, hybrid_query_collection
-from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse
+from app.core.retrieval.schemas import RetrievalHit
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding, KnowledgeBaseQueryTestResponse, KnowledgeBaseType
 from app.models.profile import Profile, ProfileConfig
 
 KNOWLEDGE_BASE_QUERY_TOP_K = 5
@@ -86,6 +90,7 @@ def build_knowledge_base_prompt_items(kbs: list[KnowledgeBase]) -> list[dict[str
                 "id": knowledge_base.id,
                 "name": knowledge_base.name,
                 "description": knowledge_base.description or "",
+                "kind": ("managed_knowledge" if knowledge_base.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED else "user_knowledge_base"),
             }
         )
     return prompt_items
@@ -109,7 +114,7 @@ async def _query_recallable_candidates(
     query_embedding: list[float],
     query: str,
     target_count: int,
-) -> list[Any]:
+) -> list[RetrievalHit]:
     """逐步扩大候选窗口，避免失效 managed 向量占满 top-k 后造成有效结果缺失。"""
     requested = max(target_count, 1)
     previous_raw_count = -1
@@ -152,6 +157,29 @@ async def _query_recallable_candidates(
             )
         )
         requested = next_requested
+
+
+async def _build_final_query_response(
+    db: AsyncSession,
+    *,
+    profile_uid: str,
+    knowledge_base_id: int,
+    hits: list[RetrievalHit],
+    final_top_k: int,
+    retrieval_mode: str,
+    rerank_error: str | None = None,
+) -> KnowledgeBaseQueryTestResponse:
+    materialized_hits = await materialize_recallable_managed_hits(
+        db,
+        uid=profile_uid,
+        knowledge_base_id=knowledge_base_id,
+        hits=hits,
+    )
+    return build_query_test_response(
+        materialized_hits[:final_top_k],
+        retrieval_mode=retrieval_mode,
+        rerank_error=rerank_error,
+    )
 
 
 async def query_knowledge_base(
@@ -208,7 +236,14 @@ async def query_knowledge_base(
         )
 
         if len(fused_hits) <= final_top_k:
-            return build_query_test_response(fused_hits[:final_top_k], retrieval_mode="hybrid")
+            return await _build_final_query_response(
+                db,
+                profile_uid=profile.uid,
+                knowledge_base_id=kb_id,
+                hits=fused_hits,
+                final_top_k=final_top_k,
+                retrieval_mode="hybrid",
+            )
 
         try:
             rerank_started = time.perf_counter()
@@ -221,7 +256,14 @@ async def query_knowledge_base(
                 rerank_model_id=rerank_config.model_id,
                 rerank_latency_ms=round(rerank_latency_ms, 2),
             ).info(t("LOG_RERANK_REMOTE_FINISHED"))
-            return build_query_test_response(reranked_hits[:final_top_k], retrieval_mode="hybrid_rerank")
+            return await _build_final_query_response(
+                db,
+                profile_uid=profile.uid,
+                knowledge_base_id=kb_id,
+                hits=reranked_hits,
+                final_top_k=final_top_k,
+                retrieval_mode="hybrid_rerank",
+            )
 
         except LLMException as e:
             excluded_rerank_priorities.add(rerank_config.priority)
@@ -248,8 +290,12 @@ async def query_knowledge_base(
         query=query,
         target_count=final_top_k,
     )
-    return build_query_test_response(
-        fused_hits[:final_top_k],
+    return await _build_final_query_response(
+        db,
+        profile_uid=profile.uid,
+        knowledge_base_id=kb_id,
+        hits=fused_hits,
+        final_top_k=final_top_k,
         retrieval_mode="hybrid",
         rerank_error=rerank_error if expose_rerank_error else None,
     )

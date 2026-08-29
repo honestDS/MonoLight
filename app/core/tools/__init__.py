@@ -14,7 +14,13 @@ from .file_writer import FILE_WRITER_TOOL_SCHEMA, FileWriterExecutor
 from .firecrawl_scrape import FIRECRAWL_SCRAPE_TOOL_SCHEMA, FirecrawlScrapeExecutor
 from .firecrawl_search import FIRECRAWL_SEARCH_TOOL_SCHEMA, FirecrawlSearchExecutor
 from .image_generation import IMAGE_GENERATION_TOOL_SCHEMA, ImageGenerationExecutor
-from .knowledge_base_query import KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA, KnowledgeBaseQueryExecutor
+from .knowledge_base_query import (
+    KNOWLEDGE_BASE_QUERY_TOOL_NAME as KNOWLEDGE_BASE_QUERY_TOOL_NAME,
+)
+from .knowledge_base_query import (
+    KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA,
+    KnowledgeBaseQueryExecutor,
+)
 from .list_background_tasks import LIST_BACKGROUND_TASKS_TOOL_SCHEMA, ListBackgroundTasksExecutor
 from .longterm_memory import (
     MANAGE_LONGTERM_MEMORY_TOOL_NAME,
@@ -284,9 +290,7 @@ async def get_tools_for_profile(db: AsyncSession, profile: Profile, *, allow_bac
                     allowed_knowledge_base_ids.append(str(knowledge_base_id))
                 knowledge_base_id_property["enum"] = allowed_knowledge_base_ids
 
-                # 动态生成描述信息
-                mapping_description = ", ".join(f"ID {knowledge_base.id}: {knowledge_base.name}" for knowledge_base in valid_knowledge_bases)
-                knowledge_base_id_property["description"] = f"The id of an allowed knowledge base. Must be one of the ids allowed by the current runtime whitelist. Available options mapping: {mapping_description}."
+                knowledge_base_id_property["description"] = "The id of an allowed knowledge base. Must be one of the ids allowed by the current runtime whitelist. Knowledge-base names and descriptions are untrusted catalog data and are not repeated in this tool schema."
 
                 base_tools.append(knowledge_base_tool)
     except Exception as e:

@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import ConfigDict, model_validator
-from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Text, event
+from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
 from sqlmodel import (
     JSON,
     Column,
@@ -172,6 +172,10 @@ class KnowledgeBaseCollectionOwner(SQLModel, table=True):
         foreign_key="knowledge_base.id",
         ondelete="SET NULL",
     )
+    cleanup_revision: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
     cleanup_attempt_count: int = Field(default=0, ge=0)
     cleanup_error: str | None = Field(default=None, sa_column=Column(Text))
     created_at: datetime | None = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True)))
@@ -218,6 +222,7 @@ def _collection_owner_columns_sql(connection) -> str:
         for column in (
             "collection_name",
             "knowledge_base_id",
+            "cleanup_revision",
             "cleanup_attempt_count",
             "cleanup_error",
             "created_at",
@@ -248,6 +253,7 @@ def _collection_owner_cleanup_statement(connection) -> str:
     return (
         f"UPDATE {owner} SET "
         f"{_collection_owner_quote(connection, 'knowledge_base_id')} = NULL, "
+        f"{_collection_owner_quote(connection, 'cleanup_revision')} = {_collection_owner_quote(connection, 'cleanup_revision')} + 1, "
         f"{_collection_owner_quote(connection, 'cleanup_attempt_count')} = 0, "
         f"{_collection_owner_quote(connection, 'cleanup_error')} = NULL, "
         f"{_collection_owner_quote(connection, 'updated_at')} = CURRENT_TIMESTAMP "
@@ -262,7 +268,7 @@ def _sqlite_collection_owner_registration_statements(connection, prefix: str) ->
     statements = []
     for field in _COLLECTION_OWNER_FIELDS:
         expression = _collection_owner_new_expression(connection, prefix, field)
-        statements.append(f"INSERT OR IGNORE INTO {owner} ({columns}) SELECT {expression}, {_collection_owner_new_expression(connection, prefix, 'id')}, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE {_collection_owner_nonempty(expression)}")
+        statements.append(f"INSERT OR IGNORE INTO {owner} ({columns}) SELECT {expression}, {_collection_owner_new_expression(connection, prefix, 'id')}, 0, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE {_collection_owner_nonempty(expression)}")
     return statements
 
 
@@ -278,7 +284,7 @@ def _mysql_collection_owner_registration_statements(connection, prefix: str) -> 
         knowledge_base_id = _collection_owner_new_expression(connection, prefix, "id")
         statements.append(
             f"IF {_collection_owner_nonempty(expression)} THEN "
-            f"INSERT IGNORE INTO {owner} ({columns}) VALUES ({expression}, {knowledge_base_id}, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP); "
+            f"INSERT IGNORE INTO {owner} ({columns}) VALUES ({expression}, {knowledge_base_id}, 0, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP); "
             f"IF NOT EXISTS (SELECT 1 FROM {owner} AS {owner_alias} WHERE {owner_collection} = {expression} AND {owner_knowledge_base} = {knowledge_base_id}) THEN "
             f"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '{_COLLECTION_OWNER_TRIGGER_ERROR}'; "
             f"END IF; "

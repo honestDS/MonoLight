@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   buildKnowledgeBaseBindingPayload,
   filterKnowledgeBaseIdsForOwner,
+  filterUserKnowledgeBasesForOwner,
   filterProfilesByUid,
   formatProfileOptionLabel,
   getNewSessionProfileOverrideId,
@@ -15,14 +16,28 @@ import {
 test('filters knowledge base bindings by owner and available knowledge bases', () => {
   const ids = ['kb-a', 'kb-b', 'kb-missing', 'kb-a']
   const knowledgeBases = [
-    { id: 'kb-a', uid: 'user-a' },
-    { id: 'kb-b', uid: 'user-b' },
-    { id: 'kb-c', uid: 'user-a' }
+    { id: 'kb-a', uid: 'user-a', knowledge_base_type: 'user' },
+    { id: 'kb-b', uid: 'user-b', knowledge_base_type: 'user' },
+    { id: 'kb-c', uid: 'user-a', knowledge_base_type: 'user' },
+    { id: 'kb-managed', uid: 'user-a', knowledge_base_type: 'llm_managed' }
   ]
 
   assert.deepEqual(filterKnowledgeBaseIdsForOwner(ids, knowledgeBases, 'user-a'), ['kb-a', 'kb-a'])
   assert.deepEqual(filterKnowledgeBaseIdsForOwner([], [], 'user-a'), [])
   assert.deepEqual(filterKnowledgeBaseIdsForOwner(ids, [], 'user-a'), [])
+})
+
+test('profile knowledge base options include only user knowledge bases owned by the profile user', () => {
+  const knowledgeBases = [
+    { id: 'kb-a', uid: 'user-a', knowledge_base_type: 'user' },
+    { id: 'kb-managed', uid: 'user-a', knowledge_base_type: 'llm_managed' },
+    { id: 'kb-b', uid: 'user-b', knowledge_base_type: 'user' }
+  ]
+
+  assert.deepEqual(
+    filterUserKnowledgeBasesForOwner(knowledgeBases, 'user-a').map(item => item.id),
+    ['kb-a']
+  )
 })
 
 test('only includes normalized knowledge base bindings when ready', () => {

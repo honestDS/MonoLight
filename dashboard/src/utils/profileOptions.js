@@ -3,10 +3,17 @@ export const filterProfilesByUid = (profiles, uid) => {
   return profiles.filter(profile => profile?.uid === uid)
 }
 
+export const filterUserKnowledgeBasesForOwner = (knowledgeBases, uid) => {
+  if (!Array.isArray(knowledgeBases) || !uid) return []
+  return knowledgeBases.filter(item => (
+    item?.uid === uid && item?.knowledge_base_type === 'user'
+  ))
+}
+
 export const filterKnowledgeBaseIdsForOwner = (ids, knowledgeBases, uid) => {
   if (!Array.isArray(ids) || !Array.isArray(knowledgeBases) || !uid) return []
-
-  return ids.filter(id => knowledgeBases.some(item => item?.uid === uid && item?.id === id))
+  const availableUserKnowledgeBases = filterUserKnowledgeBasesForOwner(knowledgeBases, uid)
+  return ids.filter(id => availableUserKnowledgeBases.some(item => item?.id === id))
 }
 
 export const buildKnowledgeBaseBindingPayload = (ids, ready) => {
