@@ -12,6 +12,7 @@ from app.core.constants import (
     ERR_KB_DOC_DELETE_FAILED,
     ERR_KB_DOC_NOT_FOUND,
     ERR_KB_DOC_SAVE_FAILED,
+    ERR_KB_EMBEDDING_CONFIG_CHANGED,
     ERR_KB_FILE_EMPTY,
     ERR_KB_FILE_ENCODING_ERROR,
     ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
@@ -48,6 +49,7 @@ from app.core.knowledge.bindings import (
     replace_user_knowledge_base_bindings,
 )
 from app.core.knowledge.deletion import delete_owned_knowledge_base
+from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
 from app.models.channel import ModelUsage
@@ -59,6 +61,8 @@ from app.models.knowledge_base import (
     KnowledgeBaseDocumentResponse,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseListResponse,
+    KnowledgeBaseMigrationDeltaAction,
+    KnowledgeBaseMigrationSourceType,
     KnowledgeBaseProfileBindingUpdate,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
@@ -118,6 +122,39 @@ async def load_embedding_model(
         lock_for_reference_write=lock_for_reference_write,
     )
     return config, {"model_id": config.model_id, "embedding_dimensions": config.declared_dimensions}
+
+
+async def embed_document_with_stable_knowledge_base_config(
+    db: AsyncSession,
+    *,
+    knowledge_base: KnowledgeBase,
+    chunks: list[str],
+    batch_size: int,
+) -> tuple[KnowledgeBase, list[list[float]]]:
+    candidate = knowledge_base
+    for _attempt in range(2):
+        expected_embedding = resolve_active_knowledge_base_embedding(candidate)
+        embeddings = await embed_chunks_with_knowledge_base_config(
+            db,
+            candidate,
+            chunks,
+            batch_size,
+            release_connection=True,
+        )
+        locked = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=knowledge_base.uid,
+            knowledge_base_id=knowledge_base.id,
+        )
+        if locked is None:
+            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+        if resolve_active_knowledge_base_embedding(locked) == expected_embedding:
+            return locked, embeddings
+        await db.rollback()
+        candidate = await knowledge_base_crud.get(db, knowledge_base.id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+    raise HTTPException(status_code=409, detail=ERR_KB_EMBEDDING_CONFIG_CHANGED)
 
 
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
@@ -376,8 +413,13 @@ async def import_document(
     if not chunks:
         raise HTTPException(status_code=400, detail=ERR_KB_FILE_EMPTY)
 
-    active_embedding = resolve_active_knowledge_base_embedding(kb)
-    embeddings = await embed_chunks_with_knowledge_base_config(db, kb, chunks, batch_size)
+    locked_kb, embeddings = await embed_document_with_stable_knowledge_base_config(
+        db,
+        knowledge_base=kb,
+        chunks=chunks,
+        batch_size=batch_size,
+    )
+    active_embedding = resolve_active_knowledge_base_embedding(locked_kb)
     document_uuid = uuid.uuid4().hex
     document_filename = file.filename or t(MSG_KB_UNNAMED_DOCUMENT)
     chunk_ids = []
@@ -404,14 +446,15 @@ async def import_document(
             batch_size=batch_size,
         )
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=t(ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
 
     try:
         db_document = await knowledge_base_document_crud.create(
             db,
             values={
-                "knowledge_base_id": kb.id,
-                "filename": file.filename or "未命名文档",
+                "knowledge_base_id": locked_kb.id,
+                "filename": document_filename,
                 "content": content,
                 "chunk_size": chunk_size,
                 "chunk_overlap": chunk_overlap,
@@ -423,7 +466,16 @@ async def import_document(
                     "content_type": file.content_type or "",
                 },
             },
+            commit=False,
         )
+        await record_knowledge_base_migration_change(
+            db,
+            knowledge_base=locked_kb,
+            source_type=KnowledgeBaseMigrationSourceType.USER_DOCUMENT,
+            source_id=db_document.id,
+            action=KnowledgeBaseMigrationDeltaAction.UPSERT,
+        )
+        await db.commit()
     except Exception as e:
         await db.rollback()
         try:
@@ -494,6 +546,13 @@ async def delete_document(
 ):
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
+    locked_kb = await knowledge_base_crud.lock_owned_by_id(
+        db,
+        uid=kb.uid,
+        knowledge_base_id=kb_id,
+    )
+    if locked_kb is None:
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
     document = await knowledge_base_document_crud.get_by_knowledge_base(
         db,
         knowledge_base_id=kb_id,
@@ -502,12 +561,19 @@ async def delete_document(
     if not document:
         raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
 
-    active_embedding = resolve_active_knowledge_base_embedding(kb)
+    active_embedding = resolve_active_knowledge_base_embedding(locked_kb)
     try:
         await knowledge_base_document_crud.delete(
             db,
             document=document,
             commit=False,
+        )
+        await record_knowledge_base_migration_change(
+            db,
+            knowledge_base=locked_kb,
+            source_type=KnowledgeBaseMigrationSourceType.USER_DOCUMENT,
+            source_id=document.id,
+            action=KnowledgeBaseMigrationDeltaAction.DELETE,
         )
         await async_delete_collection_items(
             active_embedding.collection_name,

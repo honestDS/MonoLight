@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.utils.time import get_local_time
-from app.models.knowledge_base import ManagedKnowledgeItem, ManagedKnowledgeRevision
+from app.models.knowledge_base import KnowledgeBase, ManagedKnowledgeItem, ManagedKnowledgeRevision
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,24 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 
 class CRUDManagedKnowledgeItem:
+    async def _lock_knowledge_base_for_write(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> None:
+        if db.get_bind().dialect.name == "sqlite":
+            return
+        await db.execute(
+            select(KnowledgeBase.id)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.id == knowledge_base_id,
+            )
+            .with_for_update()
+        )
+
     async def count_by_knowledge_base(
         self,
         db: AsyncSession,
@@ -145,6 +163,14 @@ class CRUDManagedKnowledgeItem:
         ]
 
     async def create(self, db: AsyncSession, *, commit: bool = True, **values: Any) -> ManagedKnowledgeItem:
+        uid = values.get("uid")
+        knowledge_base_id = values.get("knowledge_base_id")
+        if isinstance(uid, str) and isinstance(knowledge_base_id, int):
+            await self._lock_knowledge_base_for_write(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+            )
         item = ManagedKnowledgeItem.model_validate(values)
         db.add(item)
         await _finish(db, commit=commit)
@@ -152,6 +178,11 @@ class CRUDManagedKnowledgeItem:
         return item
 
     async def update_if_version(self, db: AsyncSession, *, uid: str, knowledge_base_id: int, knowledge_id: int, expected_version: int, commit: bool = True, **values: Any) -> ManagedKnowledgeItem | None:
+        await self._lock_knowledge_base_for_write(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         update_values = dict(values)
         for protected in ("id", "uid", "knowledge_base_id", "version", "created_at"):
             update_values.pop(protected, None)

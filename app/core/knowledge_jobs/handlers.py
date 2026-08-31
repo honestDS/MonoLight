@@ -24,6 +24,7 @@ from app.core.crud.managed_knowledge import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, embed_texts_with_config, load_embedding_runtime_config
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t
+from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.knowledge_jobs.executor import (
     KnowledgeJobDeterministicError,
     KnowledgeJobExecutionContext,
@@ -33,12 +34,21 @@ from app.core.knowledge_jobs.executor import (
     KnowledgeJobRetryableError,
     SessionFactory,
 )
+from app.core.knowledge_jobs.migration import (
+    handle_embedding_migration,
+    handle_old_collection_cleanup,
+)
 from app.core.knowledge_jobs.vector_cleanup import (
     create_managed_vector_cleanup_job,
     execute_managed_vector_cleanup,
 )
 from app.core.utils.text_splitter import TextSplitter
-from app.models.knowledge_base import KnowledgeBaseType, KnowledgeJobOperation
+from app.models.knowledge_base import (
+    KnowledgeBaseMigrationDeltaAction,
+    KnowledgeBaseMigrationSourceType,
+    KnowledgeBaseType,
+    KnowledgeJobOperation,
+)
 from app.providers.database import AsyncSessionLocal
 from app.providers.vector import (
     async_delete_collection_items,
@@ -60,6 +70,8 @@ class _ManagedPublicationSnapshot:
     embedding_channel_id: int
     embedding_model_id: str
     embedding_dimensions: int | None
+    embedding_signature: str | None
+    embedding_revision: int
     previous_vector_item_ids: tuple[str, ...]
 
 
@@ -145,6 +157,8 @@ async def _prepare_publication(
             embedding_channel_id=channel_id,
             embedding_model_id=model_id,
             embedding_dimensions=dimensions,
+            embedding_signature=knowledge_base.active_embedding_signature,
+            embedding_revision=knowledge_base.active_embedding_revision,
             previous_vector_item_ids=tuple(item.vector_item_ids or ()),
         )
     return snapshot, embedding_config
@@ -242,6 +256,25 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         )
         if current is None:
             raise KnowledgeJobLeaseLostError(t(ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE))
+        knowledge_base = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=snapshot.uid,
+            knowledge_base_id=snapshot.knowledge_base_id,
+        )
+        if knowledge_base is None or knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
+            await db.rollback()
+            raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        active_embedding = resolve_active_knowledge_base_embedding(knowledge_base)
+        if (
+            active_embedding.channel_id != snapshot.embedding_channel_id
+            or active_embedding.model_id != snapshot.embedding_model_id
+            or active_embedding.dimensions != snapshot.embedding_dimensions
+            or active_embedding.collection_name != snapshot.collection_name
+            or knowledge_base.active_embedding_signature != snapshot.embedding_signature
+            or knowledge_base.active_embedding_revision != snapshot.embedding_revision
+        ):
+            await db.rollback()
+            raise KnowledgeJobRetryableError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         published = await managed_knowledge_item_crud.publish_indexed_version(
             db,
             uid=snapshot.uid,
@@ -255,6 +288,14 @@ async def handle_managed_publication(context: KnowledgeJobExecutionContext) -> K
         if published is None:
             await db.rollback()
             raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+        await record_knowledge_base_migration_change(
+            db,
+            knowledge_base=knowledge_base,
+            source_type=KnowledgeBaseMigrationSourceType.MANAGED_KNOWLEDGE,
+            source_id=published.id,
+            source_version=published.version,
+            action=KnowledgeBaseMigrationDeltaAction.UPSERT,
+        )
         ready = await knowledge_base_crud.mark_managed_initial_index_ready(
             db,
             uid=snapshot.uid,
@@ -399,6 +440,8 @@ def create_default_knowledge_job_executor(
             KnowledgeJobOperation.MANAGED_UPDATE: handle_managed_publication,
             KnowledgeJobOperation.MANAGED_DELETE_CLEANUP: handle_managed_delete_cleanup,
             KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP: execute_managed_vector_cleanup,
+            KnowledgeJobOperation.EMBEDDING_MIGRATION: handle_embedding_migration,
+            KnowledgeJobOperation.OLD_COLLECTION_CLEANUP: handle_old_collection_cleanup,
         },
         session_factory=session_factory,
     )
@@ -406,6 +449,8 @@ def create_default_knowledge_job_executor(
 
 __all__ = [
     "create_default_knowledge_job_executor",
+    "handle_embedding_migration",
     "handle_managed_delete_cleanup",
     "handle_managed_publication",
+    "handle_old_collection_cleanup",
 ]

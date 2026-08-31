@@ -190,6 +190,7 @@ app/core/knowledge/
 ├── errors.py               # 托管知识领域异常
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
 ├── managed_container.py    # 按 Profile 懒创建/复用托管知识库并复制长期记忆当前嵌入运行态
+├── migration.py            # 知识库迁移期间的增量变更记录边界
 ├── recall.py               # 托管知识候选校验、去重与最终主数据还原
 └── results.py              # 托管知识领域操作结果与状态
 ```
@@ -200,6 +201,8 @@ Profile 的手工知识库绑定只管理 `USER` 类型；`LLM_MANAGED` 绑定�
 
 知识库运行时嵌入配置由 `knowledge_base_runtime.py` 统一解析。`active_*` 是当前生效配置，legacy 字段仅作旧数据回退。查询、写入、发布和清理必须使用同一解析结果；渠道与模型删除保护同时覆盖当前和目标迁移配置。
 
+用户知识库和托管知识库共用在线嵌入迁移引擎。迁移以关系数据库完整正文为事实源，先锁定快照边界并分页构建目标集合，迁移期间的关系数据变化写入单调增量日志；目标集合通过数量、标识、元数据、维度和抽样查询校验后，复用锁外最终计划并以增量水位作写入栅栏，在短事务内批量更新必要向量引用并切换 `active_*`，事务内不再全量读取或重新切分正文。旧集合清理成功前禁止开始下一次嵌入迁移，避免覆盖清理上下文；取消或失败不会改变当前生效集合。
+
 ### 知识作业：`app/core/knowledge_jobs/`
 
 ```text
@@ -209,6 +212,7 @@ app/core/knowledge_jobs/
 ├── consumer.py             # 作业消费、租约续期、恢复与重试
 ├── executor.py             # 租约栅栏与处理器执行器
 ├── handlers.py             # 托管知识异步嵌入、发布和删除清理
+├── migration.py            # 通用知识库嵌入迁移、校验、原子切换与旧集合清理
 └── vector_cleanup.py       # staged/superseded 向量的持久化独立清理作业
 ```
 
@@ -312,6 +316,7 @@ app/core/crud/
 ├── context_summary_stage.py # 上下文总结阶段数据访问
 ├── knowledge_base.py       # 知识库数据访问
 ├── knowledge_job.py        # 知识作业租约、重试与状态数据访问
+├── knowledge_embedding_migration.py  # 知识库在线嵌入迁移的快照、增量和向量标识数据访问
 ├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
 ├── log.py                  # 系统日志数据访问
 ├── message.py              # 消息数据访问
@@ -440,7 +445,7 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、用户文档、托管知识、版本历史与知识作业模型
+├── knowledge_base.py       # 知识库、用户文档、托管知识、迁移增量、版本历史与知识作业模型
 ├── memory.py               # 长期记忆模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型

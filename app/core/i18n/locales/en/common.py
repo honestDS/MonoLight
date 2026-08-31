@@ -24,6 +24,7 @@ MESSAGES = {
     "ERR_KB_FILE_ENCODING_ERROR": "Only UTF-8 or GBK encoded text documents are supported currently",
     "ERR_KB_VECTOR_WRITE_FAILED": "Failed to write to vector collection: {message}",
     "ERR_KB_DOC_SAVE_FAILED": "Failed to save document, vector chunks rolled back: {message}",
+    "ERR_KB_EMBEDDING_CONFIG_CHANGED": "The knowledge base embedding configuration just changed; please retry",
     "ERR_KB_CHUNK_OVERLAP_ERROR": "Chunk overlap must be less than chunk size",
     "ERR_KB_DENSE_RETRIEVAL_FAILED": "Knowledge base dense retrieval failed",
     "ERR_MANAGED_KNOWLEDGE_FIELD_REQUIRED": "Managed knowledge field {field} is required",

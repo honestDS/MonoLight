@@ -8,6 +8,7 @@ from .chroma import (
     async_get_collection,
     async_get_collection_items,
     async_get_or_create_collection,
+    async_query_collection,
     async_upsert_collection_items,
     async_validate_collection,
     create_collection,
@@ -24,6 +25,7 @@ from .chroma import (
     get_collection_items_async,
     get_or_create_collection,
     get_or_create_collection_async,
+    query_collection_async,
     upsert_collection_items_async,
     validate_collection_async,
 )
@@ -38,6 +40,7 @@ __all__ = [
     "async_get_collection",
     "async_get_collection_items",
     "async_get_or_create_collection",
+    "async_query_collection",
     "async_upsert_collection_items",
     "async_validate_collection",
     "create_collection",
@@ -54,6 +57,7 @@ __all__ = [
     "get_collection_items_async",
     "get_or_create_collection",
     "get_or_create_collection_async",
+    "query_collection_async",
     "upsert_collection_items_async",
     "validate_collection_async",
 ]

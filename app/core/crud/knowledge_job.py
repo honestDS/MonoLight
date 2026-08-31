@@ -33,6 +33,7 @@ _TERMINAL_STATUSES = {
 _SYSTEM_CLEANUP_OPERATIONS = {
     KnowledgeJobOperation.MANAGED_DELETE_CLEANUP,
     KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP,
+    KnowledgeJobOperation.OLD_COLLECTION_CLEANUP,
 }
 
 
@@ -67,6 +68,14 @@ class KnowledgeJobRecoveryResult:
     retried: int = 0
     failed: int = 0
     cancelled: int = 0
+    terminal_jobs: tuple[KnowledgeJobRecoveryTerminal, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeJobRecoveryTerminal:
+    job: KnowledgeJob
+    status: KnowledgeJobStatus
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,19 +96,11 @@ def _resolve_owner(owner: str | None, worker_id: str | None = None) -> str:
 
 class CRUDKnowledgeJob:
     async def get_by_id(self, db: AsyncSession, *, uid: str, job_id: int) -> KnowledgeJob | None:
-        result = await db.execute(
-            select(KnowledgeJob)
-            .where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id)
-            .execution_options(populate_existing=True)
-        )
+        result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_dedupe_key(self, db: AsyncSession, *, uid: str, dedupe_key: str) -> KnowledgeJob | None:
-        result = await db.execute(
-            select(KnowledgeJob)
-            .where(KnowledgeJob.uid == uid, KnowledgeJob.dedupe_key == dedupe_key)
-            .execution_options(populate_existing=True)
-        )
+        result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.dedupe_key == dedupe_key).execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def get_by_active_change_key(
@@ -195,6 +196,58 @@ class CRUDKnowledgeJob:
         else:
             await db.flush()
         return await self.get_by_id(db, uid=uid, job_id=job_id)
+
+    async def update_running_payload(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        job_id: int,
+        owner: str,
+        payload: dict[str, Any],
+        commit: bool = True,
+    ) -> KnowledgeJob | None:
+        now = await get_database_time(db)
+        result = await db.execute(
+            update(KnowledgeJob)
+            .where(
+                KnowledgeJob.uid == uid,
+                KnowledgeJob.id == job_id,
+                KnowledgeJob.status == KnowledgeJobStatus.RUNNING,
+                KnowledgeJob.locked_by == owner,
+                KnowledgeJob.lock_until >= now,
+                KnowledgeJob.cancel_requested_at.is_(None),
+            )
+            .values(payload=payload, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if (result.rowcount or 0) != 1:
+            return None
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return await self.get_by_id(db, uid=uid, job_id=job_id)
+
+    async def list_terminal_by_operation(
+        self,
+        db: AsyncSession,
+        *,
+        operation: KnowledgeJobOperation,
+        limit: int = 100,
+    ) -> list[KnowledgeJob]:
+        if limit <= 0:
+            return []
+        result = await db.execute(
+            select(KnowledgeJob)
+            .where(
+                KnowledgeJob.operation == operation,
+                KnowledgeJob.status.in_(_TERMINAL_STATUSES),
+            )
+            .order_by(KnowledgeJob.finished_at.desc(), KnowledgeJob.id.desc())
+            .limit(min(limit, 1000))
+        )
+        return list(result.scalars().all())
 
     async def list_claimable_for_worker(
         self,
@@ -511,6 +564,7 @@ class CRUDKnowledgeJob:
             )
         )
         retried = failed = cancelled = 0
+        terminal_jobs: list[KnowledgeJobRecoveryTerminal] = []
         for job in list(result.scalars().all()):
             if job.id is None or not job.locked_by or job.lock_until is None:
                 continue
@@ -519,6 +573,8 @@ class CRUDKnowledgeJob:
                 next_status = KnowledgeJobStatus.RETRY
             elif job.cancel_requested_at is not None:
                 next_status = KnowledgeJobStatus.CANCELLED
+            elif job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION:
+                next_status = KnowledgeJobStatus.RETRY
             elif job.attempt_count >= job.max_attempts:
                 next_status = KnowledgeJobStatus.FAILED
             else:
@@ -546,11 +602,7 @@ class CRUDKnowledgeJob:
                     KnowledgeJob.status == KnowledgeJobStatus.RUNNING,
                     KnowledgeJob.locked_by == job.locked_by,
                     KnowledgeJob.lock_until == job.lock_until,
-                    *(
-                        ()
-                        if next_status == KnowledgeJobStatus.CANCELLED or system_cleanup
-                        else (KnowledgeJob.cancel_requested_at.is_(None),)
-                    ),
+                    *(() if next_status == KnowledgeJobStatus.CANCELLED or system_cleanup else (KnowledgeJob.cancel_requested_at.is_(None),)),
                 )
                 .values(**values)
                 .execution_options(synchronize_session=False)
@@ -559,6 +611,13 @@ class CRUDKnowledgeJob:
                 continue
             if next_status in _TERMINAL_STATUSES:
                 await self._clear_pending_reference(db, uid=job.uid, job_id=job.id, updated_at=now)
+                terminal_jobs.append(
+                    KnowledgeJobRecoveryTerminal(
+                        job=job,
+                        status=next_status,
+                        error=values.get("error"),
+                    )
+                )
             if next_status == KnowledgeJobStatus.RETRY:
                 retried += 1
             elif next_status == KnowledgeJobStatus.FAILED:
@@ -569,7 +628,12 @@ class CRUDKnowledgeJob:
             await db.commit()
         else:
             await db.flush()
-        return KnowledgeJobRecoveryResult(retried=retried, failed=failed, cancelled=cancelled)
+        return KnowledgeJobRecoveryResult(
+            retried=retried,
+            failed=failed,
+            cancelled=cancelled,
+            terminal_jobs=tuple(terminal_jobs),
+        )
 
     async def request_cancel(
         self,
@@ -652,11 +716,7 @@ class CRUDKnowledgeJob:
             )
 
         current = await self.get_by_id(db, uid=uid, job_id=job_id)
-        if (
-            current is not None
-            and current.status == KnowledgeJobStatus.RUNNING
-            and current.cancel_requested_at is not None
-        ):
+        if current is not None and current.status == KnowledgeJobStatus.RUNNING and current.cancel_requested_at is not None:
             return KnowledgeJobCancelResult(job=current, accepted=True, changed=False)
         return KnowledgeJobCancelResult(job=current, accepted=False, changed=False)
 
@@ -674,7 +734,7 @@ class CRUDKnowledgeJob:
         job = await self.get_by_id(db, uid=uid, job_id=job_id)
         if job is None or job.status != KnowledgeJobStatus.RUNNING or job.locked_by != owner:
             return False
-        if is_system_cleanup_operation(job.operation):
+        if is_system_cleanup_operation(job.operation) or (job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and job.cancel_requested_at is None):
             now = await get_database_time(db)
             result = await db.execute(
                 update(KnowledgeJob)
@@ -748,6 +808,7 @@ knowledge_job_crud = CRUDKnowledgeJob()
 __all__ = [
     "KnowledgeJobCancelResult",
     "KnowledgeJobRecoveryResult",
+    "KnowledgeJobRecoveryTerminal",
     "is_system_cleanup_operation",
     "knowledge_job_crud",
 ]
