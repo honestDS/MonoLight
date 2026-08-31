@@ -4,7 +4,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, func, select
 
-from app.core.crud.context_summary_stage import (
+from app.core.crud.context_summary.stage import (
     build_context_summary_fragment_dedupe_key,
     context_summary_fragment_crud,
     context_summary_stage_crud,

@@ -4,8 +4,8 @@ from contextlib import suppress
 from typing import Any
 
 from app.core.constants import ERR_MESSAGE_PLATFORM_EVENT_NOT_SENT
-from app.core.crud.message_platform import message_platform_crud
-from app.core.crud.message_platform_outbox import message_platform_outbox_crud
+from app.core.crud.message_platform.outbox import message_platform_outbox_crud
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.base import MessagePlatformHandler

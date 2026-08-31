@@ -2,10 +2,10 @@ import asyncio
 import uuid
 
 from app.core.constants import ERR_SESSION_REPLY_AUDIT_EXECUTION_UNKNOWN
-from app.core.crud.profile import profile_crud
-from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale

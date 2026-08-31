@@ -1,6 +1,6 @@
 from app.core.constants import ERR_BACKGROUND_TASK_LEASE_MAX_ATTEMPTS_EXCEEDED
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.providers.database import AsyncSessionLocal
 

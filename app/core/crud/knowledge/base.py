@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 from sqlalchemy import and_, delete, func, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -11,6 +12,7 @@ from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseCollectionOwner,
     KnowledgeBaseCreate,
+    KnowledgeBaseDocument,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseProfileBinding,
     KnowledgeBaseType,
@@ -19,6 +21,38 @@ from app.models.knowledge_base import (
 
 
 class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBaseUpdate]):
+    async def list_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str | None,
+        skip: int,
+        limit: int,
+    ) -> tuple[list[KnowledgeBase], int]:
+        conditions = () if uid is None else (KnowledgeBase.uid == uid,)
+        result = await db.execute(select(KnowledgeBase).where(*conditions).order_by(KnowledgeBase.created_at.desc()).offset(skip).limit(limit))
+        total_result = await db.execute(select(func.count()).select_from(KnowledgeBase).where(*conditions))
+        return list(result.scalars().all()), int(total_result.scalar() or 0)
+
+    async def list_user_by_ids(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_ids: Iterable[int],
+    ) -> list[KnowledgeBase]:
+        ids = tuple(dict.fromkeys(knowledge_base_ids))
+        if not ids:
+            return []
+        result = await db.execute(
+            select(KnowledgeBase).where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.id.in_(ids),
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.USER,
+            )
+        )
+        return list(result.scalars().all())
+
     async def get_managed_by_profile(
         self,
         db: AsyncSession,
@@ -42,7 +76,7 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
         uid: str,
         profile_id: int,
     ) -> KnowledgeBase | None:
-        result = await db.execute(
+        await db.execute(
             update(KnowledgeBase)
             .where(
                 KnowledgeBase.uid == uid,
@@ -52,8 +86,6 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
             .values(updated_at=KnowledgeBase.updated_at)
             .execution_options(synchronize_session=False)
         )
-        if (result.rowcount or 0) != 1:
-            return None
         await db.flush()
         refreshed = await db.execute(
             select(KnowledgeBase)
@@ -62,9 +94,51 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
                 KnowledgeBase.managed_profile_id == profile_id,
                 KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
             )
+            .with_for_update()
             .execution_options(populate_existing=True)
         )
         return refreshed.scalars().first()
+
+    async def lock_owned_by_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> KnowledgeBase | None:
+        await db.execute(
+            update(KnowledgeBase)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.id == knowledge_base_id,
+            )
+            .values(updated_at=KnowledgeBase.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        await db.flush()
+        result = await db.execute(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.id == knowledge_base_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalars().first()
+
+    async def delete_locked(
+        self,
+        db: AsyncSession,
+        *,
+        knowledge_base: KnowledgeBase,
+        commit: bool = True,
+    ) -> None:
+        await db.delete(knowledge_base)
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
 
     async def mark_managed_initial_index_ready(
         self,
@@ -141,6 +215,21 @@ knowledge_base_crud = CRUDKnowledgeBase(KnowledgeBase)
 
 
 class CRUDKnowledgeBaseProfileBinding:
+    async def list_profile_ids_by_knowledge_base(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> list[int]:
+        result = await db.execute(
+            select(KnowledgeBaseProfileBinding.profile_id).where(
+                KnowledgeBaseProfileBinding.uid == uid,
+                KnowledgeBaseProfileBinding.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return list(result.scalars().all())
+
     async def list_user_knowledge_bases_by_profile(
         self,
         db: AsyncSession,
@@ -231,11 +320,157 @@ class CRUDKnowledgeBaseProfileBinding:
         await db.refresh(binding)
         return binding
 
+    async def delete_user_by_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        commit: bool = False,
+    ) -> int:
+        user_knowledge_base_ids = select(KnowledgeBase.id).where(
+            KnowledgeBase.uid == uid,
+            KnowledgeBase.knowledge_base_type == KnowledgeBaseType.USER,
+        )
+        result = await db.execute(
+            delete(KnowledgeBaseProfileBinding).where(
+                KnowledgeBaseProfileBinding.uid == uid,
+                KnowledgeBaseProfileBinding.profile_id == profile_id,
+                KnowledgeBaseProfileBinding.knowledge_base_id.in_(user_knowledge_base_ids),
+            )
+        )
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return int(result.rowcount or 0)
+
 
 knowledge_base_profile_binding_crud = CRUDKnowledgeBaseProfileBinding()
 
 
+class CRUDKnowledgeBaseDocument:
+    async def create(
+        self,
+        db: AsyncSession,
+        *,
+        values: dict,
+        commit: bool = True,
+    ) -> KnowledgeBaseDocument:
+        document = KnowledgeBaseDocument.model_validate(values)
+        db.add(document)
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        await db.refresh(document)
+        return document
+
+    async def list_page(
+        self,
+        db: AsyncSession,
+        *,
+        knowledge_base_id: int,
+        skip: int,
+        limit: int,
+    ) -> tuple[list[KnowledgeBaseDocument], int]:
+        condition = KnowledgeBaseDocument.knowledge_base_id == knowledge_base_id
+        result = await db.execute(select(KnowledgeBaseDocument).where(condition).order_by(KnowledgeBaseDocument.created_at.desc()).offset(skip).limit(limit))
+        total_result = await db.execute(select(func.count()).select_from(KnowledgeBaseDocument).where(condition))
+        return list(result.scalars().all()), int(total_result.scalar() or 0)
+
+    async def get_by_knowledge_base(
+        self,
+        db: AsyncSession,
+        *,
+        knowledge_base_id: int,
+        document_id: int,
+    ) -> KnowledgeBaseDocument | None:
+        result = await db.execute(
+            select(KnowledgeBaseDocument).where(
+                KnowledgeBaseDocument.id == document_id,
+                KnowledgeBaseDocument.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return result.scalars().first()
+
+    async def delete(
+        self,
+        db: AsyncSession,
+        *,
+        document: KnowledgeBaseDocument,
+        commit: bool = True,
+    ) -> None:
+        await db.delete(document)
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+
+
+knowledge_base_document_crud = CRUDKnowledgeBaseDocument()
+
+
 class CRUDKnowledgeBaseCollectionOwner:
+    async def requeue_orphan(
+        self,
+        db: AsyncSession,
+        *,
+        collection_name: str,
+        commit: bool = True,
+    ) -> int:
+        name = collection_name.strip()
+        if not name:
+            raise ValueError(t(ERR_KB_COLLECTION_OWNER_CONFLICT, collection_name=collection_name))
+
+        async def bump_existing() -> int | None:
+            result = await db.execute(
+                update(KnowledgeBaseCollectionOwner)
+                .where(
+                    KnowledgeBaseCollectionOwner.collection_name == name,
+                    KnowledgeBaseCollectionOwner.knowledge_base_id.is_(None),
+                )
+                .values(
+                    cleanup_revision=KnowledgeBaseCollectionOwner.cleanup_revision + 1,
+                    cleanup_attempt_count=0,
+                    cleanup_error=None,
+                    updated_at=func.now(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if (result.rowcount or 0) != 1:
+                return None
+            revision = await db.scalar(
+                select(KnowledgeBaseCollectionOwner.cleanup_revision).where(
+                    KnowledgeBaseCollectionOwner.collection_name == name,
+                    KnowledgeBaseCollectionOwner.knowledge_base_id.is_(None),
+                )
+            )
+            return int(revision) if revision is not None else None
+
+        revision = await bump_existing()
+        if revision is None:
+            try:
+                async with db.begin_nested():
+                    owner = KnowledgeBaseCollectionOwner(
+                        collection_name=name,
+                        knowledge_base_id=None,
+                        cleanup_revision=1,
+                    )
+                    db.add(owner)
+                    await db.flush()
+                    revision = owner.cleanup_revision
+            except IntegrityError:
+                revision = await bump_existing()
+                if revision is None:
+                    raise ValueError(t(ERR_KB_COLLECTION_OWNER_CONFLICT, collection_name=name))
+
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
+        return revision
+
     async def enqueue(
         self,
         db: AsyncSession,
@@ -289,12 +524,14 @@ class CRUDKnowledgeBaseCollectionOwner:
         db: AsyncSession,
         *,
         collection_name: str,
+        expected_revision: int,
         commit: bool = True,
     ) -> bool:
         result = await db.execute(
             delete(KnowledgeBaseCollectionOwner).where(
                 KnowledgeBaseCollectionOwner.collection_name == collection_name,
                 KnowledgeBaseCollectionOwner.knowledge_base_id.is_(None),
+                KnowledgeBaseCollectionOwner.cleanup_revision == expected_revision,
             )
         )
         if commit:
@@ -307,6 +544,7 @@ class CRUDKnowledgeBaseCollectionOwner:
         db: AsyncSession,
         *,
         collection_name: str,
+        expected_revision: int,
         error: str,
         commit: bool = True,
     ) -> bool:
@@ -315,6 +553,7 @@ class CRUDKnowledgeBaseCollectionOwner:
             .where(
                 KnowledgeBaseCollectionOwner.collection_name == collection_name,
                 KnowledgeBaseCollectionOwner.knowledge_base_id.is_(None),
+                KnowledgeBaseCollectionOwner.cleanup_revision == expected_revision,
             )
             .values(
                 cleanup_attempt_count=KnowledgeBaseCollectionOwner.cleanup_attempt_count + 1,

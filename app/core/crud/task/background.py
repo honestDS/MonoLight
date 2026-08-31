@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.constants import ERR_BACKGROUND_TASK_CANCELLED_BEFORE_EXECUTION, ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
-from app.core.crud.audit import audit_crud
+from app.core.crud.audit.audit import audit_crud
 from app.core.crud.base import CRUDBase
 from app.core.i18n import t
 from app.core.utils.background_task_result import build_background_task_failure_result

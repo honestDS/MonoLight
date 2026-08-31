@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.utils.context_messages import is_context_summary_message
 from app.core.utils.context_summary import ContextSummaryTriggerMode, ensure_context_summary
 from app.core.utils.context_summary.common import ContextSummaryWorkValidityChecker

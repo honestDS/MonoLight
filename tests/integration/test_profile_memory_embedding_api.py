@@ -10,9 +10,9 @@ from sqlmodel import SQLModel, select
 
 import app.core.crypto as crypto_module
 from app.api.v1.profile import router
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.store import memory_store_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.memory import embedding_config as embedding_service
 from app.core.security import get_current_user

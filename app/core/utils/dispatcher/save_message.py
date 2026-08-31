@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.audit.integrity import canonical_json_dumps
-from app.core.crud.message import (
+from app.core.crud.session.message import (
     message_crud,
 )
 from app.models.message import (

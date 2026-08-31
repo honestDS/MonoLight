@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.constants import ERR_PROFILE_NOT_FOUND
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (

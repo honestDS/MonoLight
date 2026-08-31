@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from app.core.constants import MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.knowledge.managed import (
     ManagedKnowledgeConflictError,
     ManagedKnowledgeContentTooLongError,

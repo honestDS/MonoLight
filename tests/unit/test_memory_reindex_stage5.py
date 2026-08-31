@@ -22,9 +22,9 @@ class _ImportSafePersistentClient:
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.constants import ERR_MEMORY_MAINTENANCE_STATE_CONFLICT
-    from app.core.crud.memory import memory_store_crud
-    from app.core.crud.memory_job import memory_job_crud
-    from app.core.crud.memory_maintenance import memory_maintenance_job_crud
+    from app.core.crud.memory.job import memory_job_crud
+    from app.core.crud.memory.maintenance import memory_maintenance_job_crud
+    from app.core.crud.memory.store import memory_store_crud
     from app.core.memory import submit_memory_reindex
     from app.core.memory.errors import MemoryConflictError
     from app.core.memory_jobs import reindex_handler

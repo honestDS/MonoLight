@@ -15,7 +15,7 @@ from app.core.constants import (
     ERR_PROFILE_EMBEDDING_CHANNEL_NOT_FOUND,
     ERR_PROFILE_NO_EMBEDDING_MODEL,
 )
-from app.core.crud.channel import channel_crud
+from app.core.crud.channel.channel import channel_crud
 from app.core.i18n import t
 from app.core.utils.http_proxy import get_channel_http_proxy
 from app.core.utils.model_request_headers import get_model_custom_headers

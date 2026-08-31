@@ -9,7 +9,7 @@ from app.core.constants import (
     ERR_CHAT_CONTEXT_BUDGET_EXHAUSTED,
     ERR_CHAT_INPUT_TOO_LONG,
 )
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.log import get_logger

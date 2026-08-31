@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.models.channel import ChannelModelItem, ModelUsage
 
 # 渠道用途映射：统一定义，避免重复

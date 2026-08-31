@@ -165,7 +165,8 @@ import {
 } from '../utils/memoryManagement'
 import {
   buildKnowledgeBaseBindingPayload,
-  filterKnowledgeBaseIdsForOwner
+  filterKnowledgeBaseIdsForOwner,
+  filterUserKnowledgeBasesForOwner
 } from '../utils/profileOptions'
 
 const { t } = useI18n()
@@ -285,8 +286,7 @@ const memoryOrganizationModel = computed(() => memoryOrganizationModels.value.fi
   String(model.model_id) === String(form.memory_organization.organization_model_id)
 )) || null)
 
-const knowledgeBaseOptions = computed(() => knowledgeBases.value
-  .filter(item => !form.uid || item.uid === form.uid)
+const knowledgeBaseOptions = computed(() => filterUserKnowledgeBasesForOwner(knowledgeBases.value, form.uid)
   .map(item => ({
     value: item.id,
     label: item.name,

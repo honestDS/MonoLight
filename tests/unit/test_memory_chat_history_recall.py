@@ -7,7 +7,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.memory import chat_history as chat_history_module
 from app.models.message import Message, MessageRole, MessageType
 

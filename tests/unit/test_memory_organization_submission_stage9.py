@@ -21,9 +21,9 @@ from app.core.constants import (
     ERR_MEMORY_ORGANIZATION_MODEL_CONFIG_INVALID,
     ERR_MEMORY_ORGANIZATION_MODEL_NOT_CONFIGURED,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import memory_record_crud, memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud, memory_store_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.memory import (

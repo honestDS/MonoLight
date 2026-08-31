@@ -19,9 +19,7 @@ _PROFILE_NON_PERSISTED_FIELDS = {
 
 class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
     async def count_by_uid(self, db: AsyncSession, *, uid: str | None) -> int:
-        result = await db.execute(
-            select(func.count()).select_from(Profile).where(Profile.uid == uid)
-        )
+        result = await db.execute(select(func.count()).select_from(Profile).where(Profile.uid == uid))
         return int(result.scalar() or 0)
 
     async def lock_for_runtime_use(
@@ -31,20 +29,9 @@ class CRUDProfile(CRUDBase[Profile, ProfileCreate, ProfileUpdate]):
         profile_id: int,
         uid: str | None,
     ) -> Profile | None:
-        locked = await db.execute(
-            update(Profile)
-            .where(Profile.id == profile_id, Profile.uid == uid)
-            .values(name=Profile.name)
-            .execution_options(synchronize_session=False)
-        )
-        if (locked.rowcount or 0) != 1:
-            return None
+        await db.execute(update(Profile).where(Profile.id == profile_id, Profile.uid == uid).values(name=Profile.name).execution_options(synchronize_session=False))
         await db.flush()
-        result = await db.execute(
-            select(Profile)
-            .where(Profile.id == profile_id, Profile.uid == uid)
-            .execution_options(populate_existing=True)
-        )
+        result = await db.execute(select(Profile).where(Profile.id == profile_id, Profile.uid == uid).with_for_update().execution_options(populate_existing=True))
         return result.scalars().first()
 
     async def delete_locked(

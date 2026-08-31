@@ -38,10 +38,10 @@ from app.core.constants import (
     MSG_SESSION_UPDATED,
     MSG_TITLE_GENERATED,
 )
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.message import message_crud
-from app.core.crud.session import session_crud
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.system.setting import system_setting_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.dispatcher import ChatDispatcher, format_exception_message
 from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
 from app.core.i18n import t

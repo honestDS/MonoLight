@@ -6,7 +6,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem
+from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem
 from app.models.message import Message, MessageRole, MessageType
 from app.models.profile import Profile
 from app.models.session import ChatSession

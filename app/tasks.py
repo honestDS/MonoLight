@@ -11,8 +11,8 @@ from app.core.constants import (
     MSG_LOG_CLEANER_CLEARED,
     MSG_TEMP_CLEANER_CLEARED,
 )
-from app.core.crud.log import system_log_crud
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.system.log import system_log_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import TEMP_DIR

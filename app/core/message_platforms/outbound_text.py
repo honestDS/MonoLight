@@ -7,9 +7,9 @@ from types import MappingProxyType
 from typing import Any
 
 from app.core.constants import ERR_WEIXIN_OPENCLAW_OUTBOUND_TEXT_FALLBACK_TOO_LONG
-from app.core.crud.message import message_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.session import session_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.assistant_files import parse_assistant_files_content

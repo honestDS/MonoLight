@@ -11,7 +11,7 @@ from app.core.constants import (
     MSG_MESSAGE_PLATFORM_TOOL_USED,
     MSG_WEIXIN_OPENCLAW_OUTBOUND_TEXT_REFINEMENT_FAILED,
 )
-from app.core.crud.message_platform_outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
+from app.core.crud.message_platform.outbox import OUTBOX_LEASE_SECONDS, calculate_retry_delay_seconds, message_platform_outbox_crud
 from app.core.i18n import message_platform_t, t
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.message_platforms import notifier as notifier_module

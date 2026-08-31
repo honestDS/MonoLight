@@ -3,7 +3,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.message_platform import message_platform_crud
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.models.message_platform import MessagePlatform, MessagePlatformType
 
 

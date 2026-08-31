@@ -12,7 +12,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_USER_TRIGGER_BOUNDARY_INVALID,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.models.message import Message, MessageRole, MessageType
 

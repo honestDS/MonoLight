@@ -10,7 +10,7 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_POSITIVE,
     MEMORY_CHAT_HISTORY_RECALL_CANDIDATE_LIMIT,
 )
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.retrieval.schemas import RetrievalChunk, RetrievalHit
 from app.core.retrieval.sparse import bm25_search

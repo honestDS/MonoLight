@@ -10,7 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
 from app.core.knowledge_jobs.manager import knowledge_job_manager
@@ -315,7 +315,9 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
                             KnowledgeBase.managed_profile_id == profile_id,
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             assert len(bases) == 1
             collection_names.extend(
@@ -330,32 +332,23 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
             )
             knowledge_base_id = bases[0].id
             assert knowledge_base_id is not None
-            assert await verify_session.scalar(
-                select(func.count()).select_from(KnowledgeBaseProfileBinding).where(
-                    KnowledgeBaseProfileBinding.knowledge_base_id == knowledge_base_id,
-                    KnowledgeBaseProfileBinding.profile_id == profile_id,
+            assert (
+                await verify_session.scalar(
+                    select(func.count())
+                    .select_from(KnowledgeBaseProfileBinding)
+                    .where(
+                        KnowledgeBaseProfileBinding.knowledge_base_id == knowledge_base_id,
+                        KnowledgeBaseProfileBinding.profile_id == profile_id,
+                    )
                 )
-            ) == 1
-            assert await verify_session.scalar(
-                select(func.count()).select_from(ManagedKnowledgeItem).where(
-                    ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id
-                )
-            ) == 2
-            assert await verify_session.scalar(
-                select(func.count()).select_from(KnowledgeJob).where(
-                    KnowledgeJob.knowledge_base_id == knowledge_base_id
-                )
-            ) == 2
+                == 1
+            )
+            assert await verify_session.scalar(select(func.count()).select_from(ManagedKnowledgeItem).where(ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id)) == 2
+            assert await verify_session.scalar(select(func.count()).select_from(KnowledgeJob).where(KnowledgeJob.knowledge_base_id == knowledge_base_id)) == 2
     finally:
         if schema_ready:
             async with session_factory() as cleanup_session:
-                bases = list(
-                    (
-                        await cleanup_session.execute(
-                            select(KnowledgeBase).where(KnowledgeBase.uid == uid)
-                        )
-                    ).scalars().all()
-                )
+                bases = list((await cleanup_session.execute(select(KnowledgeBase).where(KnowledgeBase.uid == uid))).scalars().all())
                 for base in bases:
                     collection_names.extend(
                         name
@@ -370,11 +363,7 @@ async def test_managed_knowledge_first_writes_converge_to_one_container_under_my
                 await cleanup_session.execute(delete(LongTermMemoryStore).where(LongTermMemoryStore.uid == uid))
                 await cleanup_session.execute(delete(KnowledgeBase).where(KnowledgeBase.uid == uid))
                 if collection_names:
-                    await cleanup_session.execute(
-                        delete(KnowledgeBaseCollectionOwner).where(
-                            KnowledgeBaseCollectionOwner.collection_name.in_(set(collection_names))
-                        )
-                    )
+                    await cleanup_session.execute(delete(KnowledgeBaseCollectionOwner).where(KnowledgeBaseCollectionOwner.collection_name.in_(set(collection_names))))
                 if profile_id is not None:
                     await cleanup_session.execute(delete(Profile).where(Profile.id == profile_id))
                 if prompt_id is not None:

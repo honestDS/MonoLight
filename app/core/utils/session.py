@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.channel_router import select_channel
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE, ERR_NO_VALID_CHANNEL, ERR_SESSION_NO_PERMISSION, ERR_SESSION_READ_ONLY
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import BaseBusinessException, ForbiddenException, LLMException
 from app.core.i18n import t
 from app.core.log import channel_log_extra, get_logger

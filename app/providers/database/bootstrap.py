@@ -16,10 +16,10 @@ from app.core.constants import (
     ERR_MIGRATION_SCRIPT_INVALID,
     SETUP_STATUS_COMPLETED,
 )
-from app.core.crud.profile import profile_crud
-from app.core.crud.prompt import prompt_crud
-from app.core.crud.system_setting import system_setting_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.models.profile import (
     ProfileConfig,

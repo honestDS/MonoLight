@@ -14,9 +14,9 @@ from app.core.audit.persistence import persist_prepared_audit_round
 from app.core.audit.startup import recover_and_cleanup_audit_data
 from app.core.audit.storage import AuditCleanupResult
 from app.core.constants import ERR_AUDIT_CONFIRMATION_REJECTED_BY_USER
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.message import message_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.audit import (

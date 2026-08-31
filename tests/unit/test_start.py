@@ -32,7 +32,7 @@ def test_system_runtime_settings_reserves_audit_report_email():
 @pytest.mark.asyncio
 async def test_initialize_system_runs_audit_cleanup_once(monkeypatch):
     from app.core.audit import startup as audit_startup_module
-    from app.core.crud import system_setting as system_setting_module
+    from app.core.crud.system import setting as system_setting_module
     from app.providers import database as database_module
     from app.providers.database import bootstrap as bootstrap_module
 

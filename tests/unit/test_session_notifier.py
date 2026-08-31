@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import delete
 from sqlmodel import select
 
-from app.core.crud.session_event import session_event_crud
+from app.core.crud.session.event import session_event_crud
 from app.core.session_notifier import SessionNotifier, build_session_event_dedupe_key
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession

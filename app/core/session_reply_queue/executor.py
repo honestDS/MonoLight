@@ -34,15 +34,15 @@ from app.core.constants import (
     ERR_TOOL_ROUND_PRECHECK_FAILED,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.message import message_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.session import session_crud
-from app.core.crud.session_reply_provider_usage import session_reply_provider_usage_crud
-from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
-from app.core.crud.terminal_session import terminal_session_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_provider_usage import session_reply_provider_usage_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.background import background_task_crud
+from app.core.crud.terminal.session import terminal_session_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.i18n import get_current_locale, t
 from app.core.message_platforms.notifier import send_session_event, send_session_stream_event

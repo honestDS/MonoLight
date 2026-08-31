@@ -12,7 +12,7 @@ from app.core.constants import (
     ERR_TOOL_SHELL_BLACKLISTED,
     ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
 )
-from app.core.crud.audit import audit_crud
+from app.core.crud.audit.audit import audit_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir

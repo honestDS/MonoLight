@@ -8,9 +8,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_PROFILE_NOT_FOUND, MSG_MANAGED_KNOWLEDGE_BASE_DEFAULT_NAME
-from app.core.crud.knowledge_base import knowledge_base_crud, knowledge_base_profile_binding_crud
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.knowledge.base import knowledge_base_crud, knowledge_base_profile_binding_crud
+from app.core.crud.memory.store import memory_store_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import load_embedding_runtime_config
 from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import t
@@ -105,9 +105,7 @@ async def _lock_memory_embedding_channel(
     *,
     uid: str,
 ) -> tuple[_MemoryEmbeddingSnapshot, int | None]:
-    initial = _memory_embedding_snapshot(
-        await memory_store_crud.get_snapshot_by_uid(db, uid=uid)
-    )
+    initial = _memory_embedding_snapshot(await memory_store_crud.get_snapshot_by_uid(db, uid=uid))
     try:
         runtime_config = await load_embedding_runtime_config(
             db,
@@ -127,9 +125,7 @@ async def _lock_current_memory_embedding(
     expected: _MemoryEmbeddingSnapshot,
     declared_dimensions: int | None,
 ) -> _MemoryEmbeddingSnapshot:
-    current = _memory_embedding_snapshot(
-        await memory_store_crud.lock_for_mutation(db, uid=uid, commit=False)
-    )
+    current = _memory_embedding_snapshot(await memory_store_crud.lock_for_mutation(db, uid=uid, commit=False))
     if current != expected:
         raise ManagedKnowledgeContainerConflictError()
     if declared_dimensions is not None and declared_dimensions != current.dimensions:
@@ -170,12 +166,15 @@ async def _ensure_profile_binding(
     except IntegrityError as exc:
         if not _is_profile_binding_unique_error(exc):
             raise
-        if await knowledge_base_profile_binding_crud.lock(
-            db,
-            uid=uid,
-            knowledge_base_id=knowledge_base_id,
-            profile_id=profile_id,
-        ) is None:
+        if (
+            await knowledge_base_profile_binding_crud.lock(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+                profile_id=profile_id,
+            )
+            is None
+        ):
             raise ManagedKnowledgeContainerConflictError() from exc
 
 
@@ -186,11 +185,7 @@ async def get_or_create_managed_knowledge_base(
     profile_id: int,
 ) -> ManagedKnowledgeContainerResult:
     profile_snapshot = await profile_crud.get_snapshot(db, profile_id)
-    if (
-        profile_snapshot is None
-        or profile_snapshot.uid != uid
-        or profile_snapshot.id is None
-    ):
+    if profile_snapshot is None or profile_snapshot.uid != uid or profile_snapshot.id is None:
         raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
 
     existing = await knowledge_base_crud.get_managed_by_profile(
@@ -206,6 +201,13 @@ async def get_or_create_managed_knowledge_base(
         )
         if profile is None or profile.id is None:
             raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+        existing = await knowledge_base_crud.lock_managed_by_profile(
+            db,
+            uid=uid,
+            profile_id=profile_id,
+        )
+        if existing is None:
+            raise ManagedKnowledgeContainerConflictError()
         if existing.id is None:
             raise ManagedKnowledgeContainerConflictError()
         await _ensure_profile_binding(

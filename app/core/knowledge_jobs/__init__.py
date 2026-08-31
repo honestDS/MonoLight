@@ -19,6 +19,10 @@ from app.core.knowledge_jobs.manager import (
     ProfileKnowledgeJobSubmissionResult,
     knowledge_job_manager,
 )
+from app.core.knowledge_jobs.migration import (
+    cancel_knowledge_base_embedding_migration,
+    prepare_knowledge_base_embedding_migration,
+)
 
 __all__ = [
     "KnowledgeJobCancelledError",
@@ -36,7 +40,9 @@ __all__ = [
     "KnowledgeJobTargetBusyError",
     "KnowledgeJobValidationError",
     "ProfileKnowledgeJobSubmissionResult",
+    "cancel_knowledge_base_embedding_migration",
     "create_default_knowledge_job_executor",
     "create_knowledge_job_consumer",
     "knowledge_job_manager",
+    "prepare_knowledge_base_embedding_migration",
 ]
