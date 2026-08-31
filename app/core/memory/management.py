@@ -17,13 +17,13 @@ from app.core.constants import (
     MEMORY_MAX_ACTIVE_RECORDS,
     MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.memory.errors import MemoryConflictError, MemoryNotFoundError, MemoryValidationError
 from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory.maintenance import submit_memory_reindex

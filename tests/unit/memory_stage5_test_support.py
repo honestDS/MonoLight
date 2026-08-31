@@ -5,8 +5,8 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.crud.memory import memory_record_crud, memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud, memory_store_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.utils.time import get_local_time
 from app.models.memory import (

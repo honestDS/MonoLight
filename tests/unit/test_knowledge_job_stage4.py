@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.core import knowledge_base_collection_cleanup as collection_cleanup_service
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import BaseBusinessException
 from app.core.knowledge.managed import managed_knowledge_service

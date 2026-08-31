@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.managed_knowledge import (
+from app.core.crud.knowledge.managed import (
     ManagedKnowledgeRecallState,
     managed_knowledge_item_crud,
 )

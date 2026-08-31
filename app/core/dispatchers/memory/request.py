@@ -4,7 +4,7 @@ from typing import Any
 from app.core.channel_router import select_channel
 from app.core.constants import CONTEXT_WINDOW_TOKENS_PER_K
 from app.core.context import ContextManager
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.prompts import LONGTERM_MEMORY_RECALL_CORRECTION_PROMPT
 from app.core.tools.longterm_memory import (
     MANAGE_LONGTERM_MEMORY_TOOL_NAME,

@@ -16,13 +16,13 @@ from app.core.constants import (
     ERR_PROFILE_MEMORY_SELECTION_INVALID,
     ERR_PROFILE_MEMORY_SELECTION_STALE,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_embedding_selection_token_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.memory import embedding_config as embedding_service

@@ -7,9 +7,9 @@ from typing import Any
 
 from app.core.audit.confirmation import update_confirmation_message_status
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN, ERR_BACKGROUND_TASK_PROFILE_UNAVAILABLE, ERR_TOOL_NOT_REGISTERED
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.dispatch_context import build_background_dispatch_context
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t

@@ -27,13 +27,13 @@ from app.core.constants import (
     MSG_KB_UNNAMED_DOCUMENT,
     MSG_KB_UPDATED,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.knowledge_base import (
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.knowledge.base import (
     knowledge_base_crud,
     knowledge_base_document_crud,
     knowledge_base_profile_binding_crud,
 )
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, load_embedding_runtime_config
 
 # Re-use the refactored embedding and knowledge base query core functions

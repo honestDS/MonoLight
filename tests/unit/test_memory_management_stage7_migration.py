@@ -27,8 +27,8 @@ class _ImportSafePersistentClient:
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
     from app.core.constants import ERR_MEMORY_MIGRATION_NOT_FOUND
-    from app.core.crud.memory import memory_embedding_revision_crud, memory_store_crud
-    from app.core.crud.memory_job import memory_job_crud
+    from app.core.crud.memory.job import memory_job_crud
+    from app.core.crud.memory.store import memory_embedding_revision_crud, memory_store_crud
     from app.core.memory import (
         MemoryNotFoundError,
         cancel_embedding_migration,

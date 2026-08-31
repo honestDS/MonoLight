@@ -1,7 +1,7 @@
 import json
 
 from app.core.constants import ERR_BACKGROUND_TASK_DB_CONTEXT_UNAVAILABLE, MSG_BACKGROUND_TASK_LIST_SUCCESS
-from app.core.crud.background_task import background_task_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse
 

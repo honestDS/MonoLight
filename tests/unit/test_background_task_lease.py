@@ -5,7 +5,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.background_task import background_task_crud
+from app.core.crud.task.background import background_task_crud
 from app.models.background_task import BackgroundTask, BackgroundTaskReplyStatus, BackgroundTaskStatus
 from app.providers.database import AsyncSessionLocal
 from app.providers.database.time import get_database_timestamp

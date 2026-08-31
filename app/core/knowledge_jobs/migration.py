@@ -19,12 +19,12 @@ from app.core.constants import (
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_OVERLAP,
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_SIZE,
 )
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.knowledge_embedding_migration import (
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.embedding_transition import (
     KnowledgeMigrationSnapshotRecord,
     knowledge_base_migration_crud,
 )
-from app.core.crud.knowledge_job import KnowledgeJobCancelResult, knowledge_job_crud
+from app.core.crud.knowledge.job import KnowledgeJobCancelResult, knowledge_job_crud
 from app.core.embedding.common import (
     embed_texts_with_config,
     load_embedding_runtime_config,

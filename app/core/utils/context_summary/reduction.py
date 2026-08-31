@@ -21,7 +21,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_STAGE_NOT_REDUCED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
-from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.i18n import t
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT, CONTEXT_SUMMARY_PROMPT
 from app.core.utils.context_summary.common import (

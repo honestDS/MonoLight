@@ -16,9 +16,9 @@ class _ImportSafePersistentClient:
 
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
-    from app.core.crud.memory import memory_embedding_revision_crud, memory_store_crud
-    from app.core.crud.memory_job import memory_job_crud
-    from app.core.crud.memory_maintenance import memory_maintenance_store_crud
+    from app.core.crud.memory.job import memory_job_crud
+    from app.core.crud.memory.maintenance import memory_maintenance_store_crud
+    from app.core.crud.memory.store import memory_embedding_revision_crud, memory_store_crud
     from app.core.memory_jobs.consumer import MemoryJobConsumer
     from app.core.memory_jobs.executor import MemoryJobExecutor
     from app.core.memory_jobs.maintenance_lifecycle import finalize_maintenance_terminal_state

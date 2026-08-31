@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_KB_NOT_FOUND
-from app.core.crud.knowledge_base import (
+from app.core.crud.knowledge.base import (
     knowledge_base_crud,
     knowledge_base_profile_binding_crud,
 )

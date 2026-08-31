@@ -20,13 +20,13 @@ from app.core.constants import (
     ERR_MEMORY_CHANNEL_IN_USE,
     ERR_MEMORY_MODEL_IDENTITY_IN_USE,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import (
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.exceptions import ParameterException
 from app.core.i18n import t
 from app.core.memory.channel_protection import list_memory_channel_references

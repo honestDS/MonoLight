@@ -19,7 +19,7 @@ from app.core.constants import (
     LOG_KNOWLEDGE_JOB_STARTUP_RECOVERY_COMPLETED,
     LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED,
 )
-from app.core.crud.knowledge_job import (
+from app.core.crud.knowledge.job import (
     KnowledgeJobRecoveryResult,
     is_system_cleanup_operation,
     knowledge_job_crud,

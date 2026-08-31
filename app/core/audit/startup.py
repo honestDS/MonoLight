@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.confirmation import sync_expired_confirmation_messages, update_confirmation_message_status
 from app.core.audit.storage import AuditCleanupResult, cleanup_audit_storage
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.paths import AUDIT_DIR
 from app.models.audit import AuditRecordStatus

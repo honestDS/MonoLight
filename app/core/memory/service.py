@@ -33,13 +33,13 @@ from app.core.constants import (
     MEMORY_MAX_ACTIVE_RECORDS,
     MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_delta_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import embed_texts_with_config, load_embedding_runtime_config
 from app.core.i18n import t
 from app.core.log import get_logger

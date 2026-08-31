@@ -17,8 +17,8 @@ from app.core.constants import (
     LOG_MEMORY_ORGANIZATION_MODEL_FALLBACK,
     LOG_MEMORY_ORGANIZATION_MODEL_RETRY,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import memory_job_crud
 from app.core.exceptions import LLMException
 from app.core.i18n import t
 from app.core.log import get_logger

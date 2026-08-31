@@ -7,7 +7,7 @@ from typing import NoReturn
 
 from sqlalchemy.exc import OperationalError
 
-from app.core.crud.worker_lease import worker_lease_crud
+from app.core.crud.worker.lease import worker_lease_crud
 from app.core.log import get_logger
 from app.providers.database import AsyncSessionLocal
 

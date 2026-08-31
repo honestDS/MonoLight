@@ -8,11 +8,11 @@ from app.core.constants import (
     ERR_SETUP_STATE_UPDATE_FAILED,
     ERR_USER_NAME_EXISTS,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.prompt import prompt_crud
-from app.core.crud.system_setting import system_setting_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ParameterException, ServerException
 from app.core.profile_validation import validate_channel_configs
 from app.core.security import create_access_token, get_password_hash

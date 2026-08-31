@@ -13,13 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.core.constants import ERR_MEMORY_OVER_LIMIT, MEMORY_CONTENT_MAX_TOKENS
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_delta_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.i18n import t
 from app.core.memory import (

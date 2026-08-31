@@ -10,8 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.memory import memory_store_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.memory.store import memory_store_crud
 from app.core.knowledge.errors import (
     ManagedKnowledgeContainerConflictError,
     ManagedKnowledgeRuntimeUnavailableError,
@@ -64,9 +64,7 @@ async def stage5_database(tmp_path) -> AsyncIterator[async_sessionmaker[AsyncSes
         cursor.close()
 
     async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES)
-        )
+        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES))
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -427,4 +425,3 @@ async def test_write_after_managed_container_delete_creates_new_identifier_and_t
     assert second.knowledge_base.created_at is not None
     assert first_created_at is not None
     assert second.knowledge_base.created_at >= first_created_at
-

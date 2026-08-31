@@ -12,7 +12,7 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_POSITIVE,
     SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY,
 )
-from app.core.crud.audit import audit_crud
+from app.core.crud.audit.audit import audit_crud
 from app.core.i18n import t
 from app.core.tools.read_multimodal_file import parse_multimodal_file_read_result
 from app.core.utils.context_summary import ContextSummaryTriggerMode

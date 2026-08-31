@@ -24,8 +24,8 @@ from app.core.constants import (
     MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
     MANAGED_KNOWLEDGE_KEY_MAX_CHARS,
 )
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud, managed_knowledge_revision_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud, managed_knowledge_revision_crud
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeContentTooLongError, ManagedKnowledgeNotFoundError, ManagedKnowledgeValidationError
 from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.knowledge.results import ManagedKnowledgeMutationResult, ManagedKnowledgeMutationStatus

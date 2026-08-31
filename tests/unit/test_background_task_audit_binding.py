@@ -11,8 +11,8 @@ from app.api.v1 import chat as chat_api
 from app.core import log as log_module
 from app.core.background_tasks import manager as manager_module
 from app.core.background_tasks import runner as runner_module
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.dispatchers import background as background_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
 from app.models.audit import AuditExecutionRecord, AuditExecutionStatus, AuditRecord, AuditRecordStatus, AuditToolConclusion, AuditToolDetail

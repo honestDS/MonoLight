@@ -17,11 +17,7 @@ class CRUDScheduledTask(CRUDBase[ScheduledTask, ScheduledTaskCreate, ScheduledTa
         uid: str,
         profile_id: int,
     ) -> list[ScheduledTask]:
-        result = await db.execute(
-            select(ScheduledTask)
-            .where(ScheduledTask.uid == uid, ScheduledTask.profile_id == profile_id)
-            .order_by(ScheduledTask.id.asc())
-        )
+        result = await db.execute(select(ScheduledTask).where(ScheduledTask.uid == uid, ScheduledTask.profile_id == profile_id).order_by(ScheduledTask.id.asc()))
         return list(result.scalars().all())
 
     async def delete_by_profile(

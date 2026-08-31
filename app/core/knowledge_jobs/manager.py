@@ -18,10 +18,10 @@ from app.core.constants import (
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND,
     ERR_PROFILE_NOT_FOUND,
 )
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import t
 from app.core.knowledge.errors import (

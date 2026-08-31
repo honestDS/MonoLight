@@ -11,7 +11,7 @@ from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.dispatch_context import build_dispatch_context
 from app.core.knowledge.deletion import delete_owned_knowledge_base
 from app.core.knowledge.errors import ManagedKnowledgeContainerConflictError

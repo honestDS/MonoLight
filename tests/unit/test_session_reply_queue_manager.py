@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlmodel import select
 
-from app.core.crud.message import message_crud
-from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem, session_reply_work_item_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.session_reply_queue import executor as executor_module
 from app.core.session_reply_queue.manager import SessionReplyQueueManager

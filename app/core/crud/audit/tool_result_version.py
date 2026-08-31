@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.crud.base import CRUDBase
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.models.audit import AuditToolResultVersion
 from app.models.message import Message
 

@@ -1,13 +1,13 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.message import message_crud
-from app.core.crud.message_platform_outbox import message_platform_outbox_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
-from app.core.crud.session import session_crud
-from app.core.crud.session_event import session_event_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.message_platform.outbox import message_platform_outbox_crud
+from app.core.crud.session.event import session_event_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.background import background_task_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
 
 

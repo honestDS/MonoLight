@@ -86,7 +86,7 @@ class LogManager:
         # 异步数据库写入器
         async def db_sink(message):
             try:
-                from app.core.crud.log import system_log_crud
+                from app.core.crud.system.log import system_log_crud
                 from app.models.system_log import SystemLogCreate
                 from app.providers.database import AsyncSessionLocal
 

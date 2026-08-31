@@ -12,10 +12,10 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_POSITIVE,
 )
 from app.core.crud.base import CRUDBase
-from app.core.crud.context_summary_fragment import (
+from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key as build_context_summary_fragment_dedupe_key,
 )
-from app.core.crud.context_summary_fragment import (
+from app.core.crud.context_summary.fragment import (
     context_summary_fragment_crud as context_summary_fragment_crud,
 )
 from app.core.i18n import t

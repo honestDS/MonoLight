@@ -2,8 +2,8 @@ import json
 
 from sqlalchemy import update
 
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.log import get_logger
 from app.core.prompts import BACKGROUND_TASK_RESULT_INSTRUCTION_PROMPT
 from app.core.session_reply_queue.manager import session_reply_queue_manager

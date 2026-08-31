@@ -5,8 +5,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.session_cleanup import delete_session_data
 from app.core.terminal.schemas import TerminalAction, TerminalSessionStatus
 from app.models.audit import AuditConfirmationClaim, AuditRecord, AuditRecordStatus

@@ -11,8 +11,8 @@ from app.core.constants import (
     ERR_MEMORY_JOB_TARGET_STATE_CONFLICT,
     ERR_MEMORY_NOT_CONFIGURED,
 )
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.memory_maintenance import memory_maintenance_record_crud
+from app.core.crud.memory.maintenance import memory_maintenance_record_crud
+from app.core.crud.memory.store import memory_store_crud
 from app.core.embedding.common import (
     EmbeddingRuntimeConfig,
     load_embedding_runtime_config,

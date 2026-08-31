@@ -27,8 +27,8 @@ from app.core.constants import (
     ERR_TERMINAL_WORKER_STOPPED,
     ERR_TOOL_SHELL_INTERACTIVE_AUDIT_BINDING_REQUIRED,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.terminal_session import (
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.terminal.session import (
     terminal_control_command_crud,
     terminal_session_crud,
 )

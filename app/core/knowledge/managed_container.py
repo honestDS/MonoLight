@@ -8,9 +8,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_PROFILE_NOT_FOUND, MSG_MANAGED_KNOWLEDGE_BASE_DEFAULT_NAME
-from app.core.crud.knowledge_base import knowledge_base_crud, knowledge_base_profile_binding_crud
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.knowledge.base import knowledge_base_crud, knowledge_base_profile_binding_crud
+from app.core.crud.memory.store import memory_store_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import load_embedding_runtime_config
 from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import t

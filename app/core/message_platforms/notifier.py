@@ -4,9 +4,9 @@ from functools import lru_cache
 from typing import Any
 
 from app.core.constants import MSG_MESSAGE_PLATFORM_TOOL_USED
-from app.core.crud.message_platform import message_platform_crud
-from app.core.crud.message_platform_outbox import message_platform_outbox_crud
-from app.core.crud.session import session_crud
+from app.core.crud.message_platform.outbox import message_platform_outbox_crud
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import DEFAULT_LOCALE, message_platform_t, t
 from app.core.log import get_logger
 from app.core.message_platforms.outbound_text import (

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, update
 
 from app.core.constants import ERR_TERMINAL_SESSION_LEASE_LOST
-from app.core.crud.terminal_session import terminal_control_command_crud, terminal_session_crud
+from app.core.crud.terminal.session import terminal_control_command_crud, terminal_session_crud
 from app.core.i18n import t
 from app.core.terminal import ALL_TERMINAL_ACTIONS, TerminalSessionStatus, TerminalWriteRequest, manager, recovery
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager

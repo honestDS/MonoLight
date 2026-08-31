@@ -17,7 +17,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_LEASE_UNAVAILABLE,
     ERR_MEMORY_JOB_OPERATION_INVALID,
 )
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.memory.job import memory_job_crud
 from app.core.i18n import t
 from app.models.memory import (
     LongTermMemoryMutationJob,
