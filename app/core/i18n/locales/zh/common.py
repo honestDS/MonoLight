@@ -24,6 +24,7 @@ MESSAGES = {
     "ERR_KB_FILE_ENCODING_ERROR": "暂仅支持 UTF-8 或 GBK 编码的文本类文档",
     "ERR_KB_VECTOR_WRITE_FAILED": "写入向量库失败: {message}",
     "ERR_KB_DOC_SAVE_FAILED": "保存文档失败，已回滚向量分块: {message}",
+    "ERR_KB_EMBEDDING_CONFIG_CHANGED": "知识库嵌入配置刚刚发生变化，请重试",
     "ERR_KB_CHUNK_OVERLAP_ERROR": "分块重叠必须小于分块大小",
     "ERR_KB_DENSE_RETRIEVAL_FAILED": "知识库稠密检索失败",
     "ERR_MANAGED_KNOWLEDGE_FIELD_REQUIRED": "托管知识字段 {field} 不能为空",

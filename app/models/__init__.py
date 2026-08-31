@@ -11,6 +11,7 @@ from app.models.context_summary_stage import ContextSummaryStage as ContextSumma
 from app.models.knowledge_base import KnowledgeBase as KnowledgeBase
 from app.models.knowledge_base import KnowledgeBaseCollectionOwner as KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBaseDocument as KnowledgeBaseDocument
+from app.models.knowledge_base import KnowledgeBaseEmbeddingDelta as KnowledgeBaseEmbeddingDelta
 from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBaseProfileBinding
 from app.models.knowledge_base import KnowledgeJob as KnowledgeJob
 from app.models.knowledge_base import KnowledgeJobOperation as KnowledgeJobOperation

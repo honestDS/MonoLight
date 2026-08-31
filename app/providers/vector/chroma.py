@@ -207,6 +207,37 @@ async def async_get_collection_items(
     return await _to_thread_and_wait(_get_collection_items_page_sync, collection_name, offset, limit, include)
 
 
+def _query_collection_sync(
+    collection_name: str,
+    query_embedding: Sequence[float],
+    n_results: int,
+    include: list[str] | None,
+):
+    if n_results <= 0:
+        raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="n_results"))
+    collection = get_collection(collection_name)
+    return collection.query(
+        query_embeddings=[list(query_embedding)],
+        n_results=n_results,
+        include=include or ["documents", "metadatas", "distances"],
+    )
+
+
+async def async_query_collection(
+    collection_name: str,
+    query_embedding: Sequence[float],
+    n_results: int = 1,
+    include: list[str] | None = None,
+):
+    return await _to_thread_and_wait(
+        _query_collection_sync,
+        collection_name,
+        query_embedding,
+        n_results,
+        include,
+    )
+
+
 async def async_delete_collection_items(collection_name: str, ids: Sequence[str], batch_size: int = 100) -> int:
     if batch_size <= 0:
         raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="batch_size"))
@@ -323,6 +354,7 @@ get_collection_async = async_get_collection
 delete_collection_async = async_delete_collection
 upsert_collection_items_async = async_upsert_collection_items
 get_collection_items_async = async_get_collection_items
+query_collection_async = async_query_collection
 delete_collection_items_async = async_delete_collection_items
 validate_collection_async = async_validate_collection
 delete_orphan_items_async = async_delete_orphan_items

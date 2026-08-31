@@ -35,6 +35,10 @@ from app.core.knowledge_jobs.executor import (
     SessionFactory,
 )
 from app.core.knowledge_jobs.handlers import create_default_knowledge_job_executor
+from app.core.knowledge_jobs.migration import (
+    cleanup_terminal_target_collection,
+    finalize_knowledge_migration_terminal_state,
+)
 from app.core.log import get_logger
 from app.models.knowledge_base import KnowledgeJob
 from app.providers.database import AsyncSessionLocal
@@ -188,12 +192,35 @@ class KnowledgeJobConsumer:
 
     async def _recover_expired(self) -> KnowledgeJobRecoveryResult | None:
         try:
+            target_collections: list[str] = []
             async with self._session_factory() as db:
-                return await knowledge_job_crud.recover_expired(
+                recovery = await knowledge_job_crud.recover_expired(
                     db,
                     delay_seconds=int(self._recovery_retry_delay_seconds),
                     max_attempts_error=t(ERR_KNOWLEDGE_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED),
+                    commit=False,
                 )
+                for terminal in recovery.terminal_jobs:
+                    if terminal.job.id is None:
+                        continue
+                    current = await knowledge_job_crud.get_by_id(
+                        db,
+                        uid=terminal.job.uid,
+                        job_id=terminal.job.id,
+                    )
+                    if current is None:
+                        continue
+                    target_collection = await finalize_knowledge_migration_terminal_state(
+                        db,
+                        job=current,
+                        error=terminal.error,
+                    )
+                    if target_collection:
+                        target_collections.append(target_collection)
+                await db.commit()
+            for target_collection in target_collections:
+                await cleanup_terminal_target_collection(target_collection)
+            return recovery
         except Exception as exc:
             logger.bind(error_type=type(exc).__name__).error(t(LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED))
             return None
@@ -281,15 +308,14 @@ class KnowledgeJobConsumer:
         except KnowledgeJobExecutionError as exc:
             await self._retry_or_fail(job, worker_id, exc.safe_message, exc.result)
         except Exception as exc:
-            logger.bind(job_id=job.id, operation=str(job.operation), error_type=type(exc).__name__).error(
-                t(LOG_KNOWLEDGE_JOB_EXECUTION_FAILED)
-            )
+            logger.bind(job_id=job.id, operation=str(job.operation), error_type=type(exc).__name__).error(t(LOG_KNOWLEDGE_JOB_EXECUTION_FAILED))
             await self._retry_or_fail(job, worker_id, t(ERR_KNOWLEDGE_JOB_UNEXPECTED_FAILURE), None)
 
     async def _retry_or_fail(self, job: KnowledgeJob, worker_id: str, safe_message: str, result: dict | None) -> None:
         if job.id is None:
             return
         try:
+            target_collection = None
             async with self._session_factory() as db:
                 if is_system_cleanup_operation(job.operation):
                     changed = await knowledge_job_crud.release_for_retry(
@@ -299,6 +325,7 @@ class KnowledgeJobConsumer:
                         owner=worker_id,
                         error=safe_message,
                         delay_seconds=retry_delay_seconds(job.attempt_count),
+                        commit=False,
                     )
                 elif job.attempt_count >= job.max_attempts:
                     changed = await knowledge_job_crud.mark_failed(
@@ -308,7 +335,16 @@ class KnowledgeJobConsumer:
                         owner=worker_id,
                         error=safe_message,
                         result=result,
+                        commit=False,
                     )
+                    if changed:
+                        current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
+                        if current is not None:
+                            target_collection = await finalize_knowledge_migration_terminal_state(
+                                db,
+                                job=current,
+                                error=safe_message,
+                            )
                 else:
                     changed = await knowledge_job_crud.release_for_retry(
                         db,
@@ -317,7 +353,10 @@ class KnowledgeJobConsumer:
                         owner=worker_id,
                         error=safe_message,
                         delay_seconds=retry_delay_seconds(job.attempt_count),
+                        commit=False,
                     )
+                await db.commit()
+            await cleanup_terminal_target_collection(target_collection)
             if not changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
         except Exception as exc:
@@ -327,6 +366,7 @@ class KnowledgeJobConsumer:
         if job.id is None:
             return
         try:
+            target_collection = None
             async with self._session_factory() as db:
                 changed = await knowledge_job_crud.mark_failed(
                     db,
@@ -335,7 +375,18 @@ class KnowledgeJobConsumer:
                     owner=worker_id,
                     error=safe_message,
                     result=result,
+                    commit=False,
                 )
+                if changed:
+                    current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
+                    if current is not None:
+                        target_collection = await finalize_knowledge_migration_terminal_state(
+                            db,
+                            job=current,
+                            error=safe_message,
+                        )
+                await db.commit()
+            await cleanup_terminal_target_collection(target_collection)
             if not changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
         except Exception as exc:
@@ -345,6 +396,7 @@ class KnowledgeJobConsumer:
         if job.id is None:
             return
         try:
+            target_collection = None
             async with self._session_factory() as db:
                 changed = await knowledge_job_crud.mark_cancelled(
                     db,
@@ -352,7 +404,18 @@ class KnowledgeJobConsumer:
                     job_id=job.id,
                     owner=worker_id,
                     error=safe_message,
+                    commit=False,
                 )
+                if changed:
+                    current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
+                    if current is not None:
+                        target_collection = await finalize_knowledge_migration_terminal_state(
+                            db,
+                            job=current,
+                            error=safe_message,
+                        )
+                await db.commit()
+            await cleanup_terminal_target_collection(target_collection)
             if changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).info(t(LOG_KNOWLEDGE_JOB_CANCELLED))
         except Exception as exc:
@@ -362,15 +425,27 @@ class KnowledgeJobConsumer:
         if job.id is None:
             return
         try:
+            target_collection = None
             async with self._session_factory() as db:
-                await knowledge_job_crud.release_claim_for_shutdown(
+                changed = await knowledge_job_crud.release_claim_for_shutdown(
                     db,
                     uid=job.uid,
                     job_id=job.id,
                     owner=worker_id,
                     delay_seconds=int(self._shutdown_retry_delay_seconds),
                     max_attempts_error=t(ERR_KNOWLEDGE_JOB_LEASE_MAX_ATTEMPTS_EXCEEDED),
+                    commit=False,
                 )
+                if changed:
+                    current = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
+                    if current is not None:
+                        target_collection = await finalize_knowledge_migration_terminal_state(
+                            db,
+                            job=current,
+                            error=current.error,
+                        )
+                await db.commit()
+            await cleanup_terminal_target_collection(target_collection)
         except Exception as exc:
             logger.bind(job_id=job.id, error_type=type(exc).__name__).error(t(LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED))
 
