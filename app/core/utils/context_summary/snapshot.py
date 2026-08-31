@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.utils.message_parser import parse_db_messages_to_internal
 from app.models.message import InternalMessage, Message, MessageRole
 

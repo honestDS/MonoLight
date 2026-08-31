@@ -3,11 +3,11 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_KB_NOT_FOUND, ERR_SESSION_NO_PERMISSION
-from app.core.crud.knowledge_base import (
+from app.core.crud.knowledge.base import (
     knowledge_base_collection_owner_crud,
     knowledge_base_crud,
 )
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.exceptions import ForbiddenException, ResourceNotFoundException
 from app.models.knowledge_base import KnowledgeBaseType
 

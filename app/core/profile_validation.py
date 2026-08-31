@@ -11,8 +11,8 @@ from app.core.constants import (
     ERR_PROFILE_NO_CHAT_CHANNEL,
     ERR_PROFILE_NOT_FOUND,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.models.channel import ChannelConfig, ModelChannel, ModelUsage, is_channel_model_pending_delete
 from app.models.profile import LongTermMemoryOrganizationConfig, Profile, ProfileConfig

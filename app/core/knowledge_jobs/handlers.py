@@ -15,12 +15,12 @@ from app.core.constants import (
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_OVERLAP,
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_SIZE,
 )
-from app.core.crud.knowledge_base import (
+from app.core.crud.knowledge.base import (
     knowledge_base_collection_owner_crud,
     knowledge_base_crud,
 )
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, embed_texts_with_config, load_embedding_runtime_config
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.i18n import t

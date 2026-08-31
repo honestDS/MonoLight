@@ -8,7 +8,7 @@ from sqlmodel import SQLModel
 from app.api.v1 import channels
 from app.core.channel_model_protection import find_model_identity_update_conflict
 from app.core.constants import ERR_KB_CHANNEL_IN_USE, ERR_KB_MODEL_IDENTITY_IN_USE
-from app.core.crud.channel import channel_crud
+from app.core.crud.channel.channel import channel_crud
 from app.core.exceptions import ParameterException
 from app.models.channel import ChannelCreate, ModelChannel
 from app.models.knowledge_base import KnowledgeBase
@@ -114,14 +114,10 @@ async def _create_knowledge_base(
         collection_name=f"collection-{channel_id}-{model_id}",
         active_embedding_channel_id=active_channel_id,
         active_embedding_model_id=active_model_id,
-        active_collection_name=(
-            f"active-collection-{name}" if active_channel_id is not None else None
-        ),
+        active_collection_name=(f"active-collection-{name}" if active_channel_id is not None else None),
         target_embedding_channel_id=target_channel_id,
         target_embedding_model_id=target_model_id,
-        target_collection_name=(
-            f"target-collection-{name}" if target_channel_id is not None else None
-        ),
+        target_collection_name=(f"target-collection-{name}" if target_channel_id is not None else None),
     )
     db.add(knowledge_base)
     await db.flush()

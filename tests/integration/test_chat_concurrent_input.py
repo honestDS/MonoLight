@@ -8,8 +8,8 @@ from sqlmodel import SQLModel, select
 import app.providers.database as database_provider
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
-from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
 from app.core.session_reply_queue import executor as session_reply_executor
 from app.core.session_reply_queue.manager import session_reply_queue_manager

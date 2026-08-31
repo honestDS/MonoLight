@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.context_summary_stage import (
+from app.core.crud.context_summary.stage import (
     context_summary_fragment_crud,
     context_summary_stage_crud,
 )

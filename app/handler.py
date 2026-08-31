@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.constants import ERR_DB_OPERATION_FAILED, ERR_FAVICON_NOT_FOUND, ERR_INTERNAL_SERVER_ERROR, ERR_PASSWORD_TOO_LONG_BYTES, ERR_VALIDATION_FAILED
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ServerException
 from app.core.i18n import t
 from app.core.i18n.context import reset_current_locale, set_current_locale

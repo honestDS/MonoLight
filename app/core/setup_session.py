@@ -13,7 +13,7 @@ from app.core.constants import (
     SETUP_SESSION_RECORD_VERSION,
     SETUP_SESSION_TTL_SECONDS,
 )
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ForbiddenException, ServerException
 
 

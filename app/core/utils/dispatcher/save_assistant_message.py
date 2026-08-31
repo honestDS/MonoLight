@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
 )
 
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.utils.dispatcher.process_markdown_response import process_markdown_response
 from app.core.utils.dispatcher.save_message import save_message
 from app.models.message import (

@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import MEMORY_CONTENT_MAX_TOKENS
-from app.core.crud.memory import memory_record_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,8 +30,8 @@ from app.core.constants import (
     MSG_AUDIT_CONFIRMATION_SUPERSEDED,
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.i18n import t
 from app.core.message_platforms.weixin_openclaw import WeixinOpenClawPlatformHandler
 from app.core.session_reply_queue.manager import session_reply_queue_manager

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
+from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud
 from app.core.log import get_logger
 from app.providers.database import AsyncSessionLocal
 from app.providers.vector import async_delete_collection_if_exists

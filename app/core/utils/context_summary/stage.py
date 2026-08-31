@@ -20,11 +20,11 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_STAGE_INPUT_OVER_WINDOW,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
-from app.core.crud.context_summary_fragment import (
+from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key,
     context_summary_fragment_crud,
 )
-from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_PROMPT

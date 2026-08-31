@@ -7,8 +7,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.memory import memory_record_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud
 from app.core.memory import build_memory_active_mutation_key, build_memory_organization_active_mutation_key
 from app.core.memory.organization import (
     MemoryOrganizationValidatedItem,

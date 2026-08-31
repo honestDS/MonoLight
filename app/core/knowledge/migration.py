@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.knowledge_embedding_migration import knowledge_base_migration_crud
+from app.core.crud.knowledge.embedding_transition import knowledge_base_migration_crud
 from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseEmbeddingDelta,

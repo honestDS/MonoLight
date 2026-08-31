@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.storage import write_audit_json
-from app.core.crud.audit import audit_crud
+from app.core.crud.audit.audit import audit_crud
 from app.core.paths import AUDIT_DIR
 from app.models.audit import AuditFailureType, AuditRecordStatus
 

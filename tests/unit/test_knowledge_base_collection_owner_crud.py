@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlmodel import SQLModel, select
 
 import app.models as exported_models
-from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
+from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud
 from app.models import KnowledgeBaseCollectionOwner
 from app.models.knowledge_base import KnowledgeBase
 

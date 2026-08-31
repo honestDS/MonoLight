@@ -29,10 +29,10 @@ from app.core.constants import (
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.prompt import prompt_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.memory.store import memory_store_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,

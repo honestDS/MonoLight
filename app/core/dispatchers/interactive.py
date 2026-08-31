@@ -31,10 +31,10 @@ from app.core.constants import (
     ERR_TOOL_ROUND_PRECHECK_FAILED,
 )
 from app.core.context import ContextManager
-from app.core.crud.audit import audit_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.session import session_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
 from app.core.dispatchers.memory import MemoryRecallContext, run_memory_recall_precheck
 from app.core.exceptions import ApiKeyException, BaseBusinessException, LLMException, ServerException
 from app.core.i18n import get_current_locale, t

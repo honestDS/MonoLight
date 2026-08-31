@@ -20,13 +20,13 @@ from app.core.constants import (
     ERR_PROFILE_MEMORY_SELECTION_STALE,
     ERR_PROFILE_NOT_FOUND,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_embedding_selection_token_crud,
     memory_record_crud,
     memory_store_crud,
 )
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import detect_embedding_dimensions, load_embedding_runtime_config
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.memory.identifiers import build_memory_collection_name

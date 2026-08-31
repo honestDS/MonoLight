@@ -6,7 +6,7 @@ from app.core.constants import (
     MSG_BACKGROUND_TASK_ALREADY_FINISHED,
     MSG_BACKGROUND_TASK_CANCELLED,
 )
-from app.core.crud.background_task import background_task_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.models.background_task import BackgroundTaskResponse, BackgroundTaskStatus
 

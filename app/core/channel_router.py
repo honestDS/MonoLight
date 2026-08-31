@@ -12,8 +12,8 @@ from collections import defaultdict
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.channel import channel_crud
-from app.core.crud.channel_cursor import channel_cursor_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.channel.cursor import channel_cursor_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.channel import ChannelConfig, ChannelRule, ModelChannel

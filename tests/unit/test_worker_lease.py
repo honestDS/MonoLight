@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import delete, update
 from sqlalchemy.exc import OperationalError
 
-from app.core.crud.worker_lease import worker_lease_crud
+from app.core.crud.worker.lease import worker_lease_crud
 from app.models.worker_lease import WorkerLease
 from app.providers.database import AsyncSessionLocal, engine
 from app.providers.database.time import get_database_timestamp

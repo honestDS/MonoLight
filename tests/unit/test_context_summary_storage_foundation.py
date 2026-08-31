@@ -6,8 +6,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 
-from app.core.crud.message import message_crud
-from app.core.crud.session import session_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
 from app.models.audit import AuditToolResultVersion
 from app.models.context_summary_stage import ContextSummaryFragment, ContextSummaryStage
 from app.models.message import Message, MessageRole, MessageType
@@ -186,7 +186,7 @@ async def test_tool_result_version_invalidates_summary_and_preserves_previous_co
     )
     await db_session.commit()
 
-    from app.core.crud.audit_tool_result_version import audit_tool_result_version_crud
+    from app.core.crud.audit.tool_result_version import audit_tool_result_version_crud
 
     await audit_tool_result_version_crud.append_version(
         db_session,

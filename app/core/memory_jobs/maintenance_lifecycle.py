@@ -5,12 +5,12 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_MEMORY_OLD_COLLECTION_CLEANUP_FAILED
-from app.core.crud.memory import memory_embedding_revision_crud, memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
-from app.core.crud.memory_maintenance import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.maintenance import (
     memory_maintenance_job_crud,
     memory_maintenance_store_crud,
 )
+from app.core.crud.memory.store import memory_embedding_revision_crud, memory_store_crud
 from app.core.i18n import t
 from app.core.memory_jobs.executor import (
     MemoryJobExecutionContext,

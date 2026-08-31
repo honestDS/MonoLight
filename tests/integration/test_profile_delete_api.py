@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -15,8 +15,8 @@ from sqlmodel import SQLModel
 
 import app.models  # noqa: F401
 from app.api.v1.profile import router
-from app.core.crud.profile import profile_crud
-from app.core.crud.session import session_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
 from app.core.security import get_current_user
 from app.handler import register_handlers
 from app.models.channel import ModelChannel
@@ -177,9 +177,7 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
     profile_delete_api,
 ) -> None:
     app, session_factory, _current_user = profile_delete_api
-    target_profile_id, default_profile_id, platform_id, knowledge_base_id = (
-        await _seed_profile_delete_case(session_factory)
-    )
+    target_profile_id, default_profile_id, platform_id, knowledge_base_id = await _seed_profile_delete_case(session_factory)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -244,34 +242,9 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
     async with session_factory() as db:
         assert await db.get(Profile, target_profile_id) is None
         assert await db.get(Profile, default_profile_id) is not None
-        assert (
-            await db.scalar(
-                select(func.count())
-                .select_from(ChatSession)
-                .where(
-                    ChatSession.session_id.in_(
-                        ("profile-delete-session-1", "profile-delete-session-2")
-                    )
-                )
-            )
-            == 0
-        )
-        assert (
-            await db.scalar(
-                select(func.count())
-                .select_from(Message)
-                .where(Message.session_id == "profile-delete-session-1")
-            )
-            == 0
-        )
-        assert (
-            await db.scalar(
-                select(func.count())
-                .select_from(ScheduledTask)
-                .where(ScheduledTask.profile_id == target_profile_id)
-            )
-            == 0
-        )
+        assert await db.scalar(select(func.count()).select_from(ChatSession).where(ChatSession.session_id.in_(("profile-delete-session-1", "profile-delete-session-2")))) == 0
+        assert await db.scalar(select(func.count()).select_from(Message).where(Message.session_id == "profile-delete-session-1")) == 0
+        assert await db.scalar(select(func.count()).select_from(ScheduledTask).where(ScheduledTask.profile_id == target_profile_id)) == 0
 
         platform = await db.get(MessagePlatform, platform_id)
         assert platform is not None
@@ -290,7 +263,6 @@ async def test_profile_delete_requires_fresh_impact_confirmation_and_cleans_boun
             )
             == 0
         )
-
 
 
 @pytest.mark.asyncio
@@ -345,8 +317,10 @@ async def test_profile_delete_lock_prevents_new_session_binding(
     assert bind_result is None
     async with session_factory() as verify_db:
         assert await verify_db.get(Profile, profile_id) is None
-        assert await session_crud.get_by_session_id(
-            verify_db,
-            "must-not-be-created",
-        ) is None
-
+        assert (
+            await session_crud.get_by_session_id(
+                verify_db,
+                "must-not-be-created",
+            )
+            is None
+        )

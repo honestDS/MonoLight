@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
 import app.core.terminal.manager as terminal_manager_module
-from app.core.crud.audit import audit_crud
+from app.core.crud.audit.audit import audit_crud
 from app.core.terminal.manager import _TerminalSessionRuntime, cleanup_terminal_sessions_by_chat_session
 from app.core.terminal.schemas import TerminalOutputBufferState, TerminalSessionStatus
 from app.models.audit import (

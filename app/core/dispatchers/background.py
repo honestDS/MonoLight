@@ -22,10 +22,10 @@ from app.core.constants import (
     MSG_BACKGROUND_FINAL_REPLY_FALLBACK_WITHOUT_FILES,
 )
 from app.core.context import ContextManager
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.exceptions import LLMException, ServerException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger

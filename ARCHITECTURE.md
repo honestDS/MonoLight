@@ -306,37 +306,50 @@ app/core/message_platforms/
 
 ```text
 app/core/crud/
-├── base.py                 # 通用数据访问抽象
-├── audit.py                # 审计数据访问
-├── audit_tool_result_version.py # 审计结果版本数据访问
-├── background_task.py      # 后台任务数据访问
-├── channel.py              # 渠道和模型数据访问
-├── channel_cursor.py       # 渠道路由数据访问
-├── context_summary_fragment.py # 上下文总结片段数据访问
-├── context_summary_stage.py # 上下文总结阶段数据访问
-├── knowledge_base.py       # 知识库数据访问
-├── knowledge_job.py        # 知识作业租约、重试与状态数据访问
-├── knowledge_embedding_migration.py  # 知识库在线嵌入迁移的快照、增量和向量标识数据访问
-├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
-├── log.py                  # 系统日志数据访问
-├── message.py              # 消息数据访问
-├── message_platform.py     # 消息平台数据访问
-├── message_platform_outbox.py # 消息发件箱数据访问
-├── memory.py               # 长期记忆数据访问
-├── memory_job.py           # 长期记忆作业数据访问
-├── memory_maintenance.py   # 长期记忆维护数据访问
-├── profile.py              # Profile 数据访问
-├── prompt.py               # Prompt 数据访问
-├── scheduled_task.py       # 定时任务数据访问
-├── session.py              # 会话数据访问
-├── session_event.py        # 会话事件数据访问
-├── session_reply_stream_event.py # 回复流事件数据访问
-├── session_reply_provider_usage.py # 回复请求 Provider Usage 幂等持久化
-├── session_reply_work_item.py # 回复工作数据访问
-├── system_setting.py       # 系统设置数据访问
-├── terminal_session.py     # 终端会话数据访问
-├── user.py                 # 用户数据访问
-└── worker_lease.py         # Worker 协调数据访问
+├── base.py                     # 通用数据访问抽象
+├── account/
+│   └── user.py                 # 用户数据访问
+├── audit/
+│   ├── audit.py                # 审计数据访问
+│   └── tool_result_version.py  # 审计结果版本数据访问
+├── channel/
+│   ├── channel.py              # 渠道和模型数据访问
+│   └── cursor.py               # 渠道路由数据访问
+├── context_summary/
+│   ├── fragment.py             # 上下文总结片段数据访问
+│   └── stage.py                # 上下文总结阶段数据访问
+├── knowledge/
+│   ├── base.py                 # 知识库数据访问
+│   ├── embedding_transition.py # 知识库嵌入模型切换数据访问
+│   ├── job.py                  # 知识作业数据访问
+│   └── managed.py              # 托管知识数据访问
+├── memory/
+│   ├── store.py                # 长期记忆数据访问
+│   ├── job.py                  # 长期记忆作业数据访问
+│   └── maintenance.py          # 长期记忆维护数据访问
+├── message_platform/
+│   ├── platform.py             # 消息平台数据访问
+│   └── outbox.py               # 消息发件箱数据访问
+├── profile/
+│   ├── profile.py              # Profile 数据访问
+│   └── prompt.py               # Prompt 数据访问
+├── session/
+│   ├── message.py              # 消息数据访问
+│   ├── session.py              # 会话数据访问
+│   ├── event.py                # 会话事件数据访问
+│   ├── reply_provider_usage.py # 回复 Provider Usage 持久化
+│   ├── reply_stream_event.py   # 回复流事件数据访问
+│   └── reply_work_item.py      # 回复工作数据访问
+├── system/
+│   ├── log.py                  # 系统日志数据访问
+│   └── setting.py              # 系统设置数据访问
+├── task/
+│   ├── background.py           # 后台任务数据访问
+│   └── scheduled.py            # 定时任务数据访问
+├── terminal/
+│   └── session.py              # 终端会话数据访问
+└── worker/
+    └── lease.py                # Worker 协调数据访问
 ```
 
 ### 对话分发：`app/core/dispatchers/`

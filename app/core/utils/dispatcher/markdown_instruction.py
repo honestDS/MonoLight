@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.message import message_crud
-from app.core.crud.session import session_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
 from app.core.prompts import MARKDOWN_FORMAT_INSTRUCTION_PROMPT, MAX_OUTPUT_TOKENS_INSTRUCTION_PROMPT, SYSTEM_CONTEXT_WRAPPER
 from app.core.utils.system import get_full_system_context
 from app.models.message import InternalMessage, MessageRole, TextPart

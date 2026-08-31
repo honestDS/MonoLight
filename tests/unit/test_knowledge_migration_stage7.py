@@ -10,7 +10,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.knowledge_job import knowledge_job_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.migration import record_knowledge_base_migration_change

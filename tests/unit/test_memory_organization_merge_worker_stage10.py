@@ -23,13 +23,13 @@ from app.core.constants import (
     ERR_MEMORY_MAINTENANCE_STATE_CONFLICT,
     MEMORY_CONTENT_MAX_TOKENS,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.i18n import t
 from app.core.memory import (

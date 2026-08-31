@@ -30,11 +30,11 @@ with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
         ERR_MEMORY_MUTATION_PENDING,
         ERR_MEMORY_RECORD_NOT_FOUND,
     )
-    from app.core.crud.memory import (
+    from app.core.crud.memory.job import memory_job_crud
+    from app.core.crud.memory.store import (
         memory_record_crud,
         memory_revision_crud,
     )
-    from app.core.crud.memory_job import memory_job_crud
     from app.core.memory import (
         MemoryConflictError,
         MemoryNotFoundError,

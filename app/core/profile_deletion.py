@@ -7,17 +7,17 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_PROFILE_DELETE_PERSISTED_OWNER_REQUIRED
-from app.core.crud.knowledge_base import (
+from app.core.crud.knowledge.base import (
     knowledge_base_collection_owner_crud,
     knowledge_base_crud,
     knowledge_base_profile_binding_crud,
 )
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
-from app.core.crud.message import message_crud
-from app.core.crud.message_platform import message_platform_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
-from app.core.crud.session import session_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
 from app.core.session_cleanup import delete_session_data
 from app.models.profile import Profile
@@ -116,12 +116,8 @@ async def build_profile_deletion_impact(
             ),
             "message_count": message_count,
         },
-        "scheduled_tasks": _preview_items(
-            [{"id": task.id, "name": task.name} for task in scheduled_tasks]
-        ),
-        "message_platforms": _preview_items(
-            [{"id": platform.id, "name": platform.name} for platform in message_platforms]
-        ),
+        "scheduled_tasks": _preview_items([{"id": task.id, "name": task.name} for task in scheduled_tasks]),
+        "message_platforms": _preview_items([{"id": platform.id, "name": platform.name} for platform in message_platforms]),
         "managed_knowledge_base": (
             {
                 "count": 1,
@@ -137,9 +133,7 @@ async def build_profile_deletion_impact(
             if managed_knowledge_base is not None
             else {"count": 0, "items": [], "omitted_count": 0}
         ),
-        "user_knowledge_base_bindings": _preview_items(
-            [{"id": knowledge_base.id, "name": knowledge_base.name} for knowledge_base in user_knowledge_bases]
-        ),
+        "user_knowledge_base_bindings": _preview_items([{"id": knowledge_base.id, "name": knowledge_base.name} for knowledge_base in user_knowledge_bases]),
     }
 
 
