@@ -31,11 +31,7 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         uid: str,
         profile_id: int,
     ) -> list[MessagePlatform]:
-        result = await db.execute(
-            select(MessagePlatform)
-            .where(MessagePlatform.uid == uid, MessagePlatform.profile_id == profile_id)
-            .order_by(MessagePlatform.id.asc())
-        )
+        result = await db.execute(select(MessagePlatform).where(MessagePlatform.uid == uid, MessagePlatform.profile_id == profile_id).order_by(MessagePlatform.id.asc()))
         return list(result.scalars().all())
 
     async def clear_profile_assignment(
@@ -46,17 +42,13 @@ class CRUDMessagePlatform(CRUDBase[MessagePlatform, MessagePlatformCreate, Messa
         profile_id: int,
         commit: bool = False,
     ) -> int:
-        result = await db.execute(
-            update(MessagePlatform)
-            .where(MessagePlatform.uid == uid, MessagePlatform.profile_id == profile_id)
-            .values(profile_id=None)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(update(MessagePlatform).where(MessagePlatform.uid == uid, MessagePlatform.profile_id == profile_id).values(profile_id=None).execution_options(synchronize_session=False))
         if commit:
             await db.commit()
         else:
             await db.flush()
         return result.rowcount or 0
+
     async def get_by_name(self, db: AsyncSession, name: str) -> MessagePlatform | None:
         result = await db.execute(select(MessagePlatform).where(MessagePlatform.name == name))
         return result.scalars().first()

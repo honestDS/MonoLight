@@ -7,12 +7,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.context_summary_fragment import (
+from app.core.crud.context_summary.fragment import (
     build_context_summary_fragment_dedupe_key,
     context_summary_fragment_crud,
 )
-from app.core.crud.context_summary_stage import context_summary_stage_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
+from app.core.crud.context_summary.stage import context_summary_stage_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.utils.context_summary.snapshot import ContextSummarySnapshot
 from app.core.utils.context_summary.stage import build_summary_work_identity
 from app.models import (
@@ -90,6 +90,13 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
     ),
     (
         "knowledge_job",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    (
+        "knowledge_base_embedding_delta",
         ("knowledge_base_id", "uid"),
         "knowledge_base",
         ("id", "uid"),

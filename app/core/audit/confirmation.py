@@ -22,10 +22,10 @@ from app.core.constants import (
     MSG_AUDIT_STATUS_REJECTED,
     MSG_AUDIT_STATUS_SUCCEEDED,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.audit_tool_result_version import audit_tool_result_version_crud
-from app.core.crud.message import message_crud
-from app.core.crud.session import session_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.audit.tool_result_version import audit_tool_result_version_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.message_platforms.notifier import send_session_event

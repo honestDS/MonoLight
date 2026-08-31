@@ -12,14 +12,14 @@ from sqlmodel import SQLModel
 
 import app.core.crypto as crypto_module
 from app.api.v1.memories import router
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import (
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import memory_service
 from app.core.memory.normalization import build_memory_content_hash, build_memory_record_snapshot, normalize_memory_content
 from app.core.security import get_current_user

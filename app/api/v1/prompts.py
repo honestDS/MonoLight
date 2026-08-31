@@ -17,8 +17,8 @@ from app.core.constants import (
     MSG_PROMPT_DELETED,
     MSG_PROMPT_UPDATED,
 )
-from app.core.crud.profile import profile_crud
-from app.core.crud.prompt import prompt_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,

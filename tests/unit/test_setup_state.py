@@ -19,8 +19,8 @@ from app.core.constants import (
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
 )
-from app.core.crud.system_setting import system_setting_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n import t
 from app.models.system_setting import SystemSetting
 from app.models.user import User

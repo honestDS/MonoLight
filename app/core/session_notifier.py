@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 from typing import Any
 
-from app.core.crud.session_event import session_event_crud
+from app.core.crud.session.event import session_event_crud
 from app.core.log import get_logger
 from app.providers.database import AsyncSessionLocal
 

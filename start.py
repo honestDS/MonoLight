@@ -127,7 +127,7 @@ async def initialize_system() -> None:
     await asyncio.to_thread(initialize_system_secrets)
 
     from app.core.audit.startup import recover_and_cleanup_audit_data
-    from app.core.crud.system_setting import system_setting_crud
+    from app.core.crud.system.setting import system_setting_crud
     from app.providers.database import AsyncSessionLocal
     from app.providers.database.bootstrap import init_system_data
 

@@ -19,8 +19,8 @@ from app.core.constants import (
     MEMORY_ORGANIZE_OUTPUT_ITEM_OVERHEAD_TOKENS,
     MEMORY_ORGANIZE_POLICY_VERSION,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import memory_store_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.store import memory_store_crud
 from app.core.exceptions import ParameterException
 from app.core.memory.organization import (
     calculate_organization_required_output_tokens,

@@ -13,7 +13,7 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
-from app.core.crud.context_summary_stage import (
+from app.core.crud.context_summary.stage import (
     CONTEXT_SUMMARY_FRAGMENT_PAGE_SIZE,
     context_summary_stage_crud,
 )

@@ -2,7 +2,7 @@ import json
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.crud.prompt import prompt_crud
+from app.core.crud.profile.prompt import prompt_crud
 from app.core.embedding.knowledge_base import (
     build_knowledge_base_prompt_items,
     list_available_knowledge_bases,

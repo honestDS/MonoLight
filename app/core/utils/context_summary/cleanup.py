@@ -2,7 +2,7 @@ import asyncio
 from datetime import timedelta
 
 from app.core.constants import ERR_VALUE_MUST_BE_POSITIVE
-from app.core.crud.context_summary_stage import context_summary_stage_crud
+from app.core.crud.context_summary.stage import context_summary_stage_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.utils.time import get_local_time

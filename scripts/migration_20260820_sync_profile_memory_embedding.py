@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.profile import profile_crud
+from app.core.crud.profile.profile import profile_crud
 from app.models.memory import LongTermMemoryStore
 
 MIGRATION_ID = "20260820_sync_profile_memory_embedding_v1"

@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, select
@@ -68,8 +69,11 @@ def test_app(db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> FastA
     async def fake_load_embedding_model(*_args, **_kwargs):
         return object(), {"model_id": "embed-v1", "embedding_dimensions": 768}
 
+    async def fake_create_collection(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(knowledge_base_api, "load_embedding_model", fake_load_embedding_model)
-    monkeypatch.setattr(knowledge_base_api, "create_collection", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(knowledge_base_api, "async_create_collection", fake_create_collection)
     test_app = FastAPI()
     register_handlers(test_app)
     test_app.dependency_overrides[get_db] = override_get_db
@@ -269,18 +273,10 @@ async def test_delete_user_knowledge_base_queues_all_collection_names(
     db_session.add_all([binding, document])
     await db_session.commit()
 
-    delete_collection_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-
-    def record_delete_collection(*args: object, **kwargs: object) -> None:
-        delete_collection_calls.append((args, kwargs))
-
-    monkeypatch.setattr(knowledge_base_api, "delete_collection", record_delete_collection)
-
     response = await api_client.post(f"/api/v1/knowledge-base/delete?kb_id={knowledge_base.id}")
 
     assert response.status_code == 200
     assert response.json()["data"] is True
-    assert delete_collection_calls == []
     assert await db_session.scalar(select(KnowledgeBase).where(KnowledgeBase.id == knowledge_base.id)) is None
     assert await db_session.scalar(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == knowledge_base.id)) is None
     assert await db_session.scalar(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == knowledge_base.id)) is None
@@ -289,3 +285,108 @@ async def test_delete_user_knowledge_base_queues_all_collection_names(
     assert len(owners) == 4
     assert {owner.collection_name for owner in owners} == set(collection_names)
     assert {owner.knowledge_base_id for owner in owners} == {None}
+
+
+@pytest.mark.asyncio
+async def test_replacing_user_bindings_preserves_managed_binding(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="binding profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+
+    user_one = KnowledgeBase(
+        uid="user-a",
+        name="user one",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="binding-user-one",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    user_two = KnowledgeBase(
+        uid="user-a",
+        name="user two",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="binding-user-two",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="binding-managed",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add_all([user_one, user_two, managed])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            KnowledgeBaseProfileBinding(
+                uid="user-a",
+                knowledge_base_id=user_one.id,
+                profile_id=profile.id,
+            ),
+            KnowledgeBaseProfileBinding(
+                uid="user-a",
+                knowledge_base_id=managed.id,
+                profile_id=profile.id,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    response = await api_client.post(
+        f"/api/v1/knowledge-base/profile-bindings?profile_id={profile.id}",
+        json={"knowledge_base_ids": [user_two.id]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [user_two.id]
+
+    binding_ids = set((await db_session.scalars(select(KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile.id))).all())
+    assert binding_ids == {user_two.id, managed.id}
+
+    get_response = await api_client.get(f"/api/v1/knowledge-base/profile-bindings?profile_id={profile.id}")
+    assert get_response.status_code == 200
+    assert get_response.json()["data"] == [user_two.id]
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_base_rejects_document_import(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed import profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed import",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-import",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.commit()
+    await db_session.refresh(managed)
+
+    response = await api_client.post(
+        f"/api/v1/knowledge-base/documents/import?kb_id={managed.id}",
+        files={"file": ("manual.txt", b"must not be imported", "text/plain")},
+    )
+
+    assert response.status_code == 409
+    document_count = await db_session.scalar(select(func.count()).select_from(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == managed.id))
+    assert document_count == 0

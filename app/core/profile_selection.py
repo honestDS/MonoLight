@@ -1,8 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.message_platform import message_platform_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.session import session_crud
+from app.core.crud.message_platform.platform import message_platform_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
 from app.models.profile import Profile
 
 

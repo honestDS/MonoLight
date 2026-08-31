@@ -17,7 +17,7 @@ from app.core.constants import (
     ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
     ERR_KNOWLEDGE_JOB_OPERATION_INVALID,
 )
-from app.core.crud.knowledge_job import knowledge_job_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.models.knowledge_base import KnowledgeJob, KnowledgeJobOperation, KnowledgeJobStatus
@@ -141,13 +141,7 @@ class KnowledgeJobExecutor:
             if result.finalized:
                 async with self._session_factory() as db:
                     finalized = await knowledge_job_crud.get_by_id(db, uid=job.uid, job_id=job.id)
-                if (
-                    finalized is None
-                    or finalized.status != KnowledgeJobStatus.SUCCEEDED
-                    or finalized.active_change_key is not None
-                    or finalized.locked_by is not None
-                    or finalized.lock_until is not None
-                ):
+                if finalized is None or finalized.status != KnowledgeJobStatus.SUCCEEDED or finalized.active_change_key is not None or finalized.locked_by is not None or finalized.lock_until is not None:
                     raise KnowledgeJobDeterministicError(t(ERR_KNOWLEDGE_JOB_HANDLER_RESULT_INVALID))
                 return result
             await context.checkpoint()

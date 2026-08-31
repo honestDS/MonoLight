@@ -22,7 +22,7 @@ from app.core.constants import (
     SETUP_STATUS_CONFIGURING,
     SETUP_STATUS_PENDING,
 )
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.exceptions import ParameterException, ServerException
 from app.core.setup import complete_setup
 from app.core.setup_session import establish_setup_session, require_setup_session

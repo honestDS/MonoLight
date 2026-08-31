@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.memory import memory_reference_crud
+from app.core.crud.memory.store import memory_reference_crud
 from app.models.channel import ModelUsage
 from app.models.memory import (
     LongTermMemoryMutationOperation,

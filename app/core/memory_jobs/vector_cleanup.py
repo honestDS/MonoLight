@@ -14,7 +14,7 @@ from app.core.constants import (
     ERR_MEMORY_JOB_OPERATION_INVALID,
     ERR_MEMORY_JOB_PAYLOAD_INVALID,
 )
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.memory.job import memory_job_crud
 from app.core.i18n import t
 from app.core.memory_jobs.executor import (
     MemoryJobCancelledError,

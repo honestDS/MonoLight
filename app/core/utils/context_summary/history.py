@@ -7,7 +7,7 @@ from app.core.constants import (
     ERR_VALUE_MUST_BE_NON_NEGATIVE,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.context_messages import message_token_text
 from app.core.utils.context_summary.common import join_messages, serialize_message

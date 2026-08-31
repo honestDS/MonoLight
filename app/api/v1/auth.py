@@ -11,7 +11,7 @@ from app.core.constants import (
     ERR_USER_NOT_FOUND_OR_DISABLED,
     MSG_LOGIN_SUCCESS,
 )
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
 from app.core.exceptions import (
     AuthException,
 )

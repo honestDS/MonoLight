@@ -8,7 +8,7 @@ from app.core.constants import (
     ERR_CONTEXT_SUMMARY_TRIGGER_PAIR_REQUIRED,
     ERR_CONTEXT_SUMMARY_WORK_INVALID_DURING,
 )
-from app.core.crud.session import session_crud
+from app.core.crud.session.session import session_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.prompts import CONTEXT_SUMMARY_COMPRESS_PROMPT

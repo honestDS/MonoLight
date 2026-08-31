@@ -11,7 +11,7 @@ from app.core.constants import (
     ERR_TERMINAL_SESSION_LEASE_LOST,
     ERR_TERMINAL_SESSION_NOT_FOUND,
 )
-from app.core.crud.terminal_session import terminal_control_command_crud, terminal_session_crud
+from app.core.crud.terminal.session import terminal_control_command_crud, terminal_session_crud
 from app.core.exceptions import ForbiddenException, ParameterException, ResourceNotFoundException
 from app.core.i18n import t
 from app.core.terminal import (

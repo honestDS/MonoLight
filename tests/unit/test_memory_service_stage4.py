@@ -12,12 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.core.constants import ERR_MEMORY_OVER_LIMIT, ERR_MEMORY_VERSION_CONFLICT
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_delta_crud,
     memory_record_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.memory import (
     MemoryConflictError,
     MemoryMutationStatus,

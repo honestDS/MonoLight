@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
 from app.core.constants import MSG_LOG_LIST_SUCCESS
-from app.core.crud.log import system_log_crud
-from app.core.crud.system_setting import system_setting_crud
+from app.core.crud.system.log import system_log_crud
+from app.core.crud.system.setting import system_setting_crud
 from app.core.i18n.context import reset_current_locale, set_current_locale
 from app.core.i18n.locale import DEFAULT_LOCALE, get_available_locales, normalize_locale
 from app.core.log import get_logger

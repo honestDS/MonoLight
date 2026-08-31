@@ -39,8 +39,8 @@ from app.core.constants import (
     MSG_AUDIT_ROUND_SKIPPED,
     MSG_AUDIT_WAITING_CONFIRMATION,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.channel import channel_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.channel.channel import channel_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.paths import get_user_temp_dir

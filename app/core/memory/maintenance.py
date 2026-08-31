@@ -5,9 +5,9 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_MEMORY_MAINTENANCE_STATE_CONFLICT, ERR_MEMORY_NOT_CONFIGURED
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
-from app.core.crud.memory_maintenance import memory_maintenance_store_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.maintenance import memory_maintenance_store_crud
+from app.core.crud.memory.store import memory_store_crud
 from app.core.memory.errors import MemoryConflictError
 from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory.normalization import _normalize_dedupe_key, _normalize_uid, _require_positive, _validate_commit

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from fastapi import WebSocket
 
-from app.core.crud.log import system_log_crud
+from app.core.crud.system.log import system_log_crud
 from app.providers.database import AsyncSessionLocal
 
 LOG_POLL_INTERVAL_SECONDS = 0.1

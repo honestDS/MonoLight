@@ -14,8 +14,8 @@ from app.core.constants import (
     ERR_KNOWLEDGE_JOB_PAYLOAD_INVALID,
     MANAGED_KNOWLEDGE_VECTOR_BATCH_SIZE,
 )
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.i18n import t
 from app.core.knowledge_jobs.executor import (
     KnowledgeJobDeterministicError,
@@ -209,11 +209,7 @@ async def execute_managed_vector_cleanup(
             if item is not None:
                 current_vector_ids = set(item.vector_item_ids or ())
 
-    delete_ids = [
-        item_id
-        for item_id in payload["vector_item_ids"]
-        if item_id not in current_vector_ids
-    ]
+    delete_ids = [item_id for item_id in payload["vector_item_ids"] if item_id not in current_vector_ids]
     if delete_ids:
         try:
             await async_delete_collection_items(

@@ -10,9 +10,9 @@ from app.core.background_tasks.recovery import recover_pending_background_task_r
 from app.core.background_tasks.reply_trigger import trigger_background_task_reply
 from app.core.background_tasks.runner import run_background_task
 from app.core.constants import ERR_BACKGROUND_TASK_EXECUTION_UNKNOWN
-from app.core.crud.audit import audit_crud
-from app.core.crud.background_task import background_task_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.task.background import background_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.models.background_task import BackgroundTask

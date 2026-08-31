@@ -31,11 +31,11 @@ from app.core.constants import (
     ERR_SESSION_REPLY_WORK_ENDED,
     ERR_SESSION_REPLY_WORK_NOT_FOUND,
 )
-from app.core.crud.audit import audit_crud
-from app.core.crud.message import message_crud
-from app.core.crud.session import session_crud
-from app.core.crud.session_reply_stream_event import session_reply_stream_event_crud
-from app.core.crud.session_reply_work_item import session_reply_work_item_crud
+from app.core.crud.audit.audit import audit_crud
+from app.core.crud.session.message import message_crud
+from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
+from app.core.crud.session.reply_work_item import session_reply_work_item_crud
+from app.core.crud.session.session import session_crud
 from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import get_current_locale, t
 from app.core.log import get_logger

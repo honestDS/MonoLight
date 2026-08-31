@@ -186,16 +186,22 @@ app/core/background_tasks/
 ```text
 app/core/knowledge/
 ├── __init__.py             # 托管知识领域能力导出
+├── bindings.py             # Profile 的用户知识库绑定业务边界
 ├── errors.py               # 托管知识领域异常
 ├── managed.py              # 托管知识条目、版本与维护边界领域服务
 ├── managed_container.py    # 按 Profile 懒创建/复用托管知识库并复制长期记忆当前嵌入运行态
-├── recall.py               # 托管知识召回状态过滤
+├── migration.py            # 知识库迁移期间的增量变更记录边界
+├── recall.py               # 托管知识候选校验、去重与最终主数据还原
 └── results.py              # 托管知识领域操作结果与状态
 ```
 
 该目录承载 LLM 托管知识主数据。正文和版本历史以关系库为事实源，向量仅作派生索引。首次写入按 Profile 懒创建唯一托管知识库并绑定 Profile；容器、绑定、首条知识和发布作业在同一短事务提交。召回最终由关系库版本、墓碑和 `is_recallable` 判定。
 
+Profile 的手工知识库绑定只管理 `USER` 类型；`LLM_MANAGED` 绑定由托管知识生命周期维护，保存 Profile 或用户知识库绑定时不得删除或改绑托管关系。
+
 知识库运行时嵌入配置由 `knowledge_base_runtime.py` 统一解析。`active_*` 是当前生效配置，legacy 字段仅作旧数据回退。查询、写入、发布和清理必须使用同一解析结果；渠道与模型删除保护同时覆盖当前和目标迁移配置。
+
+用户知识库和托管知识库共用在线嵌入迁移引擎。迁移以关系数据库完整正文为事实源，先锁定快照边界并分页构建目标集合，迁移期间的关系数据变化写入单调增量日志；目标集合通过数量、标识、元数据、维度和抽样查询校验后，复用锁外最终计划并以增量水位作写入栅栏，在短事务内批量更新必要向量引用并切换 `active_*`，事务内不再全量读取或重新切分正文。旧集合清理成功前禁止开始下一次嵌入迁移，避免覆盖清理上下文；取消或失败不会改变当前生效集合。
 
 ### 知识作业：`app/core/knowledge_jobs/`
 
@@ -206,6 +212,7 @@ app/core/knowledge_jobs/
 ├── consumer.py             # 作业消费、租约续期、恢复与重试
 ├── executor.py             # 租约栅栏与处理器执行器
 ├── handlers.py             # 托管知识异步嵌入、发布和删除清理
+├── migration.py            # 通用知识库嵌入迁移、校验、原子切换与旧集合清理
 └── vector_cleanup.py       # staged/superseded 向量的持久化独立清理作业
 ```
 
@@ -299,36 +306,50 @@ app/core/message_platforms/
 
 ```text
 app/core/crud/
-├── base.py                 # 通用数据访问抽象
-├── audit.py                # 审计数据访问
-├── audit_tool_result_version.py # 审计结果版本数据访问
-├── background_task.py      # 后台任务数据访问
-├── channel.py              # 渠道和模型数据访问
-├── channel_cursor.py       # 渠道路由数据访问
-├── context_summary_fragment.py # 上下文总结片段数据访问
-├── context_summary_stage.py # 上下文总结阶段数据访问
-├── knowledge_base.py       # 知识库数据访问
-├── knowledge_job.py        # 知识作业租约、重试与状态数据访问
-├── managed_knowledge.py     # 托管知识条目与版本历史数据访问
-├── log.py                  # 系统日志数据访问
-├── message.py              # 消息数据访问
-├── message_platform.py     # 消息平台数据访问
-├── message_platform_outbox.py # 消息发件箱数据访问
-├── memory.py               # 长期记忆数据访问
-├── memory_job.py           # 长期记忆作业数据访问
-├── memory_maintenance.py   # 长期记忆维护数据访问
-├── profile.py              # Profile 数据访问
-├── prompt.py               # Prompt 数据访问
-├── scheduled_task.py       # 定时任务数据访问
-├── session.py              # 会话数据访问
-├── session_event.py        # 会话事件数据访问
-├── session_reply_stream_event.py # 回复流事件数据访问
-├── session_reply_provider_usage.py # 回复请求 Provider Usage 幂等持久化
-├── session_reply_work_item.py # 回复工作数据访问
-├── system_setting.py       # 系统设置数据访问
-├── terminal_session.py     # 终端会话数据访问
-├── user.py                 # 用户数据访问
-└── worker_lease.py         # Worker 协调数据访问
+├── base.py                     # 通用数据访问抽象
+├── account/
+│   └── user.py                 # 用户数据访问
+├── audit/
+│   ├── audit.py                # 审计数据访问
+│   └── tool_result_version.py  # 审计结果版本数据访问
+├── channel/
+│   ├── channel.py              # 渠道和模型数据访问
+│   └── cursor.py               # 渠道路由数据访问
+├── context_summary/
+│   ├── fragment.py             # 上下文总结片段数据访问
+│   └── stage.py                # 上下文总结阶段数据访问
+├── knowledge/
+│   ├── base.py                 # 知识库数据访问
+│   ├── embedding_transition.py # 知识库嵌入模型切换数据访问
+│   ├── job.py                  # 知识作业数据访问
+│   └── managed.py              # 托管知识数据访问
+├── memory/
+│   ├── store.py                # 长期记忆数据访问
+│   ├── job.py                  # 长期记忆作业数据访问
+│   └── maintenance.py          # 长期记忆维护数据访问
+├── message_platform/
+│   ├── platform.py             # 消息平台数据访问
+│   └── outbox.py               # 消息发件箱数据访问
+├── profile/
+│   ├── profile.py              # Profile 数据访问
+│   └── prompt.py               # Prompt 数据访问
+├── session/
+│   ├── message.py              # 消息数据访问
+│   ├── session.py              # 会话数据访问
+│   ├── event.py                # 会话事件数据访问
+│   ├── reply_provider_usage.py # 回复 Provider Usage 持久化
+│   ├── reply_stream_event.py   # 回复流事件数据访问
+│   └── reply_work_item.py      # 回复工作数据访问
+├── system/
+│   ├── log.py                  # 系统日志数据访问
+│   └── setting.py              # 系统设置数据访问
+├── task/
+│   ├── background.py           # 后台任务数据访问
+│   └── scheduled.py            # 定时任务数据访问
+├── terminal/
+│   └── session.py              # 终端会话数据访问
+└── worker/
+    └── lease.py                # Worker 协调数据访问
 ```
 
 ### 对话分发：`app/core/dispatchers/`
@@ -383,9 +404,9 @@ app/core/tools/
 ├── firecrawl_scrape.py     # 网页抓取工具
 ├── firecrawl_search.py     # 网页搜索工具
 ├── image_generation.py     # 图像生成工具
-├── knowledge_base_query.py # 知识库查询工具
+├── knowledge_base_query.py # 知识库查询与托管知识可信元数据
 ├── list_background_tasks.py # 后台任务查询工具
-├── longterm_memory.py      # 长期记忆工具
+├── longterm_memory.py      # 统一记忆工具：个人记忆与托管知识维护
 ├── read_text_file.py       # 文本文件读取工具
 ├── read_multimodal_file.py # 多模态文件读取工具
 ├── send_file_to_user.py    # 文件发送工具
@@ -414,6 +435,8 @@ app/core/utils/
 └── tokenizer.py            # 令牌统计辅助
 ```
 
+统一记忆工具保留个人长期记忆操作，并维护当前 Profile 的托管知识。托管知识更新/删除仅接受可信召回的知识标识与版本；用户知识库和聊天历史只读。托管向量分块命中经关系库校验后按知识去重并还原完整正文，工具日志不记录查询或知识正文。
+
 ### 多语言：`app/core/i18n/`
 
 ```text
@@ -435,7 +458,7 @@ app/models/
 ├── channel.py              # 渠道与模型条目模型
 ├── channel_cursor.py       # 渠道路由模型
 ├── context_summary_stage.py # 上下文总结模型
-├── knowledge_base.py       # 知识库、用户文档、托管知识、版本历史与知识作业模型
+├── knowledge_base.py       # 知识库、用户文档、托管知识、迁移增量、版本历史与知识作业模型
 ├── memory.py               # 长期记忆模型
 ├── message.py              # 消息模型
 ├── message_platform.py     # 消息平台模型

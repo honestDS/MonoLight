@@ -49,7 +49,7 @@ from app.core.constants import (
     MSG_CHANNEL_UPDATE_CONFIRMATION_REQUIRED,
     MSG_CHANNEL_UPDATED,
 )
-from app.core.crud.channel import channel_crud
+from app.core.crud.channel.channel import channel_crud
 from app.core.exceptions import (
     BaseBusinessException,
     ForbiddenException,

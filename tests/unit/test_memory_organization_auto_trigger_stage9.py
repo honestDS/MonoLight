@@ -17,9 +17,9 @@ import app.core.crypto as crypto_module
 import app.core.memory_jobs.consumer as consumer_module
 import app.core.memory_jobs.manager as manager_module
 from app.core.constants import ERR_MEMORY_JOB_PAYLOAD_INVALID, MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import memory_record_crud, memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_record_crud, memory_store_crud
 from app.core.exceptions import ParameterException
 from app.core.memory.normalization import build_memory_content_hash
 from app.core.memory.organization import (

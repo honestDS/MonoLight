@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import ConfigDict, model_validator
-from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Text, event
+from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
 from sqlmodel import (
     JSON,
     Column,
@@ -39,6 +39,21 @@ class KnowledgeBaseOldCollectionCleanupStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class KnowledgeBaseMigrationSourceType(StrEnum):
+    USER_DOCUMENT = "user_document"
+    MANAGED_KNOWLEDGE = "managed_knowledge"
+
+
+class KnowledgeBaseMigrationDeltaAction(StrEnum):
+    UPSERT = "upsert"
+    DELETE = "delete"
+
+
+class KnowledgeBaseMigrationDeltaStatus(StrEnum):
+    PENDING = "pending"
+    APPLIED = "applied"
 
 
 class KnowledgeBaseIndexStatus(StrEnum):
@@ -172,6 +187,10 @@ class KnowledgeBaseCollectionOwner(SQLModel, table=True):
         foreign_key="knowledge_base.id",
         ondelete="SET NULL",
     )
+    cleanup_revision: int = Field(
+        default=0,
+        sa_column=Column(Integer, nullable=False, server_default="0"),
+    )
     cleanup_attempt_count: int = Field(default=0, ge=0)
     cleanup_error: str | None = Field(default=None, sa_column=Column(Text))
     created_at: datetime | None = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True)))
@@ -218,6 +237,7 @@ def _collection_owner_columns_sql(connection) -> str:
         for column in (
             "collection_name",
             "knowledge_base_id",
+            "cleanup_revision",
             "cleanup_attempt_count",
             "cleanup_error",
             "created_at",
@@ -248,6 +268,7 @@ def _collection_owner_cleanup_statement(connection) -> str:
     return (
         f"UPDATE {owner} SET "
         f"{_collection_owner_quote(connection, 'knowledge_base_id')} = NULL, "
+        f"{_collection_owner_quote(connection, 'cleanup_revision')} = {_collection_owner_quote(connection, 'cleanup_revision')} + 1, "
         f"{_collection_owner_quote(connection, 'cleanup_attempt_count')} = 0, "
         f"{_collection_owner_quote(connection, 'cleanup_error')} = NULL, "
         f"{_collection_owner_quote(connection, 'updated_at')} = CURRENT_TIMESTAMP "
@@ -262,7 +283,7 @@ def _sqlite_collection_owner_registration_statements(connection, prefix: str) ->
     statements = []
     for field in _COLLECTION_OWNER_FIELDS:
         expression = _collection_owner_new_expression(connection, prefix, field)
-        statements.append(f"INSERT OR IGNORE INTO {owner} ({columns}) SELECT {expression}, {_collection_owner_new_expression(connection, prefix, 'id')}, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE {_collection_owner_nonempty(expression)}")
+        statements.append(f"INSERT OR IGNORE INTO {owner} ({columns}) SELECT {expression}, {_collection_owner_new_expression(connection, prefix, 'id')}, 0, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE {_collection_owner_nonempty(expression)}")
     return statements
 
 
@@ -278,7 +299,7 @@ def _mysql_collection_owner_registration_statements(connection, prefix: str) -> 
         knowledge_base_id = _collection_owner_new_expression(connection, prefix, "id")
         statements.append(
             f"IF {_collection_owner_nonempty(expression)} THEN "
-            f"INSERT IGNORE INTO {owner} ({columns}) VALUES ({expression}, {knowledge_base_id}, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP); "
+            f"INSERT IGNORE INTO {owner} ({columns}) VALUES ({expression}, {knowledge_base_id}, 0, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP); "
             f"IF NOT EXISTS (SELECT 1 FROM {owner} AS {owner_alias} WHERE {owner_collection} = {expression} AND {owner_knowledge_base} = {knowledge_base_id}) THEN "
             f"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '{_COLLECTION_OWNER_TRIGGER_ERROR}'; "
             f"END IF; "
@@ -485,6 +506,43 @@ class ManagedKnowledgeRevision(SQLModel, table=True):
     source_reference: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     source_job_id: int | None = Field(default=None, index=True)
     modified_by: ManagedKnowledgeActorType = Field(index=True, max_length=20)
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
+class KnowledgeBaseEmbeddingDelta(SQLModel, table=True):
+    __tablename__ = "knowledge_base_embedding_delta"
+    __table_args__ = (
+        UniqueConstraint("migration_job_id", "sequence", name="uq_kb_embedding_delta_job_sequence"),
+        ForeignKeyConstraint(
+            ["knowledge_base_id", "uid"],
+            ["knowledge_base.id", "knowledge_base.uid"],
+            name="fk_kb_embedding_delta_kb_owner",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_kb_embedding_delta_uid_job_sequence",
+            "uid",
+            "migration_job_id",
+            "sequence",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    migration_job_id: int = Field(nullable=False, index=True)
+    sequence: int = Field(ge=1, index=True)
+    source_type: KnowledgeBaseMigrationSourceType = Field(index=True, max_length=30)
+    source_id: int = Field(ge=1, index=True)
+    source_version: int | None = Field(default=None, ge=1, index=True)
+    action: KnowledgeBaseMigrationDeltaAction = Field(index=True, max_length=20)
+    status: KnowledgeBaseMigrationDeltaStatus = Field(
+        default=KnowledgeBaseMigrationDeltaStatus.PENDING,
+        index=True,
+        max_length=20,
+    )
+    error: str | None = Field(default=None, sa_column=Column(Text))
+    applied_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
 
 

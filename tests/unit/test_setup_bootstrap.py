@@ -13,7 +13,7 @@ from app.core.constants import (
     SETUP_STATUS_KEY,
     SETUP_STATUS_PENDING,
 )
-from app.core.crud.system_setting import DEFAULT_SYSTEM_SETTINGS
+from app.core.crud.system.setting import DEFAULT_SYSTEM_SETTINGS
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
 from app.models.system_setting import SystemSetting

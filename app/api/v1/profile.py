@@ -9,12 +9,10 @@ from fastapi import (
     Query,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
 
 from app.core.constants import (
     ERR_DELETE_DEFAULT_PROFILE,
     ERR_DELETE_LAST_PROFILE,
-    ERR_KB_NOT_FOUND,
     ERR_ONLY_ADMIN_ALLOWED,
     ERR_PROFILE_MEMORY_CONFIRMATION_REQUIRED,
     ERR_PROFILE_MEMORY_CREATE_CONFIRMATION_FORBIDDEN,
@@ -31,16 +29,20 @@ from app.core.constants import (
     MSG_PROFILE_SET_DEFAULT,
     MSG_PROFILE_UPDATED,
 )
-from app.core.crud.memory import memory_store_crud
-from app.core.crud.profile import profile_crud
-from app.core.crud.prompt import prompt_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.memory.store import memory_store_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.profile.prompt import prompt_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,
     ResourceNotFoundException,
 )
 from app.core.i18n import t
+from app.core.knowledge.bindings import (
+    get_user_knowledge_base_ids_for_profile,
+    replace_user_knowledge_base_bindings,
+)
 from app.core.memory import get_memory_settings, update_organization_settings
 from app.core.memory.embedding_config import (
     build_memory_runtime,
@@ -57,7 +59,6 @@ from app.core.profile_validation import (
     validate_profile_for_assignment,
 )
 from app.core.security import get_current_user
-from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseProfileBinding
 from app.models.profile import (
     LongTermMemoryOrganizationConfig,
     ProfileConfig,
@@ -102,32 +103,6 @@ def get_profile_tool_options() -> list[dict[str, str]]:
     return [{"value": item["value"], "label": t(item["label_key"], default=item["value"])} for item in PROFILE_TOOL_OPTIONS]
 
 
-async def get_profile_knowledge_base_ids(db: AsyncSession, profile_id: int, uid: str | None) -> list[int]:
-    result = await db.execute(select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBaseProfileBinding.uid == uid).where(KnowledgeBase.uid == uid))
-    return list(result.scalars().all())
-
-
-async def replace_profile_knowledge_base_bindings(db: AsyncSession, profile_id: int, uid: str | None, knowledge_base_ids: list[int] | None) -> None:
-    if knowledge_base_ids is None:
-        return
-    normalized_kb_ids = list(dict.fromkeys(knowledge_base_ids))
-    if normalized_kb_ids:
-        if uid is None:
-            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
-        result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id.in_(normalized_kb_ids)).where(KnowledgeBase.uid == uid))
-        knowledge_bases = list(result.scalars().all())
-        if len(knowledge_bases) != len(normalized_kb_ids):
-            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
-
-    existing_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
-    for binding in existing_result.scalars().all():
-        kb = await db.get(KnowledgeBase, binding.knowledge_base_id)
-        if kb and kb.uid == uid:
-            await db.delete(binding)
-    for kb_id in normalized_kb_ids:
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=uid))
-
-
 async def build_profile_response(
     db: AsyncSession,
     profile: object,
@@ -139,7 +114,11 @@ async def build_profile_response(
     if username is not None:
         item.username = username
     if item.id is not None:
-        item.knowledge_base_ids = await get_profile_knowledge_base_ids(db, item.id, item.uid)
+        item.knowledge_base_ids = await get_user_knowledge_base_ids_for_profile(
+            db,
+            uid=item.uid,
+            profile_id=item.id,
+        )
     if memory_store is _MEMORY_STORE_UNSET:
         store = await memory_store_crud.get_snapshot_by_uid(db, uid=item.uid) if item.uid else None
     else:
@@ -250,7 +229,12 @@ async def create_profile(
             ),
             commit=False,
         )
-        await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await replace_user_knowledge_base_bindings(
+            db,
+            uid=db_profile.uid,
+            profile_id=db_profile.id,
+            knowledge_base_ids=knowledge_base_ids,
+        )
         await sync_profile_memory_organization(db, uid=db_profile.uid, memory_organization=memory_organization)
         await db.commit()
     except Exception:
@@ -426,7 +410,12 @@ async def update_profile(
             ),
             commit=False,
         )
-        await replace_profile_knowledge_base_bindings(db, db_profile.id, db_profile.uid, knowledge_base_ids)
+        await replace_user_knowledge_base_bindings(
+            db,
+            uid=db_profile.uid,
+            profile_id=db_profile.id,
+            knowledge_base_ids=knowledge_base_ids,
+        )
         await sync_profile_memory_organization(db, uid=db_profile.uid, memory_organization=memory_organization)
         await db.commit()
     except Exception:

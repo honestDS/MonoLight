@@ -9,7 +9,7 @@ from app.core.constants import (
     ERR_MEMORY_RECALL_TOOL_DEDUPE_RECORD_MISMATCHED,
     ERR_MEMORY_RECALL_TOOL_DEDUPE_RECORD_ORPHAN,
 )
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.tools.longterm_memory import (
     MANAGE_LONGTERM_MEMORY_TOOL_NAME,

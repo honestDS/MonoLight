@@ -3,10 +3,10 @@ from datetime import timedelta
 
 from sqlalchemy import update
 
-from app.core.crud.profile import profile_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
-from app.core.crud.session import session_crud
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
 from app.core.log import get_logger
 from app.core.session_reply_queue.manager import session_reply_queue_manager

@@ -19,7 +19,7 @@ from app.core.constants import (
     MSG_MESSAGE_PLATFORM_RECOVERED,
     MSG_MESSAGE_PLATFORM_UPDATED,
 )
-from app.core.crud.message_platform import message_platform_crud
+from app.core.crud.message_platform.platform import message_platform_crud
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.profile_validation import get_validated_profile_for_assignment
 from app.models.message_platform import (

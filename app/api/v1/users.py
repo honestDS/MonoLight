@@ -17,7 +17,7 @@ from app.core.constants import (
     MSG_USER_LIST_SUCCESS,
     MSG_USER_UPDATED,
 )
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
 from app.core.exceptions import (
     ForbiddenException,
     ParameterException,

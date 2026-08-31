@@ -16,10 +16,10 @@ from app.core.constants import (
     ERR_MEMORY_CHANNEL_IN_USE,
     ERR_MEMORY_MODEL_IDENTITY_IN_USE,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.memory import memory_reference_crud, memory_store_crud
-from app.core.crud.memory_job import memory_job_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import memory_reference_crud, memory_store_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.exceptions import ParameterException
 from app.core.memory.channel_protection import list_memory_channel_references
@@ -393,10 +393,7 @@ async def assert_channel_model_identity_update_allowed(
         active_embedding = resolve_active_knowledge_base_embedding(knowledge_base)
         if active_embedding.channel_id == channel_id:
             knowledge_base_model_ids.add(active_embedding.model_id)
-        if (
-            knowledge_base.target_embedding_channel_id == channel_id
-            and knowledge_base.target_embedding_model_id
-        ):
+        if knowledge_base.target_embedding_channel_id == channel_id and knowledge_base.target_embedding_model_id:
             knowledge_base_model_ids.add(knowledge_base.target_embedding_model_id)
     conflict_model_id = find_model_identity_update_conflict(knowledge_base_model_ids, old_model_ids, new_model_ids)
     if conflict_model_id is not None:

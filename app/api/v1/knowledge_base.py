@@ -2,8 +2,6 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import func
-from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.constants import (
@@ -14,8 +12,10 @@ from app.core.constants import (
     ERR_KB_DOC_DELETE_FAILED,
     ERR_KB_DOC_NOT_FOUND,
     ERR_KB_DOC_SAVE_FAILED,
+    ERR_KB_EMBEDDING_CONFIG_CHANGED,
     ERR_KB_FILE_EMPTY,
     ERR_KB_FILE_ENCODING_ERROR,
+    ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
     ERR_KB_NOT_FOUND,
     ERR_KB_VECTOR_WRITE_FAILED,
     ERR_PROFILE_NOT_FOUND,
@@ -24,10 +24,16 @@ from app.core.constants import (
     MSG_KB_DELETED,
     MSG_KB_DOC_CREATED,
     MSG_KB_DOC_DELETED,
+    MSG_KB_UNNAMED_DOCUMENT,
     MSG_KB_UPDATED,
 )
-from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
-from app.core.crud.profile import profile_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.knowledge.base import (
+    knowledge_base_crud,
+    knowledge_base_document_crud,
+    knowledge_base_profile_binding_crud,
+)
+from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, load_embedding_runtime_config
 
 # Re-use the refactored embedding and knowledge base query core functions
@@ -36,20 +42,27 @@ from app.core.embedding.knowledge_base import (
     query_knowledge_base,
 )
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
+from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
+from app.core.knowledge.bindings import (
+    get_user_knowledge_base_ids_for_profile,
+    replace_user_knowledge_base_bindings,
+)
+from app.core.knowledge.deletion import delete_owned_knowledge_base
+from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
-from app.models.channel import ModelChannel, ModelUsage
+from app.models.channel import ModelUsage
 from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseCreate,
-    KnowledgeBaseDocument,
     KnowledgeBaseDocumentContentResponse,
     KnowledgeBaseDocumentListResponse,
     KnowledgeBaseDocumentResponse,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseListResponse,
-    KnowledgeBaseProfileBinding,
+    KnowledgeBaseMigrationDeltaAction,
+    KnowledgeBaseMigrationSourceType,
     KnowledgeBaseProfileBindingUpdate,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
@@ -57,16 +70,21 @@ from app.models.knowledge_base import (
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
 )
-from app.models.profile import Profile
 from app.providers.database import get_db
-from app.providers.vector import create_collection, delete_collection, delete_collection_items, get_or_create_collection
+from app.providers.vector import (
+    async_create_collection,
+    async_delete_collection,
+    async_delete_collection_items,
+    async_get_or_create_collection,
+    async_upsert_collection_items,
+)
 from app.schemas.response import StandardResponse
 
 router = APIRouter(prefix="/knowledge-base", tags=["KnowledgeBase"])
 
 
 async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
-    kb = await db.get(KnowledgeBase, kb_id)
+    kb = await knowledge_base_crud.get(db, kb_id)
     if not kb:
         raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
@@ -75,27 +93,11 @@ async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: 
 
 
 async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int, uid: str) -> list[int]:
-    result = await db.execute(select(KnowledgeBaseProfileBinding.profile_id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.uid == uid))
-    return list(result.scalars().all())
-
-
-async def replace_knowledge_base_bindings(db: AsyncSession, kb_id: int, profile_ids: list[int]) -> None:
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb:
-        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-
-    normalized_profile_ids = list(dict.fromkeys(profile_ids))
-    if normalized_profile_ids:
-        profile_result = await db.execute(select(Profile.id).where(Profile.id.in_(normalized_profile_ids)).where(Profile.uid == kb.uid))
-        if len(list(profile_result.scalars().all())) != len(normalized_profile_ids):
-            raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
-
-    result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
-    for binding in result.scalars().all():
-        await db.delete(binding)
-
-    for profile_id in normalized_profile_ids:
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=kb.uid))
+    return await knowledge_base_profile_binding_crud.list_profile_ids_by_knowledge_base(
+        db,
+        uid=uid,
+        knowledge_base_id=kb_id,
+    )
 
 
 async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> KnowledgeBaseResponse:
@@ -122,10 +124,42 @@ async def load_embedding_model(
     return config, {"model_id": config.model_id, "embedding_dimensions": config.declared_dimensions}
 
 
+async def embed_document_with_stable_knowledge_base_config(
+    db: AsyncSession,
+    *,
+    knowledge_base: KnowledgeBase,
+    chunks: list[str],
+    batch_size: int,
+) -> tuple[KnowledgeBase, list[list[float]]]:
+    candidate = knowledge_base
+    for _attempt in range(2):
+        expected_embedding = resolve_active_knowledge_base_embedding(candidate)
+        embeddings = await embed_chunks_with_knowledge_base_config(
+            db,
+            candidate,
+            chunks,
+            batch_size,
+            release_connection=True,
+        )
+        locked = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=knowledge_base.uid,
+            knowledge_base_id=knowledge_base.id,
+        )
+        if locked is None:
+            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+        if resolve_active_knowledge_base_embedding(locked) == expected_embedding:
+            return locked, embeddings
+        await db.rollback()
+        candidate = await knowledge_base_crud.get(db, knowledge_base.id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+    raise HTTPException(status_code=409, detail=ERR_KB_EMBEDDING_CONFIG_CHANGED)
+
+
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
-    result = await db.execute(select(ModelChannel).where(ModelChannel.is_active))
     options = []
-    for channel in result.scalars().all():
+    for channel in await channel_crud.list_active(db):
         if not channel.base_url:
             continue
         for item in channel.model_ids or []:
@@ -139,21 +173,6 @@ async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]
                     }
                 )
     return options
-
-
-async def load_user_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> tuple[KnowledgeBase, Profile]:
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb:
-        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-    if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
-        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-
-    result = await db.execute(select(Profile).join(KnowledgeBaseProfileBinding, KnowledgeBaseProfileBinding.profile_id == Profile.id).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id).where(KnowledgeBaseProfileBinding.uid == kb.uid).where(Profile.uid == getattr(current_user, "uid", None)))
-    profile = result.scalars().first()
-    if not profile:
-        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-
-    return kb, profile
 
 
 @router.post("/create", response_model=StandardResponse[KnowledgeBaseResponse])
@@ -173,7 +192,7 @@ async def create_knowledge_base(
 
     # 在 ChromaDB 中创建 collection
     try:
-        create_collection(collection_name)
+        await async_create_collection(collection_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=t(ERR_KB_COLLECTION_CREATE_FAILED, message=str(e)))
 
@@ -186,39 +205,40 @@ async def create_knowledge_base(
         )
         embedding_dimensions = embedding_model.get("embedding_dimensions")
 
-        # 存入关系型数据库
-        db_kb = KnowledgeBase(
-            uid=current_user.uid,
-            name=kb_in.name,
-            description=kb_in.description,
-            embedding_channel_id=kb_in.embedding_channel_id,
-            embedding_model_id=kb_in.embedding_model_id,
-            embedding_dimensions=embedding_dimensions,
-            collection_name=collection_name,
-            knowledge_base_type=KnowledgeBaseType.USER,
-            managed_profile_id=None,
-            active_embedding_channel_id=kb_in.embedding_channel_id,
-            active_embedding_model_id=kb_in.embedding_model_id,
-            active_embedding_dimensions=embedding_dimensions,
-            active_embedding_revision=1,
-            active_collection_name=collection_name,
-            index_revision=1,
-            index_status=KnowledgeBaseIndexStatus.READY,
+        db_kb = await knowledge_base_crud.create(
+            db,
+            obj_in={
+                "uid": current_user.uid,
+                "name": kb_in.name,
+                "description": kb_in.description,
+                "embedding_channel_id": kb_in.embedding_channel_id,
+                "embedding_model_id": kb_in.embedding_model_id,
+                "embedding_dimensions": embedding_dimensions,
+                "collection_name": collection_name,
+                "knowledge_base_type": KnowledgeBaseType.USER,
+                "managed_profile_id": None,
+                "active_embedding_channel_id": kb_in.embedding_channel_id,
+                "active_embedding_model_id": kb_in.embedding_model_id,
+                "active_embedding_dimensions": embedding_dimensions,
+                "active_embedding_revision": 1,
+                "active_collection_name": collection_name,
+                "index_revision": 1,
+                "index_status": KnowledgeBaseIndexStatus.READY,
+            },
+            commit=False,
         )
-        db.add(db_kb)
         await db.commit()
-        await db.refresh(db_kb)
     except HTTPException:
         await db.rollback()
         try:
-            delete_collection(collection_name)
+            await async_delete_collection(collection_name)
         except Exception:
             pass
         raise
     except Exception as e:
         await db.rollback()
         try:
-            delete_collection(collection_name)
+            await async_delete_collection(collection_name)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail=t(ERR_KB_CREATE_FAILED_WITH_ROLLBACK, message=str(e)))
@@ -234,18 +254,13 @@ async def list_knowledge_bases(
     current_user: Any = Depends(get_current_user),
 ):
     """获取知识库列表及可用配置"""
-    # 1. 获取知识库列表 (带分页)
     skip = (page - 1) * size
-    list_query = select(KnowledgeBase)
-    count_query = select(func.count()).select_from(KnowledgeBase)
-    if not getattr(current_user, "is_superuser", False):
-        list_query = list_query.where(KnowledgeBase.uid == current_user.uid)
-        count_query = count_query.where(KnowledgeBase.uid == current_user.uid)
-
-    result_kb = await db.execute(list_query.order_by(KnowledgeBase.created_at.desc()).offset(skip).limit(size))
-    kbs = result_kb.scalars().all()
-    total_result = await db.execute(count_query)
-    total = total_result.scalar() or 0
+    kbs, total = await knowledge_base_crud.list_page(
+        db,
+        uid=None if getattr(current_user, "is_superuser", False) else current_user.uid,
+        skip=skip,
+        limit=size,
+    )
 
     knowledge_base_items = []
     for knowledge_base in kbs:
@@ -270,12 +285,11 @@ async def update_knowledge_base(
     """修改知识库"""
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
 
-    kb.name = kb_in.name
-    kb.description = kb_in.description
-
-    db.add(kb)
-    await db.commit()
-    await db.refresh(kb)
+    kb = await knowledge_base_crud.update(
+        db,
+        db_obj=kb,
+        obj_in={"name": kb_in.name, "description": kb_in.description},
+    )
     return StandardResponse.success(data=await build_knowledge_base_response(db, kb), message=MSG_KB_UPDATED)
 
 
@@ -285,16 +299,19 @@ async def get_profile_knowledge_base_bindings(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
-    profile = await db.get(Profile, profile_id)
+    profile = await profile_crud.get(db, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
 
-    result = await db.execute(
-        select(KnowledgeBaseProfileBinding.knowledge_base_id).join(KnowledgeBase, KnowledgeBase.id == KnowledgeBaseProfileBinding.knowledge_base_id).where(KnowledgeBaseProfileBinding.profile_id == profile_id).where(KnowledgeBaseProfileBinding.uid == profile.uid).where(KnowledgeBase.uid == profile.uid)
+    return StandardResponse.success(
+        data=await get_user_knowledge_base_ids_for_profile(
+            db,
+            uid=profile.uid,
+            profile_id=profile_id,
+        )
     )
-    return StandardResponse.success(data=list(result.scalars().all()))
 
 
 @router.post("/profile-bindings", response_model=StandardResponse[list[int]])
@@ -304,7 +321,7 @@ async def update_profile_knowledge_base_bindings(
     db: AsyncSession = Depends(get_db),
     current_user: Any = Depends(get_current_user),
 ):
-    snapshot = await db.get(Profile, profile_id)
+    snapshot = await profile_crud.get(db, profile_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail=ERR_PROFILE_NOT_FOUND)
     profile = await profile_crud.lock_for_runtime_use(
@@ -317,23 +334,14 @@ async def update_profile_knowledge_base_bindings(
     if profile.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
 
-    normalized_kb_ids = list(dict.fromkeys(binding_in.knowledge_base_ids))
-    if normalized_kb_ids:
-        result = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id.in_(normalized_kb_ids)).where(KnowledgeBase.uid == profile.uid))
-        knowledge_bases = list(result.scalars().all())
-        if len(knowledge_bases) != len(normalized_kb_ids):
-            raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-
-    existing_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.profile_id == profile_id))
-    for binding in existing_result.scalars().all():
-        kb = await db.get(KnowledgeBase, binding.knowledge_base_id)
-        if kb and kb.uid == profile.uid:
-            await db.delete(binding)
-
-    for kb_id in normalized_kb_ids:
-        db.add(KnowledgeBaseProfileBinding(knowledge_base_id=kb_id, profile_id=profile_id, uid=profile.uid))
+    normalized_kb_ids = await replace_user_knowledge_base_bindings(
+        db,
+        uid=profile.uid,
+        profile_id=profile_id,
+        knowledge_base_ids=binding_in.knowledge_base_ids,
+    )
     await db.commit()
-    return StandardResponse.success(data=normalized_kb_ids)
+    return StandardResponse.success(data=normalized_kb_ids or [])
 
 
 @router.post("/query-test", response_model=StandardResponse[KnowledgeBaseQueryTestResponse])
@@ -360,33 +368,16 @@ async def delete_knowledge_base(
     current_user: Any = Depends(get_current_user),
 ):
     """删除知识库"""
-
-    kb = await load_owned_knowledge_base(db, kb_id, current_user)
-
     try:
-        await knowledge_base_collection_owner_crud.enqueue(
+        await delete_owned_knowledge_base(
             db,
-            knowledge_base_id=kb.id,
-            collection_names=(
-                kb.collection_name,
-                kb.active_collection_name,
-                kb.target_collection_name,
-                kb.old_collection_name,
-            ),
-            commit=False,
+            knowledge_base_id=kb_id,
+            requester_uid=getattr(current_user, "uid", ""),
+            is_superuser=bool(getattr(current_user, "is_superuser", False)),
         )
-        docs_result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
-        for document in docs_result.scalars().all():
-            await db.delete(document)
-        binding_result = await db.execute(select(KnowledgeBaseProfileBinding).where(KnowledgeBaseProfileBinding.knowledge_base_id == kb_id))
-        for binding in binding_result.scalars().all():
-            await db.delete(binding)
-        await db.flush()
-        await db.delete(kb)
-        await db.flush()
-        await db.commit()
+    except BaseBusinessException:
+        raise
     except Exception as e:
-        await db.rollback()
         raise HTTPException(status_code=500, detail=t(ERR_KB_DELETE_FAILED, message=str(e)))
 
     return StandardResponse.success(data=True, message=MSG_KB_DELETED)
@@ -404,6 +395,8 @@ async def import_document(
 ):
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
+    if kb.knowledge_base_type != KnowledgeBaseType.USER:
+        raise HTTPException(status_code=409, detail=t(ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN))
     if chunk_overlap >= chunk_size:
         raise HTTPException(status_code=400, detail=ERR_KB_CHUNK_OVERLAP_ERROR)
 
@@ -420,9 +413,15 @@ async def import_document(
     if not chunks:
         raise HTTPException(status_code=400, detail=ERR_KB_FILE_EMPTY)
 
-    active_embedding = resolve_active_knowledge_base_embedding(kb)
-    embeddings = await embed_chunks_with_knowledge_base_config(db, kb, chunks, batch_size)
+    locked_kb, embeddings = await embed_document_with_stable_knowledge_base_config(
+        db,
+        knowledge_base=kb,
+        chunks=chunks,
+        batch_size=batch_size,
+    )
+    active_embedding = resolve_active_knowledge_base_embedding(locked_kb)
     document_uuid = uuid.uuid4().hex
+    document_filename = file.filename or t(MSG_KB_UNNAMED_DOCUMENT)
     chunk_ids = []
     metadatas = []
     for chunk_index in range(len(chunks)):
@@ -431,36 +430,56 @@ async def import_document(
             {
                 "knowledge_base_id": kb.id,
                 "document_uuid": document_uuid,
-                "filename": file.filename or "未命名文档",
+                "filename": document_filename,
                 "chunk_index": chunk_index,
             }
         )
 
     try:
-        collection = get_or_create_collection(active_embedding.collection_name)
-        collection.add(ids=chunk_ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+        await async_get_or_create_collection(active_embedding.collection_name)
+        await async_upsert_collection_items(
+            active_embedding.collection_name,
+            chunk_ids,
+            chunks,
+            embeddings,
+            metadatas,
+            batch_size=batch_size,
+        )
     except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=t(ERR_KB_VECTOR_WRITE_FAILED, message=str(e)))
 
-    db_document = KnowledgeBaseDocument(
-        knowledge_base_id=kb.id,
-        filename=file.filename or "未命名文档",
-        content=content,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        batch_size=batch_size,
-        chunk_count=len(chunks),
-        chunk_ids=chunk_ids,
-        metadata_={"document_uuid": document_uuid, "content_type": file.content_type or ""},
-    )
-    db.add(db_document)
     try:
+        db_document = await knowledge_base_document_crud.create(
+            db,
+            values={
+                "knowledge_base_id": locked_kb.id,
+                "filename": document_filename,
+                "content": content,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "batch_size": batch_size,
+                "chunk_count": len(chunks),
+                "chunk_ids": chunk_ids,
+                "metadata_": {
+                    "document_uuid": document_uuid,
+                    "content_type": file.content_type or "",
+                },
+            },
+            commit=False,
+        )
+        await record_knowledge_base_migration_change(
+            db,
+            knowledge_base=locked_kb,
+            source_type=KnowledgeBaseMigrationSourceType.USER_DOCUMENT,
+            source_id=db_document.id,
+            action=KnowledgeBaseMigrationDeltaAction.UPSERT,
+        )
         await db.commit()
-        await db.refresh(db_document)
     except Exception as e:
         await db.rollback()
         try:
-            delete_collection_items(active_embedding.collection_name, chunk_ids)
+            await async_delete_collection_items(active_embedding.collection_name, chunk_ids)
         except Exception:
             pass
         raise HTTPException(status_code=500, detail=t(ERR_KB_DOC_SAVE_FAILED, message=str(e)))
@@ -480,10 +499,12 @@ async def list_documents(
     await load_owned_knowledge_base(db, kb_id, current_user)
 
     skip = (page - 1) * size
-    result = await db.execute(select(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id).order_by(KnowledgeBaseDocument.created_at.desc()).offset(skip).limit(size))
-    documents = result.scalars().all()
-    total_result = await db.execute(select(func.count()).select_from(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == kb_id))
-    total = total_result.scalar() or 0
+    documents, total = await knowledge_base_document_crud.list_page(
+        db,
+        knowledge_base_id=kb_id,
+        skip=skip,
+        limit=size,
+    )
 
     document_items = []
     for document in documents:
@@ -506,8 +527,12 @@ async def get_document_content(
 ):
 
     await load_owned_knowledge_base(db, kb_id, current_user)
-    document = await db.get(KnowledgeBaseDocument, document_id)
-    if not document or document.knowledge_base_id != kb_id:
+    document = await knowledge_base_document_crud.get_by_knowledge_base(
+        db,
+        knowledge_base_id=kb_id,
+        document_id=document_id,
+    )
+    if not document:
         raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
     return StandardResponse.success(data=KnowledgeBaseDocumentContentResponse.model_validate(document))
 
@@ -521,15 +546,39 @@ async def delete_document(
 ):
 
     kb = await load_owned_knowledge_base(db, kb_id, current_user)
-    document = await db.get(KnowledgeBaseDocument, document_id)
-    if not document or document.knowledge_base_id != kb_id:
+    locked_kb = await knowledge_base_crud.lock_owned_by_id(
+        db,
+        uid=kb.uid,
+        knowledge_base_id=kb_id,
+    )
+    if locked_kb is None:
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+    document = await knowledge_base_document_crud.get_by_knowledge_base(
+        db,
+        knowledge_base_id=kb_id,
+        document_id=document_id,
+    )
+    if not document:
         raise HTTPException(status_code=404, detail=ERR_KB_DOC_NOT_FOUND)
 
-    active_embedding = resolve_active_knowledge_base_embedding(kb)
-    await db.delete(document)
+    active_embedding = resolve_active_knowledge_base_embedding(locked_kb)
     try:
-        await db.flush()
-        delete_collection_items(active_embedding.collection_name, document.chunk_ids or [])
+        await knowledge_base_document_crud.delete(
+            db,
+            document=document,
+            commit=False,
+        )
+        await record_knowledge_base_migration_change(
+            db,
+            knowledge_base=locked_kb,
+            source_type=KnowledgeBaseMigrationSourceType.USER_DOCUMENT,
+            source_id=document.id,
+            action=KnowledgeBaseMigrationDeltaAction.DELETE,
+        )
+        await async_delete_collection_items(
+            active_embedding.collection_name,
+            document.chunk_ids or [],
+        )
         await db.commit()
     except Exception as e:
         await db.rollback()

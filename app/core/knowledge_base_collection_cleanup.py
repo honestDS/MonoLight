@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crud.knowledge_base import knowledge_base_collection_owner_crud
+from app.core.crud.knowledge.base import knowledge_base_collection_owner_crud
 from app.core.log import get_logger
 from app.providers.database import AsyncSessionLocal
 from app.providers.vector import async_delete_collection_if_exists
@@ -38,25 +38,36 @@ async def process_pending_collection_cleanups(
         return CollectionCleanupBatchResult(0, 0, 0)
 
     pending_records = await knowledge_base_collection_owner_crud.list_pending(db, limit=limit)
-    collection_names: list[str] = [record.collection_name for record in pending_records]
+    pending_snapshots = [(record.collection_name, record.cleanup_revision) for record in pending_records]
     await db.commit()
 
     succeeded_count = 0
     failed_count = 0
-    for collection_name in collection_names:
+    for collection_name, cleanup_revision in pending_snapshots:
         try:
             await async_delete_collection_if_exists(collection_name)
         except Exception as exc:
             message = str(exc)
             error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-            await knowledge_base_collection_owner_crud.mark_failed(db, collection_name=collection_name, error=error)
-            failed_count += 1
+            changed = await knowledge_base_collection_owner_crud.mark_failed(
+                db,
+                collection_name=collection_name,
+                expected_revision=cleanup_revision,
+                error=error,
+            )
+            if changed:
+                failed_count += 1
         else:
-            await knowledge_base_collection_owner_crud.mark_succeeded(db, collection_name=collection_name)
-            succeeded_count += 1
+            changed = await knowledge_base_collection_owner_crud.mark_succeeded(
+                db,
+                collection_name=collection_name,
+                expected_revision=cleanup_revision,
+            )
+            if changed:
+                succeeded_count += 1
 
     return CollectionCleanupBatchResult(
-        pending_count=len(collection_names),
+        pending_count=len(pending_snapshots),
         succeeded_count=succeeded_count,
         failed_count=failed_count,
     )

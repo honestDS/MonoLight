@@ -17,14 +17,14 @@ from app.core.constants import (
     MEMORY_ORGANIZE_POLICY_VERSION,
     MEMORY_ORGANIZE_TRIGGER_RECORDS,
 )
-from app.core.crud.memory import (
+from app.core.crud.memory.job import memory_job_crud
+from app.core.crud.memory.store import (
     memory_embedding_delta_crud,
     memory_embedding_revision_crud,
     memory_record_crud,
     memory_revision_crud,
     memory_store_crud,
 )
-from app.core.crud.memory_job import memory_job_crud
 from app.core.i18n import t
 from app.core.memory import build_memory_collection_name, build_memory_vector_item_id
 from app.models.memory import (

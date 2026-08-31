@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,11 +15,19 @@ from app.core.constants import (
     ERR_KNOWLEDGE_JOB_FIELD_INVALID,
     ERR_KNOWLEDGE_JOB_FIELD_REQUIRED,
     ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT,
+    ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND,
+    ERR_PROFILE_NOT_FOUND,
 )
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
-from app.core.exceptions import BaseBusinessException
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.exceptions import BaseBusinessException, ResourceNotFoundException
 from app.core.i18n import t
+from app.core.knowledge.errors import (
+    ManagedKnowledgeContainerConflictError,
+    ManagedKnowledgeNotFoundError,
+)
 from app.core.knowledge.managed import managed_knowledge_service, normalize_managed_knowledge_key
 from app.core.knowledge.managed_container import get_or_create_managed_knowledge_base
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
@@ -129,6 +138,69 @@ def _safe_payload(*, content: str | None = None, knowledge_key: str | None = Non
 
 
 class KnowledgeJobManager:
+    async def _get_managed_knowledge_base_for_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+    ) -> KnowledgeBase:
+        profile = await profile_crud.lock_for_runtime_use(
+            db,
+            profile_id=profile_id,
+            uid=uid,
+        )
+        if profile is None:
+            raise ResourceNotFoundException(ERR_PROFILE_NOT_FOUND)
+        knowledge_base = await knowledge_base_crud.lock_managed_by_profile(
+            db,
+            uid=uid,
+            profile_id=profile_id,
+        )
+        if knowledge_base is None or knowledge_base.id is None:
+            raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND)
+        return knowledge_base
+
+    async def _submit_existing_managed_profile_mutation(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        commit: bool,
+        submitter: Callable[[KnowledgeBase], Awaitable[KnowledgeJobSubmissionResult]],
+    ) -> ProfileKnowledgeJobSubmissionResult:
+        uid = _require_string(uid, field="uid")
+        profile_id = _positive_int(profile_id, field="profile_id")
+        try:
+            knowledge_base = await self._get_managed_knowledge_base_for_profile(
+                db,
+                uid=uid,
+                profile_id=profile_id,
+            )
+            submission = await submitter(knowledge_base)
+            if commit:
+                await db.commit()
+                await db.refresh(knowledge_base)
+                if submission.job is not None:
+                    await db.refresh(submission.job)
+                if submission.item is not None:
+                    await db.refresh(submission.item)
+            else:
+                await db.flush()
+            return ProfileKnowledgeJobSubmissionResult(
+                knowledge_base=knowledge_base,
+                knowledge_base_created=False,
+                status=submission.status,
+                item=submission.item,
+                job=submission.job,
+                created=submission.created,
+            )
+        except Exception:
+            if commit and db.in_transaction():
+                await db.rollback()
+            raise
+
     async def submit_create_for_profile(
         self,
         db: AsyncSession,
@@ -149,7 +221,8 @@ class KnowledgeJobManager:
     ) -> ProfileKnowledgeJobSubmissionResult:
         uid = _require_string(uid, field="uid")
         profile_id = _positive_int(profile_id, field="profile_id")
-        try:
+
+        async def submit_once() -> ProfileKnowledgeJobSubmissionResult:
             container = await get_or_create_managed_knowledge_base(
                 db,
                 uid=uid,
@@ -191,10 +264,23 @@ class KnowledgeJobManager:
                 job=submission.job,
                 created=submission.created,
             )
-        except Exception:
-            if commit and db.in_transaction():
-                await db.rollback()
-            raise
+
+        attempts = 2 if commit else 1
+        for attempt in range(attempts):
+            try:
+                return await submit_once()
+            except ManagedKnowledgeContainerConflictError:
+                if not commit or attempt + 1 >= attempts:
+                    if commit and db.in_transaction():
+                        await db.rollback()
+                    raise
+                if db.in_transaction():
+                    await db.rollback()
+            except Exception:
+                if commit and db.in_transaction():
+                    await db.rollback()
+                raise
+        raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
 
     async def _create_job(
         self,
@@ -238,11 +324,7 @@ class KnowledgeJobManager:
             if _is_active_change_key_integrity_error(exc):
                 raise KnowledgeJobTargetBusyError(t(ERR_KNOWLEDGE_JOB_ACTIVE_TARGET_BUSY)) from exc
             raise
-        if not created and (
-            job.operation != operation
-            or job.request_hash != request_hash
-            or job.knowledge_base_id != knowledge_base_id
-        ):
+        if not created and (job.operation != operation or job.request_hash != request_hash or job.knowledge_base_id != knowledge_base_id):
             raise KnowledgeJobValidationError(t(ERR_KNOWLEDGE_JOB_DEDUPE_CONFLICT))
         return job, created
 
@@ -303,13 +385,7 @@ class KnowledgeJobManager:
 
     @staticmethod
     def _needs_publication(item: ManagedKnowledgeItem | None) -> bool:
-        return bool(
-            item is not None
-            and item.deleted_at is None
-            and item.pending_job_id is None
-            and not item.is_recallable
-            and item.indexed_version < item.version
-        )
+        return bool(item is not None and item.deleted_at is None and item.pending_job_id is None and not item.is_recallable and item.indexed_version < item.version)
 
     async def submit_create(
         self,
@@ -332,9 +408,7 @@ class KnowledgeJobManager:
     ) -> KnowledgeJobSubmissionResult:
         uid = _require_string(uid, field="uid")
         knowledge_base_id = _positive_int(knowledge_base_id, field="knowledge_base_id")
-        knowledge_key = normalize_managed_knowledge_key(
-            _require_string(knowledge_key, field="knowledge_key")
-        )
+        knowledge_key = normalize_managed_knowledge_key(_require_string(knowledge_key, field="knowledge_key"))
         dedupe_key = _require_string(dedupe_key, field="dedupe_key")
         _positive_int(max_attempts, field="max_attempts")
         operation = KnowledgeJobOperation.MANAGED_CREATE
@@ -386,12 +460,7 @@ class KnowledgeJobManager:
             )
             if mutation.status == ManagedKnowledgeMutationStatus.CREATED and mutation.item is not None:
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=True)
-            elif (
-                mutation.status == ManagedKnowledgeMutationStatus.EXISTING_KEY
-                and mutation.item is not None
-                and mutation.item.content == content
-                and self._needs_publication(mutation.item)
-            ):
+            elif mutation.status == ManagedKnowledgeMutationStatus.EXISTING_KEY and mutation.item is not None and mutation.item.content == content and self._needs_publication(mutation.item):
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=False)
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
@@ -439,9 +508,7 @@ class KnowledgeJobManager:
         knowledge_base_id = _positive_int(knowledge_base_id, field="knowledge_base_id")
         knowledge_id = _positive_int(knowledge_id, field="knowledge_id")
         expected_version = _positive_int(expected_version, field="expected_version")
-        knowledge_key = normalize_managed_knowledge_key(
-            _require_string(knowledge_key, field="knowledge_key")
-        )
+        knowledge_key = normalize_managed_knowledge_key(_require_string(knowledge_key, field="knowledge_key"))
         dedupe_key = _require_string(dedupe_key, field="dedupe_key")
         _positive_int(max_attempts, field="max_attempts")
         operation = KnowledgeJobOperation.MANAGED_UPDATE
@@ -497,11 +564,7 @@ class KnowledgeJobManager:
             )
             if mutation.status == ManagedKnowledgeMutationStatus.UPDATED and mutation.item is not None:
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=True)
-            elif (
-                mutation.item is not None
-                and mutation.item.id == knowledge_id
-                and self._needs_publication(mutation.item)
-            ):
+            elif mutation.item is not None and mutation.item.id == knowledge_id and self._needs_publication(mutation.item):
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=False)
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
@@ -518,6 +581,60 @@ class KnowledgeJobManager:
             if commit and db.in_transaction():
                 await db.rollback()
             raise
+
+    async def submit_update_for_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        content: str,
+        source_type: ManagedKnowledgeSourceType | str,
+        actor: ManagedKnowledgeActorType | str,
+        dedupe_key: str,
+        source_reference: dict[str, Any] | None = None,
+        source_session_id: str | None = None,
+        source_message_id: int | None = None,
+        max_attempts: int = 3,
+        commit: bool = True,
+    ) -> ProfileKnowledgeJobSubmissionResult:
+        async def submitter(knowledge_base: KnowledgeBase) -> KnowledgeJobSubmissionResult:
+            item = await managed_knowledge_item_crud.get_by_id(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base.id,
+                knowledge_id=knowledge_id,
+            )
+            if item is None:
+                raise ManagedKnowledgeNotFoundError()
+            return await self.submit_update(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base.id,
+                knowledge_id=knowledge_id,
+                expected_version=expected_version,
+                knowledge_key=item.knowledge_key,
+                content=content,
+                source_type=source_type,
+                actor=actor,
+                dedupe_key=dedupe_key,
+                source_reference=source_reference,
+                source_session_id=source_session_id,
+                source_profile_id=profile_id,
+                source_message_id=source_message_id,
+                max_attempts=max_attempts,
+                commit=False,
+            )
+
+        return await self._submit_existing_managed_profile_mutation(
+            db,
+            uid=uid,
+            profile_id=profile_id,
+            commit=commit,
+            submitter=submitter,
+        )
 
     async def submit_delete(
         self,
@@ -588,10 +705,7 @@ class KnowledgeJobManager:
                 source_job_id=job.id,
                 commit=False,
             )
-            if mutation.item is not None and (
-                mutation.status == ManagedKnowledgeMutationStatus.DELETED
-                or (mutation.item.deleted_at is not None and mutation.item.pending_job_id is None)
-            ):
+            if mutation.item is not None and (mutation.status == ManagedKnowledgeMutationStatus.DELETED or (mutation.item.deleted_at is not None and mutation.item.pending_job_id is None)):
                 job, item = await self._bind_job(
                     db,
                     job=job,
@@ -613,6 +727,49 @@ class KnowledgeJobManager:
             if commit and db.in_transaction():
                 await db.rollback()
             raise
+
+    async def submit_delete_for_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        source_type: ManagedKnowledgeSourceType | str,
+        actor: ManagedKnowledgeActorType | str,
+        dedupe_key: str,
+        source_reference: dict[str, Any] | None = None,
+        source_session_id: str | None = None,
+        source_message_id: int | None = None,
+        max_attempts: int = 3,
+        commit: bool = True,
+    ) -> ProfileKnowledgeJobSubmissionResult:
+        async def submitter(knowledge_base: KnowledgeBase) -> KnowledgeJobSubmissionResult:
+            return await self.submit_delete(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base.id,
+                knowledge_id=knowledge_id,
+                expected_version=expected_version,
+                source_type=source_type,
+                actor=actor,
+                dedupe_key=dedupe_key,
+                source_reference=source_reference,
+                source_session_id=source_session_id,
+                source_profile_id=profile_id,
+                source_message_id=source_message_id,
+                max_attempts=max_attempts,
+                commit=False,
+            )
+
+        return await self._submit_existing_managed_profile_mutation(
+            db,
+            uid=uid,
+            profile_id=profile_id,
+            commit=commit,
+            submitter=submitter,
+        )
 
 
 knowledge_job_manager = KnowledgeJobManager()

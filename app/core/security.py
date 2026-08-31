@@ -27,7 +27,7 @@ from app.core.constants import (
     ERR_UNAUTHORIZED,
     JWT_ALGORITHM,
 )
-from app.core.crud.user import user_crud
+from app.core.crud.account.user import user_crud
 from app.core.system_secrets import get_jwt_secret_key
 from app.models.user import User
 from app.providers.database import AsyncSessionLocal

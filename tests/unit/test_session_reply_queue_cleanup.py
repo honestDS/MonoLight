@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.core.crud.session_reply_work_item import CRUDSessionReplyWorkItem, SessionReplyCleanupResult
+from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, SessionReplyCleanupResult
 from app.core.session_reply_queue import consumer as consumer_module
 from app.core.utils.time import get_local_time
 from app.models.session import ChatSession

@@ -5,9 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import check_admin_privilege
 from app.core.constants import ERR_BACKGROUND_TASK_NOT_FOUND, ERR_SCHEDULED_TASK_PROFILE_NOT_FOUND, ERR_SESSION_NOT_FOUND, MSG_GENERIC_SUCCESS
-from app.core.crud.profile import profile_crud
-from app.core.crud.scheduled_task import scheduled_task_crud
-from app.core.crud.session import session_crud
+from app.core.crud.profile.profile import profile_crud
+from app.core.crud.session.session import session_crud
+from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.exceptions import ResourceNotFoundException
 from app.core.utils.time import get_local_time
 from app.models.scheduled_task import ScheduledTaskResponse, ScheduledTaskStatus

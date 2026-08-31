@@ -29,9 +29,9 @@ from app.core.constants import (
     LOG_MEMORY_AUTO_ORGANIZATION_SUBMISSION_FAILED,
     MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS,
 )
-from app.core.crud.channel import channel_crud
-from app.core.crud.memory import memory_record_crud, memory_store_crud
-from app.core.crud.memory_job import MemoryJobCancelResult, memory_job_crud
+from app.core.crud.channel.channel import channel_crud
+from app.core.crud.memory.job import MemoryJobCancelResult, memory_job_crud
+from app.core.crud.memory.store import memory_record_crud, memory_store_crud
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger

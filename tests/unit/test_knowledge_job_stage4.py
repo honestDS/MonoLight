@@ -13,13 +13,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.knowledge_job import knowledge_job_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud
+from app.core import knowledge_base_collection_cleanup as collection_cleanup_service
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import BaseBusinessException
 from app.core.knowledge.managed import managed_knowledge_service
-from app.core.knowledge.recall import filter_recallable_managed_hits
+from app.core.knowledge.recall import (
+    filter_recallable_managed_hits,
+    materialize_recallable_managed_hits,
+)
 from app.core.knowledge.results import ManagedKnowledgeMutationStatus
 from app.core.knowledge_jobs.consumer import KnowledgeJobConsumer
 from app.core.knowledge_jobs.executor import (
@@ -40,6 +44,7 @@ from app.core.retrieval.schemas import RetrievalHit
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,
+    KnowledgeBaseCollectionOwner,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseType,
     KnowledgeJob,
@@ -59,6 +64,7 @@ _TABLES = (
     ModelChannel.__table__,
     Profile.__table__,
     KnowledgeBase.__table__,
+    KnowledgeBaseCollectionOwner.__table__,
     ManagedKnowledgeItem.__table__,
     ManagedKnowledgeRevision.__table__,
     KnowledgeJob.__table__,
@@ -80,9 +86,7 @@ async def knowledge_job_database(tmp_path) -> AsyncIterator[async_sessionmaker[A
         cursor.close()
 
     async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES)
-        )
+        await connection.run_sync(lambda sync_connection: SQLModel.metadata.create_all(sync_connection, tables=_TABLES))
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -343,9 +347,7 @@ async def test_active_change_unique_conflict_is_classified_without_state_requery
     integrity_error = IntegrityError(
         "INSERT INTO knowledge_job",
         {},
-        RuntimeError(
-            "UNIQUE constraint failed: knowledge_job.uid, knowledge_job.active_change_key"
-        ),
+        RuntimeError("UNIQUE constraint failed: knowledge_job.uid, knowledge_job.active_change_key"),
     )
     monkeypatch.setattr(
         knowledge_job_crud,
@@ -389,11 +391,7 @@ async def test_expired_lease_recovers_and_old_worker_is_fenced(
 
     async with knowledge_job_database() as db:
         now = await get_database_time(db)
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == job_id)
-            .values(lock_until=now - timedelta(seconds=10))
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == job_id).values(lock_until=now - timedelta(seconds=10)))
         await db.commit()
         recovery = await knowledge_job_crud.recover_expired(db, delay_seconds=0)
     assert recovery.retried == 1
@@ -660,11 +658,7 @@ async def test_vector_cleanup_job_failure_is_independently_retryable(
             vector_item_ids=["orphan-vector"],
         )
         now = await get_database_time(db)
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == cleanup.id)
-            .values(available_at=now)
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == cleanup.id).values(available_at=now))
         await db.commit()
 
     cleanup_claim = await _claim(
@@ -914,11 +908,7 @@ async def test_retryable_cleanup_continues_after_normal_max_attempts(
             collection_name=knowledge_base.collection_name,
             vector_item_ids=["retry-forever-vector"],
         )
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == cleanup.id)
-            .values(attempt_count=cleanup.max_attempts - 1)
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == cleanup.id).values(attempt_count=cleanup.max_attempts - 1))
         await db.commit()
 
     cleanup_claim = await _claim(
@@ -969,11 +959,7 @@ async def test_lost_lease_checkpoint_rejects_old_worker(
 
     async with knowledge_job_database() as db:
         now = await get_database_time(db)
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == submission.job.id)
-            .values(lock_until=now - timedelta(seconds=10))
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == submission.job.id).values(lock_until=now - timedelta(seconds=10)))
         await db.commit()
 
     executor = create_default_knowledge_job_executor(session_factory=knowledge_job_database)
@@ -1226,11 +1212,7 @@ async def test_stale_worker_cleanup_cannot_delete_new_worker_published_vectors(
 
     async with knowledge_job_database() as db:
         now = await get_database_time(db)
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == job_id)
-            .values(lock_until=now - timedelta(seconds=10))
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == job_id).values(lock_until=now - timedelta(seconds=10)))
         await db.commit()
         recovery = await knowledge_job_crud.recover_expired(db, delay_seconds=0)
     assert recovery.retried == 1
@@ -1262,17 +1244,9 @@ async def test_stale_worker_cleanup_cannot_delete_new_worker_published_vectors(
             .order_by(KnowledgeJob.id)
         )
         cleanup_jobs = list(cleanup_result.scalars().all())
-        old_cleanup = next(
-            job
-            for job in cleanup_jobs
-            if old_vector_ids == set(job.payload.get("vector_item_ids", []))
-        )
+        old_cleanup = next(job for job in cleanup_jobs if old_vector_ids == set(job.payload.get("vector_item_ids", [])))
         now = await get_database_time(db)
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == old_cleanup.id)
-            .values(available_at=now)
-        )
+        await db.execute(update(KnowledgeJob).where(KnowledgeJob.id == old_cleanup.id).values(available_at=now))
         await db.commit()
 
     cleanup_claim = await _claim(
@@ -1435,3 +1409,397 @@ async def test_malformed_managed_vector_metadata_is_not_recalled(
         )
 
     assert [hit.id for hit in filtered] == ["user-document"]
+
+
+@pytest.mark.asyncio
+async def test_managed_chunks_deduplicate_before_rerank_and_materialize_after_selection(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    submission = await _submit_create(knowledge_job_database, knowledge_base.id)
+    item_id = submission.item.id
+    full_content = submission.item.content
+    vector_ids = [
+        f"managed_{knowledge_base.id}_{item_id}_v1_chunk_0",
+        f"managed_{knowledge_base.id}_{item_id}_v1_chunk_1",
+    ]
+
+    async with knowledge_job_database() as db:
+        await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(ManagedKnowledgeItem.id == item_id)
+            .values(
+                indexed_version=1,
+                vector_item_ids=vector_ids,
+                is_recallable=True,
+                pending_job_id=None,
+            )
+        )
+        await db.commit()
+
+        hits = [
+            RetrievalHit(
+                id=vector_ids[0],
+                content="partial chunk zero",
+                metadata={
+                    "knowledge_type": "managed",
+                    "managed_knowledge_id": item_id,
+                    "managed_knowledge_version": 1,
+                    "chunk_index": 0,
+                },
+                fusion_score=0.9,
+                rerank_score=0.8,
+                rerank_rank=1,
+            ),
+            RetrievalHit(
+                id=vector_ids[1],
+                content="partial chunk one",
+                metadata={
+                    "knowledge_type": "managed",
+                    "managed_knowledge_id": item_id,
+                    "managed_knowledge_version": 1,
+                    "chunk_index": 1,
+                },
+                fusion_score=0.7,
+                rerank_score=0.6,
+                rerank_rank=2,
+            ),
+            RetrievalHit(
+                id="user-document",
+                content="normal user document chunk",
+                metadata={"filename": "manual.md"},
+                fusion_score=0.5,
+            ),
+        ]
+
+        filtered = await filter_recallable_managed_hits(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=hits,
+        )
+        materialized = await materialize_recallable_managed_hits(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=filtered,
+        )
+
+    assert len(filtered) == 2
+    filtered_managed_hit = filtered[0]
+    assert filtered_managed_hit.id == vector_ids[0]
+    assert filtered_managed_hit.content == "partial chunk zero"
+    assert filtered_managed_hit.fusion_score == 0.9
+    assert filtered_managed_hit.rerank_score == 0.8
+    assert filtered_managed_hit.rerank_rank == 1
+    assert filtered[1].id == "user-document"
+
+    assert len(materialized) == 2
+    managed_hit = materialized[0]
+    assert managed_hit.id == vector_ids[0]
+    assert managed_hit.content == full_content
+    assert managed_hit.content not in {"partial chunk zero", "partial chunk one"}
+    assert managed_hit.fusion_score == 0.9
+    assert managed_hit.rerank_score == 0.8
+    assert managed_hit.rerank_rank == 1
+    assert managed_hit.metadata["knowledge_type"] == "managed"
+    assert managed_hit.metadata["managed_knowledge_id"] == item_id
+    assert managed_hit.metadata["managed_knowledge_version"] == 1
+    assert managed_hit.metadata["managed_knowledge_llm_maintainable"] == submission.item.llm_maintainable
+    assert materialized[1].id == "user-document"
+    assert materialized[1].content == "normal user document chunk"
+
+
+@pytest.mark.asyncio
+async def test_materialize_drops_managed_hit_changed_after_candidate_filter(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    submission = await _submit_create(knowledge_job_database, knowledge_base.id)
+    item_id = submission.item.id
+    vector_id = f"managed_{knowledge_base.id}_{item_id}_v1_chunk_0"
+
+    async with knowledge_job_database() as db:
+        await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(ManagedKnowledgeItem.id == item_id)
+            .values(
+                indexed_version=1,
+                vector_item_ids=[vector_id],
+                is_recallable=True,
+                pending_job_id=None,
+            )
+        )
+        await db.commit()
+        hits = [
+            RetrievalHit(
+                id=vector_id,
+                content="old indexed chunk",
+                metadata={
+                    "knowledge_type": "managed",
+                    "managed_knowledge_id": item_id,
+                    "managed_knowledge_version": 1,
+                },
+            ),
+            RetrievalHit(
+                id="user-document",
+                content="stable user document",
+                metadata={"filename": "manual.md"},
+            ),
+        ]
+        filtered = await filter_recallable_managed_hits(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=hits,
+        )
+        assert [hit.id for hit in filtered] == [vector_id, "user-document"]
+
+        await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(ManagedKnowledgeItem.id == item_id)
+            .values(
+                version=2,
+                is_recallable=False,
+            )
+        )
+        await db.commit()
+
+        materialized = await materialize_recallable_managed_hits(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=filtered,
+        )
+
+    assert [hit.id for hit in materialized] == ["user-document"]
+
+
+@pytest.mark.asyncio
+async def test_materialize_refreshes_managed_state_after_concurrent_update(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    submission = await _submit_create(knowledge_job_database, knowledge_base.id)
+    item_id = submission.item.id
+    vector_id = f"managed_{knowledge_base.id}_{item_id}_v1_chunk_0"
+
+    async with knowledge_job_database() as first_db:
+        await first_db.execute(
+            update(ManagedKnowledgeItem)
+            .where(ManagedKnowledgeItem.id == item_id)
+            .values(
+                indexed_version=1,
+                vector_item_ids=[vector_id],
+                is_recallable=True,
+                pending_job_id=None,
+            )
+        )
+        await first_db.commit()
+
+        hit = RetrievalHit(
+            id=vector_id,
+            content="version one chunk",
+            metadata={
+                "knowledge_type": "managed",
+                "managed_knowledge_id": item_id,
+                "managed_knowledge_version": 1,
+            },
+        )
+        filtered = await filter_recallable_managed_hits(
+            first_db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=[hit],
+        )
+        assert len(filtered) == 1
+        await first_db.commit()
+
+        async with knowledge_job_database() as second_db:
+            await second_db.execute(
+                update(ManagedKnowledgeItem)
+                .where(ManagedKnowledgeItem.id == item_id)
+                .values(
+                    version=2,
+                    content="version two relation content",
+                    indexed_version=1,
+                    is_recallable=False,
+                    vector_item_ids=[vector_id],
+                )
+            )
+            await second_db.commit()
+
+        materialized = await materialize_recallable_managed_hits(
+            first_db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            hits=filtered,
+        )
+
+    assert materialized == []
+
+
+@pytest.mark.asyncio
+async def test_failed_managed_publish_can_be_resubmitted_with_new_dedupe_key(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    first = await _submit_create(
+        knowledge_job_database,
+        knowledge_base.id,
+        dedupe_key="publish-failed-first",
+    )
+    assert first.job is not None
+    assert first.item is not None
+
+    async with knowledge_job_database() as db:
+        await db.execute(
+            update(KnowledgeJob)
+            .where(KnowledgeJob.id == first.job.id)
+            .values(
+                status=KnowledgeJobStatus.FAILED,
+                active_change_key=None,
+                locked_by=None,
+                lock_until=None,
+            )
+        )
+        await db.execute(update(ManagedKnowledgeItem).where(ManagedKnowledgeItem.id == first.item.id).values(pending_job_id=None))
+        await db.commit()
+
+    second = await _submit_create(
+        knowledge_job_database,
+        knowledge_base.id,
+        dedupe_key="publish-failed-second",
+    )
+
+    assert second.job is not None
+    assert second.job.id != first.job.id
+    assert second.item is not None
+    assert second.item.id == first.item.id
+    assert second.item.pending_job_id == second.job.id
+    assert second.item.is_recallable is False
+    assert second.item.indexed_version < second.item.version
+
+    async with knowledge_job_database() as db:
+        jobs = list((await db.scalars(select(KnowledgeJob).where(KnowledgeJob.knowledge_base_id == knowledge_base.id).order_by(KnowledgeJob.id.asc()))).all())
+    assert [job.status for job in jobs] == [
+        KnowledgeJobStatus.FAILED,
+        KnowledgeJobStatus.PENDING,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleted_container_requeues_cleanup_after_late_vector_write(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    submission = await _submit_create(knowledge_job_database, knowledge_base.id)
+    claimed = await _claim(
+        knowledge_job_database,
+        job_id=submission.job.id,
+        owner="late-write-worker",
+    )
+    assert claimed is not None
+
+    upsert_started = asyncio.Event()
+    release_upsert = asyncio.Event()
+    deleted_collections: list[str] = []
+
+    monkeypatch.setattr(
+        "app.core.knowledge_jobs.handlers.load_embedding_runtime_config",
+        AsyncMock(
+            return_value=EmbeddingRuntimeConfig(
+                channel_id=1,
+                channel_name="test",
+                model_id="embedding-model",
+                declared_dimensions=2,
+                protocol="openai_embedding",
+                timeout=30.0,
+                base_url="https://embedding.invalid/v1",
+                api_key="secret",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.knowledge_jobs.handlers.async_get_or_create_collection",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.core.knowledge_jobs.handlers.embed_texts_with_config",
+        AsyncMock(return_value=[[0.1, 0.2]]),
+    )
+
+    async def late_upsert(*_args, **_kwargs):
+        upsert_started.set()
+        await release_upsert.wait()
+        return 1
+
+    async def delete_collection_if_exists(collection_name: str) -> bool:
+        deleted_collections.append(collection_name)
+        return True
+
+    monkeypatch.setattr(
+        "app.core.knowledge_jobs.handlers.async_upsert_collection_items",
+        late_upsert,
+    )
+    monkeypatch.setattr(
+        collection_cleanup_service,
+        "async_delete_collection_if_exists",
+        delete_collection_if_exists,
+    )
+
+    executor = create_default_knowledge_job_executor(session_factory=knowledge_job_database)
+    worker_task = asyncio.create_task(executor.execute_claimed(claimed, "late-write-worker"))
+    await upsert_started.wait()
+
+    async with knowledge_job_database() as db:
+        current_kb = await db.get(KnowledgeBase, knowledge_base.id)
+        assert current_kb is not None
+        await db.delete(current_kb)
+        await db.commit()
+
+    async with knowledge_job_database() as db:
+        first_cleanup = await collection_cleanup_service.process_pending_collection_cleanups(db)
+    assert first_cleanup.pending_count == 1
+    assert first_cleanup.succeeded_count == 1
+    assert deleted_collections == [knowledge_base.collection_name]
+
+    async with knowledge_job_database() as db:
+        assert (
+            await db.get(
+                KnowledgeBaseCollectionOwner,
+                knowledge_base.collection_name,
+            )
+            is None
+        )
+
+    release_upsert.set()
+    with pytest.raises(KnowledgeJobLeaseLostError):
+        await worker_task
+
+    async with knowledge_job_database() as db:
+        requeued = await db.get(
+            KnowledgeBaseCollectionOwner,
+            knowledge_base.collection_name,
+        )
+        assert requeued is not None
+        assert requeued.knowledge_base_id is None
+        assert requeued.cleanup_revision == 1
+        second_cleanup = await collection_cleanup_service.process_pending_collection_cleanups(db)
+
+    assert second_cleanup.pending_count == 1
+    assert second_cleanup.succeeded_count == 1
+    assert deleted_collections == [
+        knowledge_base.collection_name,
+        knowledge_base.collection_name,
+    ]
+
+    async with knowledge_job_database() as db:
+        assert (
+            await db.get(
+                KnowledgeBaseCollectionOwner,
+                knowledge_base.collection_name,
+            )
+            is None
+        )

@@ -24,13 +24,23 @@ from app.core.constants import (
     MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS,
     MANAGED_KNOWLEDGE_KEY_MAX_CHARS,
 )
-from app.core.crud.knowledge_base import knowledge_base_crud
-from app.core.crud.managed_knowledge import managed_knowledge_item_crud, managed_knowledge_revision_crud
+from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud, managed_knowledge_revision_crud
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeContentTooLongError, ManagedKnowledgeNotFoundError, ManagedKnowledgeValidationError
+from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.knowledge.results import ManagedKnowledgeMutationResult, ManagedKnowledgeMutationStatus
 from app.core.utils.time import get_local_time
 from app.core.utils.tokenizer import estimate_tokens
-from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseType, ManagedKnowledgeActorType, ManagedKnowledgeItem, ManagedKnowledgeRevisionOperation, ManagedKnowledgeSourceType
+from app.models.knowledge_base import (
+    KnowledgeBase,
+    KnowledgeBaseMigrationDeltaAction,
+    KnowledgeBaseMigrationSourceType,
+    KnowledgeBaseType,
+    ManagedKnowledgeActorType,
+    ManagedKnowledgeItem,
+    ManagedKnowledgeRevisionOperation,
+    ManagedKnowledgeSourceType,
+)
 
 _UID_MAX_CHARS = 50
 
@@ -156,6 +166,19 @@ async def _load_managed_container(db: AsyncSession, *, uid: str, knowledge_base_
     return knowledge_base
 
 
+async def _lock_managed_container(db: AsyncSession, *, uid: str, knowledge_base_id: int) -> KnowledgeBase:
+    knowledge_base = await knowledge_base_crud.lock_owned_by_id(
+        db,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+    )
+    if knowledge_base is None:
+        raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND)
+    if knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
+        raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED)
+    return knowledge_base
+
+
 async def _duplicate_result(
     db: AsyncSession,
     *,
@@ -257,6 +280,19 @@ class ManagedKnowledgeService:
                         source_job_id=normalized_job_id,
                         modified_by=normalized_actor,
                         commit=False,
+                    )
+                    knowledge_base = await _lock_managed_container(
+                        db,
+                        uid=normalized_uid,
+                        knowledge_base_id=normalized_kb_id,
+                    )
+                    await record_knowledge_base_migration_change(
+                        db,
+                        knowledge_base=knowledge_base,
+                        source_type=KnowledgeBaseMigrationSourceType.MANAGED_KNOWLEDGE,
+                        source_id=item.id,
+                        source_version=item.version,
+                        action=KnowledgeBaseMigrationDeltaAction.UPSERT,
                     )
             except IntegrityError:
                 duplicate = await _duplicate_result(
@@ -371,6 +407,19 @@ class ManagedKnowledgeService:
                         modified_by=normalized_actor,
                         commit=False,
                     )
+                    knowledge_base = await _lock_managed_container(
+                        db,
+                        uid=normalized_uid,
+                        knowledge_base_id=normalized_kb_id,
+                    )
+                    await record_knowledge_base_migration_change(
+                        db,
+                        knowledge_base=knowledge_base,
+                        source_type=KnowledgeBaseMigrationSourceType.MANAGED_KNOWLEDGE,
+                        source_id=updated.id,
+                        source_version=updated.version,
+                        action=KnowledgeBaseMigrationDeltaAction.UPSERT,
+                    )
             except IntegrityError:
                 duplicate = await _duplicate_result(
                     db,
@@ -461,6 +510,19 @@ class ManagedKnowledgeService:
                     source_job_id=normalized_job_id,
                     modified_by=normalized_actor,
                     commit=False,
+                )
+                knowledge_base = await _lock_managed_container(
+                    db,
+                    uid=normalized_uid,
+                    knowledge_base_id=normalized_kb_id,
+                )
+                await record_knowledge_base_migration_change(
+                    db,
+                    knowledge_base=knowledge_base,
+                    source_type=KnowledgeBaseMigrationSourceType.MANAGED_KNOWLEDGE,
+                    source_id=deleted.id,
+                    source_version=deleted.version,
+                    action=KnowledgeBaseMigrationDeltaAction.DELETE,
                 )
 
             await _finish(db, commit=commit)

@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERR_CONTEXT_SUMMARY_MESSAGE_ID_REQUIRED
-from app.core.crud.message import message_crud
+from app.core.crud.session.message import message_crud
 from app.core.i18n import t
 from app.core.utils.dispatcher.markdown_instruction import append_user_runtime_instructions
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch

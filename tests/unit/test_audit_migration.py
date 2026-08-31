@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.dialects import mysql, sqlite
 
-from app.core.crud.audit import build_audit_status_update, build_passed_execution_claim_update, build_pending_execution_claim_update
+from app.core.crud.audit.audit import build_audit_status_update, build_passed_execution_claim_update, build_pending_execution_claim_update
 from app.core.utils.time import get_local_time
 from app.models.audit import AuditRecordStatus
 
