@@ -7,11 +7,11 @@ from sqlmodel import SQLModel
 
 from app.api.v1 import channels
 from app.core.channel_model_protection import find_model_identity_update_conflict
-from app.core.constants import ERR_KB_CHANNEL_IN_USE, ERR_KB_MODEL_IDENTITY_IN_USE
+from app.core.constants import ERR_KB_CHANNEL_IN_USE, ERR_KB_MODEL_IDENTITY_IN_USE, ERR_MEMORY_MODEL_IDENTITY_IN_USE
 from app.core.crud.channel.channel import channel_crud
 from app.core.exceptions import ParameterException
 from app.models.channel import ChannelCreate, ModelChannel
-from app.models.knowledge_base import KnowledgeBase
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseMigrationStatus
 from app.models.memory import (
     LongTermMemoryEmbeddingRevision,
     LongTermMemoryMutationJob,
@@ -166,6 +166,88 @@ async def test_kb_referenced_embedding_model_identity_changes_are_rejected(
     unchanged = await channel_crud.get(db_session, channel_id)
     assert unchanged is not None
     assert unchanged.model_ids == old_models
+
+
+@pytest.mark.asyncio
+async def test_failed_user_migration_target_model_can_be_removed_after_target_reference_is_cleared(
+    db_session: AsyncSession,
+) -> None:
+    channel = await _create_channel(
+        db_session,
+        model_ids=[
+            _embedding_model("embedding-active"),
+            _embedding_model("embedding-failed-target"),
+        ],
+    )
+    knowledge_base = await _create_knowledge_base(
+        db_session,
+        channel_id=channel.id,
+        model_id="embedding-active",
+        active_channel_id=channel.id,
+        active_model_id="embedding-active",
+    )
+    knowledge_base.migration_status = KnowledgeBaseMigrationStatus.FAILED
+    knowledge_base.target_embedding_channel_id = None
+    knowledge_base.target_embedding_model_id = None
+    knowledge_base.target_collection_name = None
+    db_session.add(knowledge_base)
+    await db_session.commit()
+
+    response = await channels.update_channel(
+        channel.id,
+        channels.ChannelUpdate(model_ids=[_embedding_model("embedding-active")]),
+        db=db_session,
+        admin={},
+    )
+
+    assert response.code == 200
+
+
+@pytest.mark.asyncio
+async def test_managed_failed_target_model_remains_protected_by_active_memory_configuration(
+    db_session: AsyncSession,
+) -> None:
+    channel = await _create_channel(
+        db_session,
+        model_ids=[
+            _embedding_model("embedding-old"),
+            _embedding_model("embedding-memory-active"),
+        ],
+    )
+    knowledge_base = await _create_knowledge_base(
+        db_session,
+        channel_id=channel.id,
+        model_id="embedding-old",
+        active_channel_id=channel.id,
+        active_model_id="embedding-old",
+    )
+    knowledge_base.migration_status = KnowledgeBaseMigrationStatus.FAILED
+    knowledge_base.target_embedding_channel_id = None
+    knowledge_base.target_embedding_model_id = None
+    knowledge_base.target_collection_name = None
+    db_session.add(
+        LongTermMemoryStore(
+            uid="knowledge-base-user",
+            active_embedding_channel_id=channel.id,
+            active_embedding_model_id="embedding-memory-active",
+            active_embedding_dimensions=1536,
+            active_embedding_signature="memory-active-signature",
+            active_embedding_revision=2,
+            active_collection_name="memory-active-collection",
+        )
+    )
+    await db_session.commit()
+
+    with pytest.raises(ParameterException) as exc_info:
+        await channels.update_channel(
+            channel.id,
+            channels.ChannelUpdate(model_ids=[_embedding_model("embedding-old")]),
+            db=db_session,
+            admin={},
+        )
+
+    assert exc_info.value.message == ERR_MEMORY_MODEL_IDENTITY_IN_USE
+    assert exc_info.value.kwargs == {"model_id": "embedding-memory-active"}
 
 
 def test_find_model_identity_update_conflict_covers_protocol_changes() -> None:

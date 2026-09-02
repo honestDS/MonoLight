@@ -32,6 +32,8 @@ export default {
   embedding_dimensions_value: '维度：{dimensions}',
   embedding_revision_value: '修订：{revision}',
   managed_embedding_follow_hint: '托管知识库的嵌入配置由长期记忆统一管理。长期记忆嵌入修订生效后，系统会自动迁移该知识库。',
+  managed_embedding_failed_hint: '托管知识库自动同步失败，当前仍使用原嵌入模型；本次同步已停止。',
+  managed_embedding_cancelled_hint: '托管知识库自动同步已取消，当前仍使用原嵌入模型。',
   embedding_migration_hint: '迁移期间继续使用当前生效集合；目标集合校验并切换成功后才会生效。',
   embedding_migration_confirm_title: '确认迁移嵌入模型',
   embedding_migration_confirm: '确定将用户知识库“{name}”迁移到 {target} 吗？迁移会重新向量化现有内容。',

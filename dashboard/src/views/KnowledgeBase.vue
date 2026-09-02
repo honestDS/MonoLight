@@ -118,6 +118,13 @@
           :closable="false"
           class="mb-15"
         />
+        <el-alert
+          v-if="managedMigrationTerminalHintKey"
+          :title="$t(managedMigrationTerminalHintKey)"
+          type="warning"
+          :closable="false"
+          class="mb-15"
+        />
 
         <el-form-item
           v-if="selectedKb?.knowledge_base_type === 'user'"
@@ -366,6 +373,7 @@ import { formatTime } from '@/utils'
 import {
   canStartKnowledgeBaseMigration,
   getKnowledgeBaseMigrationProgress,
+  getManagedKnowledgeBaseMigrationTerminalHintKey,
   isKnowledgeBaseMigrationActive
 } from '@/utils/knowledgeBaseMigration'
 import { useDeleteConfirm } from '@/composables/useDeleteConfirm'
@@ -428,6 +436,7 @@ const embeddingModelOptions = computed(() => embeddingModels.value.map(item => (
 })))
 
 const migrationProgress = computed(() => getKnowledgeBaseMigrationProgress(selectedKb.value))
+const managedMigrationTerminalHintKey = computed(() => getManagedKnowledgeBaseMigrationTerminalHintKey(selectedKb.value))
 
 const importForm = reactive({
   file: null,

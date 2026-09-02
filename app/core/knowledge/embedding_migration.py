@@ -9,6 +9,8 @@ from app.core.constants import (
     ERR_KB_EMBEDDING_PROBE_FAILED,
     ERR_KB_MANAGED_EMBEDDING_MIGRATION_FORBIDDEN,
     ERR_KB_NOT_FOUND,
+    MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX,
+    MANAGED_MEMORY_KB_MIGRATION_MAX_ATTEMPTS,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.embedding.common import (
@@ -183,7 +185,8 @@ async def submit_managed_knowledge_base_migrations_for_memory_revision(
                 target_model_id=target_model_id,
                 target_dimensions=target_dimensions,
                 target_signature=target_signature,
-                dedupe_key=(f"managed-memory-migration:{knowledge_base.id}:{memory_revision}:{target_signature}"),
+                dedupe_key=(f"{MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX}:{knowledge_base.id}:{memory_revision}:{target_signature}"),
+                max_attempts=MANAGED_MEMORY_KB_MIGRATION_MAX_ATTEMPTS,
                 commit=False,
             )
             jobs.append(job)

@@ -32,6 +32,8 @@ export default {
   embedding_dimensions_value: 'Dimensions: {dimensions}',
   embedding_revision_value: 'Revision: {revision}',
   managed_embedding_follow_hint: 'Managed knowledge base embeddings are controlled by long-term memory. After a memory embedding revision becomes active, this knowledge base is migrated automatically.',
+  managed_embedding_failed_hint: 'Managed knowledge base synchronization failed. The previous embedding model remains active, and this synchronization attempt has stopped.',
+  managed_embedding_cancelled_hint: 'Managed knowledge base synchronization was cancelled. The previous embedding model remains active.',
   embedding_migration_hint: 'The active collection continues serving during migration. The target becomes active only after validation and a successful switch.',
   embedding_migration_confirm_title: 'Confirm Embedding Migration',
   embedding_migration_confirm: 'Migrate user knowledge base “{name}” to {target}? Existing content will be re-vectorized.',

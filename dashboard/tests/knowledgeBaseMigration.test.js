@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   canStartKnowledgeBaseMigration,
   getKnowledgeBaseMigrationProgress,
+  getManagedKnowledgeBaseMigrationTerminalHintKey,
   isKnowledgeBaseMigrationActive
 } from '../src/utils/knowledgeBaseMigration.js'
 
@@ -60,4 +61,23 @@ test('migration progress is bounded and preserves completed progress', () => {
     migration_total_count: 0,
     migration_success_count: 0
   }), 100)
+})
+
+test('managed migration terminal hints explain failed and cancelled follow migrations', () => {
+  assert.equal(getManagedKnowledgeBaseMigrationTerminalHintKey({
+    knowledge_base_type: 'llm_managed',
+    migration_status: 'failed'
+  }), 'knowledgeBase.managed_embedding_failed_hint')
+  assert.equal(getManagedKnowledgeBaseMigrationTerminalHintKey({
+    knowledge_base_type: 'llm_managed',
+    migration_status: 'cancelled'
+  }), 'knowledgeBase.managed_embedding_cancelled_hint')
+  assert.equal(getManagedKnowledgeBaseMigrationTerminalHintKey({
+    knowledge_base_type: 'llm_managed',
+    migration_status: 'succeeded'
+  }), null)
+  assert.equal(getManagedKnowledgeBaseMigrationTerminalHintKey({
+    knowledge_base_type: 'user',
+    migration_status: 'failed'
+  }), null)
 })
