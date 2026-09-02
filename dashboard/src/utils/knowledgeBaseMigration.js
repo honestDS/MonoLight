@@ -30,3 +30,10 @@ export const getKnowledgeBaseMigrationProgress = (knowledgeBase) => {
 
   return Math.max(0, Math.min(100, Math.round((success / total) * 100)))
 }
+
+export const getManagedKnowledgeBaseMigrationTerminalHintKey = (knowledgeBase) => {
+  if (!knowledgeBase || knowledgeBase.knowledge_base_type !== 'llm_managed') return null
+  if (knowledgeBase.migration_status === 'failed') return 'knowledgeBase.managed_embedding_failed_hint'
+  if (knowledgeBase.migration_status === 'cancelled') return 'knowledgeBase.managed_embedding_cancelled_hint'
+  return null
+}

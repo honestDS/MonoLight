@@ -59,9 +59,7 @@ def _build_autoincrement_table_sql(source_sql: str, connection: Connection) -> s
         count=1,
     )
     if id_count != 1:
-        raise RuntimeError(
-            "knowledge_base id must be an INTEGER column for SQLite AUTOINCREMENT"
-        )
+        raise RuntimeError("knowledge_base id must be an INTEGER column for SQLite AUTOINCREMENT")
 
     rebuilt_sql, primary_key_count = _TABLE_PRIMARY_KEY_PATTERN.subn(
         "",
@@ -75,13 +73,7 @@ def _build_autoincrement_table_sql(source_sql: str, connection: Connection) -> s
 
 def _schema_objects(connection: Connection) -> list[str]:
     rows = connection.execute(
-        text(
-            "SELECT type, name, sql FROM sqlite_master "
-            "WHERE tbl_name = :table_name "
-            "AND type IN ('index', 'trigger') "
-            "AND sql IS NOT NULL "
-            "ORDER BY type, name"
-        ),
+        text("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = :table_name AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name"),
         {"table_name": _TABLE_NAME},
     ).all()
     return [str(row.sql) for row in rows if row.sql]
@@ -111,27 +103,15 @@ def _rebuild_sqlite_knowledge_base(connection: Connection) -> None:
     connection.execute(text(rebuilt_sql))
 
     columns_sql = ", ".join(_quote(connection, name) for name in columns)
-    connection.execute(
-        text(
-            f"INSERT INTO {_quote(connection, _TEMP_TABLE_NAME)} ({columns_sql}) "
-            f"SELECT {columns_sql} FROM {_quote(connection, _TABLE_NAME)}"
-        )
-    )
+    connection.execute(text(f"INSERT INTO {_quote(connection, _TEMP_TABLE_NAME)} ({columns_sql}) SELECT {columns_sql} FROM {_quote(connection, _TABLE_NAME)}"))
     connection.execute(text(f"DROP TABLE {_quote(connection, _TABLE_NAME)}"))
-    connection.execute(
-        text(
-            f"ALTER TABLE {_quote(connection, _TEMP_TABLE_NAME)} "
-            f"RENAME TO {_quote(connection, _TABLE_NAME)}"
-        )
-    )
+    connection.execute(text(f"ALTER TABLE {_quote(connection, _TEMP_TABLE_NAME)} RENAME TO {_quote(connection, _TABLE_NAME)}"))
     for ddl in schema_objects:
         connection.execute(text(ddl))
 
     violations = connection.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
-        raise RuntimeError(
-            f"knowledge_base autoincrement migration foreign key violations: {len(violations)}"
-        )
+        raise RuntimeError(f"knowledge_base autoincrement migration foreign key violations: {len(violations)}")
     if not _sqlite_uses_autoincrement(connection):
         raise RuntimeError("knowledge_base AUTOINCREMENT migration did not take effect")
 
@@ -144,15 +124,11 @@ async def migrate(session: AsyncSession) -> None:
     if database_type != "sqlite":
         raise RuntimeError(t(ERR_DATABASE_TYPE_UNSUPPORTED, database_type=database_type))
 
-    foreign_keys_enabled = bool(
-        (await connection.execute(text("PRAGMA foreign_keys"))).scalar()
-    )
+    foreign_keys_enabled = bool((await connection.execute(text("PRAGMA foreign_keys"))).scalar())
     try:
         await connection.execute(text("PRAGMA foreign_keys = OFF"))
         if bool((await connection.execute(text("PRAGMA foreign_keys"))).scalar()):
-            raise RuntimeError(
-                "failed to disable SQLite foreign keys for knowledge_base rebuild"
-            )
+            raise RuntimeError("failed to disable SQLite foreign keys for knowledge_base rebuild")
         await connection.run_sync(_rebuild_sqlite_knowledge_base)
     except Exception:
         await session.rollback()
@@ -163,4 +139,3 @@ async def migrate(session: AsyncSession) -> None:
         connection = await session.connection()
         if foreign_keys_enabled:
             await connection.execute(text("PRAGMA foreign_keys = ON"))
-

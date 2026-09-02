@@ -8,11 +8,7 @@ from sqlalchemy.exc import IntegrityError
 def integrity_error_detail(exc: IntegrityError) -> tuple[str, str]:
     """提取并标准化完整性异常中的约束名与数据库原始错误详情。"""
     original = getattr(exc, "orig", None)
-    constraint_name = str(
-        getattr(original, "constraint_name", None)
-        or getattr(exc, "constraint_name", None)
-        or ""
-    ).lower()
+    constraint_name = str(getattr(original, "constraint_name", None) or getattr(exc, "constraint_name", None) or "").lower()
     detail = " ".join(part.lower() for part in (str(original or ""), str(exc)))
     return constraint_name, detail
 
@@ -31,11 +27,7 @@ def is_unique_constraint_violation(
 
     if not any(marker in detail for marker in ("unique", "duplicate key", "duplicate entry")):
         return False
-    return any(
-        all(marker.lower() in detail for marker in marker_group)
-        for marker_group in fallback_marker_groups
-        if marker_group
-    )
+    return any(all(marker.lower() in detail for marker in marker_group) for marker_group in fallback_marker_groups if marker_group)
 
 
 __all__ = ["integrity_error_detail", "is_unique_constraint_violation"]
