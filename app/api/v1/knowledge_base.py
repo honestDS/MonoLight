@@ -13,6 +13,7 @@ from app.core.constants import (
     ERR_KB_DOC_NOT_FOUND,
     ERR_KB_DOC_SAVE_FAILED,
     ERR_KB_EMBEDDING_CONFIG_CHANGED,
+    ERR_KB_EMBEDDING_PROBE_FAILED,
     ERR_KB_FILE_EMPTY,
     ERR_KB_FILE_ENCODING_ERROR,
     ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
@@ -24,6 +25,7 @@ from app.core.constants import (
     MSG_KB_DELETED,
     MSG_KB_DOC_CREATED,
     MSG_KB_DOC_DELETED,
+    MSG_KB_EMBEDDING_MIGRATION_SUBMITTED,
     MSG_KB_UNNAMED_DOCUMENT,
     MSG_KB_UPDATED,
 )
@@ -33,8 +35,9 @@ from app.core.crud.knowledge.base import (
     knowledge_base_document_crud,
     knowledge_base_profile_binding_crud,
 )
+from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.profile.profile import profile_crud
-from app.core.embedding.common import EmbeddingRuntimeConfig, load_embedding_runtime_config
+from app.core.embedding.common import EmbeddingRuntimeConfig, build_embedding_signature, detect_embedding_dimensions, load_embedding_runtime_config
 
 # Re-use the refactored embedding and knowledge base query core functions
 from app.core.embedding.knowledge_base import (
@@ -49,6 +52,7 @@ from app.core.knowledge.bindings import (
     replace_user_knowledge_base_bindings,
 )
 from app.core.knowledge.deletion import delete_owned_knowledge_base
+from app.core.knowledge.embedding_migration import submit_user_knowledge_base_embedding_migration
 from app.core.knowledge.migration import record_knowledge_base_migration_change
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
@@ -59,16 +63,19 @@ from app.models.knowledge_base import (
     KnowledgeBaseDocumentContentResponse,
     KnowledgeBaseDocumentListResponse,
     KnowledgeBaseDocumentResponse,
+    KnowledgeBaseEmbeddingMigrationRequest,
     KnowledgeBaseIndexStatus,
     KnowledgeBaseListResponse,
     KnowledgeBaseMigrationDeltaAction,
     KnowledgeBaseMigrationSourceType,
+    KnowledgeBaseMigrationStatus,
     KnowledgeBaseProfileBindingUpdate,
     KnowledgeBaseQueryTestRequest,
     KnowledgeBaseQueryTestResponse,
     KnowledgeBaseResponse,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
+    KnowledgeJobOperation,
 )
 from app.providers.database import get_db
 from app.providers.vector import (
@@ -104,6 +111,26 @@ async def build_knowledge_base_response(db: AsyncSession, kb: KnowledgeBase) -> 
     response = KnowledgeBaseResponse.model_validate(kb)
     if kb.id is not None:
         response.profile_ids = await get_knowledge_base_profile_ids(db, kb.id, kb.uid)
+    if response.migration_status in {KnowledgeBaseMigrationStatus.FAILED, KnowledgeBaseMigrationStatus.CANCELLED} and response.migration_job_id is not None and response.target_embedding_channel_id is None:
+        job = await knowledge_job_crud.get_by_id(db, uid=kb.uid, job_id=response.migration_job_id)
+        if job is not None and job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and isinstance(job.payload, dict):
+            target = job.payload.get("target")
+            if isinstance(target, dict):
+                channel_id = target.get("channel_id")
+                model_id = target.get("model_id")
+                dimensions = target.get("dimensions")
+                signature = target.get("signature")
+                revision = target.get("revision")
+                if isinstance(channel_id, int) and not isinstance(channel_id, bool) and channel_id > 0:
+                    response.target_embedding_channel_id = channel_id
+                if isinstance(model_id, str) and model_id:
+                    response.target_embedding_model_id = model_id
+                if isinstance(dimensions, int) and not isinstance(dimensions, bool) and dimensions > 0:
+                    response.target_embedding_dimensions = dimensions
+                if isinstance(signature, str) and signature:
+                    response.target_embedding_signature = signature
+                if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
+                    response.target_embedding_revision = revision
     return response
 
 
@@ -154,7 +181,7 @@ async def embed_document_with_stable_knowledge_base_config(
         candidate = await knowledge_base_crud.get(db, knowledge_base.id)
         if candidate is None:
             raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
-    raise HTTPException(status_code=409, detail=ERR_KB_EMBEDDING_CONFIG_CHANGED)
+    raise HTTPException(status_code=409, detail=t(ERR_KB_EMBEDDING_CONFIG_CHANGED))
 
 
 async def list_embedding_model_options(db: AsyncSession) -> list[dict[str, Any]]:
@@ -183,9 +210,14 @@ async def create_knowledge_base(
 ):
     """创建知识库"""
 
-    _channel, embedding_model = await load_embedding_model(db, kb_in.embedding_channel_id, kb_in.embedding_model_id)
+    embedding_config, embedding_model = await load_embedding_model(db, kb_in.embedding_channel_id, kb_in.embedding_model_id)
     embedding_dimensions = embedding_model.get("embedding_dimensions")
     await db.commit()
+    if embedding_dimensions is None:
+        try:
+            embedding_dimensions = await detect_embedding_dimensions(embedding_config)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=t(ERR_KB_EMBEDDING_PROBE_FAILED)) from exc
 
     # 生成一个唯一的 collection_name
     collection_name = f"kb_{uuid.uuid4().hex}"
@@ -203,7 +235,20 @@ async def create_knowledge_base(
             kb_in.embedding_model_id,
             lock_for_reference_write=True,
         )
-        embedding_dimensions = embedding_model.get("embedding_dimensions")
+        locked_dimensions = embedding_model.get("embedding_dimensions")
+        if locked_dimensions is not None and locked_dimensions != embedding_dimensions:
+            raise HTTPException(status_code=409, detail=t(ERR_KB_EMBEDDING_CONFIG_CHANGED))
+        if locked_dimensions is not None:
+            embedding_dimensions = locked_dimensions
+        active_embedding_signature = (
+            build_embedding_signature(
+                kb_in.embedding_channel_id,
+                kb_in.embedding_model_id,
+                embedding_dimensions,
+            )
+            if isinstance(embedding_dimensions, int) and not isinstance(embedding_dimensions, bool) and embedding_dimensions > 0
+            else None
+        )
 
         db_kb = await knowledge_base_crud.create(
             db,
@@ -220,6 +265,7 @@ async def create_knowledge_base(
                 "active_embedding_channel_id": kb_in.embedding_channel_id,
                 "active_embedding_model_id": kb_in.embedding_model_id,
                 "active_embedding_dimensions": embedding_dimensions,
+                "active_embedding_signature": active_embedding_signature,
                 "active_embedding_revision": 1,
                 "active_collection_name": collection_name,
                 "index_revision": 1,
@@ -273,6 +319,30 @@ async def list_knowledge_bases(
     )
 
     return StandardResponse.success(data=data)
+
+
+@router.post("/embedding-migration", response_model=StandardResponse[KnowledgeBaseResponse])
+async def submit_knowledge_base_embedding_migration(
+    kb_id: int,
+    migration_in: KnowledgeBaseEmbeddingMigrationRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    kb = await load_owned_knowledge_base(db, kb_id, current_user)
+    await submit_user_knowledge_base_embedding_migration(
+        db,
+        uid=kb.uid,
+        knowledge_base_id=kb_id,
+        target_channel_id=migration_in.embedding_channel_id,
+        target_model_id=migration_in.embedding_model_id,
+    )
+    refreshed = await knowledge_base_crud.get(db, kb_id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail=ERR_KB_NOT_FOUND)
+    return StandardResponse.success(
+        data=await build_knowledge_base_response(db, refreshed),
+        message=MSG_KB_EMBEDDING_MIGRATION_SUBMITTED,
+    )
 
 
 @router.post("/update", response_model=StandardResponse[KnowledgeBaseResponse])

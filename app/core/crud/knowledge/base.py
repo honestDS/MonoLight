@@ -69,6 +69,40 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
         )
         return result.scalars().first()
 
+    async def list_managed_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+    ) -> list[KnowledgeBase]:
+        result = await db.execute(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+            )
+            .order_by(KnowledgeBase.id)
+        )
+        return list(result.scalars().all())
+
+    async def lock_managed_by_uid(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+    ) -> list[KnowledgeBase]:
+        result = await db.execute(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+            )
+            .order_by(KnowledgeBase.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
     async def lock_managed_by_profile(
         self,
         db: AsyncSession,

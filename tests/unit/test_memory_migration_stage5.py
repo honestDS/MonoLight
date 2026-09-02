@@ -377,6 +377,17 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
         return await original_embed(config, texts, dimensions=dimensions, **kwargs)
 
     monkeypatch.setattr(maintenance_vector, "embed_texts_with_config", embed_with_delta)
+    managed_follow_calls: list[dict[str, Any]] = []
+
+    async def record_managed_follow(_db: AsyncSession, **kwargs: Any) -> list[Any]:
+        managed_follow_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        migration_handler,
+        "submit_managed_knowledge_base_migrations_for_memory_revision",
+        record_managed_follow,
+    )
     claimed = await claim_job(
         memory_session_factory,
         uid=uid,
@@ -393,6 +404,17 @@ async def test_embedding_migration_switches_and_applies_snapshot_delta(
 
     assert result.finalized
     assert result.result["finalized"] is True
+    assert managed_follow_calls == [
+        {
+            "uid": uid,
+            "target_channel_id": target["channel_id"],
+            "target_model_id": target["model_id"],
+            "target_dimensions": target["dimensions"],
+            "target_signature": target["signature"],
+            "memory_revision": target["revision"],
+            "commit": False,
+        }
+    ]
     async with memory_session_factory() as db:
         finished_job = await memory_job_crud.get_by_id(db, uid=uid, job_id=job.id)
         store = await memory_store_crud.get_by_uid(db, uid=uid)

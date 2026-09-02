@@ -23,6 +23,9 @@ from app.core.crud.memory.store import (
 )
 from app.core.crud.profile.profile import profile_crud
 from app.core.i18n import t
+from app.core.knowledge.embedding_migration import (
+    submit_managed_knowledge_base_migrations_for_memory_revision,
+)
 from app.core.memory_jobs.executor import (
     MemoryJobCancelledError,
     MemoryJobExecutionContext,
@@ -552,6 +555,16 @@ async def _switch_migration(
             uid=context.job.uid,
             embedding_channel_id=target["channel_id"],
             embedding_model_id=target["model_id"],
+            commit=False,
+        )
+        await submit_managed_knowledge_base_migrations_for_memory_revision(
+            db,
+            uid=context.job.uid,
+            target_channel_id=target["channel_id"],
+            target_model_id=target["model_id"],
+            target_dimensions=target["dimensions"],
+            target_signature=target["signature"],
+            memory_revision=target["revision"],
             commit=False,
         )
         await db.commit()

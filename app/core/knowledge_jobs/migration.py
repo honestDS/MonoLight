@@ -381,7 +381,11 @@ async def prepare_knowledge_base_embedding_migration(
     dedupe_key = _require_string(dedupe_key, field="dedupe_key")
     max_attempts = _positive_int(max_attempts, field="max_attempts")
     try:
-        knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
+        knowledge_base = await lock_migrating_knowledge_base(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         if knowledge_base is None or knowledge_base.uid != uid or knowledge_base.id is None:
             raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         if knowledge_base.migration_status in _ACTIVE_MIGRATION_STATUSES:
