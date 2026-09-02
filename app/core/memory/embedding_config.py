@@ -27,7 +27,7 @@ from app.core.crud.memory.store import (
     memory_store_crud,
 )
 from app.core.crud.profile.profile import profile_crud
-from app.core.embedding.common import detect_embedding_dimensions, load_embedding_runtime_config
+from app.core.embedding.common import build_embedding_signature, detect_embedding_dimensions, load_embedding_runtime_config
 from app.core.exceptions import ParameterException, ResourceNotFoundException
 from app.core.memory.identifiers import build_memory_collection_name
 from app.core.memory_jobs.manager import memory_job_manager
@@ -56,10 +56,6 @@ def _profile_digest(profile: Profile) -> str:
         "is_default": profile.is_default,
     }
     return sha256_text(canonical_json_dumps(payload))
-
-
-def build_embedding_signature(channel_id: int, model_id: str, dimensions: int) -> str:
-    return sha256_text(canonical_json_dumps({"channel_id": channel_id, "model_id": model_id, "dimensions": dimensions}))
 
 
 def _memory_configs(profile: Profile) -> ProfileConfig:

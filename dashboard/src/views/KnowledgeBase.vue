@@ -28,12 +28,13 @@
         </template>
       </el-table-column>
 
-      <el-table-column :resizable="false" :label="$t('knowledgeBase.actions')" width="520" align="center" fixed="right">
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.actions')" width="610" align="center" fixed="right">
         <template #default="{ row }">
           <div class="action-buttons">
             <el-button type="success" size="small" @click="showImportDialog(row)">{{ $t('knowledgeBase.import_doc') }}</el-button>
             <el-button type="info" size="small" @click="showDocumentDialog(row)">{{ $t('knowledgeBase.documents') }}</el-button>
             <el-button type="warning" size="small" @click="showQueryTestDialog(row)">{{ $t('knowledgeBase.test') }}</el-button>
+            <el-button type="primary" plain size="small" @click="showMigrationDialog(row)">{{ $t('knowledgeBase.embedding_status') }}</el-button>
             <el-button type="primary" size="small" @click="showEditDialog(row)">{{ $t('knowledgeBase.edit') }}</el-button>
             <el-button type="danger" size="small" @click="handleDelete(row)">{{ $t('knowledgeBase.delete') }}</el-button>
           </div>
@@ -82,6 +83,102 @@
       <template #footer>
         <el-button @click="dialogVisible = false" size="default">{{ $t('knowledgeBase.cancel') }}</el-button>
         <el-button type="primary" :loading="submitting" @click="submitForm" size="default">{{ $t('knowledgeBase.confirm') }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      :title="$t('knowledgeBase.embedding_migration_title', { name: selectedKb?.name || '' })"
+      v-model="migrationDialogVisible"
+      width="680px"
+      class="standard-dialog"
+      center
+      align-center
+      @closed="stopMigrationPolling"
+    >
+      <el-form label-width="150px" size="default">
+        <el-form-item :label="$t('knowledgeBase.knowledge_base_type')">
+          <el-tag :type="selectedKb?.knowledge_base_type === 'llm_managed' ? 'warning' : 'info'">
+            {{ selectedKb?.knowledge_base_type === 'llm_managed' ? $t('knowledgeBase.type_managed') : $t('knowledgeBase.type_user') }}
+          </el-tag>
+        </el-form-item>
+        <el-form-item :label="$t('knowledgeBase.active_embedding')">
+          <div>
+            <div>{{ getEmbeddingModelName(selectedKb) }}</div>
+            <div class="help-text">
+              {{ $t('knowledgeBase.embedding_dimensions_value', { dimensions: selectedKb?.active_embedding_dimensions || '-' }) }}
+              · {{ $t('knowledgeBase.embedding_revision_value', { revision: selectedKb?.active_embedding_revision || '-' }) }}
+            </div>
+          </div>
+        </el-form-item>
+
+        <el-alert
+          v-if="selectedKb?.knowledge_base_type === 'llm_managed'"
+          :title="$t('knowledgeBase.managed_embedding_follow_hint')"
+          type="info"
+          :closable="false"
+          class="mb-15"
+        />
+
+        <el-form-item
+          v-if="selectedKb?.knowledge_base_type === 'user'"
+          :label="$t('knowledgeBase.target_embedding')"
+        >
+          <el-select
+            v-model="migrationTargetKey"
+            :placeholder="$t('knowledgeBase.select_embedding_model')"
+            class="full-width-input"
+            filterable
+            :disabled="!canStartKnowledgeBaseMigration(selectedKb)"
+          >
+            <el-option
+              v-for="item in embeddingModelOptions"
+              :key="item.key"
+              :label="item.label"
+              :value="item.key"
+            />
+          </el-select>
+          <div class="help-text mt-5">{{ $t('knowledgeBase.embedding_migration_hint') }}</div>
+        </el-form-item>
+
+        <el-form-item :label="$t('knowledgeBase.target_configuration')">
+          {{ getTargetEmbeddingModelName(selectedKb) }}
+        </el-form-item>
+        <el-form-item :label="$t('knowledgeBase.migration_status')">
+          {{ getMigrationStatusLabel(selectedKb?.migration_status) }}
+        </el-form-item>
+        <el-form-item :label="$t('knowledgeBase.migration_progress')">
+          <div style="width: 100%">
+            <el-progress :percentage="migrationProgress" />
+            <div class="help-text mt-5">
+              {{ $t('knowledgeBase.migration_counts', {
+                success: selectedKb?.migration_success_count || 0,
+                total: selectedKb?.migration_total_count || 0,
+                failed: selectedKb?.migration_failure_count || 0
+              }) }}
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="selectedKb?.migration_error" :label="$t('knowledgeBase.migration_error')">
+          <el-alert type="error" :closable="false" :title="selectedKb.migration_error" />
+        </el-form-item>
+        <el-form-item :label="$t('knowledgeBase.old_collection_cleanup')">
+          {{ getCleanupStatusLabel(selectedKb?.old_collection_cleanup_status) }}
+        </el-form-item>
+        <el-form-item v-if="selectedKb?.old_collection_cleanup_error" :label="$t('knowledgeBase.cleanup_error')">
+          <el-alert type="error" :closable="false" :title="selectedKb.old_collection_cleanup_error" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="migrationDialogVisible = false" size="default">{{ $t('knowledgeBase.close') }}</el-button>
+        <el-button
+          v-if="selectedKb?.knowledge_base_type === 'user'"
+          type="primary"
+          :loading="migrationSubmitting"
+          :disabled="!migrationTargetKey || !canStartKnowledgeBaseMigration(selectedKb)"
+          @click="submitEmbeddingMigration"
+        >
+          {{ $t('knowledgeBase.start_migration') }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -260,12 +357,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted, reactive, computed } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, onMounted, onBeforeUnmount, reactive, computed } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import BaseDataTable from '@/components/BaseDataTable.vue'
 import { knowledgeBaseApi } from '@/api'
 import { formatTime } from '@/utils'
+import {
+  canStartKnowledgeBaseMigration,
+  getKnowledgeBaseMigrationProgress,
+  isKnowledgeBaseMigrationActive
+} from '@/utils/knowledgeBaseMigration'
 import { useDeleteConfirm } from '@/composables/useDeleteConfirm'
 
 const { t } = useI18n()
@@ -302,6 +404,10 @@ const queryTestFormRef = ref(null)
 const queryTestResults = ref([])
 const retrievalMode = ref(null)
 const rerankError = ref(null)
+const migrationDialogVisible = ref(false)
+const migrationTargetKey = ref('')
+const migrationSubmitting = ref(false)
+let migrationPollTimer = null
 
 
 const form = reactive({
@@ -320,6 +426,8 @@ const embeddingModelOptions = computed(() => embeddingModels.value.map(item => (
   key: `${item.channel_id}::${item.model_id}`,
   label: `${item.channel_name} / ${item.model_id}${item.embedding_dimensions ? ` (${item.embedding_dimensions})` : ''}`
 })))
+
+const migrationProgress = computed(() => getKnowledgeBaseMigrationProgress(selectedKb.value))
 
 const importForm = reactive({
   file: null,
@@ -374,8 +482,127 @@ const handleSizeChange = () => {
 }
 
 const getEmbeddingModelName = (row) => {
-  const option = embeddingModelOptions.value.find(item => item.channel_id === row.embedding_channel_id && item.model_id === row.embedding_model_id)
-  return option?.label || row.embedding_model_id || '-'
+  if (!row) return '-'
+  const channelId = row.active_embedding_channel_id || row.embedding_channel_id
+  const modelId = row.active_embedding_model_id || row.embedding_model_id
+  const option = embeddingModelOptions.value.find(item => item.channel_id === channelId && item.model_id === modelId)
+  return option?.label || modelId || '-'
+}
+
+const getTargetEmbeddingModelName = (row) => {
+  if (!row?.target_embedding_channel_id || !row?.target_embedding_model_id) return '-'
+  const option = embeddingModelOptions.value.find(
+    item => item.channel_id === row.target_embedding_channel_id && item.model_id === row.target_embedding_model_id
+  )
+  const name = option ? `${option.channel_name} / ${option.model_id}` : row.target_embedding_model_id
+  return row.target_embedding_dimensions ? `${name} (${row.target_embedding_dimensions})` : name
+}
+
+const getMigrationStatusLabel = (status) => {
+  const key = status || 'idle'
+  return t(`knowledgeBase.migration_status_${key}`)
+}
+
+const getCleanupStatusLabel = (status) => {
+  const key = status || 'none'
+  return t(`knowledgeBase.cleanup_status_${key}`)
+}
+
+const stopMigrationPolling = () => {
+  if (migrationPollTimer) {
+    clearTimeout(migrationPollTimer)
+    migrationPollTimer = null
+  }
+}
+
+const shouldPollMigration = () => {
+  if (!selectedKb.value) return false
+  return (
+    isKnowledgeBaseMigrationActive(selectedKb.value.migration_status) ||
+    ['pending', 'running'].includes(selectedKb.value.old_collection_cleanup_status)
+  )
+}
+
+const refreshMigrationState = async () => {
+  if (!selectedKb.value) return
+  const selectedId = selectedKb.value.id
+  const res = await knowledgeBaseApi.list({
+    page: currentPage.value,
+    size: pageSize.value
+  })
+  const { items, total: totalCount, embedding_models: embeddingModelItems } = res.data.data
+  tableData.value = items || []
+  total.value = totalCount || 0
+  embeddingModels.value = embeddingModelItems || []
+  const refreshed = tableData.value.find(item => item.id === selectedId)
+  if (refreshed) selectedKb.value = refreshed
+}
+
+const scheduleMigrationPolling = () => {
+  stopMigrationPolling()
+  if (!migrationDialogVisible.value || !shouldPollMigration()) return
+  migrationPollTimer = setTimeout(async () => {
+    try {
+      await refreshMigrationState()
+    } catch (error) {
+      ElMessage.error(t('knowledgeBase.fetch_migration_status_failed') + error.message)
+    } finally {
+      scheduleMigrationPolling()
+    }
+  }, 2000)
+}
+
+const showMigrationDialog = (row) => {
+  selectedKb.value = row
+  migrationTargetKey.value = row.target_embedding_channel_id && row.target_embedding_model_id
+    ? `${row.target_embedding_channel_id}::${row.target_embedding_model_id}`
+    : ''
+  migrationDialogVisible.value = true
+  scheduleMigrationPolling()
+}
+
+const submitEmbeddingMigration = async () => {
+  if (!selectedKb.value || !canStartKnowledgeBaseMigration(selectedKb.value)) return
+  const target = embeddingModelOptions.value.find(item => item.key === migrationTargetKey.value)
+  if (!target) {
+    ElMessage.error(t('knowledgeBase.select_embedding_model_err'))
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      t('knowledgeBase.embedding_migration_confirm', {
+        name: selectedKb.value.name,
+        target: target.label
+      }),
+      t('knowledgeBase.embedding_migration_confirm_title'),
+      {
+        confirmButtonText: t('knowledgeBase.start_migration'),
+        cancelButtonText: t('knowledgeBase.cancel'),
+        type: 'warning'
+      }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+
+  migrationSubmitting.value = true
+  try {
+    const res = await knowledgeBaseApi.migrateEmbedding(selectedKb.value.id, {
+      embedding_channel_id: target.channel_id,
+      embedding_model_id: target.model_id
+    })
+    const refreshed = res.data.data
+    selectedKb.value = refreshed
+    const index = tableData.value.findIndex(item => item.id === refreshed.id)
+    if (index >= 0) tableData.value.splice(index, 1, refreshed)
+    ElMessage.success(t('knowledgeBase.embedding_migration_submitted'))
+    scheduleMigrationPolling()
+  } catch (error) {
+    ElMessage.error(t('knowledgeBase.embedding_migration_failed') + error.message)
+  } finally {
+    migrationSubmitting.value = false
+  }
 }
 
 const showDialog = () => {
@@ -602,6 +829,10 @@ const handleDelete = (row) => {
 
 onMounted(() => {
   fetchData()
+})
+
+onBeforeUnmount(() => {
+  stopMigrationPolling()
 })
 </script>
 
