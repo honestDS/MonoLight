@@ -148,6 +148,7 @@ MESSAGES = {
     "LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED": "知识作业数据库操作失败",
     "LOG_KNOWLEDGE_JOB_LOOP_FAILED": "知识作业消费者循环失败",
     "LOG_KNOWLEDGE_RECALL_CANDIDATE_WINDOW_EXPANDED": "知识召回有效候选不足，已扩展候选窗口：{previous_limit} -> {next_limit}，当前有效 {valid_count}/{target_count}",
+    "LOG_KNOWLEDGE_RECALL_SOURCE_FAILED": "知识库召回来源失败，已跳过该来源：{error}",
     "LOG_MANAGED_MEMORY_KB_MIGRATION_RETRY": "托管知识库嵌入迁移失败，将立即重试：第 {attempt}/{max_attempts} 次尝试",
     "LOG_MANAGED_MEMORY_KB_MIGRATION_FAILED": "托管知识库嵌入迁移已达到最大尝试次数并停止：{attempt}/{max_attempts}",
     "LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED": "知识库失败迁移的目标集合清理失败：{collection_name}",
