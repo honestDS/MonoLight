@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import and_, delete, func, or_, update
+from sqlalchemy import and_, delete, exists, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -17,6 +17,7 @@ from app.models.knowledge_base import (
     KnowledgeBaseProfileBinding,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
+    ManagedKnowledgeItem,
 )
 
 
@@ -214,6 +215,57 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
         else:
             await db.flush()
         return True
+
+    async def list_recall_sources_by_profile(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        profile_id: int,
+    ) -> list[KnowledgeBase]:
+        """列出当前 Profile 有已发布内容且索引可用的知识来源。"""
+        user_binding_exists = exists(
+            select(KnowledgeBaseProfileBinding.knowledge_base_id).where(
+                KnowledgeBaseProfileBinding.uid == uid,
+                KnowledgeBaseProfileBinding.profile_id == profile_id,
+                KnowledgeBaseProfileBinding.knowledge_base_id == KnowledgeBase.id,
+            )
+        )
+        user_document_exists = exists(
+            select(KnowledgeBaseDocument.id).where(
+                KnowledgeBaseDocument.knowledge_base_id == KnowledgeBase.id,
+            )
+        )
+        managed_item_exists = exists(
+            select(ManagedKnowledgeItem.id).where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == KnowledgeBase.id,
+                ManagedKnowledgeItem.deleted_at.is_(None),
+                ManagedKnowledgeItem.is_recallable.is_(True),
+                ManagedKnowledgeItem.indexed_version == ManagedKnowledgeItem.version,
+            )
+        )
+        result = await db.execute(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.uid == uid,
+                KnowledgeBase.index_status == KnowledgeBaseIndexStatus.READY,
+                or_(
+                    and_(
+                        KnowledgeBase.knowledge_base_type == KnowledgeBaseType.USER,
+                        user_binding_exists,
+                        user_document_exists,
+                    ),
+                    and_(
+                        KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+                        KnowledgeBase.managed_profile_id == profile_id,
+                        managed_item_exists,
+                    ),
+                ),
+            )
+            .order_by(KnowledgeBase.id.asc())
+        )
+        return list(result.scalars().all())
 
     async def list_by_embedding_channel_reference(
         self,
@@ -427,6 +479,32 @@ class CRUDKnowledgeBaseDocument:
             )
         )
         return result.scalars().first()
+
+    async def list_by_recall_references(
+        self,
+        db: AsyncSession,
+        *,
+        knowledge_base_id: int,
+        document_ids: Iterable[int] = (),
+        document_uuids: Iterable[str] = (),
+    ) -> list[KnowledgeBaseDocument]:
+        ids = tuple(document_ids)
+        uuids = tuple(document_uuids)
+        reference_conditions = []
+        if ids:
+            reference_conditions.append(KnowledgeBaseDocument.id.in_(ids))
+        if uuids:
+            reference_conditions.append(KnowledgeBaseDocument.metadata_["document_uuid"].as_string().in_(uuids))
+        if not reference_conditions:
+            return []
+
+        result = await db.execute(
+            select(KnowledgeBaseDocument).where(
+                KnowledgeBaseDocument.knowledge_base_id == knowledge_base_id,
+                or_(*reference_conditions),
+            )
+        )
+        return list(result.scalars().all())
 
     async def delete(
         self,

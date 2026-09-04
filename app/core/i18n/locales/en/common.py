@@ -148,6 +148,7 @@ MESSAGES = {
     "LOG_KNOWLEDGE_JOB_DATABASE_OPERATION_FAILED": "Knowledge job database operation failed",
     "LOG_KNOWLEDGE_JOB_LOOP_FAILED": "Knowledge job consumer loop failed",
     "LOG_KNOWLEDGE_RECALL_CANDIDATE_WINDOW_EXPANDED": "Knowledge recall had too few valid candidates; candidate window expanded from {previous_limit} to {next_limit}, with {valid_count}/{target_count} valid candidates",
+    "LOG_KNOWLEDGE_RECALL_SOURCE_FAILED": "Knowledge recall source failed; the source was skipped: {error}",
     "LOG_MANAGED_MEMORY_KB_MIGRATION_RETRY": "Managed knowledge base embedding migration failed and will retry immediately: attempt {attempt}/{max_attempts}",
     "LOG_MANAGED_MEMORY_KB_MIGRATION_FAILED": "Managed knowledge base embedding migration reached the maximum attempts and stopped: {attempt}/{max_attempts}",
     "LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED": "Failed to clean up the target collection from a terminal knowledge base migration: {collection_name}",
