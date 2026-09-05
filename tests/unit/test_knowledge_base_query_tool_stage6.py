@@ -38,8 +38,14 @@ async def test_managed_query_result_exposes_only_trusted_managed_identity(monkey
                     metadata_={
                         "knowledge_type": "managed",
                         "managed_knowledge_id": 31,
+                        "managed_knowledge_key": "game.hero_updates",
                         "managed_knowledge_version": 4,
                         "managed_knowledge_llm_maintainable": True,
+                        "managed_knowledge_source_type": "llm_tool",
+                        "managed_knowledge_source_reference": {
+                            "title": "Hero update notes",
+                            "session_id": "session-1",
+                        },
                     },
                 )
             ]
@@ -61,15 +67,50 @@ async def test_managed_query_result_exposes_only_trusted_managed_identity(monkey
     assert payload == {
         "items": [
             {
-                "source": "未知来源",
+                "source": "Hero update notes",
                 "content": "Managed knowledge body",
                 "knowledge_type": "managed",
                 "knowledge_id": 31,
                 "knowledge_expected_version": 4,
                 "llm_maintainable": True,
+                "source_type": "llm_tool",
+                "source_reference": {
+                    "title": "Hero update notes",
+                    "session_id": "session-1",
+                },
             }
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_managed_query_result_uses_knowledge_key_when_source_reference_has_no_display_name(monkeypatch):
+    async def fake_query_knowledge_base(**_kwargs):
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    content="Managed knowledge body",
+                    metadata_={
+                        "knowledge_type": "managed",
+                        "managed_knowledge_id": 31,
+                        "managed_knowledge_key": "game.hero_updates",
+                        "managed_knowledge_version": 4,
+                        "managed_knowledge_llm_maintainable": True,
+                        "managed_knowledge_source_type": "llm_tool",
+                        "managed_knowledge_source_reference": {
+                            "tool_call_id": "call-1",
+                            "session_id": "session-1",
+                        },
+                    },
+                )
+            ]
+        )
+
+    monkeypatch.setattr(knowledge_base_query_module, "query_knowledge_base", fake_query_knowledge_base)
+
+    payload = json.loads(await _executor().execute(knowledge_base_id=10, query="managed topic"))
+
+    assert payload["items"][0]["source"] == "game.hero_updates"
 
 
 @pytest.mark.asyncio

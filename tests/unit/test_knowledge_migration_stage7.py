@@ -12,9 +12,11 @@ from sqlmodel import SQLModel
 
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
+from app.core.knowledge.embedding_migration import submit_managed_knowledge_base_migrations_for_memory_revision
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.migration import record_knowledge_base_migration_change
-from app.core.knowledge_jobs.executor import KnowledgeJobExecutionContext, KnowledgeJobLeaseLostError, KnowledgeJobRetryableError
+from app.core.knowledge_jobs.consumer import KnowledgeJobConsumer
+from app.core.knowledge_jobs.executor import KnowledgeJobExecutionContext, KnowledgeJobExecutor, KnowledgeJobLeaseLostError, KnowledgeJobRetryableError
 from app.core.knowledge_jobs.handlers import create_default_knowledge_job_executor
 from app.core.knowledge_jobs.manager import KnowledgeJobTargetBusyError
 from app.core.knowledge_jobs.migration import (
@@ -1010,6 +1012,9 @@ async def test_switch_batches_managed_vector_reference_updates(
         migrated_second = await db.get(ManagedKnowledgeItem, second.id)
     assert current is not None
     assert current.active_collection_name == "stage7-managed-switch-target"
+    assert current.active_embedding_model_id == "embedding-v2"
+    assert current.active_embedding_dimensions == 3
+    assert current.active_embedding_signature == "signature-v2"
     assert migrated_first is not None and migrated_first.indexed_version == 1
     assert migrated_second is not None and migrated_second.indexed_version == 1
     assert migrated_first.vector_item_ids != ["legacy-managed-first"]
@@ -1017,6 +1022,144 @@ async def test_switch_batches_managed_vector_reference_updates(
     target_ids = set(backend.collections["stage7-managed-switch-target"]["items"])
     assert set(migrated_first.vector_item_ids).issubset(target_ids)
     assert set(migrated_second.vector_item_ids).issubset(target_ids)
+
+
+@pytest.mark.asyncio
+async def test_managed_memory_follow_submission_completes_to_final_embedding_configuration(
+    migration_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.knowledge_jobs import migration as migration_module
+
+    backend = _VectorBackend()
+    _patch_migration_backend(monkeypatch, migration_module, backend)
+    kb = await _create_container(
+        migration_database,
+        uid="managed-memory-follow-final-user",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+    )
+    async with migration_database() as db:
+        item = ManagedKnowledgeItem(
+            knowledge_base_id=kb.id,
+            uid=kb.uid,
+            knowledge_key="managed.follow.final",
+            content="managed knowledge follows the final memory embedding configuration",
+            content_hash="3" * 64,
+            version=1,
+            indexed_version=1,
+            vector_item_ids=["legacy-managed-follow-final"],
+            is_recallable=True,
+        )
+        db.add(item)
+        await db.commit()
+        jobs = await submit_managed_knowledge_base_migrations_for_memory_revision(
+            db,
+            uid=kb.uid,
+            target_channel_id=kb.active_embedding_channel_id,
+            target_model_id="embedding-v2",
+            target_dimensions=3,
+            target_signature="memory-final-signature-v2",
+            memory_revision=2,
+        )
+
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.id is not None
+    claimed = await _claim(
+        migration_database,
+        uid=kb.uid,
+        job_id=job.id,
+        owner="managed-memory-follow-final-worker",
+    )
+    context = KnowledgeJobExecutionContext(
+        job=claimed,
+        worker_id="managed-memory-follow-final-worker",
+        session_factory=migration_database,
+    )
+    execution = await migration_module.handle_embedding_migration(context)
+    assert execution.finalized is True
+
+    async with migration_database() as db:
+        current = await db.get(KnowledgeBase, kb.id)
+    assert current is not None
+    assert current.migration_status == KnowledgeBaseMigrationStatus.SUCCEEDED
+    assert current.active_embedding_channel_id == kb.active_embedding_channel_id
+    assert current.active_embedding_model_id == "embedding-v2"
+    assert current.active_embedding_dimensions == 3
+    assert current.active_embedding_signature == "memory-final-signature-v2"
+
+
+@pytest.mark.asyncio
+async def test_managed_memory_follow_retries_immediately_three_times_then_keeps_previous_embedding(
+    migration_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.knowledge_jobs import migration as migration_module
+
+    backend = _VectorBackend()
+    _patch_migration_backend(monkeypatch, migration_module, backend)
+    kb = await _create_container(
+        migration_database,
+        uid="managed-memory-follow-retry-user",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+    )
+    async with migration_database() as db:
+        jobs = await submit_managed_knowledge_base_migrations_for_memory_revision(
+            db,
+            uid=kb.uid,
+            target_channel_id=kb.active_embedding_channel_id,
+            target_model_id="embedding-v2",
+            target_dimensions=3,
+            target_signature="memory-retry-signature-v2",
+            memory_revision=2,
+        )
+
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.id is not None
+    assert job.max_attempts == 3
+
+    async def always_retryable(_context: KnowledgeJobExecutionContext):
+        raise KnowledgeJobRetryableError("managed migration retryable failure")
+
+    consumer = KnowledgeJobConsumer(
+        KnowledgeJobExecutor(
+            {KnowledgeJobOperation.EMBEDDING_MIGRATION: always_retryable},
+            session_factory=migration_database,
+        ),
+        session_factory=migration_database,
+    )
+
+    for attempt in (1, 2, 3):
+        owner = f"managed-memory-follow-retry-worker-{attempt}"
+        claimed = await _claim(
+            migration_database,
+            uid=kb.uid,
+            job_id=job.id,
+            owner=owner,
+        )
+        assert claimed.attempt_count == attempt
+        await consumer._execute(claimed, owner)
+
+        async with migration_database() as db:
+            current_job = await knowledge_job_crud.get_by_id(db, uid=kb.uid, job_id=job.id)
+            current_kb = await db.get(KnowledgeBase, kb.id)
+            now = await get_database_time(db)
+
+        assert current_job is not None
+        assert current_kb is not None
+        assert current_kb.active_embedding_model_id == "embedding-v1"
+        assert current_kb.active_embedding_signature == "signature-v1"
+        if attempt < 3:
+            assert current_job.status == KnowledgeJobStatus.RETRY
+            assert current_job.available_at <= now
+            assert current_kb.migration_status == KnowledgeBaseMigrationStatus.PREPARING
+            assert current_kb.target_embedding_model_id == "embedding-v2"
+        else:
+            assert current_job.status == KnowledgeJobStatus.FAILED
+            assert current_kb.migration_status == KnowledgeBaseMigrationStatus.FAILED
+            assert current_kb.target_embedding_model_id is None
+            assert current_kb.target_collection_name is None
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 """Shared embedding channel configuration and invocation helpers."""
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -44,6 +46,21 @@ class EmbeddingRuntimeConfig:
     @property
     def embedding_dimensions(self) -> int | None:
         return self.declared_dimensions
+
+
+def build_embedding_signature(channel_id: int, model_id: str, dimensions: int) -> str:
+    canonical = json.dumps(
+        {
+            "channel_id": channel_id,
+            "model_id": model_id,
+            "dimensions": dimensions,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 async def load_embedding_runtime_config(
@@ -134,6 +151,7 @@ probe_embedding_dimensions = detect_embedding_dimensions
 
 __all__ = [
     "EmbeddingRuntimeConfig",
+    "build_embedding_signature",
     "detect_embedding_dimensions",
     "embed_texts",
     "embed_texts_with_config",

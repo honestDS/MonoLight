@@ -1433,6 +1433,7 @@ async def test_managed_chunks_deduplicate_before_rerank_and_materialize_after_se
                 vector_item_ids=vector_ids,
                 is_recallable=True,
                 pending_job_id=None,
+                source_reference={"title": "Architecture note", "session_id": "session-1"},
             )
         )
         await db.commit()
@@ -1504,8 +1505,14 @@ async def test_managed_chunks_deduplicate_before_rerank_and_materialize_after_se
     assert managed_hit.rerank_rank == 1
     assert managed_hit.metadata["knowledge_type"] == "managed"
     assert managed_hit.metadata["managed_knowledge_id"] == item_id
+    assert managed_hit.metadata["managed_knowledge_key"] == submission.item.knowledge_key
     assert managed_hit.metadata["managed_knowledge_version"] == 1
     assert managed_hit.metadata["managed_knowledge_llm_maintainable"] == submission.item.llm_maintainable
+    assert managed_hit.metadata["managed_knowledge_source_type"] == "llm_tool"
+    assert managed_hit.metadata["managed_knowledge_source_reference"] == {
+        "title": "Architecture note",
+        "session_id": "session-1",
+    }
     assert materialized[1].id == "user-document"
     assert materialized[1].content == "normal user document chunk"
 

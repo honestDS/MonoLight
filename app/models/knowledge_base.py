@@ -629,6 +629,11 @@ class KnowledgeBaseUpdate(SQLModel):
     description: str | None = Field(None, max_length=500, description="知识库描述")
 
 
+class KnowledgeBaseEmbeddingMigrationRequest(SQLModel):
+    embedding_channel_id: int = Field(..., gt=0, description="目标向量化渠道ID")
+    embedding_model_id: str = Field(..., min_length=1, max_length=255, description="目标向量化模型ID")
+
+
 class KnowledgeBaseProfileBindingUpdate(SQLModel):
     knowledge_base_ids: list[int] = Field(default_factory=list, description="绑定的知识库ID列表")
 

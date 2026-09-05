@@ -122,8 +122,11 @@ async def materialize_recallable_managed_hits(
             {
                 "knowledge_type": "managed",
                 "managed_knowledge_id": item.id,
+                "managed_knowledge_key": item.knowledge_key,
                 "managed_knowledge_version": item.version,
                 "managed_knowledge_llm_maintainable": item.llm_maintainable,
+                "managed_knowledge_source_type": getattr(item.source_type, "value", item.source_type),
+                "managed_knowledge_source_reference": item.source_reference,
             }
         )
         materialized.append(

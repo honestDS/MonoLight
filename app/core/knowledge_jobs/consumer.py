@@ -18,6 +18,10 @@ from app.core.constants import (
     LOG_KNOWLEDGE_JOB_LOOP_FAILED,
     LOG_KNOWLEDGE_JOB_STARTUP_RECOVERY_COMPLETED,
     LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED,
+    LOG_MANAGED_MEMORY_KB_MIGRATION_FAILED,
+    LOG_MANAGED_MEMORY_KB_MIGRATION_RETRY,
+    MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX,
+    MANAGED_MEMORY_KB_MIGRATION_RETRY_DELAY_SECONDS,
 )
 from app.core.crud.knowledge.job import (
     KnowledgeJobRecoveryResult,
@@ -40,7 +44,7 @@ from app.core.knowledge_jobs.migration import (
     finalize_knowledge_migration_terminal_state,
 )
 from app.core.log import get_logger
-from app.models.knowledge_base import KnowledgeJob
+from app.models.knowledge_base import KnowledgeJob, KnowledgeJobOperation
 from app.providers.database import AsyncSessionLocal
 
 logger = get_logger(__name__)
@@ -61,6 +65,50 @@ def retry_delay_seconds(attempt_count: int) -> int:
     if attempt_count >= 10:
         return KNOWLEDGE_JOB_RETRY_MAX_SECONDS
     return min(KNOWLEDGE_JOB_RETRY_MAX_SECONDS, 2 ** (attempt_count - 1))
+
+
+def _is_managed_memory_embedding_migration(job: KnowledgeJob) -> bool:
+    return job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION and job.dedupe_key.startswith(f"{MANAGED_MEMORY_KB_MIGRATION_DEDUPE_PREFIX}:")
+
+
+def _retry_delay_seconds_for_job(job: KnowledgeJob) -> int:
+    if _is_managed_memory_embedding_migration(job):
+        return MANAGED_MEMORY_KB_MIGRATION_RETRY_DELAY_SECONDS
+    return retry_delay_seconds(job.attempt_count)
+
+
+def _log_managed_memory_migration_retry(job: KnowledgeJob) -> None:
+    if not _is_managed_memory_embedding_migration(job):
+        return
+    logger.bind(
+        job_id=job.id,
+        knowledge_base_id=job.knowledge_base_id,
+        attempt=job.attempt_count,
+        max_attempts=job.max_attempts,
+    ).warning(
+        t(
+            LOG_MANAGED_MEMORY_KB_MIGRATION_RETRY,
+            attempt=job.attempt_count,
+            max_attempts=job.max_attempts,
+        )
+    )
+
+
+def _log_managed_memory_migration_failed(job: KnowledgeJob) -> None:
+    if not _is_managed_memory_embedding_migration(job):
+        return
+    logger.bind(
+        job_id=job.id,
+        knowledge_base_id=job.knowledge_base_id,
+        attempt=job.attempt_count,
+        max_attempts=job.max_attempts,
+    ).error(
+        t(
+            LOG_MANAGED_MEMORY_KB_MIGRATION_FAILED,
+            attempt=job.attempt_count,
+            max_attempts=job.max_attempts,
+        )
+    )
 
 
 def _positive_number(value: Real, *, field: str) -> Real:
@@ -316,6 +364,8 @@ class KnowledgeJobConsumer:
             return
         try:
             target_collection = None
+            log_managed_retry = False
+            log_managed_failure = False
             async with self._session_factory() as db:
                 if is_system_cleanup_operation(job.operation):
                     changed = await knowledge_job_crud.release_for_retry(
@@ -345,6 +395,7 @@ class KnowledgeJobConsumer:
                                 job=current,
                                 error=safe_message,
                             )
+                    log_managed_failure = changed and _is_managed_memory_embedding_migration(job)
                 else:
                     changed = await knowledge_job_crud.release_for_retry(
                         db,
@@ -352,10 +403,15 @@ class KnowledgeJobConsumer:
                         job_id=job.id,
                         owner=worker_id,
                         error=safe_message,
-                        delay_seconds=retry_delay_seconds(job.attempt_count),
+                        delay_seconds=_retry_delay_seconds_for_job(job),
                         commit=False,
                     )
+                    log_managed_retry = changed and _is_managed_memory_embedding_migration(job)
                 await db.commit()
+            if log_managed_failure:
+                _log_managed_memory_migration_failed(job)
+            elif log_managed_retry:
+                _log_managed_memory_migration_retry(job)
             await cleanup_terminal_target_collection(target_collection)
             if not changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
@@ -367,6 +423,7 @@ class KnowledgeJobConsumer:
             return
         try:
             target_collection = None
+            log_managed_failure = False
             async with self._session_factory() as db:
                 changed = await knowledge_job_crud.mark_failed(
                     db,
@@ -385,7 +442,10 @@ class KnowledgeJobConsumer:
                             job=current,
                             error=safe_message,
                         )
+                    log_managed_failure = _is_managed_memory_embedding_migration(job)
                 await db.commit()
+            if log_managed_failure:
+                _log_managed_memory_migration_failed(job)
             await cleanup_terminal_target_collection(target_collection)
             if not changed:
                 logger.bind(job_id=job.id, operation=str(job.operation)).warning(t(LOG_KNOWLEDGE_JOB_STATE_UPDATE_FAILED))
