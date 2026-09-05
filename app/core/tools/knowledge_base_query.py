@@ -14,6 +14,31 @@ from app.core.tools.base import BaseExecutor
 
 KNOWLEDGE_BASE_QUERY_TOOL_NAME = "query_knowledge_base"
 
+_MANAGED_SOURCE_DISPLAY_FIELDS = (
+    "title",
+    "name",
+    "filename",
+    "url",
+    "uri",
+    "path",
+    "source",
+    "reference",
+)
+
+
+def _managed_source(metadata: dict) -> str:
+    source_reference = metadata.get("managed_knowledge_source_reference")
+    if isinstance(source_reference, dict):
+        for field in _MANAGED_SOURCE_DISPLAY_FIELDS:
+            value = source_reference.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    knowledge_key = metadata.get("managed_knowledge_key")
+    if isinstance(knowledge_key, str) and knowledge_key.strip():
+        return knowledge_key.strip()
+    return t(MSG_TOOL_KNOWLEDGE_SOURCE_UNKNOWN)
+
 KNOWLEDGE_BASE_QUERY_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -71,11 +96,14 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
             items = []
             for item in response_data.items:
                 metadata = item.metadata_ or {}
+                is_managed = metadata.get("knowledge_type") == "managed"
                 result_item = {
-                    "source": metadata.get("filename") or t(MSG_TOOL_KNOWLEDGE_SOURCE_UNKNOWN),
+                    "source": _managed_source(metadata)
+                    if is_managed
+                    else metadata.get("filename") or t(MSG_TOOL_KNOWLEDGE_SOURCE_UNKNOWN),
                     "content": item.content,
                 }
-                if metadata.get("knowledge_type") == "managed":
+                if is_managed:
                     knowledge_id = metadata.get("managed_knowledge_id")
                     expected_version = metadata.get("managed_knowledge_version")
                     llm_maintainable = metadata.get("managed_knowledge_llm_maintainable")
@@ -88,6 +116,12 @@ class KnowledgeBaseQueryExecutor(BaseExecutor):
                                 "llm_maintainable": llm_maintainable,
                             }
                         )
+                    source_type = metadata.get("managed_knowledge_source_type")
+                    if isinstance(source_type, str) and source_type.strip():
+                        result_item["source_type"] = source_type.strip()
+                    source_reference = metadata.get("managed_knowledge_source_reference")
+                    if isinstance(source_reference, dict) and source_reference:
+                        result_item["source_reference"] = source_reference
                 items.append(result_item)
             return json.dumps({"items": items}, ensure_ascii=False)
         except Exception as e:

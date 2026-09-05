@@ -177,16 +177,8 @@ async def migrate(session):
 
     async with session_factory() as session:
         await bootstrap.init_database_schema(session)
-        values = (
-            await session.execute(
-                text("SELECT value FROM ordered_migration_marker ORDER BY rowid")
-            )
-        ).scalars().all()
-        records = (
-            await session.execute(
-                text("SELECT script_name FROM migration_record ORDER BY id")
-            )
-        ).scalars().all()
+        values = (await session.execute(text("SELECT value FROM ordered_migration_marker ORDER BY rowid"))).scalars().all()
+        records = (await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))).scalars().all()
 
     assert values == ["first", "second"]
     assert records == ["migration_010_first.py", "migration_020_second.py"]
@@ -242,12 +234,8 @@ async def migrate(session):
         with pytest.raises(RuntimeError, match="expected migration failure"):
             await bootstrap.init_database_schema(session)
         await session.rollback()
-        values = (
-            await session.execute(text("SELECT value FROM failure_marker ORDER BY rowid"))
-        ).scalars().all()
-        records = (
-            await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))
-        ).scalars().all()
+        values = (await session.execute(text("SELECT value FROM failure_marker ORDER BY rowid"))).scalars().all()
+        records = (await session.execute(text("SELECT script_name FROM migration_record ORDER BY id"))).scalars().all()
 
     assert values == ["first"]
     assert records == ["migration_010_ok.py"]

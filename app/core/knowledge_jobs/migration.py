@@ -15,6 +15,7 @@ from app.core.constants import (
     ERR_KNOWLEDGE_JOB_FIELD_REQUIRED,
     ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
     ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT,
+    LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED,
     MANAGED_KNOWLEDGE_VECTOR_BATCH_SIZE,
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_OVERLAP,
     MANAGED_KNOWLEDGE_VECTOR_CHUNK_SIZE,
@@ -46,6 +47,7 @@ from app.core.knowledge_jobs.manager import (
     KnowledgeJobTargetBusyError,
     KnowledgeJobValidationError,
 )
+from app.core.log import get_logger
 from app.core.utils.database_integrity import is_unique_constraint_violation
 from app.core.utils.text_splitter import TextSplitter
 from app.models.knowledge_base import (
@@ -73,6 +75,7 @@ from app.providers.vector import (
 )
 
 MIGRATION_BATCH_SIZE = 20
+logger = get_logger(__name__)
 _ACTIVE_MIGRATION_STATUSES = frozenset(
     {
         KnowledgeBaseMigrationStatus.PREPARING,
@@ -381,7 +384,11 @@ async def prepare_knowledge_base_embedding_migration(
     dedupe_key = _require_string(dedupe_key, field="dedupe_key")
     max_attempts = _positive_int(max_attempts, field="max_attempts")
     try:
-        knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
+        knowledge_base = await lock_migrating_knowledge_base(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         if knowledge_base is None or knowledge_base.uid != uid or knowledge_base.id is None:
             raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
         if knowledge_base.migration_status in _ACTIVE_MIGRATION_STATUSES:
@@ -1252,7 +1259,8 @@ async def cleanup_terminal_target_collection(collection_name: str | None) -> Non
         validation = await async_validate_collection(collection_name)
         if getattr(validation, "exists", False):
             await async_delete_collection(collection_name)
-    except Exception:
+    except Exception as exc:
+        logger.bind(collection_name=collection_name, error_type=type(exc).__name__).warning(t(LOG_KB_TERMINAL_TARGET_CLEANUP_FAILED, collection_name=collection_name))
         return
 
 

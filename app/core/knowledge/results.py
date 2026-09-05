@@ -21,7 +21,35 @@ class ManagedKnowledgeMutationResult:
     item: ManagedKnowledgeItem | None = None
 
 
+class KnowledgeRecallSourceType(StrEnum):
+    MANAGED_KNOWLEDGE = "managed_knowledge"
+    USER_KNOWLEDGE = "user_knowledge"
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRecallItem:
+    knowledge_base_id: int
+    knowledge_base_name: str
+    source_type: KnowledgeRecallSourceType
+    source: str
+    content: str
+    truncated: bool = False
+    llm_maintainable: bool = False
+    document_id: int | None = None
+    knowledge_id: int | None = None
+    knowledge_key: str | None = None
+    knowledge_expected_version: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRecallResult:
+    items: tuple[KnowledgeRecallItem, ...] = ()
+
+
 __all__ = [
+    "KnowledgeRecallItem",
+    "KnowledgeRecallResult",
+    "KnowledgeRecallSourceType",
     "ManagedKnowledgeMutationResult",
     "ManagedKnowledgeMutationStatus",
 ]

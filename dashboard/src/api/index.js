@@ -287,6 +287,7 @@ export const fileApi = {
 export const knowledgeBaseApi = {
   list: (params) => request.get('/knowledge-base/list', { params }),
   create: (data) => request.post('/knowledge-base/create', data),
+  migrateEmbedding: (id, data) => request.post(`/knowledge-base/embedding-migration?kb_id=${id}`, data),
   update: (id, data) => request.post(`/knowledge-base/update?kb_id=${id}`, data),
   delete: (id) => request.post(`/knowledge-base/delete?kb_id=${id}`),
   importDocument: (id, formData) => request.post(`/knowledge-base/documents/import?kb_id=${id}`, formData, {
