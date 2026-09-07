@@ -1,5 +1,6 @@
 import json
 
+from app.core.constants import MANAGE_LONGTERM_MEMORY_TOOL_NAME
 from app.core.prompts import RECENT_TOOL_SUMMARY_WRAPPER
 from app.core.utils.dispatcher.truncate_tool_result import truncate_tool_messages_for_budget, truncate_tool_result_with_stats
 from app.core.utils.tokenizer import estimate_tokens
@@ -175,12 +176,14 @@ def trim_protected_tail_tools(
 
     non_tool_tokens = sum(estimate_tokens(message_token_text(msg)) for msg in protected_tail if msg.role != MessageRole.TOOL)
     tool_budget = max(1, non_system_budget - non_tool_tokens)
+    structured_recall_tool_call_ids = {tool_call.id for message in protected_tail if message.role == MessageRole.ASSISTANT for tool_call in message.tool_calls or [] if (tool_call.name == MANAGE_LONGTERM_MEMORY_TOOL_NAME and tool_call.arguments.get("operation") == "recall")}
     truncate_tool_messages_for_budget(
         tool_msgs=tool_msgs,
         context_window_k=context_window_k,
         budget_tokens=tool_budget,
         uid=uid,
         session_id=session_id,
+        structured_recall_tool_call_ids=structured_recall_tool_call_ids,
     )
 
     return protected_tail

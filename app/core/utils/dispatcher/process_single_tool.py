@@ -43,6 +43,7 @@ from app.core.tools import (
 from app.core.utils.dispatcher.helpers import format_exception_message
 from app.core.utils.dispatcher.truncate_tool_result import (
     ToolMessagesTruncationStats,
+    truncate_longterm_memory_recall_result_for_budget,
     truncate_tool_messages_for_budget,
     truncate_tool_result_with_stats,
 )
@@ -249,8 +250,8 @@ def _serialize_longterm_memory_log_arguments(arguments: dict[str, Any]) -> str:
         if field == "knowledge_key":
             safe_arguments["knowledge_key_length"] = len(value) if isinstance(value, str) else None
             continue
-        if field == "query":
-            safe_arguments["query_length"] = len(value) if isinstance(value, str) else None
+        if field in {"query", "knowledge_query"}:
+            safe_arguments[f"{field}_length"] = len(value) if isinstance(value, str) else None
             continue
         safe_arguments[field] = value
     return json.dumps(safe_arguments, ensure_ascii=False, default=str)
@@ -283,6 +284,27 @@ def _serialize_longterm_memory_log_result(result: str) -> str:
                     continue
                 safe_chat_history.append({key: item[key] for key in ("role", "truncated") if key in item})
             safe_payload["chat_history"] = safe_chat_history
+            continue
+        if field == "knowledge_base" and isinstance(value, list):
+            safe_knowledge_items = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                safe_knowledge_items.append(
+                    {
+                        key: item[key]
+                        for key in (
+                            "knowledge_base_id",
+                            "source_type",
+                            "knowledge_id",
+                            "knowledge_expected_version",
+                            "truncated",
+                            "llm_maintainable",
+                        )
+                        if key in item
+                    }
+                )
+            safe_payload["knowledge_base"] = safe_knowledge_items
             continue
         safe_payload[field] = value
     return json.dumps(safe_payload, ensure_ascii=False, default=str)
@@ -598,7 +620,13 @@ async def process_single_tool(
         1,
         (context_window_k * CONTEXT_WINDOW_TOKENS_PER_K) // 2,
     )
-    if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
+    if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
+        tool_msg.content, truncation_stats = truncate_longterm_memory_recall_result_for_budget(
+            cmd_result,
+            context_window_k=context_window_k,
+            budget_tokens=tool_result_budget_tokens,
+        )
+    elif tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
         tool_msg.content, truncation_stats = _truncate_knowledge_base_query_result_for_budget(
             cmd_result,
             context_window_k=context_window_k,

@@ -397,8 +397,9 @@ async def test_executor_recall_passes_memory_limits_and_returns_compact_items_in
         "db": context.db,
         "uid": "user-1",
         "query": "private query",
-        "top_k": 3,
-        "result_max_chars": 1234 - len("private recalled content") - len("second recalled content"),
+        "top_k": 5,
+        "candidate_k": 500,
+        "result_max_chars": 1234,
         "before_message_id": context.source_message_id,
     }
     assert json.loads(result) == {

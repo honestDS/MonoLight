@@ -16,6 +16,7 @@ export default {
   no_data: '暂无数据',
   empty_content: '暂无内容',
   unknown_tool: '未知工具',
+  context_recall: '上下文召回',
   tool_result: '工具返回',
   ws_disconnected: 'WebSocket 连接已断开',
   unknown_error: '未知错误',
