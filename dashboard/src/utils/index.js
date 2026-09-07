@@ -172,7 +172,22 @@ export const getToolCalls = (msg) => {
 }
 
 export const getToolCallName = (toolCall) => {
-  return toolCall?.name || toolCall?.function?.name || t('common.unknown_tool')
+  const name = toolCall?.name || toolCall?.function?.name
+  if (name === 'manage_longterm_memory') {
+    const rawArguments = toolCall?.arguments ?? toolCall?.function?.arguments
+    let argumentsValue = rawArguments
+    if (typeof rawArguments === 'string') {
+      try {
+        argumentsValue = JSON.parse(rawArguments)
+      } catch {
+        argumentsValue = null
+      }
+    }
+    if (argumentsValue?.operation === 'recall') {
+      return t('common.context_recall')
+    }
+  }
+  return name || t('common.unknown_tool')
 }
 
 export const getToolCallArguments = (toolCall) => {

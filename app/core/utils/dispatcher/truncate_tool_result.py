@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 
@@ -100,12 +101,144 @@ def truncate_tool_result_with_stats(content: str, context_window_k: int, limit_t
         )
 
 
+def truncate_longterm_memory_recall_result_for_budget(
+    result: str,
+    *,
+    context_window_k: int,
+    budget_tokens: int,
+) -> tuple[str, ToolMessagesTruncationStats]:
+    overall = truncate_tool_result_with_stats(
+        result,
+        context_window_k,
+        limit_tokens=budget_tokens,
+    )
+    if not overall.truncated:
+        return result, ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
+
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return overall.content, ToolMessagesTruncationStats(
+            truncated_count=1,
+            removed_chars=overall.removed_chars,
+        )
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        return overall.content, ToolMessagesTruncationStats(
+            truncated_count=1,
+            removed_chars=overall.removed_chars,
+        )
+
+    safe_payload = dict(payload)
+    safe_payload["items"] = [dict(item) for item in payload.get("items", []) if isinstance(item, dict)]
+    for section in ("knowledge_base", "chat_history"):
+        value = payload.get(section)
+        if isinstance(value, list):
+            safe_payload[section] = [dict(item) for item in value if isinstance(item, dict)]
+    safe_payload["truncated"] = True
+
+    original_contents: dict[tuple[str, int], str] = {}
+    for section in ("items", "knowledge_base", "chat_history"):
+        section_items = safe_payload.get(section)
+        if not isinstance(section_items, list):
+            continue
+        for index, item in enumerate(section_items):
+            content = item.get("content")
+            if isinstance(content, str) and content:
+                original_contents[(section, index)] = content
+                item["content"] = ""
+
+    def compact() -> str:
+        return json.dumps(
+            safe_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    def fits(value: str) -> bool:
+        return not truncate_tool_result_with_stats(
+            value,
+            context_window_k,
+            limit_tokens=budget_tokens,
+        ).truncated
+
+    def remove_last(section: str) -> bool:
+        section_items = safe_payload.get(section)
+        if not isinstance(section_items, list) or not section_items:
+            return False
+        section_items.pop()
+        count_field = f"{section}_omitted_count"
+        safe_payload[count_field] = int(safe_payload.get(count_field, 0)) + 1
+        return True
+
+    base = compact()
+    while not fits(base):
+        if remove_last("chat_history"):
+            pass
+        elif remove_last("knowledge_base"):
+            pass
+        else:
+            break
+        base = compact()
+
+    base_stats = truncate_tool_result_with_stats(
+        base,
+        context_window_k,
+        limit_tokens=budget_tokens,
+    )
+    surviving_contents = [(section, index, content) for (section, index), content in original_contents.items() if isinstance(safe_payload.get(section), list) and index < len(safe_payload[section])]
+    remaining_tokens = max(budget_tokens - base_stats.original_tokens - 4, 0)
+    per_content_budget = max(1, remaining_tokens // len(surviving_contents)) if surviving_contents and remaining_tokens else 0
+
+    if per_content_budget:
+        while True:
+            for section, index, content in surviving_contents:
+                item = safe_payload[section][index]
+                content_stats = truncate_tool_result_with_stats(
+                    content,
+                    context_window_k,
+                    limit_tokens=per_content_budget,
+                )
+                item["content"] = content_stats.content
+                if content_stats.truncated:
+                    item["truncated"] = True
+                    if section == "knowledge_base" and item.get("source_type") == "managed_knowledge":
+                        item["llm_maintainable"] = False
+                        item.pop("knowledge_id", None)
+                        item.pop("knowledge_expected_version", None)
+            candidate = compact()
+            if fits(candidate):
+                return candidate, ToolMessagesTruncationStats(
+                    truncated_count=1,
+                    removed_chars=max(len(result) - len(candidate), 0),
+                )
+            if per_content_budget == 1:
+                break
+            per_content_budget = max(1, per_content_budget // 2)
+
+    if surviving_contents and not per_content_budget:
+        for section, index, _content in surviving_contents:
+            item = safe_payload[section][index]
+            item["truncated"] = True
+            if section == "knowledge_base" and item.get("source_type") == "managed_knowledge":
+                item["llm_maintainable"] = False
+                item.pop("knowledge_id", None)
+                item.pop("knowledge_expected_version", None)
+
+    final_value = compact()
+    return final_value, ToolMessagesTruncationStats(
+        truncated_count=1,
+        removed_chars=max(len(result) - len(final_value), 0),
+    )
+
+
 def truncate_tool_messages_for_budget(
     tool_msgs: list[InternalMessage],
     context_window_k: int,
     budget_tokens: int,
     uid: str,
     session_id: str,
+    structured_recall_tool_call_ids: set[str] | None = None,
 ) -> ToolMessagesTruncationStats:
     if not tool_msgs:
         return ToolMessagesTruncationStats(truncated_count=0, removed_chars=0)
@@ -114,7 +247,20 @@ def truncate_tool_messages_for_budget(
     truncated_count = 0
     removed_chars = 0
     for msg in tool_msgs:
-        truncation = truncate_tool_result_with_stats(msg.content or "", context_window_k, limit_tokens=per_tool_budget)
+        if structured_recall_tool_call_ids and msg.tool_call_id in structured_recall_tool_call_ids:
+            msg.content, stats = truncate_longterm_memory_recall_result_for_budget(
+                msg.content or "",
+                context_window_k=context_window_k,
+                budget_tokens=per_tool_budget,
+            )
+            truncated_count += stats.truncated_count
+            removed_chars += stats.removed_chars
+            continue
+        truncation = truncate_tool_result_with_stats(
+            msg.content or "",
+            context_window_k,
+            limit_tokens=per_tool_budget,
+        )
         msg.content = truncation.content
         if truncation.truncated:
             truncated_count += 1

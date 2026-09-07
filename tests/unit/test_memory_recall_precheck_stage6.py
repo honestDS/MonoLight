@@ -30,7 +30,13 @@ def _call(call_id="call-1", arguments=None, name=MANAGE_LONGTERM_MEMORY_TOOL_NAM
     return InternalToolCall(
         id=call_id,
         name=name,
-        arguments=arguments or {"operation": "recall", "query": "user context", "top_k": 3},
+        arguments=arguments
+        or {
+            "operation": "recall",
+            "query": "user context",
+            "knowledge_query": "user context details",
+            "top_k": 3,
+        },
     )
 
 
@@ -97,6 +103,15 @@ def test_recall_validators_accept_only_empty_text_and_one_valid_recall_call(cont
     message = _assistant(content=content, refusal=refusal)
 
     assert precheck_module.response_is_valid(_response(message))
+    assert persistence_module.is_valid_recall_call(message)
+
+
+def test_live_precheck_requires_knowledge_query_but_persisted_legacy_recall_remains_valid():
+    message = _assistant(
+        arguments={"operation": "recall", "query": "legacy context", "top_k": 3}
+    )
+
+    assert not precheck_module.response_is_valid(_response(message))
     assert persistence_module.is_valid_recall_call(message)
 
 
