@@ -19,6 +19,8 @@ from app.core.constants import (
     ERR_KB_MANAGED_DOCUMENT_IMPORT_FORBIDDEN,
     ERR_KB_NOT_FOUND,
     ERR_KB_VECTOR_WRITE_FAILED,
+    ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
+    ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND,
     ERR_PROFILE_NOT_FOUND,
     ERR_SESSION_NO_PERMISSION,
     MSG_KB_CREATED,
@@ -36,6 +38,7 @@ from app.core.crud.knowledge.base import (
     knowledge_base_profile_binding_crud,
 )
 from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig, build_embedding_signature, detect_embedding_dimensions, load_embedding_runtime_config
 
@@ -53,7 +56,10 @@ from app.core.knowledge.bindings import (
 )
 from app.core.knowledge.deletion import delete_owned_knowledge_base
 from app.core.knowledge.embedding_migration import submit_user_knowledge_base_embedding_migration
+from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeNotFoundError
+from app.core.knowledge.managed import build_managed_knowledge_snapshot, managed_knowledge_service
 from app.core.knowledge.migration import record_knowledge_base_migration_change
+from app.core.knowledge_jobs.manager import knowledge_job_manager
 from app.core.security import get_current_user
 from app.core.utils.text_splitter import TextSplitter
 from app.models.channel import ModelUsage
@@ -76,6 +82,16 @@ from app.models.knowledge_base import (
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
     KnowledgeJobOperation,
+    ManagedKnowledgeActorType,
+    ManagedKnowledgeCreateRequest,
+    ManagedKnowledgeDeleteRequest,
+    ManagedKnowledgeItemResponse,
+    ManagedKnowledgeItemSummaryResponse,
+    ManagedKnowledgeListResponse,
+    ManagedKnowledgeMutationResponse,
+    ManagedKnowledgeRevisionResponse,
+    ManagedKnowledgeSourceType,
+    ManagedKnowledgeUpdateRequest,
 )
 from app.providers.database import get_db
 from app.providers.vector import (
@@ -97,6 +113,33 @@ async def load_owned_knowledge_base(db: AsyncSession, kb_id: int, current_user: 
     if kb.uid != getattr(current_user, "uid", None) and not getattr(current_user, "is_superuser", False):
         raise HTTPException(status_code=403, detail=ERR_SESSION_NO_PERMISSION)
     return kb
+
+
+async def load_owned_managed_knowledge_base(db: AsyncSession, kb_id: int, current_user: Any) -> KnowledgeBase:
+    knowledge_base = await load_owned_knowledge_base(db, kb_id, current_user)
+    if knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
+        raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED)
+    return knowledge_base
+
+
+def build_managed_knowledge_item_response(item) -> ManagedKnowledgeItemResponse:
+    payload = build_managed_knowledge_snapshot(item)
+    payload["id"] = payload["knowledge_id"]
+    content = payload.get("content") or ""
+    payload["content_preview"] = content[:300]
+    return ManagedKnowledgeItemResponse.model_validate(payload)
+
+
+def build_managed_knowledge_item_summary(item) -> ManagedKnowledgeItemSummaryResponse:
+    response = build_managed_knowledge_item_response(item)
+    return ManagedKnowledgeItemSummaryResponse.model_validate(response.model_dump())
+
+
+def build_managed_knowledge_mutation_response(result) -> ManagedKnowledgeMutationResponse:
+    status = getattr(result.status, "value", str(result.status))
+    item = build_managed_knowledge_item_response(result.item) if result.item is not None else None
+    job_id = getattr(result.job, "id", None) if result.job is not None else None
+    return ManagedKnowledgeMutationResponse(status=status, item=item, job_id=job_id)
 
 
 async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int, uid: str) -> list[int]:
@@ -361,6 +404,143 @@ async def update_knowledge_base(
         obj_in={"name": kb_in.name, "description": kb_in.description},
     )
     return StandardResponse.success(data=await build_knowledge_base_response(db, kb), message=MSG_KB_UPDATED)
+
+
+@router.get("/managed-items/list", response_model=StandardResponse[ManagedKnowledgeListResponse])
+async def list_managed_knowledge_items(
+    kb_id: int,
+    page: int = 1,
+    size: int = 20,
+    query: str = "",
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    page_size = min(max(size, 1), 100)
+    skip = max(page - 1, 0) * page_size
+    items, total = await managed_knowledge_item_crud.list_page(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        skip=skip,
+        limit=page_size,
+        query=query,
+    )
+    return StandardResponse.success(
+        data=ManagedKnowledgeListResponse(
+            items=[build_managed_knowledge_item_summary(item) for item in items],
+            total=total,
+        )
+    )
+
+
+@router.get("/managed-items/get", response_model=StandardResponse[ManagedKnowledgeItemResponse])
+async def get_managed_knowledge_item(
+    kb_id: int,
+    knowledge_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    item = await managed_knowledge_item_crud.get_by_id(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_id=knowledge_id,
+    )
+    if item is None or item.deleted_at is not None:
+        raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
+    return StandardResponse.success(data=build_managed_knowledge_item_response(item))
+
+
+@router.post("/managed-items/create", response_model=StandardResponse[ManagedKnowledgeMutationResponse])
+async def create_managed_knowledge_item(
+    kb_id: int,
+    item_in: ManagedKnowledgeCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await knowledge_job_manager.submit_create(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_key=item_in.knowledge_key,
+        content=item_in.content,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        actor=ManagedKnowledgeActorType.USER,
+        dedupe_key=f"managed-user-create:{uuid.uuid4().hex}",
+        llm_maintainable=item_in.llm_maintainable,
+        source_profile_id=knowledge_base.managed_profile_id,
+    )
+    return StandardResponse.success(data=build_managed_knowledge_mutation_response(result))
+
+
+@router.post("/managed-items/update", response_model=StandardResponse[ManagedKnowledgeMutationResponse])
+async def update_managed_knowledge_item(
+    kb_id: int,
+    knowledge_id: int,
+    item_in: ManagedKnowledgeUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await knowledge_job_manager.submit_update(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_id=knowledge_id,
+        expected_version=item_in.expected_version,
+        knowledge_key=item_in.knowledge_key,
+        content=item_in.content,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        actor=ManagedKnowledgeActorType.USER,
+        dedupe_key=f"managed-user-update:{uuid.uuid4().hex}",
+        llm_maintainable=item_in.llm_maintainable,
+        source_profile_id=knowledge_base.managed_profile_id,
+    )
+    return StandardResponse.success(data=build_managed_knowledge_mutation_response(result))
+
+
+@router.post("/managed-items/delete", response_model=StandardResponse[ManagedKnowledgeMutationResponse])
+async def delete_managed_knowledge_item(
+    kb_id: int,
+    knowledge_id: int,
+    item_in: ManagedKnowledgeDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await knowledge_job_manager.submit_delete(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_id=knowledge_id,
+        expected_version=item_in.expected_version,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        actor=ManagedKnowledgeActorType.USER,
+        dedupe_key=f"managed-user-delete:{uuid.uuid4().hex}",
+        source_profile_id=knowledge_base.managed_profile_id,
+    )
+    return StandardResponse.success(data=build_managed_knowledge_mutation_response(result))
+
+
+@router.get("/managed-items/history", response_model=StandardResponse[list[ManagedKnowledgeRevisionResponse]])
+async def get_managed_knowledge_history(
+    kb_id: int,
+    knowledge_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    history = await managed_knowledge_service.list_history(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_id=knowledge_id,
+        limit=100,
+    )
+    return StandardResponse.success(data=[ManagedKnowledgeRevisionResponse.model_validate(revision) for revision in history])
 
 
 @router.get("/profile-bindings", response_model=StandardResponse[list[int]])

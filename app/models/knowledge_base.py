@@ -634,6 +634,72 @@ class KnowledgeBaseEmbeddingMigrationRequest(SQLModel):
     embedding_model_id: str = Field(..., min_length=1, max_length=255, description="目标向量化模型ID")
 
 
+class ManagedKnowledgeCreateRequest(SQLModel):
+    knowledge_key: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    llm_maintainable: bool = False
+
+
+class ManagedKnowledgeUpdateRequest(ManagedKnowledgeCreateRequest):
+    expected_version: int = Field(..., ge=1)
+
+
+class ManagedKnowledgeDeleteRequest(SQLModel):
+    expected_version: int = Field(..., ge=1)
+
+
+class ManagedKnowledgeItemSummaryResponse(SQLModel):
+    id: int
+    knowledge_base_id: int
+    knowledge_key: str
+    content_preview: str
+    content_token_count: int
+    version: int
+    source_type: ManagedKnowledgeSourceType
+    source_reference: dict[str, Any] | None = None
+    created_by: ManagedKnowledgeActorType
+    last_modified_by: ManagedKnowledgeActorType
+    llm_maintainable: bool
+    indexed_version: int
+    is_recallable: bool
+    pending_job_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_recalled_at: datetime | None = None
+
+
+class ManagedKnowledgeItemResponse(ManagedKnowledgeItemSummaryResponse):
+    content: str
+
+
+class ManagedKnowledgeListResponse(SQLModel):
+    items: list[ManagedKnowledgeItemSummaryResponse]
+    total: int
+
+
+class ManagedKnowledgeMutationResponse(SQLModel):
+    status: str
+    item: ManagedKnowledgeItemResponse | None = None
+    job_id: int | None = None
+
+
+class ManagedKnowledgeRevisionResponse(SQLModel):
+    id: int
+    knowledge_base_id: int
+    knowledge_id: int
+    version: int
+    operation: ManagedKnowledgeRevisionOperation
+    before_snapshot: dict[str, Any] | None = None
+    after_snapshot: dict[str, Any]
+    source_type: ManagedKnowledgeSourceType
+    source_reference: dict[str, Any] | None = None
+    source_job_id: int | None = None
+    modified_by: ManagedKnowledgeActorType
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class KnowledgeBaseProfileBindingUpdate(SQLModel):
     knowledge_base_ids: list[int] = Field(default_factory=list, description="绑定的知识库ID列表")
 
