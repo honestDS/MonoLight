@@ -34,7 +34,11 @@ from app.models.knowledge_base import (
     KnowledgeJob,
     KnowledgeJobOperation,
     KnowledgeJobStatus,
+    ManagedKnowledgeActorType,
     ManagedKnowledgeItem,
+    ManagedKnowledgeRevision,
+    ManagedKnowledgeRevisionOperation,
+    ManagedKnowledgeSourceType,
 )
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
@@ -62,6 +66,7 @@ async def db_session() -> AsyncIterator[AsyncSession]:
                     KnowledgeBaseDocument.__table__,
                     KnowledgeBaseCollectionOwner.__table__,
                     ManagedKnowledgeItem.__table__,
+                    ManagedKnowledgeRevision.__table__,
                     KnowledgeJob.__table__,
                 ],
             )
@@ -405,6 +410,300 @@ async def test_managed_knowledge_base_rejects_document_import(
     assert response.status_code == 409
     document_count = await db_session.scalar(select(func.count()).select_from(KnowledgeBaseDocument).where(KnowledgeBaseDocument.knowledge_base_id == managed.id))
     assert document_count == 0
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_read_api_lists_gets_and_returns_history(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed api profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed api",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-api",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="alpha-key",
+        content="alpha full managed knowledge content",
+        content_token_count=6,
+        content_hash="a" * 64,
+        version=2,
+        source_type=ManagedKnowledgeSourceType.LLM_TOOL,
+        source_reference={"kind": "test"},
+        created_by=ManagedKnowledgeActorType.LLM,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=True,
+        indexed_version=2,
+        vector_item_ids=["managed-api-item"],
+        is_recallable=True,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    db_session.add(
+        ManagedKnowledgeRevision(
+            uid="user-a",
+            knowledge_base_id=managed.id,
+            knowledge_id=item.id,
+            version=2,
+            operation=ManagedKnowledgeRevisionOperation.UPDATE,
+            before_snapshot={"content": "old"},
+            after_snapshot={"content": item.content},
+            source_type=ManagedKnowledgeSourceType.USER_API,
+            source_reference={"kind": "test"},
+            modified_by=ManagedKnowledgeActorType.USER,
+        )
+    )
+    await db_session.commit()
+
+    list_response = await api_client.get(f"/api/v1/knowledge-base/managed-items/list?kb_id={managed.id}&query=alpha")
+    assert list_response.status_code == 200
+    listed = list_response.json()["data"]
+    assert listed["total"] == 1
+    assert listed["items"][0]["knowledge_key"] == "alpha-key"
+    assert listed["items"][0]["content_preview"] == "alpha full managed knowledge content"
+    assert "content" not in listed["items"][0]
+
+    get_response = await api_client.get(f"/api/v1/knowledge-base/managed-items/get?kb_id={managed.id}&knowledge_id={item.id}")
+    assert get_response.status_code == 200
+    assert get_response.json()["data"]["content"] == item.content
+
+    history_response = await api_client.get(f"/api/v1/knowledge-base/managed-items/history?kb_id={managed.id}&knowledge_id={item.id}")
+    assert history_response.status_code == 200
+    history = history_response.json()["data"]
+    assert len(history) == 1
+    assert history[0]["version"] == 2
+    assert history[0]["modified_by"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_create_api_runs_real_job_submission(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed real create profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed real create",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-real-create",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.commit()
+    await db_session.refresh(managed)
+
+    response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/create?kb_id={managed.id}",
+        json={
+            "knowledge_key": "manual-key",
+            "content": "manual managed knowledge content",
+            "llm_maintainable": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["status"] == "created"
+    assert payload["job_id"] is not None
+    item = await db_session.scalar(
+        select(ManagedKnowledgeItem).where(
+            ManagedKnowledgeItem.knowledge_base_id == managed.id,
+            ManagedKnowledgeItem.knowledge_key == "manual-key",
+        )
+    )
+    assert item is not None
+    assert item.pending_job_id == payload["job_id"]
+    assert item.source_type == ManagedKnowledgeSourceType.USER_API
+    assert item.created_by == ManagedKnowledgeActorType.USER
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_create_api_uses_user_job_submission(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = Profile(uid="user-a", name="managed mutation profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed mutation",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-mutation",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="user-created",
+        content="user managed content",
+        content_token_count=3,
+        content_hash="b" * 64,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=True,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    await db_session.commit()
+    captured: dict[str, object] = {}
+
+    async def fake_submit_create(_db: AsyncSession, **kwargs: object):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status=SimpleNamespace(value="created"),
+            item=item,
+            job=SimpleNamespace(id=321),
+        )
+
+    monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_create", fake_submit_create)
+
+    response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/create?kb_id={managed.id}",
+        json={
+            "knowledge_key": "user-created",
+            "content": "user managed content",
+            "llm_maintainable": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["status"] == "created"
+    assert payload["job_id"] == 321
+    assert captured["uid"] == "user-a"
+    assert captured["knowledge_base_id"] == managed.id
+    assert captured["source_type"] == ManagedKnowledgeSourceType.USER_API
+    assert captured["actor"] == ManagedKnowledgeActorType.USER
+    assert captured["llm_maintainable"] is True
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_update_and_delete_use_user_job_submissions(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = Profile(uid="user-a", name="managed update profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed update",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-update",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="managed-update-key",
+        content="managed update content",
+        content_token_count=3,
+        content_hash="c" * 64,
+        version=3,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+    )
+    db_session.add(item)
+    await db_session.commit()
+    await db_session.refresh(item)
+    update_kwargs: dict[str, object] = {}
+    delete_kwargs: dict[str, object] = {}
+
+    async def fake_submit_update(_db: AsyncSession, **kwargs: object):
+        update_kwargs.update(kwargs)
+        return SimpleNamespace(status=SimpleNamespace(value="updated"), item=item, job=SimpleNamespace(id=401))
+
+    async def fake_submit_delete(_db: AsyncSession, **kwargs: object):
+        delete_kwargs.update(kwargs)
+        return SimpleNamespace(status=SimpleNamespace(value="deleted"), item=item, job=SimpleNamespace(id=402))
+
+    monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_update", fake_submit_update)
+    monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_delete", fake_submit_delete)
+
+    update_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/update?kb_id={managed.id}&knowledge_id={item.id}",
+        json={
+            "knowledge_key": "managed-update-key",
+            "content": "updated content",
+            "expected_version": 3,
+            "llm_maintainable": True,
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_kwargs["expected_version"] == 3
+    assert update_kwargs["actor"] == ManagedKnowledgeActorType.USER
+    assert update_kwargs["source_type"] == ManagedKnowledgeSourceType.USER_API
+    assert update_kwargs["llm_maintainable"] is True
+
+    delete_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed.id}&knowledge_id={item.id}",
+        json={"expected_version": 3},
+    )
+    assert delete_response.status_code == 200
+    assert delete_kwargs["expected_version"] == 3
+    assert delete_kwargs["actor"] == ManagedKnowledgeActorType.USER
+    assert delete_kwargs["source_type"] == ManagedKnowledgeSourceType.USER_API
+
+
+@pytest.mark.asyncio
+async def test_user_knowledge_base_rejects_managed_knowledge_management_api(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    user_base = KnowledgeBase(
+        uid="user-a",
+        name="user-only documents",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="user-only-documents",
+        knowledge_base_type=KnowledgeBaseType.USER,
+    )
+    db_session.add(user_base)
+    await db_session.commit()
+    await db_session.refresh(user_base)
+
+    response = await api_client.get(f"/api/v1/knowledge-base/managed-items/list?kb_id={user_base.id}")
+
+    assert response.status_code == 409
 
 
 @pytest.mark.asyncio

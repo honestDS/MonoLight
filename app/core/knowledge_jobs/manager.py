@@ -40,6 +40,7 @@ from app.models.knowledge_base import (
     ManagedKnowledgeItem,
     ManagedKnowledgeSourceType,
 )
+from app.providers.database import ensure_sqlite_outer_transaction
 from app.providers.database.time import get_database_time
 
 _ACTIVE_CHANGE_KEY_CONSTRAINT = "uq_knowledge_job_uid_active_change"
@@ -300,6 +301,7 @@ class KnowledgeJobManager:
         source_message_id: int | None,
         max_attempts: int,
     ) -> tuple[KnowledgeJob, bool]:
+        await ensure_sqlite_outer_transaction(db)
         available_at = await get_database_time(db)
         try:
             job, created = await knowledge_job_crud.create(

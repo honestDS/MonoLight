@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -31,6 +31,34 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 
 class CRUDManagedKnowledgeItem:
+    async def list_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        skip: int = 0,
+        limit: int = 20,
+        query: str | None = None,
+    ) -> tuple[list[ManagedKnowledgeItem], int]:
+        filters = [
+            ManagedKnowledgeItem.uid == uid,
+            ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+            ManagedKnowledgeItem.deleted_at.is_(None),
+        ]
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            pattern = f"%{normalized_query}%"
+            filters.append(
+                or_(
+                    ManagedKnowledgeItem.knowledge_key.ilike(pattern),
+                    ManagedKnowledgeItem.content.ilike(pattern),
+                )
+            )
+        total_result = await db.execute(select(func.count()).select_from(ManagedKnowledgeItem).where(*filters))
+        items_result = await db.execute(select(ManagedKnowledgeItem).where(*filters).order_by(ManagedKnowledgeItem.updated_at.desc(), ManagedKnowledgeItem.id.desc()).offset(skip).limit(limit))
+        return list(items_result.scalars().all()), int(total_result.scalar() or 0)
+
     async def _lock_knowledge_base_for_write(
         self,
         db: AsyncSession,
