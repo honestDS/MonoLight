@@ -222,6 +222,7 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
         *,
         uid: str,
         profile_id: int,
+        include_managed: bool = True,
     ) -> list[KnowledgeBase]:
         """列出当前 Profile 有已发布内容且索引可用的知识来源。"""
         user_binding_exists = exists(
@@ -236,32 +237,37 @@ class CRUDKnowledgeBase(CRUDBase[KnowledgeBase, KnowledgeBaseCreate, KnowledgeBa
                 KnowledgeBaseDocument.knowledge_base_id == KnowledgeBase.id,
             )
         )
-        managed_item_exists = exists(
-            select(ManagedKnowledgeItem.id).where(
-                ManagedKnowledgeItem.uid == uid,
-                ManagedKnowledgeItem.knowledge_base_id == KnowledgeBase.id,
-                ManagedKnowledgeItem.deleted_at.is_(None),
-                ManagedKnowledgeItem.is_recallable.is_(True),
-                ManagedKnowledgeItem.indexed_version == ManagedKnowledgeItem.version,
+        source_conditions = [
+            and_(
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.USER,
+                user_binding_exists,
+                user_document_exists,
             )
-        )
+        ]
+        if include_managed:
+            managed_item_exists = exists(
+                select(ManagedKnowledgeItem.id).where(
+                    ManagedKnowledgeItem.uid == uid,
+                    ManagedKnowledgeItem.knowledge_base_id == KnowledgeBase.id,
+                    ManagedKnowledgeItem.deleted_at.is_(None),
+                    ManagedKnowledgeItem.is_recallable.is_(True),
+                    ManagedKnowledgeItem.indexed_version == ManagedKnowledgeItem.version,
+                )
+            )
+            source_conditions.append(
+                and_(
+                    KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+                    KnowledgeBase.managed_profile_id == profile_id,
+                    managed_item_exists,
+                )
+            )
+
         result = await db.execute(
             select(KnowledgeBase)
             .where(
                 KnowledgeBase.uid == uid,
                 KnowledgeBase.index_status == KnowledgeBaseIndexStatus.READY,
-                or_(
-                    and_(
-                        KnowledgeBase.knowledge_base_type == KnowledgeBaseType.USER,
-                        user_binding_exists,
-                        user_document_exists,
-                    ),
-                    and_(
-                        KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
-                        KnowledgeBase.managed_profile_id == profile_id,
-                        managed_item_exists,
-                    ),
-                ),
+                or_(*source_conditions),
             )
             .order_by(KnowledgeBase.id.asc())
         )

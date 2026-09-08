@@ -60,6 +60,8 @@ from app.models.profile import (
 def _is_tool_enabled(tool_name: str, cfg: ProfileConfig) -> bool:
     if tool_name == MANAGE_LONGTERM_MEMORY_TOOL_NAME:
         return bool(getattr(getattr(cfg, "memory", None), "enabled", False))
+    if tool_name == KNOWLEDGE_BASE_QUERY_TOOL_NAME:
+        return not bool(getattr(getattr(cfg, "memory", None), "enabled", False))
     enabled_tools = getattr(getattr(cfg, "tool", None), "enabled_tools", None)
     if not isinstance(enabled_tools, list):
         return False

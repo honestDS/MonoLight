@@ -2,11 +2,9 @@ import json
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.crud.knowledge.base import knowledge_base_crud
 from app.core.crud.profile.prompt import prompt_crud
-from app.core.embedding.knowledge_base import (
-    build_knowledge_base_prompt_items,
-    list_available_knowledge_bases,
-)
+from app.core.embedding.knowledge_base import build_knowledge_base_prompt_items
 from app.core.log import (
     get_logger,
 )
@@ -15,7 +13,9 @@ from app.core.prompts import (
     LONGTERM_MEMORY_SYSTEM_PROMPT,
     SYSTEM_INSTRUCTIONS_WRAPPER,
     SYSTEM_RUNTIME_CONTEXT_POLICY,
+    UNIFIED_KNOWLEDGE_BASES_WRAPPER,
 )
+from app.models.knowledge_base import KnowledgeBaseType
 from app.models.message import (
     InternalMessage,
     MessageRole,
@@ -51,17 +51,29 @@ async def build_system_prompt(
     # 长期记忆规则放在 Profile Prompt 之后，避免被普通 Profile 指令覆盖。
     profile_configs = profile.configs if isinstance(profile.configs, dict) else {}
     memory_config = profile_configs.get("memory")
-    if include_longterm_memory and isinstance(memory_config, dict) and memory_config.get("enabled") is True:
+    memory_enabled = isinstance(memory_config, dict) and memory_config.get("enabled") is True
+    if include_longterm_memory and memory_enabled:
         full_parts.append(LONGTERM_MEMORY_SYSTEM_PROMPT)
 
-    # 查询该 Profile 关联的可用知识库并注入
+    # 仅注入当前真正可召回的知识来源，避免提示模型调用未暴露的独立查询工具。
     try:
-        knowledge_bases = await list_available_knowledge_bases(db, profile)
+        profile_id = profile.id
+        knowledge_bases = []
+        if isinstance(profile_id, int):
+            knowledge_bases = await knowledge_base_crud.list_recall_sources_by_profile(
+                db,
+                uid=profile.uid,
+                profile_id=profile_id,
+                include_managed=memory_enabled,
+            )
+        if not memory_enabled:
+            knowledge_bases = [knowledge_base for knowledge_base in knowledge_bases if getattr(knowledge_base.knowledge_base_type, "value", knowledge_base.knowledge_base_type) == KnowledgeBaseType.USER.value]
         if knowledge_bases:
             knowledge_base_items = build_knowledge_base_prompt_items(knowledge_bases)
             # 序列化为美化后的 JSON
             knowledge_base_json = json.dumps(knowledge_base_items, ensure_ascii=False, indent=2)
-            knowledge_base_part = KNOWLEDGE_BASES_WRAPPER.format(content=knowledge_base_json)
+            wrapper = UNIFIED_KNOWLEDGE_BASES_WRAPPER if memory_enabled else KNOWLEDGE_BASES_WRAPPER
+            knowledge_base_part = wrapper.format(content=knowledge_base_json)
             full_parts.append(knowledge_base_part)
     except Exception:
         # 即使查询知识库失败，也不影响正常对话
