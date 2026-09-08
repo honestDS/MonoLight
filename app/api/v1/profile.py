@@ -94,7 +94,6 @@ PROFILE_TOOL_OPTIONS = [
     {"value": "list_background_tasks", "label_key": "TOOL_LIST_BACKGROUND_TASKS_LABEL"},
     {"value": "cancel_background_task", "label_key": "TOOL_CANCEL_BACKGROUND_TASK_LABEL"},
     {"value": "generate_image", "label_key": "TOOL_GENERATE_IMAGE_LABEL"},
-    {"value": "query_knowledge_base", "label_key": "TOOL_QUERY_KNOWLEDGE_BASE_LABEL"},
     {"value": "read_multimodal_file", "label_key": "TOOL_READ_MULTIMODAL_FILE_LABEL"},
 ]
 
