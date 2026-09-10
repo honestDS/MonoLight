@@ -15,8 +15,14 @@
       @page-change="fetchData"
       @size-change="handleSizeChange"
     >
-      <el-table-column :resizable="false" prop="name" :label="$t('knowledgeBase.kb_name')" min-width="150" sortable />
-      <el-table-column :resizable="false" :label="$t('knowledgeBase.knowledge_base_type')" width="130" align="center">
+      <el-table-column
+        prop="name"
+        :label="$t('knowledgeBase.kb_name')"
+        show-overflow-tooltip
+        :resizable="false"
+        min-width="180px"
+      />
+      <el-table-column :resizable="false" :label="$t('knowledgeBase.knowledge_base_type')" align="center">
         <template #default="{ row }">
           <el-tag :type="canManageManagedKnowledge(row) ? 'warning' : 'info'">
             {{ canManageManagedKnowledge(row) ? $t('knowledgeBase.type_managed') : $t('knowledgeBase.type_user') }}
