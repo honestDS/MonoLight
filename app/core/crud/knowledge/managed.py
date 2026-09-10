@@ -23,6 +23,12 @@ class ManagedKnowledgeRecallState:
     deleted_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class ManagedKnowledgeOrganizationCandidate:
+    item: ManagedKnowledgeItem
+    revision: ManagedKnowledgeRevision
+
+
 async def _finish(db: AsyncSession, *, commit: bool) -> None:
     if commit:
         await db.commit()
@@ -31,6 +37,32 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
 
 
 class CRUDManagedKnowledgeItem:
+    async def list_organization_candidates(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> list[ManagedKnowledgeOrganizationCandidate]:
+        result = await db.execute(
+            select(ManagedKnowledgeItem, ManagedKnowledgeRevision)
+            .join(
+                ManagedKnowledgeRevision,
+                (ManagedKnowledgeRevision.uid == ManagedKnowledgeItem.uid) & (ManagedKnowledgeRevision.knowledge_base_id == ManagedKnowledgeItem.knowledge_base_id) & (ManagedKnowledgeRevision.knowledge_id == ManagedKnowledgeItem.id) & (ManagedKnowledgeRevision.version == ManagedKnowledgeItem.version),
+            )
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.deleted_at.is_(None),
+                ManagedKnowledgeItem.llm_maintainable.is_(True),
+                ManagedKnowledgeItem.is_recallable.is_(True),
+                ManagedKnowledgeItem.pending_job_id.is_(None),
+                ManagedKnowledgeItem.indexed_version == ManagedKnowledgeItem.version,
+            )
+            .order_by(ManagedKnowledgeItem.id)
+        )
+        return [ManagedKnowledgeOrganizationCandidate(item=item, revision=revision) for item, revision in result.all()]
+
     async def list_page(
         self,
         db: AsyncSession,
@@ -334,6 +366,26 @@ class CRUDManagedKnowledgeItem:
 
 
 class CRUDManagedKnowledgeRevision:
+    async def get_by_ids(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        revision_ids: Iterable[int],
+    ) -> list[ManagedKnowledgeRevision]:
+        ids = tuple(dict.fromkeys(revision_ids))
+        if not ids:
+            return []
+        result = await db.execute(
+            select(ManagedKnowledgeRevision).where(
+                ManagedKnowledgeRevision.uid == uid,
+                ManagedKnowledgeRevision.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeRevision.id.in_(ids),
+            )
+        )
+        return list(result.scalars().all())
+
     async def create(self, db: AsyncSession, *, commit: bool = True, **values: Any) -> ManagedKnowledgeRevision:
         revision = ManagedKnowledgeRevision.model_validate(values)
         db.add(revision)

@@ -43,6 +43,8 @@ MESSAGES = {
     "ERR_MANAGED_KNOWLEDGE_LLM_MAINTENANCE_FORBIDDEN": "This managed knowledge item does not allow LLM updates or deletion",
     "ERR_MANAGED_KNOWLEDGE_RUNTIME_UNAVAILABLE": "The active long-term memory embedding runtime is unavailable, so the managed knowledge base cannot be created",
     "ERR_MANAGED_KNOWLEDGE_CONTAINER_CONFLICT": "The managed knowledge base state changed; retry the knowledge write",
+    "ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID": "Knowledge organization snapshot is invalid or no longer internally consistent",
+    "ERR_KNOWLEDGE_ORGANIZATION_STAGE_IDENTITY_CONFLICT": "Knowledge organization stage identity conflicts with an existing stage",
     "MSG_MANAGED_KNOWLEDGE_BASE_DEFAULT_NAME": "Managed Knowledge - {profile_name}",
     "ERR_DENSE_RETRIEVAL_FAILED": "Dense retrieval failed",
     "MSG_GENERIC_SUCCESS": "Operation successful",
