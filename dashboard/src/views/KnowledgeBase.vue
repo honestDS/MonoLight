@@ -360,7 +360,16 @@
           </template>
         </el-table-column>
         <el-table-column :label="$t('knowledgeBase.managed_status')" width="120" align="center">
-          <template #default="{ row }">{{ getManagedKnowledgeStatusLabel(row) }}</template>
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="row.publication_job_status === 'failed' && row.publication_job_error"
+              :content="row.publication_job_error"
+              placement="top"
+            >
+              <span>{{ getManagedKnowledgeStatusLabel(row) }}</span>
+            </el-tooltip>
+            <span v-else>{{ getManagedKnowledgeStatusLabel(row) }}</span>
+          </template>
         </el-table-column>
         <el-table-column :label="$t('knowledgeBase.managed_updated_at')" width="170">
           <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
@@ -374,6 +383,7 @@
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="history">{{ $t('knowledgeBase.managed_history') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="row.publication_job_status === 'failed'" command="retry">{{ $t('knowledgeBase.managed_retry') }}</el-dropdown-item>
                     <el-dropdown-item command="delete" divided class="danger-dropdown-item">{{ $t('knowledgeBase.delete') }}</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
@@ -389,7 +399,7 @@
           :total="managedKnowledgeTotal"
           :page-sizes="[10, 20, 50]"
           layout="total, sizes, prev, pager, next"
-          @current-change="fetchManagedKnowledgeItems"
+          @current-change="handleManagedKnowledgePageChange"
           @size-change="handleManagedKnowledgeSizeChange"
         />
       </div>
@@ -534,9 +544,12 @@ import {
 import {
   canManageKnowledgeBaseDocuments,
   canManageManagedKnowledge,
+  createManagedKnowledgeDedupeKey,
+  getManagedKnowledgeMutationFeedback,
   getKnowledgeBaseProfileIds,
   normalizeKnowledgeBase
 } from '@/utils/knowledgeBaseManagement'
+import { createAbortableTaskManager, createLatestRequestTracker } from '@/utils/requestTaskManager'
 import { useDeleteConfirm } from '@/composables/useDeleteConfirm'
 
 const { t } = useI18n()
@@ -593,6 +606,8 @@ const managedKnowledgeHistoryLoading = ref(false)
 const managedKnowledgeHistory = ref([])
 const managedKnowledgeHistoryKey = ref('')
 let managedKnowledgePollTimer = null
+const managedKnowledgeTaskManager = createAbortableTaskManager()
+const managedKnowledgeRequestTracker = createLatestRequestTracker()
 
 
 const form = reactive({
@@ -856,21 +871,39 @@ const resetManagedKnowledgeForm = () => {
   managedKnowledgeForm.llm_maintainable = false
 }
 
-const fetchManagedKnowledgeItems = async (notifyError = true) => {
+const managedKnowledgeListTaskKey = 'managed-knowledge-list'
+
+const fetchManagedKnowledgeItems = async (notifyError = true, replaceCurrent = false) => {
   if (!selectedKb.value || !canManageManagedKnowledge(selectedKb.value)) return
-  managedKnowledgeLoading.value = true
+  const selectedId = selectedKb.value.id
+  if (replaceCurrent) managedKnowledgeTaskManager.cancel(managedKnowledgeListTaskKey)
+  const token = managedKnowledgeTaskManager.begin(managedKnowledgeListTaskKey)
+  if (!token) return
+  const requestSeq = managedKnowledgeRequestTracker.begin()
+  if (managedKnowledgeTaskManager.isCurrent(token)) managedKnowledgeLoading.value = true
   try {
-    const res = await knowledgeBaseApi.managedItems(selectedKb.value.id, {
+    const res = await knowledgeBaseApi.managedItems(selectedId, {
       page: managedKnowledgePage.value,
       size: managedKnowledgePageSize.value,
       query: managedKnowledgeQuery.value
-    })
+    }, { signal: token.signal })
+    if (
+      !managedKnowledgeTaskManager.isCurrent(token)
+      || !managedKnowledgeRequestTracker.isCurrent(requestSeq)
+      || selectedKb.value?.id !== selectedId
+    ) return
     managedKnowledgeItems.value = res.data.data.items || []
     managedKnowledgeTotal.value = res.data.data.total || 0
   } catch (error) {
-    if (notifyError) ElMessage.error(t('knowledgeBase.managed_fetch_failed') + error.message)
+    if (token.signal.aborted || !managedKnowledgeTaskManager.isCurrent(token)) return
+    if (notifyError && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
+      ElMessage.error(t('knowledgeBase.managed_fetch_failed') + error.message)
+    }
   } finally {
-    managedKnowledgeLoading.value = false
+    if (managedKnowledgeTaskManager.isCurrent(token) && managedKnowledgeRequestTracker.isCurrent(requestSeq)) {
+      managedKnowledgeLoading.value = false
+    }
+    managedKnowledgeTaskManager.finish(token)
   }
 }
 
@@ -879,10 +912,16 @@ const stopManagedKnowledgePolling = () => {
     clearTimeout(managedKnowledgePollTimer)
     managedKnowledgePollTimer = null
   }
+  managedKnowledgeTaskManager.invalidate()
+  managedKnowledgeRequestTracker.invalidate()
+  managedKnowledgeLoading.value = false
 }
 
 const scheduleManagedKnowledgePolling = () => {
-  stopManagedKnowledgePolling()
+  if (managedKnowledgePollTimer) {
+    clearTimeout(managedKnowledgePollTimer)
+    managedKnowledgePollTimer = null
+  }
   if (!managedKnowledgeDialogVisible.value || !managedKnowledgeItems.value.some(item => item.pending_job_id)) return
   managedKnowledgePollTimer = setTimeout(async () => {
     try {
@@ -894,25 +933,31 @@ const scheduleManagedKnowledgePolling = () => {
 }
 
 const showManagedKnowledgeDialog = async (row) => {
+  stopManagedKnowledgePolling()
   selectedKb.value = row
   managedKnowledgePage.value = 1
   managedKnowledgeQuery.value = ''
   managedKnowledgeItems.value = []
   managedKnowledgeTotal.value = 0
   managedKnowledgeDialogVisible.value = true
-  await fetchManagedKnowledgeItems()
+  await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
 
 const handleManagedKnowledgeSearch = async () => {
   managedKnowledgePage.value = 1
-  await fetchManagedKnowledgeItems()
+  await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
 
 const handleManagedKnowledgeSizeChange = async () => {
   managedKnowledgePage.value = 1
-  await fetchManagedKnowledgeItems()
+  await fetchManagedKnowledgeItems(true, true)
+  scheduleManagedKnowledgePolling()
+}
+
+const handleManagedKnowledgePageChange = async () => {
+  await fetchManagedKnowledgeItems(true, true)
   scheduleManagedKnowledgePolling()
 }
 
@@ -939,6 +984,11 @@ const showManagedKnowledgeEditDialog = async (row) => {
   }
 }
 
+const showManagedKnowledgeMutationFeedback = (operation, status) => {
+  const feedback = getManagedKnowledgeMutationFeedback(operation, status)
+  ElMessage({ type: feedback.type, message: t(`knowledgeBase.${feedback.key}`) })
+}
+
 const submitManagedKnowledge = async () => {
   if (!managedKnowledgeFormRef.value || !selectedKb.value) return
   await managedKnowledgeFormRef.value.validate(async (valid) => {
@@ -950,18 +1000,27 @@ const submitManagedKnowledge = async () => {
         content: managedKnowledgeForm.content,
         llm_maintainable: managedKnowledgeForm.llm_maintainable
       }
+      let operation = 'create'
+      let res
       if (managedKnowledgeEditingId.value) {
-        await knowledgeBaseApi.updateManagedItem(selectedKb.value.id, managedKnowledgeEditingId.value, {
+        operation = 'update'
+        res = await knowledgeBaseApi.updateManagedItem(selectedKb.value.id, managedKnowledgeEditingId.value, {
           ...payload,
-          expected_version: managedKnowledgeForm.expected_version
+          expected_version: managedKnowledgeForm.expected_version,
+          dedupe_key: createManagedKnowledgeDedupeKey('update')
         })
-        ElMessage.success(t('knowledgeBase.managed_update_success'))
       } else {
-        await knowledgeBaseApi.createManagedItem(selectedKb.value.id, payload)
-        ElMessage.success(t('knowledgeBase.managed_create_success'))
+        res = await knowledgeBaseApi.createManagedItem(selectedKb.value.id, {
+          ...payload,
+          dedupe_key: createManagedKnowledgeDedupeKey('create')
+        })
       }
-      managedKnowledgeEditDialogVisible.value = false
-      await fetchManagedKnowledgeItems()
+      const status = res.data.data.status
+      showManagedKnowledgeMutationFeedback(operation, status)
+      if (!['existing_key', 'existing_content'].includes(status)) {
+        managedKnowledgeEditDialogVisible.value = false
+      }
+      await fetchManagedKnowledgeItems(true, true)
       scheduleManagedKnowledgePolling()
     } catch (error) {
       ElMessage.error((managedKnowledgeEditingId.value ? t('knowledgeBase.managed_update_failed') : t('knowledgeBase.managed_create_failed')) + error.message)
@@ -988,12 +1047,35 @@ const handleDeleteManagedKnowledge = async (row) => {
     throw action
   }
   try {
-    await knowledgeBaseApi.deleteManagedItem(selectedKb.value.id, row.id, { expected_version: row.version })
-    ElMessage.success(t('knowledgeBase.managed_delete_success'))
-    await fetchManagedKnowledgeItems()
+    const res = await knowledgeBaseApi.deleteManagedItem(selectedKb.value.id, row.id, {
+      expected_version: row.version,
+      dedupe_key: createManagedKnowledgeDedupeKey('delete')
+    })
+    showManagedKnowledgeMutationFeedback('delete', res.data.data.status)
+    await fetchManagedKnowledgeItems(true, true)
     scheduleManagedKnowledgePolling()
   } catch (error) {
     ElMessage.error(t('knowledgeBase.managed_delete_failed') + error.message)
+  }
+}
+
+const retryManagedKnowledgePublication = async (row) => {
+  if (
+    !selectedKb.value
+    || row.publication_job_status !== 'failed'
+    || !row.publication_job_id
+  ) return
+  try {
+    const res = await knowledgeBaseApi.retryManagedItem(selectedKb.value.id, row.id, {
+      expected_version: row.version,
+      failed_job_id: row.publication_job_id,
+      dedupe_key: createManagedKnowledgeDedupeKey('retry')
+    })
+    showManagedKnowledgeMutationFeedback('retry', res.data.data.status)
+    await fetchManagedKnowledgeItems(true, true)
+    scheduleManagedKnowledgePolling()
+  } catch (error) {
+    ElMessage.error(t('knowledgeBase.managed_retry_failed') + error.message)
   }
 }
 
@@ -1018,6 +1100,10 @@ const handleManagedKnowledgeMoreAction = (command, row) => {
     showManagedKnowledgeHistory(row)
     return
   }
+  if (command === 'retry') {
+    retryManagedKnowledgePublication(row)
+    return
+  }
   if (command === 'delete') handleDeleteManagedKnowledge(row)
 }
 
@@ -1026,7 +1112,11 @@ const getManagedActorLabel = (actor) => t(`knowledgeBase.managed_actor_${actor |
 const getManagedOperationLabel = (operation) => t(`knowledgeBase.managed_operation_${operation || 'update'}`)
 
 const getManagedKnowledgeStatusLabel = (row) => {
-  if (row.pending_job_id) return t('knowledgeBase.managed_status_processing')
+  if (row.pending_job_id || ['pending', 'running', 'retry'].includes(row.publication_job_status)) {
+    return t('knowledgeBase.managed_status_processing')
+  }
+  if (row.publication_job_status === 'failed') return t('knowledgeBase.managed_status_failed')
+  if (row.publication_job_status === 'cancelled') return t('knowledgeBase.managed_status_cancelled')
   if (row.is_recallable && row.indexed_version === row.version) return t('knowledgeBase.managed_status_ready')
   return t('knowledgeBase.managed_status_pending')
 }

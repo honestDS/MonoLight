@@ -36,6 +36,7 @@ from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeJob,
     KnowledgeJobOperation,
+    KnowledgeJobStatus,
     ManagedKnowledgeActorType,
     ManagedKnowledgeItem,
     ManagedKnowledgeSourceType,
@@ -139,6 +140,23 @@ def _safe_payload(*, content: str | None = None, knowledge_key: str | None = Non
 
 
 class KnowledgeJobManager:
+    async def _lock_sqlite_submission_scope(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> None:
+        if db.get_bind().dialect.name != "sqlite":
+            return
+        locked_knowledge_base = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
+        if locked_knowledge_base is None:
+            raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND)
+
     async def _get_managed_knowledge_base_for_profile(
         self,
         db: AsyncSession,
@@ -301,6 +319,11 @@ class KnowledgeJobManager:
         source_message_id: int | None,
         max_attempts: int,
     ) -> tuple[KnowledgeJob, bool]:
+        await self._lock_sqlite_submission_scope(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         await ensure_sqlite_outer_transaction(db)
         available_at = await get_database_time(db)
         try:
@@ -389,6 +412,115 @@ class KnowledgeJobManager:
     def _needs_publication(item: ManagedKnowledgeItem | None) -> bool:
         return bool(item is not None and item.deleted_at is None and item.pending_job_id is None and not item.is_recallable and item.indexed_version < item.version)
 
+    async def retry_failed_publication(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        failed_job_id: int,
+        dedupe_key: str,
+        source_profile_id: int | None = None,
+        max_attempts: int = 3,
+        commit: bool = True,
+    ) -> KnowledgeJobSubmissionResult:
+        uid = _require_string(uid, field="uid")
+        knowledge_base_id = _positive_int(knowledge_base_id, field="knowledge_base_id")
+        knowledge_id = _positive_int(knowledge_id, field="knowledge_id")
+        expected_version = _positive_int(expected_version, field="expected_version")
+        failed_job_id = _positive_int(failed_job_id, field="failed_job_id")
+        dedupe_key = _require_string(dedupe_key, field="dedupe_key")
+        _positive_int(max_attempts, field="max_attempts")
+        try:
+            await self._lock_sqlite_submission_scope(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+            )
+            item = await managed_knowledge_item_crud.get_by_id(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_id=knowledge_id,
+            )
+            failed_job = await knowledge_job_crud.get_by_id(db, uid=uid, job_id=failed_job_id)
+            failed_job_targets_item = bool(failed_job is not None and failed_job.knowledge_id == knowledge_id and failed_job.expected_version == expected_version)
+            legacy_failed_create_targets_item = bool(failed_job is not None and failed_job.operation == KnowledgeJobOperation.MANAGED_CREATE and failed_job.knowledge_id is None and failed_job.expected_version is None and item is not None and item.source_job_id == failed_job_id)
+            if (
+                item is None
+                or item.deleted_at is not None
+                or item.version != expected_version
+                or item.is_recallable
+                or item.indexed_version >= item.version
+                or failed_job is None
+                or failed_job.status != KnowledgeJobStatus.FAILED
+                or failed_job.knowledge_base_id != knowledge_base_id
+                or failed_job.operation not in {KnowledgeJobOperation.MANAGED_CREATE, KnowledgeJobOperation.MANAGED_UPDATE}
+                or not (failed_job_targets_item or legacy_failed_create_targets_item)
+            ):
+                raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+
+            operation = failed_job.operation
+            request_hash = _request_hash(
+                operation,
+                {
+                    "retry_of_job_id": failed_job_id,
+                    "knowledge_base_id": knowledge_base_id,
+                    "knowledge_id": knowledge_id,
+                    "expected_version": expected_version,
+                    "content_hash": item.content_hash,
+                },
+            )
+            job, created = await self._create_job(
+                db,
+                uid=uid,
+                operation=operation,
+                dedupe_key=dedupe_key,
+                request_hash=request_hash,
+                active_change_key=_active_key(knowledge_base_id, knowledge_id=knowledge_id),
+                knowledge_base_id=knowledge_base_id,
+                knowledge_id=knowledge_id,
+                expected_version=expected_version,
+                payload=_safe_payload(content=item.content, knowledge_key=item.knowledge_key),
+                source_session_id=None,
+                source_profile_id=source_profile_id,
+                source_message_id=None,
+                max_attempts=max_attempts,
+            )
+            if not created:
+                if commit:
+                    await db.commit()
+                current_item = await managed_knowledge_item_crud.get_by_id(
+                    db,
+                    uid=uid,
+                    knowledge_base_id=knowledge_base_id,
+                    knowledge_id=knowledge_id,
+                )
+                return KnowledgeJobSubmissionResult(ManagedKnowledgeMutationStatus.RETRY_SUBMITTED, current_item, job, False)
+
+            rebound = await managed_knowledge_item_crud.bind_pending_job(
+                db,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+                knowledge_id=knowledge_id,
+                expected_version=expected_version,
+                job_id=job.id,
+                commit=False,
+            )
+            if rebound is None:
+                raise KnowledgeJobConflictError(t(ERR_KNOWLEDGE_JOB_TARGET_STATE_CONFLICT))
+            if commit:
+                await db.commit()
+                await db.refresh(job)
+                await db.refresh(rebound)
+            return KnowledgeJobSubmissionResult(ManagedKnowledgeMutationStatus.RETRY_SUBMITTED, rebound, job, True)
+        except Exception:
+            if commit and db.in_transaction():
+                await db.rollback()
+            raise
+
     async def submit_create(
         self,
         db: AsyncSession,
@@ -460,10 +592,12 @@ class KnowledgeJobManager:
                 llm_maintainable=llm_maintainable,
                 commit=False,
             )
+            result_status = mutation.status
             if mutation.status == ManagedKnowledgeMutationStatus.CREATED and mutation.item is not None:
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=True)
             elif mutation.status == ManagedKnowledgeMutationStatus.EXISTING_KEY and mutation.item is not None and mutation.item.content == content and self._needs_publication(mutation.item):
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=False)
+                result_status = ManagedKnowledgeMutationStatus.RETRY_SUBMITTED
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
                 job = None
@@ -475,7 +609,7 @@ class KnowledgeJobManager:
                 if item is not None:
                     await db.refresh(item)
             return KnowledgeJobSubmissionResult(
-                status=mutation.status,
+                status=result_status,
                 item=item,
                 job=job,
                 created=job is not None,
@@ -564,10 +698,12 @@ class KnowledgeJobManager:
                 llm_maintainable=llm_maintainable,
                 commit=False,
             )
+            result_status = mutation.status
             if mutation.status == ManagedKnowledgeMutationStatus.UPDATED and mutation.item is not None:
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=True)
             elif mutation.item is not None and mutation.item.id == knowledge_id and self._needs_publication(mutation.item):
                 job, item = await self._bind_job(db, job=job, item=mutation.item, source_job_id=False)
+                result_status = ManagedKnowledgeMutationStatus.RETRY_SUBMITTED
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
                 job = None
@@ -578,7 +714,7 @@ class KnowledgeJobManager:
                     await db.refresh(job)
                 if item is not None:
                     await db.refresh(item)
-            return KnowledgeJobSubmissionResult(mutation.status, item, job, job is not None)
+            return KnowledgeJobSubmissionResult(result_status, item, job, job is not None)
         except Exception:
             if commit and db.in_transaction():
                 await db.rollback()
@@ -707,6 +843,7 @@ class KnowledgeJobManager:
                 source_job_id=job.id,
                 commit=False,
             )
+            result_status = mutation.status
             if mutation.item is not None and (mutation.status == ManagedKnowledgeMutationStatus.DELETED or (mutation.item.deleted_at is not None and mutation.item.pending_job_id is None)):
                 job, item = await self._bind_job(
                     db,
@@ -714,6 +851,8 @@ class KnowledgeJobManager:
                     item=mutation.item,
                     source_job_id=mutation.status == ManagedKnowledgeMutationStatus.DELETED,
                 )
+                if mutation.status != ManagedKnowledgeMutationStatus.DELETED:
+                    result_status = ManagedKnowledgeMutationStatus.RETRY_SUBMITTED
             else:
                 await knowledge_job_crud.delete_unstarted(db, uid=uid, job_id=job.id, commit=False)
                 job = None
@@ -724,7 +863,7 @@ class KnowledgeJobManager:
                     await db.refresh(job)
                 if item is not None:
                     await db.refresh(item)
-            return KnowledgeJobSubmissionResult(mutation.status, item, job, job is not None)
+            return KnowledgeJobSubmissionResult(result_status, item, job, job is not None)
         except Exception:
             if commit and db.in_transaction():
                 await db.rollback()

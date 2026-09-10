@@ -17,6 +17,7 @@ from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.embedding.common import build_embedding_signature
 from app.core.exceptions import ParameterException
 from app.core.i18n.context import reset_current_locale, set_current_locale
+from app.core.knowledge.errors import ManagedKnowledgeConflictError
 from app.core.knowledge_jobs.manager import KnowledgeJobTargetBusyError
 from app.core.knowledge_jobs.migration import finalize_knowledge_migration_terminal_state
 from app.core.security import get_current_user
@@ -446,11 +447,25 @@ async def test_managed_knowledge_management_read_api_lists_gets_and_returns_hist
         created_by=ManagedKnowledgeActorType.LLM,
         last_modified_by=ManagedKnowledgeActorType.USER,
         llm_maintainable=True,
-        indexed_version=2,
+        indexed_version=1,
         vector_item_ids=["managed-api-item"],
-        is_recallable=True,
+        is_recallable=False,
     )
     db_session.add(item)
+    await db_session.flush()
+    failed_job = KnowledgeJob(
+        uid="user-a",
+        operation=KnowledgeJobOperation.MANAGED_UPDATE,
+        dedupe_key="managed-api-failed-job",
+        request_hash="d" * 64,
+        status=KnowledgeJobStatus.FAILED,
+        knowledge_base_id=managed.id,
+        knowledge_id=item.id,
+        expected_version=2,
+        payload={},
+        error="safe publication failure",
+    )
+    db_session.add(failed_job)
     await db_session.flush()
     db_session.add(
         ManagedKnowledgeRevision(
@@ -474,11 +489,15 @@ async def test_managed_knowledge_management_read_api_lists_gets_and_returns_hist
     assert listed["total"] == 1
     assert listed["items"][0]["knowledge_key"] == "alpha-key"
     assert listed["items"][0]["content_preview"] == "alpha full managed knowledge content"
+    assert listed["items"][0]["publication_job_id"] == failed_job.id
+    assert listed["items"][0]["publication_job_status"] == "failed"
+    assert listed["items"][0]["publication_job_error"] == "safe publication failure"
     assert "content" not in listed["items"][0]
 
     get_response = await api_client.get(f"/api/v1/knowledge-base/managed-items/get?kb_id={managed.id}&knowledge_id={item.id}")
     assert get_response.status_code == 200
     assert get_response.json()["data"]["content"] == item.content
+    assert get_response.json()["data"]["publication_job_status"] == "failed"
 
     history_response = await api_client.get(f"/api/v1/knowledge-base/managed-items/history?kb_id={managed.id}&knowledge_id={item.id}")
     assert history_response.status_code == 200
@@ -517,6 +536,7 @@ async def test_managed_knowledge_management_create_api_runs_real_job_submission(
             "knowledge_key": "manual-key",
             "content": "manual managed knowledge content",
             "llm_maintainable": True,
+            "dedupe_key": "managed-api-real-create",
         },
     )
 
@@ -534,6 +554,110 @@ async def test_managed_knowledge_management_create_api_runs_real_job_submission(
     assert item.pending_job_id == payload["job_id"]
     assert item.source_type == ManagedKnowledgeSourceType.USER_API
     assert item.created_by == ManagedKnowledgeActorType.USER
+
+    replay = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/create?kb_id={managed.id}",
+        json={
+            "knowledge_key": "manual-key",
+            "content": "manual managed knowledge content",
+            "llm_maintainable": True,
+            "dedupe_key": "managed-api-real-create",
+        },
+    )
+    assert replay.status_code == 200
+    assert replay.json()["data"]["job_id"] == payload["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_failed_publication_retry_api_rebinds_new_job_idempotently(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed retry profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed retry",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-retry",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="retry-key",
+        content="retry publication content",
+        content_token_count=3,
+        content_hash="9" * 64,
+        version=1,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+        indexed_version=0,
+        vector_item_ids=[],
+        is_recallable=False,
+    )
+    db_session.add(item)
+    await db_session.flush()
+    failed_job = KnowledgeJob(
+        uid="user-a",
+        operation=KnowledgeJobOperation.MANAGED_CREATE,
+        dedupe_key="managed-api-failed-retry-source",
+        request_hash="8" * 64,
+        status=KnowledgeJobStatus.FAILED,
+        knowledge_base_id=managed.id,
+        knowledge_id=None,
+        expected_version=None,
+        payload={},
+        error="publication failed",
+    )
+    db_session.add(failed_job)
+    await db_session.flush()
+    item.source_job_id = failed_job.id
+    await db_session.commit()
+
+    failed_list = await api_client.get(f"/api/v1/knowledge-base/managed-items/list?kb_id={managed.id}")
+    assert failed_list.status_code == 200
+    failed_row = failed_list.json()["data"]["items"][0]
+    assert failed_row["publication_job_id"] == failed_job.id
+    assert failed_row["publication_job_status"] == "failed"
+
+    request_body = {
+        "expected_version": 1,
+        "failed_job_id": failed_job.id,
+        "dedupe_key": "managed-api-retry-publication",
+    }
+    response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/retry?kb_id={managed.id}&knowledge_id={item.id}",
+        json=request_body,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["status"] == "retry_submitted"
+    assert payload["job_id"] is not None
+    assert payload["job_id"] != failed_job.id
+    await db_session.refresh(item)
+    assert item.pending_job_id == payload["job_id"]
+
+    replay = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/retry?kb_id={managed.id}&knowledge_id={item.id}",
+        json=request_body,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["data"]["job_id"] == payload["job_id"]
+
+    persisted_failed = await db_session.get(KnowledgeJob, failed_job.id)
+    assert persisted_failed is not None
+    assert persisted_failed.status == KnowledgeJobStatus.FAILED
 
 
 @pytest.mark.asyncio
@@ -580,7 +704,7 @@ async def test_managed_knowledge_management_create_api_uses_user_job_submission(
         return SimpleNamespace(
             status=SimpleNamespace(value="created"),
             item=item,
-            job=SimpleNamespace(id=321),
+            job=SimpleNamespace(id=321, status=KnowledgeJobStatus.PENDING, error=None),
         )
 
     monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_create", fake_submit_create)
@@ -591,6 +715,7 @@ async def test_managed_knowledge_management_create_api_uses_user_job_submission(
             "knowledge_key": "user-created",
             "content": "user managed content",
             "llm_maintainable": True,
+            "dedupe_key": "managed-api-create-user",
         },
     )
 
@@ -603,6 +728,7 @@ async def test_managed_knowledge_management_create_api_uses_user_job_submission(
     assert captured["source_type"] == ManagedKnowledgeSourceType.USER_API
     assert captured["actor"] == ManagedKnowledgeActorType.USER
     assert captured["llm_maintainable"] is True
+    assert captured["dedupe_key"] == "managed-api-create-user"
 
 
 @pytest.mark.asyncio
@@ -648,11 +774,19 @@ async def test_managed_knowledge_management_update_and_delete_use_user_job_submi
 
     async def fake_submit_update(_db: AsyncSession, **kwargs: object):
         update_kwargs.update(kwargs)
-        return SimpleNamespace(status=SimpleNamespace(value="updated"), item=item, job=SimpleNamespace(id=401))
+        return SimpleNamespace(
+            status=SimpleNamespace(value="updated"),
+            item=item,
+            job=SimpleNamespace(id=401, status=KnowledgeJobStatus.PENDING, error=None),
+        )
 
     async def fake_submit_delete(_db: AsyncSession, **kwargs: object):
         delete_kwargs.update(kwargs)
-        return SimpleNamespace(status=SimpleNamespace(value="deleted"), item=item, job=SimpleNamespace(id=402))
+        return SimpleNamespace(
+            status=SimpleNamespace(value="deleted"),
+            item=item,
+            job=SimpleNamespace(id=402, status=KnowledgeJobStatus.PENDING, error=None),
+        )
 
     monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_update", fake_submit_update)
     monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "submit_delete", fake_submit_delete)
@@ -664,6 +798,7 @@ async def test_managed_knowledge_management_update_and_delete_use_user_job_submi
             "content": "updated content",
             "expected_version": 3,
             "llm_maintainable": True,
+            "dedupe_key": "managed-api-update-user",
         },
     )
     assert update_response.status_code == 200
@@ -671,15 +806,319 @@ async def test_managed_knowledge_management_update_and_delete_use_user_job_submi
     assert update_kwargs["actor"] == ManagedKnowledgeActorType.USER
     assert update_kwargs["source_type"] == ManagedKnowledgeSourceType.USER_API
     assert update_kwargs["llm_maintainable"] is True
+    assert update_kwargs["dedupe_key"] == "managed-api-update-user"
 
     delete_response = await api_client.post(
         f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed.id}&knowledge_id={item.id}",
-        json={"expected_version": 3},
+        json={"expected_version": 3, "dedupe_key": "managed-api-delete-user"},
     )
     assert delete_response.status_code == 200
     assert delete_kwargs["expected_version"] == 3
     assert delete_kwargs["actor"] == ManagedKnowledgeActorType.USER
     assert delete_kwargs["source_type"] == ManagedKnowledgeSourceType.USER_API
+    assert delete_kwargs["dedupe_key"] == "managed-api-delete-user"
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_update_and_delete_api_run_real_job_submissions(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed real mutation profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed real mutation",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-real-mutation",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    update_item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="real-update-key",
+        content="before update",
+        content_token_count=2,
+        content_hash="e" * 64,
+        version=1,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+    )
+    delete_item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="real-delete-key",
+        content="delete me",
+        content_token_count=2,
+        content_hash="f" * 64,
+        version=1,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+    )
+    db_session.add_all([update_item, delete_item])
+    await db_session.commit()
+    await db_session.refresh(update_item)
+    await db_session.refresh(delete_item)
+
+    update_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/update?kb_id={managed.id}&knowledge_id={update_item.id}",
+        json={
+            "knowledge_key": "real-update-key",
+            "content": "after update",
+            "expected_version": 1,
+            "llm_maintainable": True,
+            "dedupe_key": "managed-api-real-update",
+        },
+    )
+    assert update_response.status_code == 200
+    update_payload = update_response.json()["data"]
+    assert update_payload["status"] == "updated"
+    assert update_payload["job_id"] is not None
+    await db_session.refresh(update_item)
+    assert update_item.version == 2
+    assert update_item.pending_job_id == update_payload["job_id"]
+    assert update_item.llm_maintainable is True
+    update_revision = await db_session.scalar(
+        select(ManagedKnowledgeRevision).where(
+            ManagedKnowledgeRevision.knowledge_base_id == managed.id,
+            ManagedKnowledgeRevision.knowledge_id == update_item.id,
+            ManagedKnowledgeRevision.version == 2,
+        )
+    )
+    assert update_revision is not None
+    assert update_revision.operation == ManagedKnowledgeRevisionOperation.UPDATE
+    assert update_revision.source_job_id == update_payload["job_id"]
+    assert update_revision.before_snapshot["content"] == "before update"
+    assert update_revision.after_snapshot["content"] == "after update"
+
+    update_replay = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/update?kb_id={managed.id}&knowledge_id={update_item.id}",
+        json={
+            "knowledge_key": "real-update-key",
+            "content": "after update",
+            "expected_version": 1,
+            "llm_maintainable": True,
+            "dedupe_key": "managed-api-real-update",
+        },
+    )
+    assert update_replay.status_code == 200
+    assert update_replay.json()["data"]["job_id"] == update_payload["job_id"]
+
+    delete_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed.id}&knowledge_id={delete_item.id}",
+        json={"expected_version": 1, "dedupe_key": "managed-api-real-delete"},
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()["data"]
+    assert delete_payload["status"] == "deleted"
+    assert delete_payload["job_id"] is not None
+    await db_session.refresh(delete_item)
+    assert delete_item.deleted_at is not None
+    assert delete_item.is_recallable is False
+    assert delete_item.pending_job_id == delete_payload["job_id"]
+    delete_revision = await db_session.scalar(
+        select(ManagedKnowledgeRevision).where(
+            ManagedKnowledgeRevision.knowledge_base_id == managed.id,
+            ManagedKnowledgeRevision.knowledge_id == delete_item.id,
+            ManagedKnowledgeRevision.version == 2,
+        )
+    )
+    assert delete_revision is not None
+    assert delete_revision.operation == ManagedKnowledgeRevisionOperation.DELETE
+    assert delete_revision.source_job_id == delete_payload["job_id"]
+    assert delete_revision.before_snapshot["deleted_at"] is None
+    assert delete_revision.after_snapshot["deleted_at"] is not None
+
+    delete_replay = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed.id}&knowledge_id={delete_item.id}",
+        json={"expected_version": 1, "dedupe_key": "managed-api-real-delete"},
+    )
+    assert delete_replay.status_code == 200
+    assert delete_replay.json()["data"]["job_id"] == delete_payload["job_id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_api_rejects_stale_versions_without_side_effects(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+) -> None:
+    profile = Profile(uid="user-a", name="managed stale version profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed stale version",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-stale-version",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="stale-version-key",
+        content="current content",
+        content_token_count=2,
+        content_hash="7" * 64,
+        version=2,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+        indexed_version=2,
+        is_recallable=True,
+    )
+    db_session.add(item)
+    await db_session.commit()
+    await db_session.refresh(item)
+    managed_id = managed.id
+    item_id = item.id
+    assert managed_id is not None
+    assert item_id is not None
+
+    stale_update = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/update?kb_id={managed_id}&knowledge_id={item_id}",
+        json={
+            "knowledge_key": "stale-version-key",
+            "content": "must not replace current content",
+            "expected_version": 1,
+            "llm_maintainable": True,
+            "dedupe_key": "managed-api-stale-update",
+        },
+    )
+    assert stale_update.status_code == 409
+
+    stale_delete = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed_id}&knowledge_id={item_id}",
+        json={"expected_version": 1, "dedupe_key": "managed-api-stale-delete"},
+    )
+    assert stale_delete.status_code == 409
+
+    await db_session.refresh(item)
+    assert item.version == 2
+    assert item.content == "current content"
+    assert item.deleted_at is None
+    assert item.pending_job_id is None
+    assert await db_session.scalar(select(func.count()).select_from(ManagedKnowledgeRevision).where(ManagedKnowledgeRevision.knowledge_id == item.id)) == 0
+    assert await knowledge_job_crud.get_by_dedupe_key(db_session, uid="user-a", dedupe_key="managed-api-stale-update") is None
+    assert await knowledge_job_crud.get_by_dedupe_key(db_session, uid="user-a", dedupe_key="managed-api-stale-delete") is None
+
+
+@pytest.mark.asyncio
+async def test_managed_knowledge_management_api_rolls_back_item_revision_and_job_when_binding_fails(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    embedding_channel: ModelChannel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = Profile(uid="user-a", name="managed rollback profile", configs={})
+    db_session.add(profile)
+    await db_session.flush()
+    managed = KnowledgeBase(
+        uid="user-a",
+        name="managed rollback",
+        embedding_channel_id=embedding_channel.id,
+        embedding_model_id="embed-v1",
+        embedding_dimensions=768,
+        collection_name="managed-rollback",
+        knowledge_base_type=KnowledgeBaseType.LLM_MANAGED,
+        managed_profile_id=profile.id,
+    )
+    db_session.add(managed)
+    await db_session.flush()
+    update_item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="rollback-update-key",
+        content="before rollback update",
+        content_token_count=3,
+        content_hash="5" * 64,
+        version=1,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+        indexed_version=1,
+        is_recallable=True,
+    )
+    delete_item = ManagedKnowledgeItem(
+        uid="user-a",
+        knowledge_base_id=managed.id,
+        knowledge_key="rollback-delete-key",
+        content="before rollback delete",
+        content_token_count=3,
+        content_hash="6" * 64,
+        version=1,
+        source_type=ManagedKnowledgeSourceType.USER_API,
+        created_by=ManagedKnowledgeActorType.USER,
+        last_modified_by=ManagedKnowledgeActorType.USER,
+        llm_maintainable=False,
+        indexed_version=1,
+        is_recallable=True,
+    )
+    db_session.add_all([update_item, delete_item])
+    await db_session.commit()
+    await db_session.refresh(update_item)
+    await db_session.refresh(delete_item)
+    managed_id = managed.id
+    update_item_id = update_item.id
+    delete_item_id = delete_item.id
+    assert managed_id is not None
+    assert update_item_id is not None
+    assert delete_item_id is not None
+
+    async def fail_binding(*_args, **_kwargs):
+        raise ManagedKnowledgeConflictError()
+
+    monkeypatch.setattr(knowledge_base_api.knowledge_job_manager, "_bind_job", fail_binding)
+
+    update_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/update?kb_id={managed_id}&knowledge_id={update_item_id}",
+        json={
+            "knowledge_key": "rollback-update-key",
+            "content": "must be rolled back",
+            "expected_version": 1,
+            "llm_maintainable": True,
+            "dedupe_key": "managed-api-rollback-update",
+        },
+    )
+    assert update_response.status_code == 409
+
+    delete_response = await api_client.post(
+        f"/api/v1/knowledge-base/managed-items/delete?kb_id={managed_id}&knowledge_id={delete_item_id}",
+        json={"expected_version": 1, "dedupe_key": "managed-api-rollback-delete"},
+    )
+    assert delete_response.status_code == 409
+
+    await db_session.refresh(update_item)
+    await db_session.refresh(delete_item)
+    assert update_item.version == 1
+    assert update_item.content == "before rollback update"
+    assert update_item.pending_job_id is None
+    assert update_item.llm_maintainable is False
+    assert delete_item.version == 1
+    assert delete_item.deleted_at is None
+    assert delete_item.pending_job_id is None
+    assert delete_item.is_recallable is True
+    assert await db_session.scalar(select(func.count()).select_from(ManagedKnowledgeRevision).where(ManagedKnowledgeRevision.knowledge_base_id == managed_id)) == 0
+    assert await knowledge_job_crud.get_by_dedupe_key(db_session, uid="user-a", dedupe_key="managed-api-rollback-update") is None
+    assert await knowledge_job_crud.get_by_dedupe_key(db_session, uid="user-a", dedupe_key="managed-api-rollback-delete") is None
 
 
 @pytest.mark.asyncio

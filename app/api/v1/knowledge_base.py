@@ -81,14 +81,18 @@ from app.models.knowledge_base import (
     KnowledgeBaseResponse,
     KnowledgeBaseType,
     KnowledgeBaseUpdate,
+    KnowledgeJob,
     KnowledgeJobOperation,
+    KnowledgeJobStatus,
     ManagedKnowledgeActorType,
     ManagedKnowledgeCreateRequest,
     ManagedKnowledgeDeleteRequest,
+    ManagedKnowledgeItem,
     ManagedKnowledgeItemResponse,
     ManagedKnowledgeItemSummaryResponse,
     ManagedKnowledgeListResponse,
     ManagedKnowledgeMutationResponse,
+    ManagedKnowledgeRetryRequest,
     ManagedKnowledgeRevisionResponse,
     ManagedKnowledgeSourceType,
     ManagedKnowledgeUpdateRequest,
@@ -122,24 +126,66 @@ async def load_owned_managed_knowledge_base(db: AsyncSession, kb_id: int, curren
     return knowledge_base
 
 
-def build_managed_knowledge_item_response(item) -> ManagedKnowledgeItemResponse:
+def build_managed_knowledge_item_response(item, publication_job=None) -> ManagedKnowledgeItemResponse:
     payload = build_managed_knowledge_snapshot(item)
     payload["id"] = payload["knowledge_id"]
     content = payload.get("content") or ""
     payload["content_preview"] = content[:300]
+    if publication_job is not None:
+        payload["publication_job_id"] = publication_job.id
+        payload["publication_job_status"] = getattr(publication_job.status, "value", publication_job.status)
+        payload["publication_job_error"] = publication_job.error
     return ManagedKnowledgeItemResponse.model_validate(payload)
 
 
-def build_managed_knowledge_item_summary(item) -> ManagedKnowledgeItemSummaryResponse:
-    response = build_managed_knowledge_item_response(item)
+def build_managed_knowledge_item_summary(item, publication_job=None) -> ManagedKnowledgeItemSummaryResponse:
+    response = build_managed_knowledge_item_response(item, publication_job)
     return ManagedKnowledgeItemSummaryResponse.model_validate(response.model_dump())
 
 
 def build_managed_knowledge_mutation_response(result) -> ManagedKnowledgeMutationResponse:
     status = getattr(result.status, "value", str(result.status))
-    item = build_managed_knowledge_item_response(result.item) if result.item is not None else None
+    item = build_managed_knowledge_item_response(result.item, result.job) if result.item is not None else None
     job_id = getattr(result.job, "id", None) if result.job is not None else None
     return ManagedKnowledgeMutationResponse(status=status, item=item, job_id=job_id)
+
+
+def managed_user_dedupe_key(prefix: str, requested: str | None) -> str:
+    return requested or f"{prefix}:{uuid.uuid4().hex}"
+
+
+async def load_managed_knowledge_publication_jobs(
+    db: AsyncSession,
+    *,
+    knowledge_base: KnowledgeBase,
+    items: list[ManagedKnowledgeItem],
+) -> dict[int, KnowledgeJob]:
+    targets = [(item.id, item.version) for item in items if item.id is not None]
+    latest_by_target = await knowledge_job_crud.latest_publication_jobs_for_targets(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=knowledge_base.id,
+        targets=targets,
+    )
+    unresolved_source_job_ids = [item.source_job_id for item in items if item.id is not None and (item.id, item.version) not in latest_by_target and item.source_job_id is not None]
+    source_jobs = await knowledge_job_crud.get_by_ids(
+        db,
+        uid=knowledge_base.uid,
+        job_ids=unresolved_source_job_ids,
+    )
+    source_jobs_by_id = {job.id: job for job in source_jobs if job.id is not None}
+    resolved: dict[int, KnowledgeJob] = {}
+    for item in items:
+        if item.id is None:
+            continue
+        publication_job = latest_by_target.get((item.id, item.version))
+        if publication_job is None and item.source_job_id is not None:
+            candidate = source_jobs_by_id.get(item.source_job_id)
+            if candidate is not None and candidate.knowledge_base_id == knowledge_base.id and candidate.operation == KnowledgeJobOperation.MANAGED_CREATE and candidate.knowledge_id is None and candidate.status in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED}:
+                publication_job = candidate
+        if publication_job is not None:
+            resolved[item.id] = publication_job
+    return resolved
 
 
 async def get_knowledge_base_profile_ids(db: AsyncSession, kb_id: int, uid: str) -> list[int]:
@@ -426,9 +472,14 @@ async def list_managed_knowledge_items(
         limit=page_size,
         query=query,
     )
+    publication_jobs = await load_managed_knowledge_publication_jobs(
+        db,
+        knowledge_base=knowledge_base,
+        items=items,
+    )
     return StandardResponse.success(
         data=ManagedKnowledgeListResponse(
-            items=[build_managed_knowledge_item_summary(item) for item in items],
+            items=[build_managed_knowledge_item_summary(item, publication_jobs.get(item.id)) for item in items],
             total=total,
         )
     )
@@ -450,7 +501,12 @@ async def get_managed_knowledge_item(
     )
     if item is None or item.deleted_at is not None:
         raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_ITEM_NOT_FOUND)
-    return StandardResponse.success(data=build_managed_knowledge_item_response(item))
+    publication_jobs = await load_managed_knowledge_publication_jobs(
+        db,
+        knowledge_base=knowledge_base,
+        items=[item],
+    )
+    return StandardResponse.success(data=build_managed_knowledge_item_response(item, publication_jobs.get(item.id)))
 
 
 @router.post("/managed-items/create", response_model=StandardResponse[ManagedKnowledgeMutationResponse])
@@ -469,7 +525,7 @@ async def create_managed_knowledge_item(
         content=item_in.content,
         source_type=ManagedKnowledgeSourceType.USER_API,
         actor=ManagedKnowledgeActorType.USER,
-        dedupe_key=f"managed-user-create:{uuid.uuid4().hex}",
+        dedupe_key=managed_user_dedupe_key("managed-user-create", item_in.dedupe_key),
         llm_maintainable=item_in.llm_maintainable,
         source_profile_id=knowledge_base.managed_profile_id,
     )
@@ -495,7 +551,7 @@ async def update_managed_knowledge_item(
         content=item_in.content,
         source_type=ManagedKnowledgeSourceType.USER_API,
         actor=ManagedKnowledgeActorType.USER,
-        dedupe_key=f"managed-user-update:{uuid.uuid4().hex}",
+        dedupe_key=managed_user_dedupe_key("managed-user-update", item_in.dedupe_key),
         llm_maintainable=item_in.llm_maintainable,
         source_profile_id=knowledge_base.managed_profile_id,
     )
@@ -519,7 +575,29 @@ async def delete_managed_knowledge_item(
         expected_version=item_in.expected_version,
         source_type=ManagedKnowledgeSourceType.USER_API,
         actor=ManagedKnowledgeActorType.USER,
-        dedupe_key=f"managed-user-delete:{uuid.uuid4().hex}",
+        dedupe_key=managed_user_dedupe_key("managed-user-delete", item_in.dedupe_key),
+        source_profile_id=knowledge_base.managed_profile_id,
+    )
+    return StandardResponse.success(data=build_managed_knowledge_mutation_response(result))
+
+
+@router.post("/managed-items/retry", response_model=StandardResponse[ManagedKnowledgeMutationResponse])
+async def retry_managed_knowledge_item(
+    kb_id: int,
+    knowledge_id: int,
+    item_in: ManagedKnowledgeRetryRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Any = Depends(get_current_user),
+):
+    knowledge_base = await load_owned_managed_knowledge_base(db, kb_id, current_user)
+    result = await knowledge_job_manager.retry_failed_publication(
+        db,
+        uid=knowledge_base.uid,
+        knowledge_base_id=kb_id,
+        knowledge_id=knowledge_id,
+        expected_version=item_in.expected_version,
+        failed_job_id=item_in.failed_job_id,
+        dedupe_key=managed_user_dedupe_key("managed-user-retry", item_in.dedupe_key),
         source_profile_id=knowledge_base.managed_profile_id,
     )
     return StandardResponse.success(data=build_managed_knowledge_mutation_response(result))

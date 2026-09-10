@@ -99,6 +99,56 @@ class CRUDKnowledgeJob:
         result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.id == job_id).execution_options(populate_existing=True))
         return result.scalars().first()
 
+    async def get_by_ids(self, db: AsyncSession, *, uid: str, job_ids: Iterable[int]) -> list[KnowledgeJob]:
+        normalized_ids = sorted({job_id for job_id in job_ids if isinstance(job_id, int) and not isinstance(job_id, bool) and job_id > 0})
+        if not normalized_ids:
+            return []
+        result = await db.execute(
+            select(KnowledgeJob)
+            .where(
+                KnowledgeJob.uid == uid,
+                KnowledgeJob.id.in_(normalized_ids),
+            )
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    async def latest_publication_jobs_for_targets(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        targets: Iterable[tuple[int, int]],
+    ) -> dict[tuple[int, int], KnowledgeJob]:
+        normalized_targets = sorted({(knowledge_id, expected_version) for knowledge_id, expected_version in targets if isinstance(knowledge_id, int) and not isinstance(knowledge_id, bool) and knowledge_id > 0 and isinstance(expected_version, int) and not isinstance(expected_version, bool) and expected_version > 0})
+        if not normalized_targets:
+            return {}
+        target_filters = [
+            and_(
+                KnowledgeJob.knowledge_id == knowledge_id,
+                KnowledgeJob.expected_version == expected_version,
+            )
+            for knowledge_id, expected_version in normalized_targets
+        ]
+        result = await db.execute(
+            select(KnowledgeJob)
+            .where(
+                KnowledgeJob.uid == uid,
+                KnowledgeJob.knowledge_base_id == knowledge_base_id,
+                KnowledgeJob.operation.in_([KnowledgeJobOperation.MANAGED_CREATE, KnowledgeJobOperation.MANAGED_UPDATE]),
+                or_(*target_filters),
+            )
+            .order_by(KnowledgeJob.id.desc())
+            .execution_options(populate_existing=True)
+        )
+        latest: dict[tuple[int, int], KnowledgeJob] = {}
+        for job in result.scalars().all():
+            if job.knowledge_id is None or job.expected_version is None:
+                continue
+            latest.setdefault((job.knowledge_id, job.expected_version), job)
+        return latest
+
     async def get_by_dedupe_key(self, db: AsyncSession, *, uid: str, dedupe_key: str) -> KnowledgeJob | None:
         result = await db.execute(select(KnowledgeJob).where(KnowledgeJob.uid == uid, KnowledgeJob.dedupe_key == dedupe_key).execution_options(populate_existing=True))
         return result.scalars().first()
