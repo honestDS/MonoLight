@@ -638,6 +638,7 @@ class ManagedKnowledgeCreateRequest(SQLModel):
     knowledge_key: str = Field(..., min_length=1, max_length=255)
     content: str = Field(..., min_length=1)
     llm_maintainable: bool = False
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ManagedKnowledgeUpdateRequest(ManagedKnowledgeCreateRequest):
@@ -646,6 +647,13 @@ class ManagedKnowledgeUpdateRequest(ManagedKnowledgeCreateRequest):
 
 class ManagedKnowledgeDeleteRequest(SQLModel):
     expected_version: int = Field(..., ge=1)
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ManagedKnowledgeRetryRequest(SQLModel):
+    expected_version: int = Field(..., ge=1)
+    failed_job_id: int = Field(..., ge=1)
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ManagedKnowledgeItemSummaryResponse(SQLModel):
@@ -663,6 +671,9 @@ class ManagedKnowledgeItemSummaryResponse(SQLModel):
     indexed_version: int
     is_recallable: bool
     pending_job_id: int | None = None
+    publication_job_id: int | None = None
+    publication_job_status: KnowledgeJobStatus | None = None
+    publication_job_error: str | None = None
     created_at: datetime
     updated_at: datetime
     last_recalled_at: datetime | None = None

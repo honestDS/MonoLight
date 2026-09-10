@@ -193,6 +193,43 @@ async def test_first_write_creates_managed_container_binding_and_first_job(
 
 
 @pytest.mark.asyncio
+async def test_first_write_container_binding_and_item_remain_invisible_until_submission_commit(
+    stage5_database: async_sessionmaker[AsyncSession],
+) -> None:
+    profile, _channel = await _create_profile_runtime(stage5_database)
+    async with stage5_database() as writer:
+        result = await knowledge_job_manager.submit_create_for_profile(
+            writer,
+            uid="user-1",
+            profile_id=profile.id,
+            knowledge_key="atomic.first.write",
+            content="Container, binding, item, and job must publish atomically.",
+            source_type=ManagedKnowledgeSourceType.LLM_TOOL,
+            actor=ManagedKnowledgeActorType.LLM,
+            dedupe_key="stage5-atomic-first-write",
+            commit=False,
+        )
+
+        async with stage5_database() as observer:
+            assert await observer.scalar(select(func.count()).select_from(KnowledgeBase)) == 0
+            assert await observer.scalar(select(func.count()).select_from(KnowledgeBaseProfileBinding)) == 0
+            assert await observer.scalar(select(func.count()).select_from(ManagedKnowledgeItem)) == 0
+            assert await observer.scalar(select(func.count()).select_from(KnowledgeJob)) == 0
+
+        await writer.commit()
+
+    assert result.knowledge_base_created is True
+    assert result.item is not None
+    assert result.job is not None
+
+    async with stage5_database() as observer:
+        assert await observer.scalar(select(func.count()).select_from(KnowledgeBase)) == 1
+        assert await observer.scalar(select(func.count()).select_from(KnowledgeBaseProfileBinding)) == 1
+        assert await observer.scalar(select(func.count()).select_from(ManagedKnowledgeItem)) == 1
+        assert await observer.scalar(select(func.count()).select_from(KnowledgeJob)) == 1
+
+
+@pytest.mark.asyncio
 async def test_first_write_without_memory_runtime_leaves_no_empty_container(
     stage5_database: async_sessionmaker[AsyncSession],
 ) -> None:

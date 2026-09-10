@@ -5,6 +5,8 @@ import fs from 'node:fs'
 import {
   canManageKnowledgeBaseDocuments,
   canManageManagedKnowledge,
+  createManagedKnowledgeDedupeKey,
+  getManagedKnowledgeMutationFeedback,
   getKnowledgeBaseProfileIds,
   normalizeKnowledgeBase
 } from '../src/utils/knowledgeBaseManagement.js'
@@ -32,6 +34,24 @@ test('legacy knowledge base responses safely downgrade to user knowledge bases',
   assert.equal(canManageManagedKnowledge(legacy), false)
 })
 
+test('managed knowledge mutation feedback distinguishes submission from no-op results', () => {
+  assert.deepEqual(getManagedKnowledgeMutationFeedback('create', 'created'), { type: 'success', key: 'managed_create_submitted' })
+  assert.deepEqual(getManagedKnowledgeMutationFeedback('create', 'existing_key'), { type: 'warning', key: 'managed_existing_key' })
+  assert.deepEqual(getManagedKnowledgeMutationFeedback('create', 'existing_content'), { type: 'warning', key: 'managed_existing_content' })
+  assert.deepEqual(getManagedKnowledgeMutationFeedback('update', 'unchanged'), { type: 'info', key: 'managed_no_changes' })
+  assert.deepEqual(getManagedKnowledgeMutationFeedback('delete', 'deleted'), { type: 'success', key: 'managed_delete_submitted' })
+})
+
+test('managed knowledge UI creates a fresh idempotency key for each user action', () => {
+  const first = createManagedKnowledgeDedupeKey('create')
+  const second = createManagedKnowledgeDedupeKey('create')
+
+  assert.match(first, /^managed-ui-create:/)
+  assert.match(second, /^managed-ui-create:/)
+  assert.notEqual(first, second)
+  assert.ok(first.length <= 255)
+})
+
 test('knowledge base view exposes separate user-document and managed-knowledge entries', () => {
   const source = fs.readFileSync(new URL('../src/views/KnowledgeBase.vue', import.meta.url), 'utf8')
   const commonStyles = fs.readFileSync(new URL('../src/assets/css/common.scss', import.meta.url), 'utf8')
@@ -55,6 +75,17 @@ test('knowledge base view exposes separate user-document and managed-knowledge e
   assert.match(source, /knowledgeBase\.actions'\)" width="180"[\s\S]*managed-knowledge-action-buttons/)
   assert.match(source, /handleManagedKnowledgeMoreAction\(\$event, row\)/)
   assert.match(source, /command="history"/)
+  assert.match(source, /v-if="row\.publication_job_status === 'failed'" command="retry"/)
+  assert.match(source, /knowledgeBaseApi\.retryManagedItem/)
+  assert.match(source, /publication_job_status === 'failed'[\s\S]*managed_status_failed/)
+  assert.match(source, /createAbortableTaskManager/)
+  assert.match(source, /createLatestRequestTracker/)
+  assert.match(source, /managedKnowledgeRequestTracker\.invalidate\(\)/)
+  assert.match(source, /signal: token\.signal/)
+  assert.match(source, /createManagedKnowledgeDedupeKey\('create'\)/)
+  assert.match(source, /createManagedKnowledgeDedupeKey\('update'\)/)
+  assert.match(source, /createManagedKnowledgeDedupeKey\('delete'\)/)
+  assert.match(source, /createManagedKnowledgeDedupeKey\('retry'\)/)
   assert.match(source, /v-if="selectedKb\?\.knowledge_base_type === 'user'"[\s\S]*submitEmbeddingMigration/)
   assert.match(source, /onBeforeUnmount\(\(\) => \{[\s\S]*stopManagedKnowledgePolling\(\)/)
   assert.doesNotMatch(commonStyles, /--el-table-fixed-right-column:\s*none\s*!important/)

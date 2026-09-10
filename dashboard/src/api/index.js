@@ -290,11 +290,12 @@ export const knowledgeBaseApi = {
   migrateEmbedding: (id, data) => request.post(`/knowledge-base/embedding-migration?kb_id=${id}`, data),
   update: (id, data) => request.post(`/knowledge-base/update?kb_id=${id}`, data),
   delete: (id) => request.post(`/knowledge-base/delete?kb_id=${id}`),
-  managedItems: (id, params) => request.get('/knowledge-base/managed-items/list', { params: { kb_id: id, ...params } }),
+  managedItems: (id, params, config = {}) => request.get('/knowledge-base/managed-items/list', { ...config, params: { kb_id: id, ...params } }),
   managedItem: (id, knowledgeId) => request.get('/knowledge-base/managed-items/get', { params: { kb_id: id, knowledge_id: knowledgeId } }),
   createManagedItem: (id, data) => request.post(`/knowledge-base/managed-items/create?kb_id=${id}`, data),
   updateManagedItem: (id, knowledgeId, data) => request.post(`/knowledge-base/managed-items/update?kb_id=${id}&knowledge_id=${knowledgeId}`, data),
   deleteManagedItem: (id, knowledgeId, data) => request.post(`/knowledge-base/managed-items/delete?kb_id=${id}&knowledge_id=${knowledgeId}`, data),
+  retryManagedItem: (id, knowledgeId, data) => request.post(`/knowledge-base/managed-items/retry?kb_id=${id}&knowledge_id=${knowledgeId}`, data),
   managedHistory: (id, knowledgeId) => request.get('/knowledge-base/managed-items/history', { params: { kb_id: id, knowledge_id: knowledgeId } }),
   importDocument: (id, formData) => request.post(`/knowledge-base/documents/import?kb_id=${id}`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
