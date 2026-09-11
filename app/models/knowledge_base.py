@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import ConfigDict, model_validator
 from sqlalchemy import DDL, CheckConstraint, ForeignKeyConstraint, Integer, Text, event
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlmodel import (
     JSON,
     Column,
@@ -473,7 +474,10 @@ class ManagedKnowledgeItem(SQLModel, table=True):
     knowledge_base_id: int = Field(nullable=False, index=True, description="所属托管知识库")
     uid: str = Field(nullable=False, index=True, max_length=50, description="所属用户")
     knowledge_key: str = Field(nullable=False, index=True, max_length=255, description="稳定知识键")
-    content: str = Field(sa_column=Column(Text, nullable=False), description="完整知识正文，不保存截断内容")
+    content: str = Field(
+        sa_column=Column(Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+        description="完整知识正文，不保存截断内容",
+    )
     content_token_count: int = Field(default=0, ge=0, nullable=False, description="完整正文 Token 数")
     content_hash: str = Field(nullable=False, index=True, max_length=64, description="完整正文的稳定 SHA-256 摘要")
     version: int = Field(default=1, ge=1, index=True, nullable=False, description="当前知识版本")
@@ -623,6 +627,33 @@ class KnowledgeOrganizationSnapshot(SQLModel, table=True):
     index_revision: int = Field(default=0, ge=0, nullable=False)
     item_count: int = Field(default=0, ge=0, nullable=False)
     items: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
+
+
+class KnowledgeOrganizationSnapshotItem(SQLModel, table=True):
+    __tablename__ = "knowledge_organization_snapshot_item"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "sequence", name="uq_knowledge_organization_snapshot_item_sequence"),
+        UniqueConstraint("snapshot_id", "knowledge_id", name="uq_knowledge_organization_snapshot_item_knowledge"),
+        Index("ix_knowledge_organization_snapshot_item_snapshot_sequence", "snapshot_id", "sequence"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, index=True)
+    snapshot_id: int = Field(nullable=False, index=True, foreign_key="knowledge_organization_snapshot.id", ondelete="CASCADE")
+    uid: str = Field(nullable=False, index=True, max_length=50)
+    knowledge_base_id: int = Field(nullable=False, index=True)
+    sequence: int = Field(ge=0, nullable=False)
+    knowledge_id: int = Field(ge=1, nullable=False, index=True)
+    expected_version: int = Field(ge=1, nullable=False)
+    knowledge_key: str = Field(nullable=False, max_length=255)
+    content_hash: str = Field(nullable=False, max_length=64)
+    content_token_count: int = Field(default=0, ge=0, nullable=False)
+    revision_id: int = Field(ge=1, nullable=False, index=True)
+    source_type: str = Field(nullable=False, max_length=30)
+    source_reference: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    llm_maintainable: bool = Field(default=True, nullable=False)
+    indexed_version: int = Field(ge=1, nullable=False)
+    vector_item_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
 
 

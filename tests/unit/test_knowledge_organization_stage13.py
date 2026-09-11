@@ -28,6 +28,7 @@ from app.models.knowledge_base import (
     KnowledgeOrganizationFragment,
     KnowledgeOrganizationFragmentStatus,
     KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationSnapshotItem,
     KnowledgeOrganizationStage,
     KnowledgeOrganizationStageStatus,
     ManagedKnowledgeActorType,
@@ -48,6 +49,7 @@ _TABLES = (
     ManagedKnowledgeItem.__table__,
     ManagedKnowledgeRevision.__table__,
     KnowledgeOrganizationSnapshot.__table__,
+    KnowledgeOrganizationSnapshotItem.__table__,
     KnowledgeOrganizationStage.__table__,
     KnowledgeOrganizationFragment.__table__,
 )
@@ -207,15 +209,16 @@ def _make_stage(
     stage_key: str = "stage-0",
     model_snapshot: dict | None = None,
 ) -> KnowledgeOrganizationStage:
-    frozen_model = model_snapshot or {
+    execution_model = model_snapshot or {
         "channel_id": 9,
         "model_id": "organization-model",
+        "protocol": "openai",
         "context_window_tokens": 128000,
         "max_output_tokens": 4096,
     }
     work_key, model_key = build_knowledge_organization_work_identity(
         snapshot_key=snapshot.snapshot_key,
-        model_snapshot=frozen_model,
+        execution_model=execution_model,
     )
     return KnowledgeOrganizationStage(
         uid=snapshot.uid,
@@ -227,7 +230,14 @@ def _make_stage(
         stage_index=0,
         lower_stage_key=None,
         model_key=model_key,
-        model_snapshot=frozen_model,
+        model_snapshot={
+            "execution_model": {
+                "channel_id": execution_model.get("channel_id"),
+                "model_id": execution_model.get("model_id"),
+                "protocol": execution_model.get("protocol"),
+            },
+            "purpose": "test",
+        },
         expected_fragment_count=expected_fragment_count,
     )
 
@@ -269,11 +279,17 @@ async def test_snapshot_only_contains_published_llm_maintainable_items_and_freez
         assert snapshot.active_embedding_revision == 7
         assert snapshot.index_revision == 11
         assert snapshot.boundary_revision_id > 0
-        assert len(snapshot.items) == 1
-        snapshot_item = snapshot.items[0]
-        assert snapshot_item["knowledge_key"] == "included"
-        assert snapshot_item["llm_maintainable"] is True
-        assert snapshot_item["content_reference"]["revision_id"] > 0
+        assert snapshot.items == []
+        snapshot_item = (
+            await db.execute(
+                select(KnowledgeOrganizationSnapshotItem).where(
+                    KnowledgeOrganizationSnapshotItem.snapshot_id == snapshot.id,
+                )
+            )
+        ).scalar_one()
+        assert snapshot_item.knowledge_key == "included"
+        assert snapshot_item.llm_maintainable is True
+        assert snapshot_item.revision_id > 0
 
         duplicate_snapshot = await create_knowledge_organization_snapshot(
             db,
@@ -289,7 +305,7 @@ async def test_snapshot_only_contains_published_llm_maintainable_items_and_freez
         current = (
             await db.execute(
                 select(ManagedKnowledgeItem).where(
-                    ManagedKnowledgeItem.id == snapshot_item["knowledge_id"],
+                    ManagedKnowledgeItem.id == snapshot_item.knowledge_id,
                 )
             )
         ).scalar_one()
@@ -318,7 +334,7 @@ async def test_snapshot_only_contains_published_llm_maintainable_items_and_freez
 
 
 @pytest.mark.asyncio
-async def test_same_snapshot_and_model_generate_same_work_identity():
+async def test_same_snapshot_keeps_work_identity_when_execution_model_changes():
     first_model = {
         "channel_id": 1,
         "model_id": "organizer",
@@ -329,21 +345,39 @@ async def test_same_snapshot_and_model_generate_same_work_identity():
         "model_id": "organizer",
         "channel_id": 1,
     }
+    same_execution_model_different_runtime = {
+        "channel_id": 1,
+        "model_id": "organizer",
+        "protocol": None,
+        "parameters": {"temperature": 0.9, "top_p": 0.1},
+        "context_window_tokens": 64000,
+    }
 
-    assert build_knowledge_organization_work_identity(
+    first_work_key, first_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
-        model_snapshot=first_model,
-    ) == build_knowledge_organization_work_identity(
-        snapshot_key="a" * 64,
-        model_snapshot=same_model_different_key_order,
+        execution_model=first_model,
     )
-    assert build_knowledge_organization_work_identity(
+    same_work_key, same_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
-        model_snapshot=first_model,
-    ) != build_knowledge_organization_work_identity(
+        execution_model=same_model_different_key_order,
+    )
+    runtime_changed_work_key, runtime_changed_model_key = build_knowledge_organization_work_identity(
+        snapshot_key="a" * 64,
+        execution_model=same_execution_model_different_runtime,
+    )
+    changed_work_key, _changed_snapshot_model_key = build_knowledge_organization_work_identity(
         snapshot_key="b" * 64,
-        model_snapshot=first_model,
+        execution_model=first_model,
     )
+    replacement_work_key, replacement_model_key = build_knowledge_organization_work_identity(
+        snapshot_key="a" * 64,
+        execution_model={"channel_id": 7, "model_id": "replacement", "parameters": {"temperature": 0.8}},
+    )
+
+    assert first_work_key == same_work_key == runtime_changed_work_key == replacement_work_key
+    assert first_model_key == same_model_key == runtime_changed_model_key
+    assert replacement_model_key != first_model_key
+    assert changed_work_key != first_work_key
 
 
 @pytest.mark.asyncio

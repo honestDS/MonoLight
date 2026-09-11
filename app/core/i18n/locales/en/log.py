@@ -144,6 +144,7 @@ MESSAGES = {
     "LOG_RETRIEVAL_HYBRID_STARTED": "Hybrid retrieval started: preparing concurrent dense and sparse retrieval",
     "LOG_RETRIEVAL_SPARSE_FAILED": "Knowledge base sparse retrieval failed, degraded to dense-only results: {error}",
     "LOG_RETRIEVAL_SPARSE_FINISHED": "Sparse retrieval completed: got {count} hits",
+    "LOG_KNOWLEDGE_ORGANIZATION_CONFIG_INVALID": "Managed knowledge organization model configuration is currently unavailable; organization was rejected: {error}",
     "LOG_SESSION_TITLE_FAILED": "Failed to generate session title: {error}",
     "LOG_SESSION_TITLE_GENERATED": "LLM generated session title successfully: {title}",
     "LOG_SESSION_TITLE_STARTED": "Starting session title generation task: uid={uid}, session_id={session_id}, model={model_id}, user_message={message}",

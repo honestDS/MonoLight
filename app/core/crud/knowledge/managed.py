@@ -366,6 +366,47 @@ class CRUDManagedKnowledgeItem:
 
 
 class CRUDManagedKnowledgeRevision:
+    async def get_boundary_revision_id(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> int:
+        result = await db.execute(
+            select(func.max(ManagedKnowledgeRevision.id)).where(
+                ManagedKnowledgeRevision.uid == uid,
+                ManagedKnowledgeRevision.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return int(result.scalar() or 0)
+
+    async def list_latest_at_boundary_page(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        boundary_revision_id: int,
+        after_knowledge_id: int = 0,
+        limit: int = 200,
+    ) -> list[ManagedKnowledgeRevision]:
+        latest = (
+            select(
+                ManagedKnowledgeRevision.knowledge_id.label("knowledge_id"),
+                func.max(ManagedKnowledgeRevision.id).label("revision_id"),
+            )
+            .where(
+                ManagedKnowledgeRevision.uid == uid,
+                ManagedKnowledgeRevision.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeRevision.id <= boundary_revision_id,
+            )
+            .group_by(ManagedKnowledgeRevision.knowledge_id)
+            .subquery()
+        )
+        result = await db.execute(select(ManagedKnowledgeRevision).join(latest, ManagedKnowledgeRevision.id == latest.c.revision_id).where(ManagedKnowledgeRevision.knowledge_id > after_knowledge_id).order_by(ManagedKnowledgeRevision.knowledge_id).limit(limit))
+        return list(result.scalars().all())
+
     async def get_by_ids(
         self,
         db: AsyncSession,
