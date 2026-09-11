@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import delete, exists, update
+from sqlalchemy import delete, exists, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
@@ -15,8 +15,10 @@ from app.models.knowledge_base import (
     KnowledgeOrganizationFragment,
     KnowledgeOrganizationFragmentStatus,
     KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationSnapshotItem,
     KnowledgeOrganizationStage,
     KnowledgeOrganizationStageStatus,
+    ManagedKnowledgeRevision,
 )
 
 KNOWLEDGE_ORGANIZATION_CLEANUP_BATCH_SIZE = 200
@@ -77,6 +79,101 @@ class CRUDKnowledgeOrganizationSnapshot:
         return snapshot, True
 
 
+class CRUDKnowledgeOrganizationSnapshotItem:
+    @staticmethod
+    def _matches_existing(
+        existing: KnowledgeOrganizationSnapshotItem,
+        item: KnowledgeOrganizationSnapshotItem,
+    ) -> bool:
+        return (
+            existing.snapshot_id == item.snapshot_id
+            and existing.uid == item.uid
+            and existing.knowledge_base_id == item.knowledge_base_id
+            and existing.sequence == item.sequence
+            and existing.knowledge_id == item.knowledge_id
+            and existing.expected_version == item.expected_version
+            and existing.knowledge_key == item.knowledge_key
+            and existing.content_hash == item.content_hash
+            and existing.content_token_count == item.content_token_count
+            and existing.revision_id == item.revision_id
+            and existing.source_type == item.source_type
+            and existing.source_reference == item.source_reference
+            and existing.llm_maintainable == item.llm_maintainable
+            and existing.indexed_version == item.indexed_version
+            and existing.vector_item_ids == item.vector_item_ids
+        )
+
+    async def get_by_sequence(
+        self,
+        db: AsyncSession,
+        *,
+        snapshot_id: int,
+        sequence: int,
+    ) -> KnowledgeOrganizationSnapshotItem | None:
+        result = await db.execute(
+            select(KnowledgeOrganizationSnapshotItem).where(
+                KnowledgeOrganizationSnapshotItem.snapshot_id == snapshot_id,
+                KnowledgeOrganizationSnapshotItem.sequence == sequence,
+            )
+        )
+        return result.scalars().first()
+
+    async def create_idempotent(
+        self,
+        db: AsyncSession,
+        *,
+        item: KnowledgeOrganizationSnapshotItem,
+    ) -> tuple[KnowledgeOrganizationSnapshotItem | None, bool]:
+        existing = await self.get_by_sequence(
+            db,
+            snapshot_id=item.snapshot_id,
+            sequence=item.sequence,
+        )
+        if existing is not None:
+            return (existing, False) if self._matches_existing(existing, item) else (None, False)
+        try:
+            async with db.begin_nested():
+                db.add(item)
+                await db.flush()
+        except IntegrityError:
+            existing = await self.get_by_sequence(
+                db,
+                snapshot_id=item.snapshot_id,
+                sequence=item.sequence,
+            )
+            if existing is None or not self._matches_existing(existing, item):
+                return None, False
+            return existing, False
+        return item, True
+
+    async def count_for_snapshot(self, db: AsyncSession, *, snapshot_id: int) -> int:
+        result = await db.execute(select(func.count()).select_from(KnowledgeOrganizationSnapshotItem).where(KnowledgeOrganizationSnapshotItem.snapshot_id == snapshot_id))
+        return int(result.scalar() or 0)
+
+    async def list_with_revision_page(
+        self,
+        db: AsyncSession,
+        *,
+        snapshot_id: int,
+        after_sequence: int = -1,
+        limit: int = 200,
+    ) -> list[tuple[KnowledgeOrganizationSnapshotItem, ManagedKnowledgeRevision]]:
+        result = await db.execute(
+            select(KnowledgeOrganizationSnapshotItem, ManagedKnowledgeRevision)
+            .join(
+                ManagedKnowledgeRevision,
+                ManagedKnowledgeRevision.id == KnowledgeOrganizationSnapshotItem.revision_id,
+            )
+            .where(
+                KnowledgeOrganizationSnapshotItem.snapshot_id == snapshot_id,
+                KnowledgeOrganizationSnapshotItem.sequence > after_sequence,
+            )
+            .order_by(KnowledgeOrganizationSnapshotItem.sequence)
+            .limit(limit)
+        )
+        return list(result.all())
+
+
 class CRUDKnowledgeOrganizationFragment:
     @staticmethod
     def build_dedupe_key(
@@ -101,6 +198,25 @@ class CRUDKnowledgeOrganizationFragment:
             )
         )
         return result.scalars().first()
+
+    async def list_stage_page(
+        self,
+        db: AsyncSession,
+        *,
+        stage_id: int,
+        after_fragment_index: int = -1,
+        limit: int = 200,
+    ) -> list[KnowledgeOrganizationFragment]:
+        result = await db.execute(
+            select(KnowledgeOrganizationFragment)
+            .where(
+                KnowledgeOrganizationFragment.stage_id == stage_id,
+                KnowledgeOrganizationFragment.fragment_index > after_fragment_index,
+            )
+            .order_by(KnowledgeOrganizationFragment.fragment_index)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     @staticmethod
     def _matches_existing(
@@ -260,23 +376,33 @@ class CRUDKnowledgeOrganizationStage:
         if stage is None or stage.snapshot_key != snapshot_key or stage.model_key != model_key or stage.status not in {KnowledgeOrganizationStageStatus.RUNNING, KnowledgeOrganizationStageStatus.COMPLETED} or stage.succeeded_fragment_count > stage.expected_fragment_count:
             return None
 
-        fragments = list((await db.execute(select(KnowledgeOrganizationFragment).where(KnowledgeOrganizationFragment.stage_id == stage.id).order_by(KnowledgeOrganizationFragment.fragment_index))).scalars().all())
-        for expected_index, fragment in enumerate(fragments):
-            if (
-                fragment.fragment_index != expected_index
-                or fragment.uid != stage.uid
-                or fragment.knowledge_base_id != stage.knowledge_base_id
-                or fragment.snapshot_id != stage.snapshot_id
-                or fragment.work_key != stage.work_key
-                or fragment.snapshot_key != stage.snapshot_key
-                or fragment.stage_key != stage.stage_key
-                or fragment.model_key != stage.model_key
-                or fragment.status != KnowledgeOrganizationFragmentStatus.COMPLETED
-            ):
+        expected_index = 0
+        while expected_index < stage.succeeded_fragment_count:
+            page = await knowledge_organization_fragment_crud.list_stage_page(
+                db,
+                stage_id=stage.id,
+                after_fragment_index=expected_index - 1,
+                limit=min(KNOWLEDGE_ORGANIZATION_CLEANUP_BATCH_SIZE, stage.succeeded_fragment_count - expected_index),
+            )
+            if not page:
                 return None
-        if len(fragments) != stage.succeeded_fragment_count:
+            for fragment in page:
+                if (
+                    fragment.fragment_index != expected_index
+                    or fragment.uid != stage.uid
+                    or fragment.knowledge_base_id != stage.knowledge_base_id
+                    or fragment.snapshot_id != stage.snapshot_id
+                    or fragment.work_key != stage.work_key
+                    or fragment.snapshot_key != stage.snapshot_key
+                    or fragment.stage_key != stage.stage_key
+                    or fragment.model_key != stage.model_key
+                    or fragment.status != KnowledgeOrganizationFragmentStatus.COMPLETED
+                ):
+                    return None
+                expected_index += 1
+        if expected_index != stage.succeeded_fragment_count:
             return None
-        if stage.status == KnowledgeOrganizationStageStatus.COMPLETED and len(fragments) != stage.expected_fragment_count:
+        if stage.status == KnowledgeOrganizationStageStatus.COMPLETED and expected_index != stage.expected_fragment_count:
             return None
         return stage.succeeded_fragment_count
 
@@ -305,24 +431,35 @@ class CRUDKnowledgeOrganizationStage:
             await db.rollback()
             return False
 
-        fragments = list((await db.execute(select(KnowledgeOrganizationFragment).where(KnowledgeOrganizationFragment.stage_id == stage.id).order_by(KnowledgeOrganizationFragment.fragment_index))).scalars().all())
-        if len(fragments) != stage.expected_fragment_count:
-            await db.rollback()
-            return False
-        for expected_index, fragment in enumerate(fragments):
-            if (
-                fragment.fragment_index != expected_index
-                or fragment.uid != stage.uid
-                or fragment.knowledge_base_id != stage.knowledge_base_id
-                or fragment.snapshot_id != stage.snapshot_id
-                or fragment.work_key != stage.work_key
-                or fragment.snapshot_key != stage.snapshot_key
-                or fragment.stage_key != stage.stage_key
-                or fragment.model_key != stage.model_key
-                or fragment.status != KnowledgeOrganizationFragmentStatus.COMPLETED
-            ):
+        expected_index = 0
+        while expected_index < stage.expected_fragment_count:
+            page = await knowledge_organization_fragment_crud.list_stage_page(
+                db,
+                stage_id=stage.id,
+                after_fragment_index=expected_index - 1,
+                limit=min(KNOWLEDGE_ORGANIZATION_CLEANUP_BATCH_SIZE, stage.expected_fragment_count - expected_index),
+            )
+            if not page:
                 await db.rollback()
                 return False
+            for fragment in page:
+                if (
+                    fragment.fragment_index != expected_index
+                    or fragment.uid != stage.uid
+                    or fragment.knowledge_base_id != stage.knowledge_base_id
+                    or fragment.snapshot_id != stage.snapshot_id
+                    or fragment.work_key != stage.work_key
+                    or fragment.snapshot_key != stage.snapshot_key
+                    or fragment.stage_key != stage.stage_key
+                    or fragment.model_key != stage.model_key
+                    or fragment.status != KnowledgeOrganizationFragmentStatus.COMPLETED
+                ):
+                    await db.rollback()
+                    return False
+                expected_index += 1
+        if expected_index != stage.expected_fragment_count:
+            await db.rollback()
+            return False
 
         now = get_local_time()
         completed = await db.execute(
@@ -362,7 +499,12 @@ class CRUDKnowledgeOrganizationStage:
                 KnowledgeOrganizationStage.stage_key == stage_key,
                 KnowledgeOrganizationStage.snapshot_key == snapshot_key,
                 KnowledgeOrganizationStage.model_key == model_key,
-                KnowledgeOrganizationStage.status == KnowledgeOrganizationStageStatus.RUNNING,
+                KnowledgeOrganizationStage.status.in_(
+                    (
+                        KnowledgeOrganizationStageStatus.RUNNING,
+                        KnowledgeOrganizationStageStatus.COMPLETED,
+                    )
+                ),
             )
             .values(
                 status=KnowledgeOrganizationStageStatus.FAILED,
@@ -482,5 +624,6 @@ class CRUDKnowledgeOrganizationStage:
 
 
 knowledge_organization_snapshot_crud = CRUDKnowledgeOrganizationSnapshot()
+knowledge_organization_snapshot_item_crud = CRUDKnowledgeOrganizationSnapshotItem()
 knowledge_organization_fragment_crud = CRUDKnowledgeOrganizationFragment()
 knowledge_organization_stage_crud = CRUDKnowledgeOrganizationStage()

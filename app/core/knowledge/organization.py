@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,13 +11,22 @@ from app.core.constants import (
     ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
+    KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
-from app.core.crud.knowledge.managed import managed_knowledge_item_crud, managed_knowledge_revision_crud
-from app.core.crud.knowledge.organization import knowledge_organization_snapshot_crud
+from app.core.crud.knowledge.managed import managed_knowledge_revision_crud
+from app.core.crud.knowledge.organization import (
+    knowledge_organization_snapshot_crud,
+    knowledge_organization_snapshot_item_crud,
+)
 from app.core.i18n import t
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeNotFoundError
-from app.models.knowledge_base import KnowledgeBaseType, KnowledgeOrganizationSnapshot, ManagedKnowledgeRevision
+from app.models.knowledge_base import (
+    KnowledgeBaseType,
+    KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationSnapshotItem,
+    ManagedKnowledgeRevision,
+)
 
 
 def _enum_value(value: Any) -> Any:
@@ -27,57 +36,231 @@ def _enum_value(value: Any) -> Any:
 def build_knowledge_organization_work_identity(
     *,
     snapshot_key: str,
-    model_snapshot: Mapping[str, Any],
+    execution_model: Mapping[str, Any],
 ) -> tuple[str, str]:
-    model_key = hashlib.sha256(canonical_json_dumps(dict(model_snapshot)).encode("utf-8")).hexdigest()
+    model_identity = {
+        "channel_id": execution_model.get("channel_id"),
+        "model_id": execution_model.get("model_id"),
+        "protocol": execution_model.get("protocol"),
+    }
+    model_key = hashlib.sha256(canonical_json_dumps(model_identity).encode("utf-8")).hexdigest()
     work_payload = {
-        "model_key": model_key,
         "scope": "knowledge_organization",
         "snapshot_key": snapshot_key,
+        "version": 2,
     }
     work_key = hashlib.sha256(canonical_json_dumps(work_payload).encode("utf-8")).hexdigest()
     return work_key, model_key
 
 
-def _build_snapshot_item(candidate) -> dict[str, Any]:
-    item = candidate.item
-    revision = candidate.revision
+def _require_snapshot_mapping(revision: ManagedKnowledgeRevision) -> Mapping[str, Any]:
+    value = revision.after_snapshot
+    if not isinstance(value, Mapping):
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    return value
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _revision_is_organization_candidate(revision: ManagedKnowledgeRevision) -> bool:
+    snapshot = _require_snapshot_mapping(revision)
+    version = _positive_int(snapshot.get("version"))
+    indexed_version = _non_negative_int(snapshot.get("indexed_version"))
+    return bool(_positive_int(snapshot.get("knowledge_id")) is not None and version is not None and snapshot.get("deleted_at") is None and snapshot.get("llm_maintainable") is True and snapshot.get("is_recallable") is True and snapshot.get("pending_job_id") is None and indexed_version == version)
+
+
+def _build_snapshot_item_from_revision(revision: ManagedKnowledgeRevision) -> dict[str, Any]:
+    snapshot = _require_snapshot_mapping(revision)
+    knowledge_id = _positive_int(snapshot.get("knowledge_id"))
+    version = _positive_int(snapshot.get("version"))
+    indexed_version = _positive_int(snapshot.get("indexed_version"))
+    content_token_count = _non_negative_int(snapshot.get("content_token_count"))
+    knowledge_key = snapshot.get("knowledge_key")
+    content_hash = snapshot.get("content_hash")
+    source_type = _enum_value(snapshot.get("source_type"))
+    vector_item_ids = snapshot.get("vector_item_ids")
+    if (
+        knowledge_id is None
+        or version is None
+        or indexed_version is None
+        or content_token_count is None
+        or not isinstance(knowledge_key, str)
+        or not knowledge_key
+        or not isinstance(content_hash, str)
+        or len(content_hash) != 64
+        or not isinstance(source_type, str)
+        or not source_type
+        or not isinstance(vector_item_ids, list)
+        or any(not isinstance(item_id, str) or not item_id for item_id in vector_item_ids)
+        or revision.id is None
+        or revision.knowledge_id != knowledge_id
+        or revision.version != version
+    ):
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
     return {
-        "knowledge_id": item.id,
-        "expected_version": item.version,
-        "knowledge_key": item.knowledge_key,
-        "content_hash": item.content_hash,
-        "content_token_count": item.content_token_count,
+        "knowledge_id": knowledge_id,
+        "expected_version": version,
+        "knowledge_key": knowledge_key,
+        "content_hash": content_hash,
+        "content_token_count": content_token_count,
         "content_reference": {
             "revision_id": revision.id,
-            "version": revision.version,
+            "version": version,
         },
-        "source_type": _enum_value(item.source_type),
-        "source_reference": item.source_reference,
-        "llm_maintainable": item.llm_maintainable,
-        "indexed_version": item.indexed_version,
+        "source_type": source_type,
+        "source_reference": snapshot.get("source_reference"),
+        "llm_maintainable": True,
+        "indexed_version": indexed_version,
+        "vector_item_ids": list(vector_item_ids),
     }
 
 
-def _build_snapshot_key(
+async def _iter_candidate_revisions(
+    db: AsyncSession,
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    boundary_revision_id: int,
+    page_size: int,
+) -> AsyncIterator[ManagedKnowledgeRevision]:
+    after_knowledge_id = 0
+    while True:
+        page = await managed_knowledge_revision_crud.list_latest_at_boundary_page(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            boundary_revision_id=boundary_revision_id,
+            after_knowledge_id=after_knowledge_id,
+            limit=page_size,
+        )
+        if not page:
+            return
+        for revision in page:
+            after_knowledge_id = max(after_knowledge_id, revision.knowledge_id)
+            if _revision_is_organization_candidate(revision):
+                yield revision
+        if len(page) < page_size:
+            return
+
+
+def _snapshot_digest_prefix(
     *,
     uid: str,
     knowledge_base_id: int,
     boundary_revision_id: int,
     active_embedding_revision: int,
     index_revision: int,
-    items: list[dict[str, Any]],
-) -> str:
-    payload = {
-        "active_embedding_revision": active_embedding_revision,
-        "boundary_revision_id": boundary_revision_id,
-        "index_revision": index_revision,
-        "items": items,
-        "knowledge_base_id": knowledge_base_id,
-        "scope": "knowledge_organization_snapshot",
-        "uid": uid,
-    }
-    return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+) -> bytes:
+    return canonical_json_dumps(
+        {
+            "active_embedding_revision": active_embedding_revision,
+            "boundary_revision_id": boundary_revision_id,
+            "index_revision": index_revision,
+            "knowledge_base_id": knowledge_base_id,
+            "scope": "knowledge_organization_snapshot_v2",
+            "uid": uid,
+        }
+    ).encode("utf-8")
+
+
+async def _calculate_snapshot_identity(
+    db: AsyncSession,
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    boundary_revision_id: int,
+    active_embedding_revision: int,
+    index_revision: int,
+    page_size: int,
+) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    digest.update(
+        _snapshot_digest_prefix(
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            boundary_revision_id=boundary_revision_id,
+            active_embedding_revision=active_embedding_revision,
+            index_revision=index_revision,
+        )
+    )
+    item_count = 0
+    async for revision in _iter_candidate_revisions(
+        db,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+        boundary_revision_id=boundary_revision_id,
+        page_size=page_size,
+    ):
+        item_payload = _build_snapshot_item_from_revision(revision)
+        encoded = canonical_json_dumps(item_payload).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
+        digest.update(encoded)
+        item_count += 1
+    return digest.hexdigest(), item_count
+
+
+async def _ensure_snapshot_items(
+    db: AsyncSession,
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    page_size: int,
+) -> None:
+    if snapshot.id is None:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    sequence = 0
+    async for revision in _iter_candidate_revisions(
+        db,
+        uid=snapshot.uid,
+        knowledge_base_id=snapshot.knowledge_base_id,
+        boundary_revision_id=snapshot.boundary_revision_id,
+        page_size=page_size,
+    ):
+        item_payload = _build_snapshot_item_from_revision(revision)
+        content_reference = item_payload["content_reference"]
+        row = KnowledgeOrganizationSnapshotItem(
+            snapshot_id=snapshot.id,
+            uid=snapshot.uid,
+            knowledge_base_id=snapshot.knowledge_base_id,
+            sequence=sequence,
+            knowledge_id=item_payload["knowledge_id"],
+            expected_version=item_payload["expected_version"],
+            knowledge_key=item_payload["knowledge_key"],
+            content_hash=item_payload["content_hash"],
+            content_token_count=item_payload["content_token_count"],
+            revision_id=content_reference["revision_id"],
+            source_type=item_payload["source_type"],
+            source_reference=item_payload["source_reference"],
+            llm_maintainable=True,
+            indexed_version=item_payload["indexed_version"],
+            vector_item_ids=item_payload["vector_item_ids"],
+        )
+        persisted, _ = await knowledge_organization_snapshot_item_crud.create_idempotent(
+            db,
+            item=row,
+        )
+        if persisted is None:
+            await db.rollback()
+            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+        sequence += 1
+        if sequence % page_size == 0:
+            await db.commit()
+    await db.commit()
+    persisted_count = await knowledge_organization_snapshot_item_crud.count_for_snapshot(
+        db,
+        snapshot_id=snapshot.id,
+    )
+    if persisted_count != snapshot.item_count:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
 
 
 async def create_knowledge_organization_snapshot(
@@ -92,20 +275,19 @@ async def create_knowledge_organization_snapshot(
     if knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
         raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED)
 
-    candidates = await managed_knowledge_item_crud.list_organization_candidates(
+    boundary_revision_id = await managed_knowledge_revision_crud.get_boundary_revision_id(
         db,
         uid=uid,
         knowledge_base_id=knowledge_base_id,
     )
-    items = [_build_snapshot_item(candidate) for candidate in candidates]
-    boundary_revision_id = max((candidate.revision.id or 0 for candidate in candidates), default=0)
-    snapshot_key = _build_snapshot_key(
+    snapshot_key, item_count = await _calculate_snapshot_identity(
+        db,
         uid=uid,
         knowledge_base_id=knowledge_base_id,
         boundary_revision_id=boundary_revision_id,
         active_embedding_revision=knowledge_base.active_embedding_revision,
         index_revision=knowledge_base.index_revision,
-        items=items,
+        page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
     )
     snapshot = KnowledgeOrganizationSnapshot(
         uid=uid,
@@ -114,18 +296,114 @@ async def create_knowledge_organization_snapshot(
         boundary_revision_id=boundary_revision_id,
         active_embedding_revision=knowledge_base.active_embedding_revision,
         index_revision=knowledge_base.index_revision,
-        item_count=len(items),
-        items=items,
+        item_count=item_count,
+        items=[],
     )
     persisted, _ = await knowledge_organization_snapshot_crud.create_snapshot(db, snapshot=snapshot)
+    await _ensure_snapshot_items(
+        db,
+        snapshot=persisted,
+        page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
+    )
     return persisted
 
 
-def _revision_matches_snapshot_item(revision: ManagedKnowledgeRevision, snapshot_item: Mapping[str, Any]) -> bool:
-    content_reference = snapshot_item.get("content_reference")
-    if not isinstance(content_reference, Mapping):
-        return False
-    return revision.id == content_reference.get("revision_id") and revision.knowledge_id == snapshot_item.get("knowledge_id") and revision.version == snapshot_item.get("expected_version") and revision.version == content_reference.get("version")
+def _revision_matches_snapshot_item(
+    revision: ManagedKnowledgeRevision,
+    snapshot_item: KnowledgeOrganizationSnapshotItem,
+) -> bool:
+    return revision.id == snapshot_item.revision_id and revision.uid == snapshot_item.uid and revision.knowledge_base_id == snapshot_item.knowledge_base_id and revision.knowledge_id == snapshot_item.knowledge_id and revision.version == snapshot_item.expected_version
+
+
+def _resolve_snapshot_item(
+    row: KnowledgeOrganizationSnapshotItem,
+    revision: ManagedKnowledgeRevision,
+) -> dict[str, Any]:
+    if not _revision_matches_snapshot_item(revision, row):
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    after_snapshot = _require_snapshot_mapping(revision)
+    content = after_snapshot.get("content")
+    if (
+        not isinstance(content, str)
+        or not content
+        or after_snapshot.get("knowledge_key") != row.knowledge_key
+        or after_snapshot.get("content_hash") != row.content_hash
+        or after_snapshot.get("content_token_count") != row.content_token_count
+        or after_snapshot.get("llm_maintainable") is not True
+        or after_snapshot.get("indexed_version") != row.indexed_version
+    ):
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    if hashlib.sha256(content.encode("utf-8")).hexdigest() != row.content_hash:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    return {
+        "knowledge_id": row.knowledge_id,
+        "expected_version": row.expected_version,
+        "knowledge_key": row.knowledge_key,
+        "content_hash": row.content_hash,
+        "content_token_count": row.content_token_count,
+        "content_reference": {
+            "revision_id": row.revision_id,
+            "version": row.expected_version,
+        },
+        "source_type": row.source_type,
+        "source_reference": row.source_reference,
+        "llm_maintainable": row.llm_maintainable,
+        "indexed_version": row.indexed_version,
+        "vector_item_ids": list(row.vector_item_ids or []),
+        "content": content,
+    }
+
+
+async def load_knowledge_organization_snapshot_item_page(
+    db: AsyncSession,
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    after_sequence: int = -1,
+    limit: int = KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
+) -> tuple[dict[str, Any], ...]:
+    if snapshot.id is None or after_sequence < -1 or limit < 1:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    page = await knowledge_organization_snapshot_item_crud.list_with_revision_page(
+        db,
+        snapshot_id=snapshot.id,
+        after_sequence=after_sequence,
+        limit=limit,
+    )
+    expected_sequence = after_sequence + 1
+    resolved: list[dict[str, Any]] = []
+    for row, revision in page:
+        if row.sequence != expected_sequence:
+            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+        resolved.append(_resolve_snapshot_item(row, revision))
+        expected_sequence += 1
+    return tuple(resolved)
+
+
+async def iter_knowledge_organization_snapshot_items(
+    db: AsyncSession,
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    page_size: int = KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
+) -> AsyncIterator[dict[str, Any]]:
+    if snapshot.id is None or page_size < 1:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+    expected_sequence = 0
+    while True:
+        page = await load_knowledge_organization_snapshot_item_page(
+            db,
+            snapshot=snapshot,
+            after_sequence=expected_sequence - 1,
+            limit=page_size,
+        )
+        if not page:
+            break
+        for item in page:
+            yield item
+            expected_sequence += 1
+        if len(page) < page_size:
+            break
+    if expected_sequence != snapshot.item_count:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
 
 
 async def load_knowledge_organization_snapshot_items(
@@ -133,37 +411,20 @@ async def load_knowledge_organization_snapshot_items(
     *,
     snapshot: KnowledgeOrganizationSnapshot,
 ) -> tuple[dict[str, Any], ...]:
-    revision_ids = []
-    for item in snapshot.items:
-        content_reference = item.get("content_reference") if isinstance(item, dict) else None
-        revision_id = content_reference.get("revision_id") if isinstance(content_reference, dict) else None
-        if not isinstance(revision_id, int) or isinstance(revision_id, bool) or revision_id < 1:
-            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-        revision_ids.append(revision_id)
-
-    revisions = await managed_knowledge_revision_crud.get_by_ids(
-        db,
-        uid=snapshot.uid,
-        knowledge_base_id=snapshot.knowledge_base_id,
-        revision_ids=revision_ids,
-    )
-    revisions_by_id = {revision.id: revision for revision in revisions}
-    resolved: list[dict[str, Any]] = []
-    for item in snapshot.items:
-        content_reference = item["content_reference"]
-        revision = revisions_by_id.get(content_reference["revision_id"])
-        if revision is None or not _revision_matches_snapshot_item(revision, item):
-            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-        after_snapshot = revision.after_snapshot
-        content = after_snapshot.get("content") if isinstance(after_snapshot, dict) else None
-        if not isinstance(content, str):
-            raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
-        resolved.append({**item, "content": content})
-    return tuple(resolved)
+    items = [
+        item
+        async for item in iter_knowledge_organization_snapshot_items(
+            db,
+            snapshot=snapshot,
+        )
+    ]
+    return tuple(items)
 
 
 __all__ = [
     "build_knowledge_organization_work_identity",
     "create_knowledge_organization_snapshot",
+    "iter_knowledge_organization_snapshot_items",
+    "load_knowledge_organization_snapshot_item_page",
     "load_knowledge_organization_snapshot_items",
 ]

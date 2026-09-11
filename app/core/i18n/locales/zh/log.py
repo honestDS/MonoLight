@@ -144,6 +144,7 @@ MESSAGES = {
     "LOG_RETRIEVAL_HYBRID_STARTED": "混合检索开始：准备并发提交稠密检索和稀疏检索",
     "LOG_RETRIEVAL_SPARSE_FAILED": "知识库稀疏检索失败，已退化为纯稠密结果: {error}",
     "LOG_RETRIEVAL_SPARSE_FINISHED": "稀疏检索完成：取到 {count} 条信息",
+    "LOG_KNOWLEDGE_ORGANIZATION_CONFIG_INVALID": "托管知识整理模型配置当前不可用，已拒绝整理：{error}",
     "LOG_SESSION_TITLE_FAILED": "生成会话标题失败: {error}",
     "LOG_SESSION_TITLE_GENERATED": "LLM 成功生成会话标题: {title}",
     "LOG_SESSION_TITLE_STARTED": "开始生成会话标题任务: uid={uid}, session_id={session_id}, model={model_id}, 用户消息={message}",

@@ -19,6 +19,7 @@ from app.models.knowledge_base import KnowledgeJobStatus as KnowledgeJobStatus
 from app.models.knowledge_base import KnowledgeOrganizationFragment as KnowledgeOrganizationFragment
 from app.models.knowledge_base import KnowledgeOrganizationFragmentStatus as KnowledgeOrganizationFragmentStatus
 from app.models.knowledge_base import KnowledgeOrganizationSnapshot as KnowledgeOrganizationSnapshot
+from app.models.knowledge_base import KnowledgeOrganizationSnapshotItem as KnowledgeOrganizationSnapshotItem
 from app.models.knowledge_base import KnowledgeOrganizationStage as KnowledgeOrganizationStage
 from app.models.knowledge_base import KnowledgeOrganizationStageStatus as KnowledgeOrganizationStageStatus
 from app.models.knowledge_base import ManagedKnowledgeActorType as ManagedKnowledgeActorType
