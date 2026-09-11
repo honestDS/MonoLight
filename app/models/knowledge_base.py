@@ -491,6 +491,7 @@ class ManagedKnowledgeItem(SQLModel, table=True):
     vector_item_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False), description="当前关联的向量分块标识")
     is_recallable: bool = Field(default=False, index=True, nullable=False, description="当前版本是否允许召回")
     pending_job_id: int | None = Field(default=None, index=True, description="待处理知识作业；步骤 4 接入")
+    organization_lock_token: str | None = Field(default=None, index=True, max_length=64, description="知识整理运行锁；非空时禁止人工和 LLM 修改或删除")
     created_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
     updated_at: datetime = Field(default_factory=get_local_time, sa_column=Column(DateTime(timezone=True), index=True, nullable=False))
     deleted_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), index=True))

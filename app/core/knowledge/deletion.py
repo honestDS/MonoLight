@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import ERR_KB_NOT_FOUND, ERR_SESSION_NO_PERMISSION
+from app.core.constants import ERR_KB_NOT_FOUND, ERR_SESSION_NO_PERMISSION, LOG_KNOWLEDGE_BASE_DELETE_WITH_ACTIVE_ORGANIZATION
 from app.core.crud.knowledge.base import (
     knowledge_base_collection_owner_crud,
     knowledge_base_crud,
 )
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.crud.profile.profile import profile_crud
 from app.core.exceptions import ForbiddenException, ResourceNotFoundException
+from app.core.i18n import t
+from app.core.log import get_logger
 from app.models.knowledge_base import KnowledgeBaseType
+
+logger = get_logger(__name__)
 
 
 async def delete_owned_knowledge_base(
@@ -47,6 +52,15 @@ async def delete_owned_knowledge_base(
         )
         if knowledge_base is None:
             raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
+
+        if knowledge_base.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED:
+            locked_count = await managed_knowledge_item_crud.count_organization_locked(
+                db,
+                uid=owner_uid,
+                knowledge_base_id=knowledge_base.id,
+            )
+            if locked_count:
+                logger.bind(knowledge_base_id=knowledge_base.id, uid=owner_uid, locked_count=locked_count).warning(t(LOG_KNOWLEDGE_BASE_DELETE_WITH_ACTIVE_ORGANIZATION, locked_count=locked_count))
 
         await knowledge_base_collection_owner_crud.enqueue(
             db,

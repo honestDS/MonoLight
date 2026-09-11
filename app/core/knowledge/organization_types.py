@@ -44,7 +44,7 @@ class KnowledgeOrganizationMerge(_KnowledgeOrganizationModel):
 
 class KnowledgeOrganizationConflict(_KnowledgeOrganizationModel):
     action: Literal["conflict"]
-    sources: tuple[KnowledgeOrganizationSourceReference, ...] = Field(min_length=1)
+    sources: tuple[KnowledgeOrganizationSourceReference, ...] = Field(min_length=2)
     reason: StrictStr = Field(min_length=1, max_length=1000)
     summary: StrictStr = Field(min_length=1)
 

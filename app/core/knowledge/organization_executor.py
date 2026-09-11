@@ -7,15 +7,25 @@ import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from tempfile import TemporaryFile
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TextIO
+from uuid import uuid4
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
+    ERR_KB_NOT_FOUND,
+    ERR_KNOWLEDGE_JOB_ACTIVE_TARGET_BUSY,
+    ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
+    ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID,
+    ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID,
     KNOWLEDGE_ORGANIZATION_FRAGMENT_CONCURRENCY,
     KNOWLEDGE_ORGANIZATION_INPUT_QUEUE_CAPACITY,
+    KNOWLEDGE_ORGANIZATION_JOB_LEASE_RENEW_INTERVAL_SECONDS,
+    KNOWLEDGE_ORGANIZATION_JOB_LEASE_SECONDS,
     KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS,
     KNOWLEDGE_ORGANIZATION_REORDER_WINDOW,
     KNOWLEDGE_ORGANIZATION_RESULT_QUEUE_CAPACITY,
@@ -24,9 +34,18 @@ from app.core.constants import (
     LOG_KNOWLEDGE_ORGANIZATION_CONFIG_INVALID,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.crud.knowledge.organization import knowledge_organization_fragment_crud, knowledge_organization_stage_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
+from app.core.exceptions import ResourceNotFoundException
 from app.core.i18n import t
+from app.core.knowledge.errors import (
+    KnowledgeOrganizationConfigurationError,
+    KnowledgeOrganizationContextExceededError,
+    KnowledgeOrganizationExecutionError,
+    KnowledgeOrganizationModelFailedError,
+    KnowledgeOrganizationNotConvergedError,
+)
 from app.core.knowledge.organization import create_knowledge_organization_snapshot, load_knowledge_organization_snapshot_item_page
 from app.core.knowledge.organization_runtime import (
     KnowledgeOrganizationCandidate,
@@ -49,6 +68,7 @@ from app.core.log import get_logger
 from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT, KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT
 from app.core.utils.tokenizer import estimate_tokens
 from app.models.knowledge_base import (
+    KnowledgeJobOperation,
     KnowledgeOrganizationFragment,
     KnowledgeOrganizationFragmentStatus,
     KnowledgeOrganizationSnapshot,
@@ -59,22 +79,6 @@ from app.models.message import InternalMessage, MessageRole
 from app.providers.llm.client import LLMClient
 
 logger = get_logger(__name__)
-
-
-class KnowledgeOrganizationExecutionError(RuntimeError):
-    code = "knowledge_organization_failed"
-
-
-class KnowledgeOrganizationContextExceededError(KnowledgeOrganizationExecutionError):
-    code = "organization_context_exceeded"
-
-
-class KnowledgeOrganizationModelFailedError(KnowledgeOrganizationExecutionError):
-    code = "organization_model_execution_failed"
-
-
-class KnowledgeOrganizationNotConvergedError(KnowledgeOrganizationExecutionError):
-    code = "organization_not_converged"
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +367,7 @@ async def _default_model_caller(
 ) -> KnowledgeOrganizationPlan:
     payload = canonical_json_dumps([_scope_payload(item) for item in scope])
     if estimate_tokens(payload) > model.input_budget_tokens:
-        raise KnowledgeOrganizationContextExceededError(t("organization scope exceeds model input budget"))
+        raise KnowledgeOrganizationContextExceededError()
     response = await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
@@ -398,7 +402,7 @@ async def _default_analysis_caller(model: KnowledgeOrganizationModelConfig, *, c
     analysis_max_output_tokens = min(model.max_output_tokens, KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS)
     available = model.context_window_tokens - analysis_max_output_tokens - model.safety_margin_tokens - prompt_tokens
     if estimate_tokens(payload) > available:
-        raise KnowledgeOrganizationContextExceededError(t("organization analysis scope exceeds model input budget"))
+        raise KnowledgeOrganizationContextExceededError()
     response = await LLMClient.generate(
         api_key=model.api_key,
         base_url=model.base_url,
@@ -429,6 +433,29 @@ async def _default_analysis_caller(model: KnowledgeOrganizationModelConfig, *, c
     return parsed.summary
 
 
+def _analysis_payload_tokens(content: str) -> int:
+    return max(1, estimate_tokens(canonical_json_dumps({"content": content})))
+
+
+def _split_analysis_content_for_payload(content: str, *, max_payload_tokens: int) -> tuple[str, ...]:
+    if not isinstance(content, str) or not content or max_payload_tokens < 1:
+        raise KnowledgeOrganizationContextExceededError()
+
+    max_content_tokens = max(1, min(estimate_tokens(content), max_payload_tokens))
+    while True:
+        parts = split_content_for_analysis(content, max_tokens=max_content_tokens)
+        payload_sizes = tuple(_analysis_payload_tokens(part) for part in parts)
+        if all(size <= max_payload_tokens for size in payload_sizes):
+            return parts
+        if max_content_tokens == 1:
+            raise KnowledgeOrganizationContextExceededError()
+        largest_payload = max(payload_sizes)
+        next_limit = max(1, (max_content_tokens * max_payload_tokens) // largest_payload)
+        if next_limit >= max_content_tokens:
+            next_limit = max_content_tokens - 1
+        max_content_tokens = next_limit
+
+
 async def _maybe_await(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
@@ -454,11 +481,14 @@ def _model_key(model: KnowledgeOrganizationModelConfig) -> str:
     return hashlib.sha256(canonical_json_dumps(execution_model).encode("utf-8")).hexdigest()
 
 
-def _work_key(snapshot: KnowledgeOrganizationSnapshot) -> str:
+def _work_key(snapshot: KnowledgeOrganizationSnapshot, *, organization_job_id: int) -> str:
+    if isinstance(organization_job_id, bool) or not isinstance(organization_job_id, int) or organization_job_id < 1:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
     payload = {
         "snapshot_key": snapshot.snapshot_key,
+        "organization_job_id": organization_job_id,
         "scope": "knowledge_organization",
-        "version": 2,
+        "version": 4,
     }
     return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
 
@@ -652,8 +682,8 @@ async def _iter_initial_groups(
             return
         page_items = tuple(page)
         page.clear()
-        oversized = [item for item in page_items if _scope_item_tokens(item) > model.input_budget_tokens]
-        regular = tuple(item for item in page_items if _scope_item_tokens(item) <= model.input_budget_tokens)
+        oversized = [item for item in page_items if _scope_tokens((item,)) > model.input_budget_tokens]
+        regular = tuple(item for item in page_items if _scope_tokens((item,)) <= model.input_budget_tokens)
         if regular:
             neighbors = await _load_semantic_neighbors(
                 semantic_neighbor_loader,
@@ -677,7 +707,7 @@ async def _iter_initial_groups(
                 yield KnowledgeOrganizationFragmentInput(
                     fragment_index=current_index,
                     scope=(item,),
-                    input_tokens=_scope_item_tokens(item),
+                    input_tokens=_scope_tokens((item,)),
                 )
 
     async for item in _iter_snapshot_scope_items(session_factory, snapshot=snapshot):
@@ -696,6 +726,123 @@ async def _count_groups(groups: AsyncIterator[KnowledgeOrganizationFragmentInput
             raise RuntimeError(t("organization group index mismatch"))
         count += 1
     return count
+
+
+def _initial_group_spool_payload(group: KnowledgeOrganizationFragmentInput) -> dict[str, Any]:
+    return {
+        "fragment_index": group.fragment_index,
+        "input_tokens": group.input_tokens,
+        "scope": [
+            {
+                "sources": [[knowledge_id, expected_version] for knowledge_id, expected_version in item.sources],
+                "knowledge_key": item.knowledge_key,
+                "content": item.content,
+                "content_hash": item.content_hash,
+                "source_type": item.source_type,
+                "source_reference": dict(item.source_reference) if item.source_reference is not None else None,
+                "vector_item_ids": list(item.vector_item_ids),
+                "related_ids": sorted(item.related_ids),
+            }
+            for item in group.scope
+        ],
+    }
+
+
+def _initial_group_from_spool_payload(raw: Mapping[str, Any]) -> KnowledgeOrganizationFragmentInput:
+    fragment_index = raw.get("fragment_index")
+    input_tokens = raw.get("input_tokens")
+    raw_scope = raw.get("scope")
+    if not isinstance(fragment_index, int) or isinstance(fragment_index, bool) or fragment_index < 0 or not isinstance(input_tokens, int) or isinstance(input_tokens, bool) or input_tokens < 1 or not isinstance(raw_scope, list) or not raw_scope:
+        raise RuntimeError(t("organization initial group spool invalid"))
+
+    scope: list[KnowledgeOrganizationScopeItem] = []
+    for raw_item in raw_scope:
+        if not isinstance(raw_item, Mapping):
+            raise RuntimeError(t("organization initial group spool invalid"))
+        raw_sources = raw_item.get("sources")
+        raw_vector_item_ids = raw_item.get("vector_item_ids")
+        raw_related_ids = raw_item.get("related_ids")
+        source_reference = raw_item.get("source_reference")
+        if (
+            not isinstance(raw_sources, list)
+            or not raw_sources
+            or not isinstance(raw_vector_item_ids, list)
+            or any(not isinstance(value, str) or not value for value in raw_vector_item_ids)
+            or not isinstance(raw_related_ids, list)
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in raw_related_ids)
+            or (source_reference is not None and not isinstance(source_reference, Mapping))
+        ):
+            raise RuntimeError(t("organization initial group spool invalid"))
+        sources: list[tuple[int, int]] = []
+        for source in raw_sources:
+            if not isinstance(source, list) or len(source) != 2 or any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in source):
+                raise RuntimeError(t("organization initial group spool invalid"))
+            sources.append((source[0], source[1]))
+        knowledge_key = raw_item.get("knowledge_key")
+        content = raw_item.get("content")
+        content_hash = raw_item.get("content_hash")
+        source_type = raw_item.get("source_type")
+        if not all(isinstance(value, str) and value for value in (knowledge_key, content, content_hash, source_type)):
+            raise RuntimeError(t("organization initial group spool invalid"))
+        scope.append(
+            KnowledgeOrganizationScopeItem(
+                sources=tuple(sources),
+                knowledge_key=knowledge_key,
+                content=content,
+                content_hash=content_hash,
+                source_type=source_type,
+                source_reference=source_reference,
+                vector_item_ids=tuple(raw_vector_item_ids),
+                related_ids=frozenset(raw_related_ids),
+            )
+        )
+    return KnowledgeOrganizationFragmentInput(
+        fragment_index=fragment_index,
+        scope=tuple(scope),
+        input_tokens=input_tokens,
+    )
+
+
+async def _capture_initial_groups(
+    groups: AsyncIterator[KnowledgeOrganizationFragmentInput],
+) -> tuple[TextIO, int]:
+    spool = TemporaryFile(mode="w+t", encoding="utf-8", newline="\n")
+    count = 0
+    try:
+        async for group in groups:
+            if group.fragment_index != count:
+                raise RuntimeError(t("organization group index mismatch"))
+            spool.write(canonical_json_dumps(_initial_group_spool_payload(group)))
+            spool.write("\n")
+            count += 1
+        spool.flush()
+        spool.seek(0)
+        return spool, count
+    except BaseException:
+        spool.close()
+        raise
+
+
+async def _iter_captured_initial_groups(
+    spool: TextIO,
+    *,
+    first_index: int,
+) -> AsyncIterator[KnowledgeOrganizationFragmentInput]:
+    spool.seek(0)
+    expected_index = 0
+    for line in spool:
+        try:
+            raw = json.loads(line)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(t("organization initial group spool invalid")) from exc
+        if not isinstance(raw, Mapping):
+            raise RuntimeError(t("organization initial group spool invalid"))
+        group = _initial_group_from_spool_payload(raw)
+        if group.fragment_index != expected_index:
+            raise RuntimeError(t("organization group index mismatch"))
+        expected_index += 1
+        if group.fragment_index >= first_index:
+            yield group
 
 
 async def _write_plan_fragment(
@@ -892,10 +1039,10 @@ async def _execute_analysis_stage(
 ) -> tuple[str, KnowledgeOrganizationStage]:
     analysis_prompt_tokens = estimate_tokens(KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT)
     analysis_max_output_tokens = min(model.max_output_tokens, KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS)
-    max_part_tokens = model.context_window_tokens - analysis_max_output_tokens - model.safety_margin_tokens - analysis_prompt_tokens - 32
-    if max_part_tokens <= 0:
-        raise KnowledgeOrganizationContextExceededError(t("organization model cannot fit minimal analysis input"))
-    parts = split_content_for_analysis(content, max_tokens=max_part_tokens)
+    max_payload_tokens = model.context_window_tokens - analysis_max_output_tokens - model.safety_margin_tokens - analysis_prompt_tokens
+    if max_payload_tokens <= 0:
+        raise KnowledgeOrganizationContextExceededError()
+    parts = _split_analysis_content_for_payload(content, max_payload_tokens=max_payload_tokens)
     expected_count = len(parts)
     analysis_input_key = hashlib.sha256(
         canonical_json_dumps(
@@ -918,11 +1065,11 @@ async def _execute_analysis_stage(
         purpose=purpose,
     )
     if stage.status == KnowledgeOrganizationStageStatus.INVALIDATED:
-        raise KnowledgeOrganizationModelFailedError(t("organization analysis stage already invalidated"))
+        raise KnowledgeOrganizationExecutionError()
     if stage.status == KnowledgeOrganizationStageStatus.COMPLETED:
         reduced = await _read_analysis_stage_text(session_factory, stage=stage)
         if estimate_tokens(reduced) >= estimate_tokens(content):
-            exc = KnowledgeOrganizationNotConvergedError("organization long-item analysis did not reduce")
+            exc = KnowledgeOrganizationNotConvergedError()
             await _fail_and_invalidate_stage(session_factory, stage=stage, error=f"{type(exc).__name__}: {exc}")
             raise exc
         return reduced, stage
@@ -984,7 +1131,7 @@ async def _execute_analysis_stage(
                 )
             reduced = await _read_analysis_stage_text(session_factory, stage=stage)
             if estimate_tokens(reduced) >= estimate_tokens(content):
-                raise KnowledgeOrganizationNotConvergedError(t("organization long-item analysis did not reduce"))
+                raise KnowledgeOrganizationNotConvergedError()
             await _mark_stage_completed(session_factory, stage=stage)
             return reduced, stage
         except KnowledgeOrganizationNotConvergedError as exc:
@@ -995,7 +1142,9 @@ async def _execute_analysis_stage(
             if attempt + 1 >= KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS:
                 await _fail_and_invalidate_stage(session_factory, stage=stage, error=f"{type(exc).__name__}: {exc}")
                 raise
-    raise KnowledgeOrganizationModelFailedError(str(last_error) if last_error is not None else t("organization analysis failed"))
+    raise KnowledgeOrganizationModelFailedError(
+        cause=str(last_error) if last_error is not None else None,
+    )
 
 
 async def _compact_scope_item(
@@ -1007,7 +1156,7 @@ async def _compact_scope_item(
     item: KnowledgeOrganizationScopeItem,
     analysis_caller: Callable[..., Any],
 ) -> tuple[KnowledgeOrganizationScopeItem, int]:
-    if _scope_item_tokens(item) <= model.input_budget_tokens:
+    if _scope_tokens((item,)) <= model.input_budget_tokens:
         return item, 0
     minimum_item = KnowledgeOrganizationScopeItem(
         sources=item.sources,
@@ -1020,8 +1169,8 @@ async def _compact_scope_item(
         related_ids=item.related_ids,
         effective_item=item.effective_item,
     )
-    if _scope_item_tokens(minimum_item) > model.input_budget_tokens:
-        raise KnowledgeOrganizationContextExceededError(t("organization model cannot fit minimum knowledge metadata"))
+    if _scope_tokens((minimum_item,)) > model.input_budget_tokens:
+        raise KnowledgeOrganizationContextExceededError()
     content = item.content
     stage_count = 0
     analysis_layer = 0
@@ -1049,7 +1198,7 @@ async def _compact_scope_item(
             related_ids=item.related_ids,
             effective_item=item.effective_item,
         )
-        if _scope_item_tokens(compacted) <= model.input_budget_tokens:
+        if _scope_tokens((compacted,)) <= model.input_budget_tokens:
             return compacted, stage_count
         analysis_layer += 1
 
@@ -1078,7 +1227,7 @@ async def _prepare_scope_for_model(
         analysis_stage_count += added_stages
     result = tuple(prepared)
     if _scope_tokens(result) > model.input_budget_tokens:
-        raise KnowledgeOrganizationContextExceededError(t("organization grouped scope exceeds model input budget"))
+        raise KnowledgeOrganizationContextExceededError()
     return result, analysis_stage_count
 
 
@@ -1157,6 +1306,40 @@ def _build_reduction_output_scope_item(
     )
 
 
+def _resolve_reduction_effective_item(
+    plan_item: KnowledgeOrganizationPlanItem,
+    *,
+    touched: tuple[KnowledgeOrganizationScopeItem, ...],
+) -> KnowledgeOrganizationPlanItem:
+    if len(touched) > 1:
+        if not isinstance(plan_item, (KnowledgeOrganizationMerge, KnowledgeOrganizationConflict)):
+            raise ValueError(t("organization reduction cross-candidate action invalid"))
+        if isinstance(plan_item, KnowledgeOrganizationMerge) and any(isinstance(candidate.effective_item, KnowledgeOrganizationConflict) for candidate in touched):
+            raise ValueError(t("organization reduction cannot merge an unresolved conflict"))
+        return plan_item
+
+    candidate = touched[0]
+    if len(candidate.sources) == 1:
+        if isinstance(plan_item, KnowledgeOrganizationKeep):
+            return candidate.effective_item or plan_item
+        if isinstance(plan_item, KnowledgeOrganizationUpdate):
+            return plan_item
+        raise ValueError(t("organization reduction single candidate cannot create merge or conflict"))
+
+    existing = candidate.effective_item
+    if not isinstance(existing, (KnowledgeOrganizationMerge, KnowledgeOrganizationConflict)):
+        raise ValueError(t("organization reduction multi-source candidate missing effective action"))
+    if isinstance(existing, KnowledgeOrganizationMerge):
+        if not isinstance(plan_item, KnowledgeOrganizationMerge):
+            raise ValueError(t("organization reduction cannot change an existing multi-source action"))
+        if plan_item.primary_knowledge_id != existing.primary_knowledge_id or plan_item.target.knowledge_key != candidate.knowledge_key or plan_item.target.content != candidate.content:
+            raise ValueError(t("organization reduction existing merge must remain unchanged"))
+        return existing
+    if not isinstance(plan_item, KnowledgeOrganizationConflict):
+        raise ValueError(t("organization reduction cannot change an existing multi-source action"))
+    return existing
+
+
 def _compose_scope_plan(
     plan: KnowledgeOrganizationPlan,
     *,
@@ -1191,16 +1374,9 @@ def _compose_scope_plan(
             raise ValueError(t("organization reduction candidate covered more than once"))
         covered_scope_indexes.update(touched_indexes)
 
-        if len(touched) == 1:
-            if ref_set != set(touched[0].sources):
-                raise ValueError(t("organization reduction candidate coverage mismatch"))
-            effective_item = touched[0].effective_item or plan_item
-        else:
-            if not isinstance(plan_item, (KnowledgeOrganizationMerge, KnowledgeOrganizationConflict)):
-                raise ValueError(t("organization reduction cross-candidate action invalid"))
-            if isinstance(plan_item, KnowledgeOrganizationMerge) and any(isinstance(candidate.effective_item, KnowledgeOrganizationConflict) for candidate in touched):
-                raise ValueError(t("organization reduction cannot merge an unresolved conflict"))
-            effective_item = plan_item
+        if len(touched) == 1 and ref_set != set(touched[0].sources):
+            raise ValueError(t("organization reduction candidate coverage mismatch"))
+        effective_item = _resolve_reduction_effective_item(plan_item, touched=touched)
 
         effective_items.append(effective_item.model_dump(mode="json"))
         output_scope.append(
@@ -1214,6 +1390,7 @@ def _compose_scope_plan(
     if covered_scope_indexes != set(range(len(scope))):
         raise ValueError(t("organization reduction candidate coverage incomplete"))
     effective_plan = KnowledgeOrganizationPlan.model_validate({"items": effective_items})
+    effective_plan = _validate_scope_plan(effective_plan, scope=scope)
     return effective_plan, tuple(output_scope)
 
 
@@ -1366,10 +1543,12 @@ async def _validate_reduction_decrease(
         return
     lower_input_tokens = await _measure_reduction_input_tokens(session_factory, lower_stage=lower_stage)
     if output_tokens >= lower_input_tokens:
-        raise KnowledgeOrganizationNotConvergedError(t(f"organization reduction did not strictly decrease: input={lower_input_tokens}, output={output_tokens}"))
+        raise KnowledgeOrganizationNotConvergedError(
+            cause=f"input_tokens={lower_input_tokens}, output_tokens={output_tokens}",
+        )
 
 
-async def _execute_plan_stage_for_model(
+async def _execute_plan_stage_with_known_groups(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     snapshot: KnowledgeOrganizationSnapshot,
@@ -1377,28 +1556,14 @@ async def _execute_plan_stage_for_model(
     stage_index: int,
     lower_stage: KnowledgeOrganizationStage | None,
     model: KnowledgeOrganizationModelConfig,
-    collection_name: str,
     model_caller: Callable[..., Any],
     analysis_caller: Callable[..., Any],
-    semantic_neighbor_loader: Callable[..., Any],
+    expected_count: int,
+    initial_group_spool: TextIO | None = None,
     single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None,
 ) -> tuple[_StageExecutionResult, int]:
-    if single_scope is not None:
-        expected_count = 1
-    elif lower_stage is None:
-        expected_count = await _count_groups(
-            _iter_initial_groups(
-                session_factory,
-                snapshot=snapshot,
-                model=model,
-                collection_name=collection_name,
-                semantic_neighbor_loader=semantic_neighbor_loader,
-            )
-        )
-    else:
-        expected_count = await _count_groups(_iter_reduction_groups(session_factory, lower_stage=lower_stage, model=model))
     if expected_count <= 0:
-        raise KnowledgeOrganizationModelFailedError(t("organization stage has no candidate groups"))
+        raise KnowledgeOrganizationExecutionError()
 
     purpose = "initial" if lower_stage is None else "reduction"
     stage = await _create_stage(
@@ -1412,7 +1577,7 @@ async def _execute_plan_stage_for_model(
         purpose=purpose,
     )
     if stage.status == KnowledgeOrganizationStageStatus.INVALIDATED:
-        raise KnowledgeOrganizationModelFailedError(t("organization stage already invalidated"))
+        raise KnowledgeOrganizationExecutionError()
     if stage.status == KnowledgeOrganizationStageStatus.COMPLETED:
         output_tokens = await _measure_stage_output_tokens(session_factory, stage=stage)
         try:
@@ -1438,14 +1603,9 @@ async def _execute_plan_stage_for_model(
                     yield KnowledgeOrganizationFragmentInput(fragment_index=0, scope=single_scope, input_tokens=_scope_tokens(single_scope))
                 return
             if lower_stage is None:
-                async for item in _iter_initial_groups(
-                    session_factory,
-                    snapshot=snapshot,
-                    model=model,
-                    collection_name=collection_name,
-                    semantic_neighbor_loader=semantic_neighbor_loader,
-                    first_index=first_index,
-                ):
+                if initial_group_spool is None:
+                    raise RuntimeError(t("organization initial group spool missing"))
+                async for item in _iter_captured_initial_groups(initial_group_spool, first_index=first_index):
                     yield item
                 return
             async for item in _iter_reduction_groups(
@@ -1510,7 +1670,332 @@ async def _execute_plan_stage_for_model(
             if attempt + 1 >= KNOWLEDGE_ORGANIZATION_MODEL_MAX_ATTEMPTS:
                 await _fail_and_invalidate_stage(session_factory, stage=stage, error=f"{type(exc).__name__}: {exc}")
                 raise
-    raise KnowledgeOrganizationModelFailedError(str(last_error) if last_error is not None else t("organization stage failed"))
+    raise KnowledgeOrganizationModelFailedError(
+        cause=str(last_error) if last_error is not None else None,
+    )
+
+
+async def _execute_plan_stage_for_model(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    snapshot: KnowledgeOrganizationSnapshot,
+    work_key: str,
+    stage_index: int,
+    lower_stage: KnowledgeOrganizationStage | None,
+    model: KnowledgeOrganizationModelConfig,
+    collection_name: str,
+    model_caller: Callable[..., Any],
+    analysis_caller: Callable[..., Any],
+    semantic_neighbor_loader: Callable[..., Any],
+    single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None,
+) -> tuple[_StageExecutionResult, int]:
+    if single_scope is not None:
+        return await _execute_plan_stage_with_known_groups(
+            session_factory,
+            snapshot=snapshot,
+            work_key=work_key,
+            stage_index=stage_index,
+            lower_stage=lower_stage,
+            model=model,
+            model_caller=model_caller,
+            analysis_caller=analysis_caller,
+            expected_count=1,
+            single_scope=single_scope,
+        )
+
+    if lower_stage is None:
+        spool, expected_count = await _capture_initial_groups(
+            _iter_initial_groups(
+                session_factory,
+                snapshot=snapshot,
+                model=model,
+                collection_name=collection_name,
+                semantic_neighbor_loader=semantic_neighbor_loader,
+            )
+        )
+        try:
+            return await _execute_plan_stage_with_known_groups(
+                session_factory,
+                snapshot=snapshot,
+                work_key=work_key,
+                stage_index=stage_index,
+                lower_stage=None,
+                model=model,
+                model_caller=model_caller,
+                analysis_caller=analysis_caller,
+                expected_count=expected_count,
+                initial_group_spool=spool,
+            )
+        finally:
+            spool.close()
+
+    expected_count = await _count_groups(_iter_reduction_groups(session_factory, lower_stage=lower_stage, model=model))
+    return await _execute_plan_stage_with_known_groups(
+        session_factory,
+        snapshot=snapshot,
+        work_key=work_key,
+        stage_index=stage_index,
+        lower_stage=lower_stage,
+        model=model,
+        model_caller=model_caller,
+        analysis_caller=analysis_caller,
+        expected_count=expected_count,
+    )
+
+
+async def _resolve_knowledge_organization_model(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    model_candidates: tuple[KnowledgeOrganizationModelConfig, ...] | None,
+) -> KnowledgeOrganizationModelConfig:
+    if model_candidates is not None:
+        resolved = tuple(model_candidates)
+    else:
+        async with session_factory() as db:
+            try:
+                resolved = await load_knowledge_organization_model_candidates(db, uid=uid)
+            except Exception as exc:
+                logger.bind(uid=uid, knowledge_base_id=knowledge_base_id).warning(t(LOG_KNOWLEDGE_ORGANIZATION_CONFIG_INVALID, error=str(exc)))
+                raise KnowledgeOrganizationConfigurationError(cause=f"{type(exc).__name__}: {exc}") from exc
+    if not resolved:
+        raise KnowledgeOrganizationConfigurationError()
+    return resolved[0]
+
+
+async def _prepare_knowledge_organization_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    organization_job_id: int,
+) -> tuple[KnowledgeOrganizationSnapshot, str]:
+    async with session_factory() as db:
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=organization_job_id,
+        )
+        knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
+        if knowledge_base is None or knowledge_base.uid != uid:
+            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
+        await db.refresh(knowledge_base)
+        if knowledge_base.active_embedding_revision != snapshot.active_embedding_revision or knowledge_base.index_revision != snapshot.index_revision:
+            raise KnowledgeOrganizationExecutionError(
+                message=ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID,
+                code=409,
+                status="organization_snapshot_stale",
+                retryable=True,
+            )
+        return snapshot, resolve_active_knowledge_base_embedding(knowledge_base).collection_name
+
+
+async def _execute_knowledge_organization_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    organization_job_id: int,
+    model_candidates: tuple[KnowledgeOrganizationModelConfig, ...] | None = None,
+    initial_model: KnowledgeOrganizationModelConfig | None = None,
+    snapshot: KnowledgeOrganizationSnapshot | None = None,
+    collection_name: str | None = None,
+    model_caller: Callable[..., Any] | None = None,
+    analysis_caller: Callable[..., Any] | None = None,
+    semantic_neighbor_loader: Callable[..., Any] | None = None,
+) -> KnowledgeOrganizationExecutionResult:
+    model = initial_model or await _resolve_knowledge_organization_model(
+        session_factory,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+        model_candidates=model_candidates,
+    )
+    call_model = model_caller or _default_model_caller
+    call_analysis = analysis_caller or _default_analysis_caller
+    load_neighbors = semantic_neighbor_loader or (lambda scope, collection: load_vector_semantic_neighbors(scope, collection_name=collection))
+
+    if snapshot is None or collection_name is None:
+        snapshot, collection_name = await _prepare_knowledge_organization_snapshot(
+            session_factory,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=organization_job_id,
+        )
+    if snapshot.item_count == 0:
+        return KnowledgeOrganizationExecutionResult(
+            plan=KnowledgeOrganizationPlan(items=()),
+            model_id=None,
+            stage_count=0,
+            snapshot_id=snapshot.id,
+        )
+
+    work_key = _work_key(snapshot, organization_job_id=organization_job_id)
+    lower_stage: KnowledgeOrganizationStage | None = None
+    stage_count = 0
+    layer_index = 0
+    while True:
+        if model_candidates is None and layer_index > 0:
+            model = await _resolve_knowledge_organization_model(
+                session_factory,
+                uid=uid,
+                knowledge_base_id=knowledge_base_id,
+                model_candidates=None,
+            )
+        single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None
+        if lower_stage is None:
+            single_scope = await _try_load_single_request_scope(
+                session_factory,
+                snapshot=snapshot,
+                model=model,
+            )
+
+        try:
+            selected_result, added_analysis_stages = await _execute_plan_stage_for_model(
+                session_factory,
+                snapshot=snapshot,
+                work_key=work_key,
+                stage_index=layer_index,
+                lower_stage=lower_stage,
+                model=model,
+                collection_name=collection_name,
+                model_caller=call_model,
+                analysis_caller=call_analysis,
+                semantic_neighbor_loader=load_neighbors,
+                single_scope=single_scope,
+            )
+            stage_count += 1 + added_analysis_stages
+        except Exception as exc:
+            if _contains_exception(exc, KnowledgeOrganizationContextExceededError):
+                raise KnowledgeOrganizationContextExceededError() from exc
+            if _contains_exception(exc, KnowledgeOrganizationNotConvergedError):
+                raise KnowledgeOrganizationNotConvergedError() from exc
+            if isinstance(exc, KnowledgeOrganizationModelFailedError):
+                raise
+            raise KnowledgeOrganizationModelFailedError(cause=f"{type(exc).__name__}: {exc}") from exc
+
+        completed_stage = selected_result.stage
+        if completed_stage.expected_fragment_count == 1:
+            return KnowledgeOrganizationExecutionResult(
+                plan=await _combine_stage_plan(session_factory, stage=completed_stage),
+                model_id=model.model_id,
+                stage_count=stage_count,
+                snapshot_id=snapshot.id,
+            )
+        lower_stage = completed_stage
+        layer_index += 1
+
+
+async def _create_direct_organization_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    knowledge_base_id: int,
+) -> tuple[int, str]:
+    run_nonce = uuid4().hex
+    worker_id = uuid4().hex
+    request_payload = {
+        "knowledge_base_id": knowledge_base_id,
+        "source": "direct_stage14",
+        "run_nonce": run_nonce,
+    }
+    request_hash = hashlib.sha256(canonical_json_dumps(request_payload).encode("utf-8")).hexdigest()
+    async with session_factory() as db:
+        knowledge_base = await knowledge_base_crud.lock_owned_by_id(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
+        if knowledge_base is None:
+            raise ResourceNotFoundException(ERR_KB_NOT_FOUND)
+        try:
+            job = await knowledge_job_crud.create_claimed(
+                db,
+                uid=uid,
+                owner=worker_id,
+                lease_seconds=KNOWLEDGE_ORGANIZATION_JOB_LEASE_SECONDS,
+                operation=KnowledgeJobOperation.MANUAL_ORGANIZE,
+                dedupe_key=f"manual-organize:{knowledge_base_id}:{run_nonce}",
+                request_hash=request_hash,
+                active_change_key=f"kb-organization:{knowledge_base_id}",
+                knowledge_base_id=knowledge_base_id,
+                payload=request_payload,
+                max_attempts=1,
+            )
+        except IntegrityError as exc:
+            await db.rollback()
+            raise KnowledgeOrganizationExecutionError(
+                message=ERR_KNOWLEDGE_JOB_ACTIVE_TARGET_BUSY,
+                code=409,
+                status="organization_target_busy",
+                retryable=True,
+            ) from exc
+        if job.id is None:
+            raise KnowledgeOrganizationExecutionError()
+        return job.id, worker_id
+
+
+async def _renew_direct_organization_job_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    job_id: int,
+    worker_id: str,
+    done: asyncio.Event,
+) -> None:
+    while not done.is_set():
+        try:
+            await asyncio.wait_for(done.wait(), timeout=KNOWLEDGE_ORGANIZATION_JOB_LEASE_RENEW_INTERVAL_SECONDS)
+            return
+        except TimeoutError:
+            pass
+        async with session_factory() as db:
+            renewed = await knowledge_job_crud.renew_lease(
+                db,
+                uid=uid,
+                job_id=job_id,
+                owner=worker_id,
+                lease_seconds=KNOWLEDGE_ORGANIZATION_JOB_LEASE_SECONDS,
+            )
+        if not renewed:
+            raise KnowledgeOrganizationExecutionError(
+                message=ERR_KNOWLEDGE_JOB_LEASE_UNAVAILABLE,
+                code=409,
+                status="organization_lease_lost",
+                retryable=True,
+            )
+
+
+async def _mark_direct_organization_job_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    uid: str,
+    job_id: int,
+    worker_id: str,
+    result: KnowledgeOrganizationExecutionResult | None,
+    error: BaseException | None,
+) -> bool:
+    async with session_factory() as db:
+        if error is None:
+            return await knowledge_job_crud.mark_succeeded(
+                db,
+                uid=uid,
+                job_id=job_id,
+                owner=worker_id,
+                result={
+                    "snapshot_id": result.snapshot_id if result is not None else None,
+                    "stage_count": result.stage_count if result is not None else 0,
+                    "model_id": result.model_id if result is not None else None,
+                },
+            )
+        return await knowledge_job_crud.mark_failed(
+            db,
+            uid=uid,
+            job_id=job_id,
+            owner=worker_id,
+            error=f"{type(error).__name__}: {error}",
+        )
 
 
 async def execute_knowledge_organization(
@@ -1523,101 +2008,99 @@ async def execute_knowledge_organization(
     analysis_caller: Callable[..., Any] | None = None,
     semantic_neighbor_loader: Callable[..., Any] | None = None,
 ) -> KnowledgeOrganizationExecutionResult:
-    async def resolve_models() -> tuple[KnowledgeOrganizationModelConfig, ...]:
-        if model_candidates is not None:
-            resolved = tuple(model_candidates)
-        else:
-            async with session_factory() as db:
-                try:
-                    resolved = await load_knowledge_organization_model_candidates(db, uid=uid)
-                except Exception as exc:
-                    logger.bind(uid=uid, knowledge_base_id=knowledge_base_id).warning(t(LOG_KNOWLEDGE_ORGANIZATION_CONFIG_INVALID, error=str(exc)))
-                    raise KnowledgeOrganizationModelFailedError(t("organization model configuration unavailable")) from exc
-        if not resolved:
-            raise KnowledgeOrganizationModelFailedError(t("organization has no model candidates"))
-        return resolved
-
-    models = await resolve_models()
-    call_model = model_caller or _default_model_caller
-    call_analysis = analysis_caller or _default_analysis_caller
-    load_neighbors = semantic_neighbor_loader or (lambda scope, collection: load_vector_semantic_neighbors(scope, collection_name=collection))
-
-    async with session_factory() as db:
-        snapshot = await create_knowledge_organization_snapshot(db, uid=uid, knowledge_base_id=knowledge_base_id)
-        knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
-        if knowledge_base is None or knowledge_base.uid != uid:
-            raise KnowledgeOrganizationModelFailedError(t("organization knowledge base missing"))
-        collection_name = resolve_active_knowledge_base_embedding(knowledge_base).collection_name
-    if snapshot.item_count == 0:
-        return KnowledgeOrganizationExecutionResult(
-            plan=KnowledgeOrganizationPlan(items=()),
-            model_id=None,
-            stage_count=0,
-            snapshot_id=snapshot.id,
+    initial_model = await _resolve_knowledge_organization_model(
+        session_factory,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+        model_candidates=model_candidates,
+    )
+    organization_job_id, worker_id = await _create_direct_organization_job(
+        session_factory,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+    )
+    try:
+        snapshot, collection_name = await _prepare_knowledge_organization_snapshot(
+            session_factory,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=organization_job_id,
         )
+    except BaseException as exc:
+        await _mark_direct_organization_job_terminal(
+            session_factory,
+            uid=uid,
+            job_id=organization_job_id,
+            worker_id=worker_id,
+            result=None,
+            error=exc,
+        )
+        raise
 
-    work_key = _work_key(snapshot)
-    lower_stage: KnowledgeOrganizationStage | None = None
-    stage_count = 0
-    layer_index = 0
-    while True:
-        if model_candidates is None and layer_index > 0:
-            models = await resolve_models()
-        selected_result: _StageExecutionResult | None = None
-        selected_model: KnowledgeOrganizationModelConfig | None = None
-        single_scope: tuple[KnowledgeOrganizationScopeItem, ...] | None = None
-        if lower_stage is None:
-            single_scope = await _try_load_single_request_scope(
-                session_factory,
-                snapshot=snapshot,
-                model=models[0],
-            )
-
-        layer_errors: list[BaseException] = []
-        for model in models:
-            model_single_scope = single_scope
-            if lower_stage is None and model is not models[0] and single_scope is None:
-                model_single_scope = await _try_load_single_request_scope(session_factory, snapshot=snapshot, model=model)
-            try:
-                selected_result, added_analysis_stages = await _execute_plan_stage_for_model(
-                    session_factory,
-                    snapshot=snapshot,
-                    work_key=work_key,
-                    stage_index=layer_index,
-                    lower_stage=lower_stage,
-                    model=model,
-                    collection_name=collection_name,
-                    model_caller=call_model,
-                    analysis_caller=call_analysis,
-                    semantic_neighbor_loader=load_neighbors,
-                    single_scope=model_single_scope,
-                )
-                stage_count += 1 + added_analysis_stages
-                selected_model = model
-                break
-            except Exception as exc:
-                layer_errors.append(exc)
-                continue
-        if selected_result is None or selected_model is None:
-            if layer_errors and all(_contains_exception(error, KnowledgeOrganizationContextExceededError) for error in layer_errors):
-                raise KnowledgeOrganizationContextExceededError(t("all organization models cannot fit minimal input")) from layer_errors[-1]
-            if layer_errors and all(_contains_exception(error, KnowledgeOrganizationNotConvergedError) for error in layer_errors):
-                raise KnowledgeOrganizationNotConvergedError(t("all organization models failed to converge")) from layer_errors[-1]
-            raise KnowledgeOrganizationModelFailedError(t("all organization models failed")) from (layer_errors[-1] if layer_errors else None)
-
-        completed_stage = selected_result.stage
-        if completed_stage.expected_fragment_count == 1:
-            return KnowledgeOrganizationExecutionResult(
-                plan=await _combine_stage_plan(session_factory, stage=completed_stage),
-                model_id=selected_model.model_id,
-                stage_count=stage_count,
-                snapshot_id=snapshot.id,
-            )
-        lower_stage = completed_stage
-        layer_index += 1
+    done = asyncio.Event()
+    run_task = asyncio.create_task(
+        _execute_knowledge_organization_run(
+            session_factory,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=organization_job_id,
+            model_candidates=model_candidates,
+            initial_model=initial_model,
+            snapshot=snapshot,
+            collection_name=collection_name,
+            model_caller=model_caller,
+            analysis_caller=analysis_caller,
+            semantic_neighbor_loader=semantic_neighbor_loader,
+        )
+    )
+    lease_task = asyncio.create_task(
+        _renew_direct_organization_job_lease(
+            session_factory,
+            uid=uid,
+            job_id=organization_job_id,
+            worker_id=worker_id,
+            done=done,
+        )
+    )
+    try:
+        completed, _pending = await asyncio.wait({run_task, lease_task}, return_when=asyncio.FIRST_COMPLETED)
+        if lease_task in completed:
+            lease_error = lease_task.exception()
+            if lease_error is not None:
+                run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
+                raise lease_error
+        result = await run_task
+        done.set()
+        await lease_task
+        if not await _mark_direct_organization_job_terminal(
+            session_factory,
+            uid=uid,
+            job_id=organization_job_id,
+            worker_id=worker_id,
+            result=result,
+            error=None,
+        ):
+            raise KnowledgeOrganizationExecutionError()
+        return result
+    except BaseException as exc:
+        done.set()
+        if not lease_task.done():
+            lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
+        await _mark_direct_organization_job_terminal(
+            session_factory,
+            uid=uid,
+            job_id=organization_job_id,
+            worker_id=worker_id,
+            result=None,
+            error=exc,
+        )
+        raise
 
 
 __all__ = [
+    "KnowledgeOrganizationConfigurationError",
     "KnowledgeOrganizationContextExceededError",
     "KnowledgeOrganizationExecutionError",
     "KnowledgeOrganizationExecutionResult",

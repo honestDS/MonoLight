@@ -16,6 +16,7 @@ from app.core.constants import (
     ERR_KNOWLEDGE_JOB_OWNER_MISMATCH,
     ERR_VALUE_MUST_BE_POSITIVE,
 )
+from app.core.crud.knowledge.managed import organization_lock_token_for_job
 from app.core.i18n import t
 from app.models.knowledge_base import (
     KnowledgeJob,
@@ -35,11 +36,22 @@ _SYSTEM_CLEANUP_OPERATIONS = {
     KnowledgeJobOperation.MANAGED_VECTOR_CLEANUP,
     KnowledgeJobOperation.OLD_COLLECTION_CLEANUP,
 }
+_ORGANIZATION_OPERATIONS = {
+    KnowledgeJobOperation.AUTO_ORGANIZE,
+    KnowledgeJobOperation.MANUAL_ORGANIZE,
+}
 
 
 def is_system_cleanup_operation(operation: KnowledgeJobOperation | str) -> bool:
     try:
         return KnowledgeJobOperation(operation) in _SYSTEM_CLEANUP_OPERATIONS
+    except (TypeError, ValueError):
+        return False
+
+
+def is_organization_operation(operation: KnowledgeJobOperation | str) -> bool:
+    try:
+        return KnowledgeJobOperation(operation) in _ORGANIZATION_OPERATIONS
     except (TypeError, ValueError):
         return False
 
@@ -192,6 +204,41 @@ class CRUDKnowledgeJob:
             await db.commit()
         await db.refresh(job)
         return job, True
+
+    async def create_claimed(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        owner: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = 300,
+        commit: bool = True,
+        **values: Any,
+    ) -> KnowledgeJob:
+        resolved_owner = _resolve_owner(owner, worker_id)
+        if lease_seconds < 1:
+            raise ValueError(t(ERR_VALUE_MUST_BE_POSITIVE, field="lease_seconds"))
+        now = await get_database_time(db)
+        job = KnowledgeJob.model_validate(
+            {
+                "uid": uid,
+                **values,
+                "status": KnowledgeJobStatus.RUNNING,
+                "attempt_count": 1,
+                "locked_by": resolved_owner,
+                "lock_until": now + timedelta(seconds=lease_seconds),
+                "started_at": now,
+                "error": None,
+                "updated_at": now,
+            }
+        )
+        db.add(job)
+        await db.flush()
+        if commit:
+            await db.commit()
+        await db.refresh(job)
+        return job
 
     async def delete_unstarted(
         self,
@@ -452,6 +499,17 @@ class CRUDKnowledgeJob:
             .execution_options(synchronize_session=False)
         )
 
+    async def _clear_organization_locks(self, db: AsyncSession, *, uid: str, job_id: int) -> None:
+        await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.organization_lock_token == organization_lock_token_for_job(job_id),
+            )
+            .values(organization_lock_token=None)
+            .execution_options(synchronize_session=False)
+        )
+
     async def _mark_terminal(
         self,
         db: AsyncSession,
@@ -490,8 +548,12 @@ class CRUDKnowledgeJob:
             .execution_options(synchronize_session=False)
         )
         changed = (update_result.rowcount or 0) == 1
-        if changed and status in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED}:
-            await self._clear_pending_reference(db, uid=uid, job_id=job_id, updated_at=now)
+        if changed:
+            terminal_job = await self.get_by_id(db, uid=uid, job_id=job_id)
+            if terminal_job is not None and is_organization_operation(terminal_job.operation):
+                await self._clear_organization_locks(db, uid=uid, job_id=job_id)
+            if status in {KnowledgeJobStatus.FAILED, KnowledgeJobStatus.CANCELLED}:
+                await self._clear_pending_reference(db, uid=uid, job_id=job_id, updated_at=now)
         if commit:
             await db.commit()
         else:
@@ -623,6 +685,8 @@ class CRUDKnowledgeJob:
                 next_status = KnowledgeJobStatus.RETRY
             elif job.cancel_requested_at is not None:
                 next_status = KnowledgeJobStatus.CANCELLED
+            elif is_organization_operation(job.operation):
+                next_status = KnowledgeJobStatus.FAILED
             elif job.operation == KnowledgeJobOperation.EMBEDDING_MIGRATION:
                 next_status = KnowledgeJobStatus.RETRY
             elif job.attempt_count >= job.max_attempts:
@@ -660,6 +724,8 @@ class CRUDKnowledgeJob:
             if (update_result.rowcount or 0) != 1:
                 continue
             if next_status in _TERMINAL_STATUSES:
+                if is_organization_operation(job.operation):
+                    await self._clear_organization_locks(db, uid=job.uid, job_id=job.id)
                 await self._clear_pending_reference(db, uid=job.uid, job_id=job.id, updated_at=now)
                 terminal_jobs.append(
                     KnowledgeJobRecoveryTerminal(
