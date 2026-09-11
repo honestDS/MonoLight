@@ -9,6 +9,8 @@ from sqlalchemy import delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.core.constants import ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID
+from app.core.i18n import t
 from app.core.utils.time import get_local_time
 from app.models.knowledge_base import KnowledgeBase, ManagedKnowledgeItem, ManagedKnowledgeRevision
 
@@ -34,6 +36,12 @@ async def _finish(db: AsyncSession, *, commit: bool) -> None:
         await db.commit()
     else:
         await db.flush()
+
+
+def organization_lock_token_for_job(job_id: int) -> str:
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
+    return f"job:{job_id}"
 
 
 class CRUDManagedKnowledgeItem:
@@ -122,6 +130,24 @@ class CRUDManagedKnowledgeItem:
             .where(
                 ManagedKnowledgeItem.uid == uid,
                 ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        return int(result.scalar() or 0)
+
+    async def count_organization_locked(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+    ) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.organization_lock_token.is_not(None),
             )
         )
         return int(result.scalar() or 0)
@@ -256,6 +282,7 @@ class CRUDManagedKnowledgeItem:
                 ManagedKnowledgeItem.id == knowledge_id,
                 ManagedKnowledgeItem.version == expected_version,
                 ManagedKnowledgeItem.deleted_at.is_(None),
+                ManagedKnowledgeItem.organization_lock_token.is_(None),
             )
             .values(**update_values)
             .execution_options(synchronize_session=False)
@@ -280,6 +307,11 @@ class CRUDManagedKnowledgeItem:
         source_job_id: int | None = None,
         commit: bool = True,
     ) -> ManagedKnowledgeItem | None:
+        await self._lock_knowledge_base_for_write(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         values: dict[str, Any] = {
             "pending_job_id": job_id,
             "updated_at": get_local_time(),
@@ -294,6 +326,7 @@ class CRUDManagedKnowledgeItem:
                 ManagedKnowledgeItem.id == knowledge_id,
                 ManagedKnowledgeItem.version == expected_version,
                 ManagedKnowledgeItem.pending_job_id.is_(None),
+                ManagedKnowledgeItem.organization_lock_token.is_(None),
             )
             .values(**values)
             .execution_options(synchronize_session=False)
@@ -315,6 +348,11 @@ class CRUDManagedKnowledgeItem:
         vector_item_ids: list[str],
         commit: bool = True,
     ) -> ManagedKnowledgeItem | None:
+        await self._lock_knowledge_base_for_write(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         result = await db.execute(
             update(ManagedKnowledgeItem)
             .where(
@@ -350,6 +388,11 @@ class CRUDManagedKnowledgeItem:
         job_id: int,
         commit: bool = True,
     ) -> bool:
+        await self._lock_knowledge_base_for_write(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+        )
         result = await db.execute(
             delete(ManagedKnowledgeItem).where(
                 ManagedKnowledgeItem.uid == uid,
@@ -364,8 +407,57 @@ class CRUDManagedKnowledgeItem:
         await _finish(db, commit=commit)
         return (result.rowcount or 0) == 1
 
+    async def acquire_organization_lock(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        expected_version: int,
+        organization_job_id: int,
+    ) -> bool:
+        lock_token = organization_lock_token_for_job(organization_job_id)
+        result = await db.execute(
+            update(ManagedKnowledgeItem)
+            .where(
+                ManagedKnowledgeItem.uid == uid,
+                ManagedKnowledgeItem.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeItem.id == knowledge_id,
+                ManagedKnowledgeItem.version == expected_version,
+                ManagedKnowledgeItem.deleted_at.is_(None),
+                ManagedKnowledgeItem.llm_maintainable.is_(True),
+                ManagedKnowledgeItem.is_recallable.is_(True),
+                ManagedKnowledgeItem.pending_job_id.is_(None),
+                ManagedKnowledgeItem.indexed_version == expected_version,
+                ManagedKnowledgeItem.organization_lock_token.is_(None),
+            )
+            .values(organization_lock_token=lock_token)
+            .execution_options(synchronize_session=False)
+        )
+        return (result.rowcount or 0) == 1
+
 
 class CRUDManagedKnowledgeRevision:
+    async def get_by_version(
+        self,
+        db: AsyncSession,
+        *,
+        uid: str,
+        knowledge_base_id: int,
+        knowledge_id: int,
+        version: int,
+    ) -> ManagedKnowledgeRevision | None:
+        result = await db.execute(
+            select(ManagedKnowledgeRevision).where(
+                ManagedKnowledgeRevision.uid == uid,
+                ManagedKnowledgeRevision.knowledge_base_id == knowledge_base_id,
+                ManagedKnowledgeRevision.knowledge_id == knowledge_id,
+                ManagedKnowledgeRevision.version == version,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_boundary_revision_id(
         self,
         db: AsyncSession,

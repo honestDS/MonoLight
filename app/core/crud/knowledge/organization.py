@@ -60,12 +60,13 @@ class CRUDKnowledgeOrganizationSnapshot:
         db: AsyncSession,
         *,
         snapshot: KnowledgeOrganizationSnapshot,
+        commit: bool = True,
     ) -> tuple[KnowledgeOrganizationSnapshot, bool]:
-        db.add(snapshot)
         try:
-            await db.commit()
+            async with db.begin_nested():
+                db.add(snapshot)
+                await db.flush()
         except IntegrityError:
-            await db.rollback()
             existing = await self.get_by_identity(
                 db,
                 uid=snapshot.uid,
@@ -75,6 +76,10 @@ class CRUDKnowledgeOrganizationSnapshot:
             if existing is None:
                 raise
             return existing, False
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(snapshot)
         return snapshot, True
 

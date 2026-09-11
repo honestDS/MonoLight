@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
     CONTEXT_WINDOW_TOKENS_PER_K,
+    ERR_KNOWLEDGE_ORGANIZATION_MODEL_CONFIG_INVALID,
     KNOWLEDGE_ORGANIZATION_CONTEXT_SAFETY_MARGIN_TOKENS,
     KNOWLEDGE_ORGANIZATION_SEMANTIC_NEIGHBOR_COUNT,
     KNOWLEDGE_ORGANIZATION_SUMMARY_MAX_TOKENS,
@@ -287,9 +288,30 @@ def validate_knowledge_organization_plan(
     )
 
 
+def _minimum_organization_input_tokens() -> int:
+    payload = [
+        {
+            "knowledge_id": 1,
+            "expected_version": 1,
+            "knowledge_key": "x",
+            "content": "x",
+            "content_hash": "0" * 64,
+            "content_token_count": 1,
+            "source_type": "managed_knowledge",
+            "source_reference": None,
+        }
+    ]
+    return max(1, estimate_tokens(canonical_json_dumps(payload)))
+
+
 def _build_model_config(channel, item: ChannelModelItem) -> KnowledgeOrganizationModelConfig:
-    if item.context_window_k is None or item.max_tokens is None:
-        raise ValueError(t("organization model budget missing"))
+    if item.context_window_k is None or item.max_tokens is None or item.max_tokens <= 0:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_MODEL_CONFIG_INVALID))
+    context_window_tokens = item.context_window_k * CONTEXT_WINDOW_TOKENS_PER_K
+    system_prompt_tokens = estimate_tokens(KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT)
+    available_input_tokens = context_window_tokens - item.max_tokens - KNOWLEDGE_ORGANIZATION_CONTEXT_SAFETY_MARGIN_TOKENS - system_prompt_tokens
+    if available_input_tokens < _minimum_organization_input_tokens():
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_MODEL_CONFIG_INVALID))
     return KnowledgeOrganizationModelConfig(
         channel_id=channel.id,
         channel_name=channel.name,
@@ -302,10 +324,10 @@ def _build_model_config(channel, item: ChannelModelItem) -> KnowledgeOrganizatio
         temperature=item.temperature if item.temperature is not None else 0.1,
         top_p=item.top_p,
         timeout=MEMORY_ORGANIZE_LLM_TIMEOUT_SECONDS,
-        context_window_tokens=item.context_window_k * CONTEXT_WINDOW_TOKENS_PER_K,
+        context_window_tokens=context_window_tokens,
         max_output_tokens=item.max_tokens,
         safety_margin_tokens=KNOWLEDGE_ORGANIZATION_CONTEXT_SAFETY_MARGIN_TOKENS,
-        system_prompt_tokens=estimate_tokens(KNOWLEDGE_ORGANIZATION_SYSTEM_PROMPT),
+        system_prompt_tokens=system_prompt_tokens,
     )
 
 
@@ -335,8 +357,7 @@ async def load_knowledge_organization_model_candidates(
     primary = next((item for item in parsed if item.model_id == store.organization_model_id), None)
     if primary is None:
         raise ValueError(t("organization primary model unavailable"))
-    ordered = [primary, *(item for item in parsed if item.model_id != primary.model_id)]
-    return tuple(_build_model_config(channel, item) for item in ordered)
+    return (_build_model_config(channel, primary),)
 
 
 def _candidate_request_payload(candidate: KnowledgeOrganizationCandidate) -> dict[str, Any]:

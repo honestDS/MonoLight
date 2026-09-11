@@ -341,6 +341,7 @@ class CRUDKnowledgeBaseMigration:
                 ManagedKnowledgeItem.__table__.c.version == bindparam("batch_version"),
                 ManagedKnowledgeItem.__table__.c.is_recallable.is_(True),
                 ManagedKnowledgeItem.__table__.c.deleted_at.is_(None),
+                ManagedKnowledgeItem.__table__.c.organization_lock_token.is_(None),
             )
             .values(
                 indexed_version=bindparam("batch_indexed_version"),

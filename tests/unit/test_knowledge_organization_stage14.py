@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,9 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 from app.core.constants import MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
+from app.core.crud.knowledge.embedding_transition import knowledge_base_migration_crud
+from app.core.crud.knowledge.job import knowledge_job_crud
+from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ResourceNotFoundException, ServerException
 from app.core.knowledge import managed as managed_module
 from app.core.knowledge import organization_executor as executor_module
 from app.core.knowledge.managed import build_managed_knowledge_snapshot
@@ -43,6 +47,9 @@ from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseType,
+    KnowledgeJob,
+    KnowledgeJobOperation,
+    KnowledgeJobStatus,
     KnowledgeOrganizationFragment,
     KnowledgeOrganizationSnapshot,
     KnowledgeOrganizationSnapshotItem,
@@ -58,6 +65,7 @@ from app.models.memory import LongTermMemoryStore
 from app.models.message import InternalMessage, InternalResponse, MessageRole
 from app.models.profile import Profile
 from app.models.prompt import PromptLibrary
+from app.providers.database.time import get_database_time
 from scripts import migration_20260910_add_knowledge_organization_stage as organization_stage_migration
 from scripts import migration_20260911_add_knowledge_organization_snapshot_items as organization_snapshot_item_migration
 
@@ -66,6 +74,7 @@ _TABLES = (
     ModelChannel.__table__,
     Profile.__table__,
     KnowledgeBase.__table__,
+    KnowledgeJob.__table__,
     ManagedKnowledgeItem.__table__,
     ManagedKnowledgeRevision.__table__,
     KnowledgeOrganizationSnapshot.__table__,
@@ -74,6 +83,23 @@ _TABLES = (
     KnowledgeOrganizationFragment.__table__,
     LongTermMemoryStore.__table__,
 )
+
+
+def test_stage14_organization_errors_follow_project_business_exception_hierarchy():
+    context_error = executor_module.KnowledgeOrganizationContextExceededError()
+    config_error = executor_module.KnowledgeOrganizationConfigurationError()
+    model_error = executor_module.KnowledgeOrganizationModelFailedError()
+    convergence_error = executor_module.KnowledgeOrganizationNotConvergedError()
+    execution_error = executor_module.KnowledgeOrganizationExecutionError()
+
+    assert isinstance(context_error, ParameterException)
+    assert isinstance(config_error, ParameterException)
+    assert isinstance(model_error, LLMException)
+    assert isinstance(convergence_error, ServerException)
+    assert isinstance(execution_error, ServerException)
+    errors = (context_error, config_error, model_error, convergence_error, execution_error)
+    assert [error.code for error in errors] == [400, 400, 502, 500, 500]
+    assert all(isinstance(error.code, int) for error in errors)
 
 
 @pytest_asyncio.fixture
@@ -177,6 +203,335 @@ async def _add_item(db: AsyncSession, *, knowledge_base_id: int, key: str, conte
     return item, revision
 
 
+async def _create_running_organization_job(db: AsyncSession, *, knowledge_base_id: int, job_id_suffix: str = "test") -> KnowledgeJob:
+    available_at = await get_database_time(db)
+    job, created = await knowledge_job_crud.create(
+        db,
+        uid="user-1",
+        operation=KnowledgeJobOperation.MANUAL_ORGANIZE,
+        dedupe_key=f"manual-organize:{knowledge_base_id}:{job_id_suffix}",
+        request_hash=hashlib.sha256(job_id_suffix.encode("utf-8")).hexdigest(),
+        active_change_key=f"kb-organization:{knowledge_base_id}",
+        knowledge_base_id=knowledge_base_id,
+        payload={"source": "test"},
+        available_at=available_at,
+        max_attempts=1,
+    )
+    assert created and job.id is not None
+    claimed = await knowledge_job_crud.try_claim(
+        db,
+        uid="user-1",
+        job_id=job.id,
+        owner=f"worker-{job_id_suffix}",
+        lease_seconds=60,
+        enabled_operations=(KnowledgeJobOperation.MANUAL_ORGANIZE,),
+    )
+    assert claimed is not None
+    return claimed
+
+
+@pytest.mark.asyncio
+async def test_stage14_snapshot_renews_job_lease_inside_freeze_transaction(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        await _add_item(db, knowledge_base_id=knowledge_base.id, key="lease-guard", content="stable content")
+        job = await _create_running_organization_job(db, knowledge_base_id=knowledge_base.id, job_id_suffix="lease-guard")
+        assert job.locked_by is not None
+
+        renew_calls = []
+        original_renew = knowledge_job_crud.renew_lease
+        clock = 0.0
+
+        def advancing_clock():
+            nonlocal clock
+            clock += 25.0
+            return clock
+
+        async def tracked_renew(db_arg, **kwargs):
+            renew_calls.append((db_arg, dict(kwargs)))
+            return await original_renew(db_arg, **kwargs)
+
+        from app.core.knowledge import organization as organization_module
+
+        monkeypatch.setattr(organization_module, "monotonic", advancing_clock)
+        monkeypatch.setattr(knowledge_job_crud, "renew_lease", tracked_renew)
+
+        await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            organization_job_id=job.id,
+        )
+
+    assert len(renew_calls) >= 3
+    assert all(db_arg is db for db_arg, _kwargs in renew_calls)
+    assert all(kwargs["owner"] == job.locked_by for _db_arg, kwargs in renew_calls)
+    assert all(kwargs["commit"] is False for _db_arg, kwargs in renew_calls)
+
+
+@pytest.mark.asyncio
+async def test_stage14_independent_lease_renewal_starts_after_snapshot_transaction(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    lease_started = asyncio.Event()
+
+    async def blocked_snapshot(*_args, **_kwargs):
+        snapshot_started.set()
+        await release_snapshot.wait()
+        raise RuntimeError("stop after snapshot transaction")
+
+    async def tracked_lease(*_args, done: asyncio.Event, **_kwargs):
+        lease_started.set()
+        await done.wait()
+
+    monkeypatch.setattr(executor_module, "create_knowledge_organization_snapshot", blocked_snapshot)
+    monkeypatch.setattr(executor_module, "_renew_direct_organization_job_lease", tracked_lease)
+
+    task = asyncio.create_task(
+        execute_knowledge_organization(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            model_candidates=(_model(input_budget_tokens=4000),),
+        )
+    )
+    await asyncio.wait_for(snapshot_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    try:
+        assert lease_started.is_set() is False
+    finally:
+        release_snapshot.set()
+    with pytest.raises(RuntimeError, match="stop after snapshot transaction"):
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", [ManagedKnowledgeActorType.USER, ManagedKnowledgeActorType.LLM])
+async def test_stage14_snapshot_locks_involved_items_against_user_and_llm_mutation(session_factory, actor):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="locked", content="original content")
+        knowledge_base_id = knowledge_base.id
+        knowledge_id = item.id
+        job = await _create_running_organization_job(db, knowledge_base_id=knowledge_base_id, job_id_suffix=f"locked-{actor.value}")
+        await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=job.id,
+        )
+
+        current = await db.get(ManagedKnowledgeItem, knowledge_id)
+        assert current is not None
+        await db.refresh(current)
+        assert current.organization_lock_token == f"job:{job.id}"
+
+    async with session_factory() as db:
+        with pytest.raises(managed_module.ManagedKnowledgeConflictError):
+            await managed_module.managed_knowledge_service.update(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base_id,
+                knowledge_id=knowledge_id,
+                expected_version=1,
+                knowledge_key="locked",
+                content="changed during organization",
+                source_type=ManagedKnowledgeSourceType.USER_API if actor == ManagedKnowledgeActorType.USER else ManagedKnowledgeSourceType.LLM_TOOL,
+                actor=actor,
+            )
+
+    async with session_factory() as db:
+        with pytest.raises(managed_module.ManagedKnowledgeConflictError):
+            await managed_module.managed_knowledge_service.delete(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base_id,
+                knowledge_id=knowledge_id,
+                expected_version=1,
+                source_type=ManagedKnowledgeSourceType.USER_API if actor == ManagedKnowledgeActorType.USER else ManagedKnowledgeSourceType.LLM_TOOL,
+                actor=actor,
+            )
+
+
+@pytest.mark.asyncio
+async def test_stage14_expired_organization_job_fails_and_releases_persistent_item_locks(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="orphan-lock", content="stable content")
+        job = await _create_running_organization_job(db, knowledge_base_id=knowledge_base.id, job_id_suffix="orphan")
+        await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            organization_job_id=job.id,
+        )
+        job.lock_until = job.started_at - timedelta(seconds=1)
+        db.add(job)
+        await db.commit()
+
+    async with session_factory() as db:
+        recovery = await knowledge_job_crud.recover_expired(db, max_attempts_error="expired")
+        recovered = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job.id)
+        current = await db.get(ManagedKnowledgeItem, item.id)
+
+    assert recovery.failed == 1
+    assert recovery.retried == 0
+    assert recovered is not None and recovered.status == KnowledgeJobStatus.FAILED
+    assert current is not None and current.organization_lock_token is None
+
+
+@pytest.mark.asyncio
+async def test_stage14_snapshot_rejects_nonrunning_organization_job_as_lock_owner(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="invalid-owner", content="stable content")
+        available_at = await get_database_time(db)
+        job, created = await knowledge_job_crud.create(
+            db,
+            uid="user-1",
+            operation=KnowledgeJobOperation.MANUAL_ORGANIZE,
+            dedupe_key=f"manual-organize:{knowledge_base.id}:pending-owner",
+            request_hash=hashlib.sha256(b"pending-owner").hexdigest(),
+            active_change_key=f"kb-organization:{knowledge_base.id}",
+            knowledge_base_id=knowledge_base.id,
+            payload={"source": "test"},
+            available_at=available_at,
+            max_attempts=1,
+        )
+        assert created and job.id is not None
+
+        with pytest.raises(managed_module.ManagedKnowledgeConflictError):
+            await create_knowledge_organization_snapshot(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base.id,
+                organization_job_id=job.id,
+            )
+        current = await db.get(ManagedKnowledgeItem, item.id)
+
+    assert current is not None and current.organization_lock_token is None
+
+
+@pytest.mark.asyncio
+async def test_stage14_direct_runs_are_serialized_by_persistent_active_change_key(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+
+    first_job_id, first_worker = await executor_module._create_direct_organization_job(
+        session_factory,
+        uid="user-1",
+        knowledge_base_id=knowledge_base.id,
+    )
+    with pytest.raises(executor_module.KnowledgeOrganizationExecutionError) as exc_info:
+        await executor_module._create_direct_organization_job(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
+    assert exc_info.value.code == 409
+    assert exc_info.value.data == {"status": "organization_target_busy", "retryable": True}
+
+    async with session_factory() as db:
+        assert await knowledge_job_crud.mark_failed(
+            db,
+            uid="user-1",
+            job_id=first_job_id,
+            owner=first_worker,
+            error="test cleanup",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage14_direct_run_reports_missing_knowledge_base_instead_of_busy(session_factory):
+    with pytest.raises(ResourceNotFoundException) as exc_info:
+        await executor_module._create_direct_organization_job(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=999,
+        )
+
+    assert exc_info.value.code == 404
+
+
+@pytest.mark.asyncio
+async def test_stage14_direct_run_is_created_already_claimed_without_pending_claim_window(session_factory, monkeypatch: pytest.MonkeyPatch):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+
+    async def unexpected_claim(*_args, **_kwargs):
+        raise AssertionError("direct organization runs must not use a second-step claim")
+
+    monkeypatch.setattr(knowledge_job_crud, "try_claim", unexpected_claim)
+
+    job_id, worker_id = await executor_module._create_direct_organization_job(
+        session_factory,
+        uid="user-1",
+        knowledge_base_id=knowledge_base.id,
+    )
+
+    async with session_factory() as db:
+        job = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job_id)
+
+    assert job is not None
+    assert job.status == KnowledgeJobStatus.RUNNING
+    assert job.locked_by == worker_id
+    assert job.lock_until is not None
+    assert job.attempt_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_stage14_execution_holds_item_lock_until_success_or_failure_then_releases_it(session_factory, fail):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="task-lock", content="stable content")
+        knowledge_base_id = knowledge_base.id
+        knowledge_id = item.id
+
+    async def model_caller(_model_config, *, scope):
+        async with session_factory() as db:
+            current = await db.get(ManagedKnowledgeItem, knowledge_id)
+            assert current is not None
+            assert current.organization_lock_token is not None
+        if fail:
+            raise RuntimeError("forced organization failure")
+        return _keep_plan_for_scope(scope)
+
+    if fail:
+        with pytest.raises(executor_module.KnowledgeOrganizationModelFailedError):
+            await execute_knowledge_organization(
+                session_factory,
+                uid="user-1",
+                knowledge_base_id=knowledge_base_id,
+                model_candidates=(_model(input_budget_tokens=4000),),
+                model_caller=model_caller,
+                semantic_neighbor_loader=lambda _scope, _collection: {},
+            )
+    else:
+        await execute_knowledge_organization(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base_id,
+            model_candidates=(_model(input_budget_tokens=4000),),
+            model_caller=model_caller,
+            semantic_neighbor_loader=lambda _scope, _collection: {},
+        )
+
+    async with session_factory() as db:
+        current = await db.get(ManagedKnowledgeItem, knowledge_id)
+        assert current is not None
+        assert current.organization_lock_token is None
+
+
 def test_stage14_managed_knowledge_limit_and_database_text_type(monkeypatch: pytest.MonkeyPatch):
     assert MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS == 16384
     assert ManagedKnowledgeItem.__table__.c.content.type.compile(dialect=mysql.dialect()) == "LONGTEXT"
@@ -272,6 +627,49 @@ async def test_stage14_snapshot_keeps_frozen_revision_after_current_item_changes
         assert resolved[0]["expected_version"] == 1
         assert resolved[0]["content"] == "content at frozen boundary"
         assert resolved[0]["content_reference"] == {"revision_id": revision.id, "version": 1}
+
+
+@pytest.mark.asyncio
+async def test_stage14_snapshot_uses_current_index_vector_ids_without_mutating_content_revision(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="migrated-index", content="stable content")
+        original_revision_snapshot = dict(revision.after_snapshot)
+        item.vector_item_ids = ["new-active-vector-1", "new-active-vector-2"]
+        item.indexed_version = item.version
+        knowledge_base.active_embedding_revision += 1
+        knowledge_base.index_revision += 1
+        await db.commit()
+
+        snapshot = await create_knowledge_organization_snapshot(db, uid="user-1", knowledge_base_id=knowledge_base.id)
+        resolved = [entry async for entry in iter_knowledge_organization_snapshot_items(db, snapshot=snapshot)]
+        await db.refresh(revision)
+
+    assert resolved[0]["vector_item_ids"] == ["new-active-vector-1", "new-active-vector-2"]
+    assert revision.after_snapshot == original_revision_snapshot
+
+
+@pytest.mark.asyncio
+async def test_stage14_embedding_switch_cannot_rebind_vectors_while_item_is_organization_locked(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="migration-lock", content="stable content")
+        job = await _create_running_organization_job(db, knowledge_base_id=knowledge_base.id, job_id_suffix="migration-lock")
+        await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            organization_job_id=job.id,
+        )
+
+        changed = await knowledge_base_migration_crud.update_managed_vectors_batch(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            updates=[(item.id, item.version, ["migration-vector"])],
+        )
+
+    assert changed is False
 
 
 def _candidate(knowledge_id: int, key: str, content: str, *, source: str | None = None) -> KnowledgeOrganizationCandidate:
@@ -419,6 +817,57 @@ def test_stage14_plan_validation_enforces_scope_coverage_versions_and_target_con
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_window_k", "max_tokens"),
+    [(64, 0), (1, 700)],
+    ids=["zero-output-budget", "no-organization-input-budget"],
+)
+async def test_stage14_model_config_rejects_unusable_budget_before_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_window_k: int,
+    max_tokens: int,
+):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        knowledge_base_id = knowledge_base.id
+        channel = ModelChannel(
+            name=f"invalid-organization-budget-{context_window_k}-{max_tokens}",
+            api_key="secret-api-key",
+            base_url="https://example.invalid",
+            model_ids=[
+                {
+                    "model_id": "primary",
+                    "usage": "CHAT",
+                    "protocol": "OPENAI",
+                    "context_window_k": context_window_k,
+                    "max_tokens": max_tokens,
+                    "is_enabled": True,
+                }
+            ],
+        )
+        db.add(channel)
+        await db.flush()
+        db.add(
+            LongTermMemoryStore(
+                uid="user-1",
+                organization_channel_id=channel.id,
+                organization_model_id="primary",
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(ValueError):
+            await load_knowledge_organization_model_candidates(db, uid="user-1")
+
+    with pytest.raises(executor_module.KnowledgeOrganizationConfigurationError):
+        await execute_knowledge_organization(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_stage14_model_candidates_are_resolved_from_current_config_without_persisting_connection_secrets(session_factory):
     async with session_factory() as db:
         channel = ModelChannel(
@@ -479,7 +928,7 @@ async def test_stage14_model_candidates_are_resolved_from_current_config_without
         await db.commit()
 
         candidates = await load_knowledge_organization_model_candidates(db, uid="user-1")
-        assert [candidate.model_id for candidate in candidates] == ["primary", "fallback-1", "fallback-2"]
+        assert [candidate.model_id for candidate in candidates] == ["primary"]
         assert candidates[0].context_window_tokens == 128000
         assert candidates[0].max_output_tokens == 8192
 
@@ -711,6 +1160,54 @@ async def test_stage14_large_snapshot_uses_multiple_fragments_then_merges_to_one
 
 
 @pytest.mark.asyncio
+async def test_stage14_initial_grouping_reuses_one_frozen_neighbor_result_for_count_and_execution(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        for index in range(3):
+            await _add_item(
+                db,
+                knowledge_base_id=knowledge_base.id,
+                key=f"neighbor-{index}",
+                content=(f"fact{index} " * 20).strip(),
+            )
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
+
+    neighbor_calls = 0
+
+    async def changing_neighbors(_scope, _collection):
+        nonlocal neighbor_calls
+        neighbor_calls += 1
+        if neighbor_calls == 1:
+            return {1: {2}, 2: {1}}
+        return {}
+
+    stage_result, analysis_stage_count = await executor_module._execute_plan_stage_for_model(
+        session_factory,
+        snapshot=snapshot,
+        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        stage_index=0,
+        lower_stage=None,
+        model=_model(input_budget_tokens=250),
+        collection_name=knowledge_base.active_collection_name,
+        model_caller=lambda _model_config, *, scope: _keep_plan_for_scope(scope),
+        analysis_caller=lambda _model_config, *, content: content,
+        semantic_neighbor_loader=changing_neighbors,
+    )
+
+    assert neighbor_calls == 1
+    assert analysis_stage_count == 0
+    assert stage_result.stage.expected_fragment_count == 2
+    async with session_factory() as db:
+        persisted_stage = await db.get(KnowledgeOrganizationStage, stage_result.stage.id)
+    assert persisted_stage is not None
+    assert persisted_stage.status == KnowledgeOrganizationStageStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_stage14_reduction_keep_preserves_lower_update_action(session_factory):
     async with session_factory() as db:
         knowledge_base = await _create_managed_container(db)
@@ -865,6 +1362,352 @@ def test_stage14_reduction_preserves_existing_merge_without_new_action_type():
     assert {item.action for item in effective_plan.items} <= {"keep", "update", "merge", "conflict"}
 
 
+def test_stage14_reduction_new_single_source_update_replaces_lower_update():
+    lower_plan = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "update",
+                    "source": {"knowledge_id": 1, "expected_version": 1},
+                    "target": {"knowledge_key": "topic-v1", "content": "first proposed content"},
+                    "summary": "first proposal",
+                }
+            ]
+        }
+    )
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1),),
+            knowledge_key="topic-v1",
+            content="first proposal",
+            content_hash=hashlib.sha256(b"first proposed content").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=lower_plan.items[0],
+        ),
+    )
+    upper_plan = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "update",
+                    "source": {"knowledge_id": 1, "expected_version": 1},
+                    "target": {"knowledge_key": "topic-v2", "content": "second proposed content"},
+                    "summary": "second proposal",
+                }
+            ]
+        }
+    )
+
+    effective_plan, output_scope = executor_module._compose_scope_plan(upper_plan, scope=scope)
+
+    assert effective_plan.items[0].action == "update"
+    assert effective_plan.items[0].target.knowledge_key == "topic-v2"
+    assert effective_plan.items[0].target.content == "second proposed content"
+    assert output_scope[0].effective_item == effective_plan.items[0]
+
+
+def test_stage14_schema_rejects_single_source_conflict_before_reduction_composition():
+    with pytest.raises(ValueError):
+        KnowledgeOrganizationPlan.model_validate(
+            {
+                "items": [
+                    {
+                        "action": "conflict",
+                        "sources": [{"knowledge_id": 1, "expected_version": 1}],
+                        "reason": "uncertain",
+                        "summary": "uncertain",
+                    }
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize("upper_action", ["conflict", "merge"])
+def test_stage14_reduction_cannot_change_existing_multi_source_action_without_combining_candidates(upper_action: str):
+    lower_merge = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "merge",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "primary_knowledge_id": 1,
+                    "target": {"knowledge_key": "merged", "content": "canonical merged content"},
+                    "summary": "merged summary",
+                }
+            ]
+        }
+    ).items[0]
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1), (2, 1)),
+            knowledge_key="merged",
+            content="merged summary",
+            content_hash=hashlib.sha256(b"canonical merged content").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=lower_merge,
+        ),
+    )
+    if upper_action == "conflict":
+        raw_item = {
+            "action": "conflict",
+            "sources": [
+                {"knowledge_id": 1, "expected_version": 1},
+                {"knowledge_id": 2, "expected_version": 1},
+            ],
+            "reason": "changed interpretation",
+            "summary": "changed",
+        }
+    else:
+        raw_item = {
+            "action": "merge",
+            "sources": [
+                {"knowledge_id": 1, "expected_version": 1},
+                {"knowledge_id": 2, "expected_version": 1},
+            ],
+            "primary_knowledge_id": 1,
+            "target": {"knowledge_key": "different", "content": "different merged target"},
+            "summary": "changed",
+        }
+    upper_plan = KnowledgeOrganizationPlan.model_validate({"items": [raw_item]})
+
+    with pytest.raises(ValueError):
+        executor_module._compose_scope_plan(upper_plan, scope=scope)
+
+
+def test_stage14_reduction_existing_conflict_keeps_effective_action_and_accepts_new_compact_summary():
+    lower_conflict = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "conflict",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "reason": "lower unresolved reason",
+                    "summary": "lower conflict summary",
+                }
+            ]
+        }
+    ).items[0]
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1), (2, 1)),
+            knowledge_key="conflict-1-2",
+            content="lower conflict summary",
+            content_hash=hashlib.sha256(b"lower conflict summary").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=lower_conflict,
+        ),
+    )
+    upper_plan = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "conflict",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "reason": "upper comparison still unresolved",
+                    "summary": "new compact conflict summary",
+                }
+            ]
+        }
+    )
+
+    effective_plan, output_scope = executor_module._compose_scope_plan(upper_plan, scope=scope)
+
+    assert effective_plan.items[0] == lower_conflict
+    assert output_scope[0].effective_item == lower_conflict
+    assert output_scope[0].content == "new compact conflict summary"
+
+
+def test_stage14_reduction_existing_merge_rejects_primary_change_even_when_compact_target_matches():
+    lower_merge = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "merge",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "primary_knowledge_id": 1,
+                    "target": {"knowledge_key": "merged", "content": "canonical merged content"},
+                    "summary": "compact merged summary",
+                }
+            ]
+        }
+    ).items[0]
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1), (2, 1)),
+            knowledge_key="merged",
+            content="compact merged summary",
+            content_hash=hashlib.sha256(b"canonical merged content").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=lower_merge,
+        ),
+    )
+    changed_primary = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "merge",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "primary_knowledge_id": 2,
+                    "target": {"knowledge_key": "merged", "content": "compact merged summary"},
+                    "summary": "still merged",
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError):
+        executor_module._compose_scope_plan(changed_primary, scope=scope)
+
+
+def test_stage14_reduction_can_create_conflict_by_combining_multiple_previous_candidates():
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1),),
+            knowledge_key="topic-a",
+            content="alpha",
+            content_hash=hashlib.sha256(b"alpha").hexdigest(),
+            source_type="organization_fragment",
+        ),
+        KnowledgeOrganizationScopeItem(
+            sources=((2, 1),),
+            knowledge_key="topic-b",
+            content="beta",
+            content_hash=hashlib.sha256(b"beta").hexdigest(),
+            source_type="organization_fragment",
+        ),
+    )
+    upper_conflict = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "conflict",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 2, "expected_version": 1},
+                    ],
+                    "reason": "incompatible facts",
+                    "summary": "conflicting alpha and beta",
+                }
+            ]
+        }
+    )
+
+    effective_plan, output_scope = executor_module._compose_scope_plan(upper_conflict, scope=scope)
+
+    assert effective_plan.items[0].action == "conflict"
+    assert output_scope[0].sources == ((1, 1), (2, 1))
+
+
+def test_stage14_reduction_rejects_single_candidate_merge_without_combining_previous_candidates():
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1),),
+            knowledge_key="topic-a",
+            content="alpha",
+            content_hash=hashlib.sha256(b"alpha").hexdigest(),
+            source_type="organization_fragment",
+        ),
+    )
+    invalid_merge = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "merge",
+                    "sources": [
+                        {"knowledge_id": 1, "expected_version": 1},
+                        {"knowledge_id": 1, "expected_version": 1},
+                    ],
+                    "primary_knowledge_id": 1,
+                    "target": {"knowledge_key": "topic-a", "content": "alpha"},
+                    "summary": "invalid merge",
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError):
+        executor_module._compose_scope_plan(invalid_merge, scope=scope)
+
+
+def test_stage14_reduction_keep_revalidates_inherited_targets_across_fragments():
+    first_update = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "update",
+                    "source": {"knowledge_id": 1, "expected_version": 1},
+                    "target": {"knowledge_key": "shared-target", "content": "first revised content"},
+                    "summary": "first update",
+                }
+            ]
+        }
+    ).items[0]
+    second_update = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "update",
+                    "source": {"knowledge_id": 2, "expected_version": 1},
+                    "target": {"knowledge_key": "shared-target", "content": "second revised content"},
+                    "summary": "second update",
+                }
+            ]
+        }
+    ).items[0]
+    scope = (
+        KnowledgeOrganizationScopeItem(
+            sources=((1, 1),),
+            knowledge_key="shared-target",
+            content="first update",
+            content_hash=hashlib.sha256(b"first revised content").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=first_update,
+        ),
+        KnowledgeOrganizationScopeItem(
+            sources=((2, 1),),
+            knowledge_key="shared-target",
+            content="second update",
+            content_hash=hashlib.sha256(b"second revised content").hexdigest(),
+            source_type="organization_fragment",
+            effective_item=second_update,
+        ),
+    )
+    upper_plan = KnowledgeOrganizationPlan.model_validate(
+        {
+            "items": [
+                {
+                    "action": "keep",
+                    "source": {"knowledge_id": 1, "expected_version": 1},
+                    "summary": "keep first",
+                },
+                {
+                    "action": "keep",
+                    "source": {"knowledge_id": 2, "expected_version": 1},
+                    "summary": "keep second",
+                },
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError):
+        executor_module._compose_scope_plan(upper_plan, scope=scope)
+
+
 @pytest.mark.asyncio
 async def test_stage14_each_reduction_layer_resolves_current_model_config(session_factory, monkeypatch: pytest.MonkeyPatch):
     async with session_factory() as db:
@@ -941,19 +1784,21 @@ async def test_stage14_rejects_and_logs_when_current_model_config_is_unavailable
     monkeypatch.setattr(executor_module, "load_knowledge_organization_model_candidates", unavailable)
     monkeypatch.setattr(executor_module, "logger", _Logger())
 
-    with pytest.raises(executor_module.KnowledgeOrganizationModelFailedError):
+    with pytest.raises(executor_module.KnowledgeOrganizationConfigurationError) as exc_info:
         await execute_knowledge_organization(
             session_factory,
             uid="user-1",
             knowledge_base_id=1,
         )
 
+    assert exc_info.value.code == 400
+    assert exc_info.value.data == {"status": "organization_model_config_invalid", "retryable": False}
     assert len(warnings) == 1
     assert "organization primary model unavailable" in warnings[0]
 
 
 @pytest.mark.asyncio
-async def test_stage14_primary_model_fails_three_times_then_invalidates_and_uses_fallback(session_factory):
+async def test_stage14_primary_model_fails_three_times_without_using_unselected_model(session_factory):
     async with session_factory() as db:
         knowledge_base = await _create_managed_container(db)
         await _add_item(db, knowledge_base_id=knowledge_base.id, key="fallback", content="fallback knowledge")
@@ -968,25 +1813,24 @@ async def test_stage14_primary_model_fails_three_times_then_invalidates_and_uses
             raise RuntimeError("model unavailable")
         return _keep_plan_for_scope(scope)
 
-    result = await execute_knowledge_organization(
-        session_factory,
-        uid="user-1",
-        knowledge_base_id=knowledge_base.id,
-        model_candidates=(primary, fallback),
-        model_caller=model_caller,
-        semantic_neighbor_loader=lambda _scope, _collection: {},
-    )
-    assert attempts == ["model-a", "model-a", "model-a", "model-b"]
-    assert result.model_id == "model-b"
+    with pytest.raises(executor_module.KnowledgeOrganizationModelFailedError) as exc_info:
+        await execute_knowledge_organization(
+            session_factory,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            model_candidates=(primary, fallback),
+            model_caller=model_caller,
+            semantic_neighbor_loader=lambda _scope, _collection: {},
+        )
+    assert exc_info.value.code == 502
+    assert exc_info.value.data == {"status": "organization_model_execution_failed", "retryable": True}
+    assert attempts == ["model-a", "model-a", "model-a"]
 
     async with session_factory() as db:
         stages = list((await db.execute(select(KnowledgeOrganizationStage).order_by(KnowledgeOrganizationStage.id))).scalars().all())
-        assert [stage.status for stage in stages] == [
-            KnowledgeOrganizationStageStatus.INVALIDATED,
-            KnowledgeOrganizationStageStatus.COMPLETED,
-        ]
+        assert [stage.status for stage in stages] == [KnowledgeOrganizationStageStatus.INVALIDATED]
         assert all("frozen_candidates" not in stage.model_snapshot for stage in stages)
-        assert [stage.model_snapshot["execution_model"]["model_id"] for stage in stages] == ["model-a", "model-b"]
+        assert [stage.model_snapshot["execution_model"]["model_id"] for stage in stages] == ["model-a"]
 
 
 @pytest.mark.asyncio
@@ -1026,6 +1870,111 @@ async def test_stage14_long_single_item_is_fully_analyzed_before_organization(se
     assert len(result.plan.items) == 1
     assert result.plan.items[0].source.knowledge_id == 1
     assert result.stage_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_stage14_long_item_split_accounts_for_serialized_analysis_payload(session_factory):
+    content = '\\"' * 1000
+    raw_tokens = executor_module.estimate_tokens(content)
+    serialized_tokens = executor_module.estimate_tokens(executor_module.canonical_json_dumps({"content": content}))
+    assert serialized_tokens > raw_tokens + 32
+
+    prompt_tokens = executor_module.estimate_tokens(executor_module.KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT)
+    analysis_output_tokens = 256
+    safety_margin_tokens = 64
+    available_payload_tokens = raw_tokens + 32
+    model = replace(
+        _model(input_budget_tokens=4000),
+        context_window_tokens=prompt_tokens + analysis_output_tokens + safety_margin_tokens + available_payload_tokens,
+        max_output_tokens=analysis_output_tokens,
+        safety_margin_tokens=safety_margin_tokens,
+    )
+
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(
+            db,
+            knowledge_base_id=knowledge_base.id,
+            key="escaped-json",
+            content=content,
+        )
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
+
+    scope_item = KnowledgeOrganizationScopeItem(
+        sources=((item.id, item.version),),
+        knowledge_key=item.knowledge_key,
+        content=content,
+        content_hash=item.content_hash,
+        source_type=item.source_type.value,
+        source_reference=item.source_reference,
+        vector_item_ids=tuple(item.vector_item_ids),
+    )
+    analyzed_parts: list[str] = []
+
+    async def analysis_caller(_model_config, *, content):
+        payload_tokens = executor_module.estimate_tokens(executor_module.canonical_json_dumps({"content": content}))
+        if payload_tokens > available_payload_tokens:
+            raise KnowledgeOrganizationContextExceededError("serialized analysis payload exceeds budget")
+        analyzed_parts.append(content)
+        return "s"
+
+    reduced, _stage = await executor_module._execute_analysis_stage(
+        session_factory,
+        snapshot=snapshot,
+        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        model=model,
+        scope_item=scope_item,
+        content=content,
+        analysis_layer=0,
+        analysis_caller=analysis_caller,
+    )
+
+    assert len(analyzed_parts) > 1
+    assert "".join(analyzed_parts) == content
+    assert reduced
+
+
+@pytest.mark.asyncio
+async def test_stage14_single_candidate_budget_uses_final_array_payload_and_compacts_instead_of_failing(session_factory):
+    content = "payload boundary detail " * 24
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        item, _revision = await _add_item(db, knowledge_base_id=knowledge_base.id, key="payload-boundary", content=content)
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
+
+    scope_item = KnowledgeOrganizationScopeItem(
+        sources=((item.id, item.version),),
+        knowledge_key=item.knowledge_key,
+        content=content,
+        content_hash=item.content_hash,
+        source_type=item.source_type.value,
+        source_reference=item.source_reference,
+        vector_item_ids=tuple(item.vector_item_ids),
+    )
+    item_tokens = executor_module._scope_item_tokens(scope_item)
+    actual_payload_tokens = executor_module._scope_tokens((scope_item,))
+    assert actual_payload_tokens > item_tokens
+    model = _model(input_budget_tokens=item_tokens)
+
+    prepared, analysis_stage_count = await executor_module._prepare_scope_for_model(
+        session_factory,
+        snapshot=snapshot,
+        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        model=model,
+        scope=(scope_item,),
+        analysis_caller=lambda _model_config, *, content: "compact summary",
+    )
+
+    assert analysis_stage_count > 0
+    assert executor_module._scope_tokens(prepared) <= model.input_budget_tokens
 
 
 @pytest.mark.asyncio
@@ -1088,7 +2037,9 @@ async def test_stage14_context_exceeded_is_only_used_when_minimum_analysis_input
             model_caller=lambda _model_config, *, scope: _keep_plan_for_scope(scope),
             semantic_neighbor_loader=lambda _scope, _collection: {},
         )
-    assert exc_info.value.code == "organization_context_exceeded"
+    assert isinstance(exc_info.value, BaseBusinessException)
+    assert exc_info.value.code == 400
+    assert exc_info.value.data == {"status": "organization_context_exceeded", "retryable": False}
 
 
 @pytest.mark.asyncio
@@ -1287,3 +2238,149 @@ async def test_stage14_completed_analysis_stage_revalidates_strict_decrease(monk
             analysis_caller=lambda _model_config, *, content: content,
         )
     assert invalidated is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_status", [KnowledgeOrganizationStageStatus.INVALIDATED, KnowledgeOrganizationStageStatus.FAILED])
+async def test_stage14_new_execution_retries_failed_stage_without_changing_snapshot_or_model(session_factory, failed_status):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        await _add_item(db, knowledge_base_id=knowledge_base.id, key="retry-topic", content="retry knowledge")
+
+    calls = 0
+
+    async def unavailable(_model_config, *, scope):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("temporary model failure")
+
+    arguments = dict(
+        uid="user-1",
+        knowledge_base_id=knowledge_base.id,
+        model_candidates=(_model(input_budget_tokens=4000),),
+        semantic_neighbor_loader=lambda _scope, _collection: {},
+    )
+    with pytest.raises(executor_module.KnowledgeOrganizationModelFailedError):
+        await execute_knowledge_organization(session_factory, **arguments, model_caller=unavailable)
+    assert calls == 3
+    async with session_factory() as db:
+        old = (await db.execute(select(KnowledgeOrganizationStage))).scalar_one()
+        old.status = failed_status
+        await db.commit()
+        old_id, old_snapshot_id, old_error = old.id, old.snapshot_id, old.error
+
+    async def recovered(_model_config, *, scope):
+        nonlocal calls
+        calls += 1
+        return _keep_plan_for_scope(scope)
+
+    result = await execute_knowledge_organization(session_factory, **arguments, model_caller=recovered)
+    assert calls == 4
+    assert result.snapshot_id == old_snapshot_id
+    assert len(result.plan.items) == 1
+    async with session_factory() as db:
+        stages = list((await db.execute(select(KnowledgeOrganizationStage).order_by(KnowledgeOrganizationStage.id))).scalars())
+        assert len(stages) == 2
+        assert stages[0].id == old_id
+        assert stages[0].status == failed_status
+        assert stages[0].error == old_error
+        assert stages[1].status == KnowledgeOrganizationStageStatus.COMPLETED
+        assert stages[0].work_key != stages[1].work_key
+        assert stages[0].model_key == stages[1].model_key
+        assert stages[0].stage_key != stages[1].stage_key
+        fragments = list((await db.execute(select(KnowledgeOrganizationFragment))).scalars())
+        assert [fragment.stage_id for fragment in fragments] == [stages[1].id]
+
+
+@pytest.mark.asyncio
+async def test_stage14_new_execution_never_resumes_running_stage_from_previous_task(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        await _add_item(db, knowledge_base_id=knowledge_base.id, key="resume-topic", content="resume knowledge")
+        previous_job = await _create_running_organization_job(
+            db,
+            knowledge_base_id=knowledge_base.id,
+            job_id_suffix="previous-task",
+        )
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            organization_job_id=previous_job.id,
+        )
+
+    model = _model(input_budget_tokens=4000)
+    seeded = await executor_module._create_stage(
+        session_factory,
+        snapshot=snapshot,
+        work_key=executor_module._work_key(snapshot, organization_job_id=previous_job.id),
+        stage_index=0,
+        lower_stage_key=None,
+        model=model,
+        expected_fragment_count=1,
+        purpose="initial",
+    )
+    assert seeded.status == KnowledgeOrganizationStageStatus.RUNNING
+
+    async with session_factory() as db:
+        assert await knowledge_job_crud.mark_failed(
+            db,
+            uid="user-1",
+            job_id=previous_job.id,
+            owner=previous_job.locked_by,
+            error="simulated previous task failure",
+        )
+
+    result = await execute_knowledge_organization(
+        session_factory,
+        uid="user-1",
+        knowledge_base_id=knowledge_base.id,
+        model_candidates=(model,),
+        model_caller=lambda _model_config, *, scope: _keep_plan_for_scope(scope),
+        semantic_neighbor_loader=lambda _scope, _collection: {},
+    )
+    assert len(result.plan.items) == 1
+
+    async with session_factory() as db:
+        stages = list((await db.execute(select(KnowledgeOrganizationStage).order_by(KnowledgeOrganizationStage.id))).scalars())
+        assert len(stages) == 2
+        assert stages[0].id == seeded.id
+        assert stages[0].status == KnowledgeOrganizationStageStatus.RUNNING
+        assert stages[1].status == KnowledgeOrganizationStageStatus.COMPLETED
+        assert stages[1].work_key != stages[0].work_key
+
+
+@pytest.mark.asyncio
+async def test_stage14_new_execution_retries_failed_long_item_analysis(session_factory):
+    async with session_factory() as db:
+        knowledge_base = await _create_managed_container(db)
+        await _add_item(db, knowledge_base_id=knowledge_base.id, key="long-retry", content=" ".join(f"fact-{index}" for index in range(500)))
+
+    async def unavailable(_model_config, *, content):
+        raise RuntimeError("temporary analysis failure")
+
+    arguments = dict(
+        uid="user-1",
+        knowledge_base_id=knowledge_base.id,
+        model_candidates=(_model(input_budget_tokens=180),),
+        model_caller=lambda _model_config, *, scope: _keep_plan_for_scope(scope),
+        semantic_neighbor_loader=lambda _scope, _collection: {},
+    )
+    with pytest.raises(executor_module.KnowledgeOrganizationModelFailedError):
+        await execute_knowledge_organization(session_factory, **arguments, analysis_caller=unavailable)
+    async with session_factory() as db:
+        previous = list((await db.execute(select(KnowledgeOrganizationStage))).scalars())
+        assert len(previous) == 2
+        old_keys = {stage.stage_key for stage in previous}
+        assert all(stage.status == KnowledgeOrganizationStageStatus.INVALIDATED for stage in previous)
+
+    result = await execute_knowledge_organization(
+        session_factory,
+        **arguments,
+        analysis_caller=lambda _model_config, *, content: "compact summary",
+    )
+    assert len(result.plan.items) == 1
+    async with session_factory() as db:
+        stages = list((await db.execute(select(KnowledgeOrganizationStage))).scalars())
+        assert all(stage.status == KnowledgeOrganizationStageStatus.INVALIDATED for stage in stages if stage.stage_key in old_keys)
+        assert any(stage.status == KnowledgeOrganizationStageStatus.COMPLETED and stage.model_snapshot["purpose"].startswith("analysis:") for stage in stages)

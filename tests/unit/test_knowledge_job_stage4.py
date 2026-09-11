@@ -20,6 +20,7 @@ from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import BaseBusinessException
 from app.core.knowledge.managed import managed_knowledge_service
+from app.core.knowledge.organization import create_knowledge_organization_snapshot
 from app.core.knowledge.recall import (
     filter_recallable_managed_hits,
     materialize_recallable_managed_hits,
@@ -50,6 +51,8 @@ from app.models.knowledge_base import (
     KnowledgeJob,
     KnowledgeJobOperation,
     KnowledgeJobStatus,
+    KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationSnapshotItem,
     ManagedKnowledgeActorType,
     ManagedKnowledgeItem,
     ManagedKnowledgeRevision,
@@ -67,6 +70,8 @@ _TABLES = (
     KnowledgeBaseCollectionOwner.__table__,
     ManagedKnowledgeItem.__table__,
     ManagedKnowledgeRevision.__table__,
+    KnowledgeOrganizationSnapshot.__table__,
+    KnowledgeOrganizationSnapshotItem.__table__,
     KnowledgeJob.__table__,
 )
 
@@ -427,6 +432,16 @@ async def test_managed_publication_runs_external_calls_without_database_session(
     knowledge_base = await _create_container(knowledge_job_database)
     submission = await _submit_create(knowledge_job_database, knowledge_base.id)
     job_id = submission.job.id
+    async with knowledge_job_database() as db:
+        revision_before_publication = (
+            await db.execute(
+                select(ManagedKnowledgeRevision).where(
+                    ManagedKnowledgeRevision.knowledge_id == submission.item.id,
+                    ManagedKnowledgeRevision.version == 1,
+                )
+            )
+        ).scalar_one()
+        immutable_revision_snapshot = dict(revision_before_publication.after_snapshot)
     claimed = await _claim(knowledge_job_database, job_id=job_id, owner="worker-1")
     assert claimed is not None
 
@@ -484,13 +499,28 @@ async def test_managed_publication_runs_external_calls_without_database_session(
 
     async with knowledge_job_database() as db:
         item = await db.get(ManagedKnowledgeItem, submission.item.id)
+        revision = (
+            await db.execute(
+                select(ManagedKnowledgeRevision).where(
+                    ManagedKnowledgeRevision.knowledge_id == submission.item.id,
+                    ManagedKnowledgeRevision.version == 1,
+                )
+            )
+        ).scalar_one()
         current_knowledge_base = await db.get(KnowledgeBase, knowledge_base.id)
         job = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job_id)
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
     assert item is not None
     assert item.indexed_version == item.version == 1
     assert item.is_recallable is True
     assert item.pending_job_id is None
     assert len(item.vector_item_ids) == 1
+    assert revision.after_snapshot == immutable_revision_snapshot
+    assert snapshot.item_count == 1
     assert current_knowledge_base is not None
     assert current_knowledge_base.index_status == KnowledgeBaseIndexStatus.READY
     assert job is not None and job.status == KnowledgeJobStatus.SUCCEEDED

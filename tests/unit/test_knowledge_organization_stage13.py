@@ -218,6 +218,7 @@ def _make_stage(
     }
     work_key, model_key = build_knowledge_organization_work_identity(
         snapshot_key=snapshot.snapshot_key,
+        organization_job_id=13,
         execution_model=execution_model,
     )
     return KnowledgeOrganizationStage(
@@ -334,7 +335,7 @@ async def test_snapshot_only_contains_published_llm_maintainable_items_and_freez
 
 
 @pytest.mark.asyncio
-async def test_same_snapshot_keeps_work_identity_when_execution_model_changes():
+async def test_work_identity_is_stable_within_one_run_and_changes_for_a_new_run():
     first_model = {
         "channel_id": 1,
         "model_id": "organizer",
@@ -355,29 +356,40 @@ async def test_same_snapshot_keeps_work_identity_when_execution_model_changes():
 
     first_work_key, first_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
+        organization_job_id=1,
         execution_model=first_model,
     )
     same_work_key, same_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
+        organization_job_id=1,
         execution_model=same_model_different_key_order,
     )
     runtime_changed_work_key, runtime_changed_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
+        organization_job_id=1,
         execution_model=same_execution_model_different_runtime,
     )
     changed_work_key, _changed_snapshot_model_key = build_knowledge_organization_work_identity(
         snapshot_key="b" * 64,
+        organization_job_id=1,
         execution_model=first_model,
     )
     replacement_work_key, replacement_model_key = build_knowledge_organization_work_identity(
         snapshot_key="a" * 64,
+        organization_job_id=1,
         execution_model={"channel_id": 7, "model_id": "replacement", "parameters": {"temperature": 0.8}},
+    )
+    new_run_work_key, _new_run_model_key = build_knowledge_organization_work_identity(
+        snapshot_key="a" * 64,
+        organization_job_id=2,
+        execution_model=first_model,
     )
 
     assert first_work_key == same_work_key == runtime_changed_work_key == replacement_work_key
     assert first_model_key == same_model_key == runtime_changed_model_key
     assert replacement_model_key != first_model_key
     assert changed_work_key != first_work_key
+    assert new_run_work_key != first_work_key
 
 
 @pytest.mark.asyncio

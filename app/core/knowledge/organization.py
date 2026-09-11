@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from time import monotonic
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import (
+    ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID,
     ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND,
     ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED,
+    ERR_MANAGED_KNOWLEDGE_ORGANIZATION_LOCKED,
+    KNOWLEDGE_ORGANIZATION_JOB_LEASE_RENEW_INTERVAL_SECONDS,
+    KNOWLEDGE_ORGANIZATION_JOB_LEASE_SECONDS,
     KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
 )
 from app.core.crud.knowledge.base import knowledge_base_crud
-from app.core.crud.knowledge.managed import managed_knowledge_revision_crud
+from app.core.crud.knowledge.job import is_organization_operation, knowledge_job_crud
+from app.core.crud.knowledge.managed import managed_knowledge_item_crud, managed_knowledge_revision_crud
 from app.core.crud.knowledge.organization import (
     knowledge_organization_snapshot_crud,
     knowledge_organization_snapshot_item_crud,
@@ -23,10 +29,14 @@ from app.core.i18n import t
 from app.core.knowledge.errors import ManagedKnowledgeConflictError, ManagedKnowledgeNotFoundError
 from app.models.knowledge_base import (
     KnowledgeBaseType,
+    KnowledgeJob,
+    KnowledgeJobStatus,
     KnowledgeOrganizationSnapshot,
     KnowledgeOrganizationSnapshotItem,
+    ManagedKnowledgeItem,
     ManagedKnowledgeRevision,
 )
+from app.providers.database.time import get_database_time
 
 
 def _enum_value(value: Any) -> Any:
@@ -36,8 +46,11 @@ def _enum_value(value: Any) -> Any:
 def build_knowledge_organization_work_identity(
     *,
     snapshot_key: str,
+    organization_job_id: int,
     execution_model: Mapping[str, Any],
 ) -> tuple[str, str]:
+    if isinstance(organization_job_id, bool) or not isinstance(organization_job_id, int) or organization_job_id < 1:
+        raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID))
     model_identity = {
         "channel_id": execution_model.get("channel_id"),
         "model_id": execution_model.get("model_id"),
@@ -45,9 +58,10 @@ def build_knowledge_organization_work_identity(
     }
     model_key = hashlib.sha256(canonical_json_dumps(model_identity).encode("utf-8")).hexdigest()
     work_payload = {
+        "organization_job_id": organization_job_id,
         "scope": "knowledge_organization",
         "snapshot_key": snapshot_key,
-        "version": 2,
+        "version": 4,
     }
     work_key = hashlib.sha256(canonical_json_dumps(work_payload).encode("utf-8")).hexdigest()
     return work_key, model_key
@@ -72,23 +86,80 @@ def _non_negative_int(value: Any) -> int | None:
     return value
 
 
-def _revision_is_organization_candidate(revision: ManagedKnowledgeRevision) -> bool:
+async def _validate_organization_job_for_lock(
+    db: AsyncSession,
+    *,
+    uid: str,
+    knowledge_base_id: int,
+    organization_job_id: int,
+) -> KnowledgeJob:
+    job = await knowledge_job_crud.get_by_id(db, uid=uid, job_id=organization_job_id)
+    now = await get_database_time(db)
+    if job is None or job.knowledge_base_id != knowledge_base_id or not is_organization_operation(job.operation) or job.status != KnowledgeJobStatus.RUNNING or not job.locked_by or job.lock_until is None or job.lock_until < now:
+        raise ManagedKnowledgeConflictError(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID)
+    return job
+
+
+def _build_snapshot_lease_heartbeat(
+    db: AsyncSession,
+    *,
+    job: KnowledgeJob,
+) -> Callable[[bool], Awaitable[None]]:
+    if job.id is None or not job.locked_by:
+        raise ManagedKnowledgeConflictError(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID)
+    last_renewed_at = 0.0
+
+    async def renew(force: bool = False) -> None:
+        nonlocal last_renewed_at
+        current = monotonic()
+        if not force and current - last_renewed_at < KNOWLEDGE_ORGANIZATION_JOB_LEASE_RENEW_INTERVAL_SECONDS:
+            return
+        renewed = await knowledge_job_crud.renew_lease(
+            db,
+            uid=job.uid,
+            job_id=job.id,
+            owner=job.locked_by,
+            lease_seconds=KNOWLEDGE_ORGANIZATION_JOB_LEASE_SECONDS,
+            commit=False,
+        )
+        if not renewed:
+            raise ManagedKnowledgeConflictError(ERR_KNOWLEDGE_ORGANIZATION_RUN_INVALID)
+        last_renewed_at = monotonic()
+
+    return renew
+
+
+def _revision_is_organization_candidate(revision: ManagedKnowledgeRevision, item: ManagedKnowledgeItem | None) -> bool:
+    if item is None:
+        return False
     snapshot = _require_snapshot_mapping(revision)
     version = _positive_int(snapshot.get("version"))
-    indexed_version = _non_negative_int(snapshot.get("indexed_version"))
-    return bool(_positive_int(snapshot.get("knowledge_id")) is not None and version is not None and snapshot.get("deleted_at") is None and snapshot.get("llm_maintainable") is True and snapshot.get("is_recallable") is True and snapshot.get("pending_job_id") is None and indexed_version == version)
+    knowledge_id = _positive_int(snapshot.get("knowledge_id"))
+    return bool(
+        knowledge_id is not None
+        and version is not None
+        and revision.knowledge_id == knowledge_id
+        and revision.version == version
+        and item.id == knowledge_id
+        and item.version == version
+        and item.deleted_at is None
+        and item.llm_maintainable is True
+        and item.is_recallable is True
+        and item.pending_job_id is None
+        and item.indexed_version == version
+    )
 
 
-def _build_snapshot_item_from_revision(revision: ManagedKnowledgeRevision) -> dict[str, Any]:
+def _build_snapshot_item_from_revision(revision: ManagedKnowledgeRevision, item: ManagedKnowledgeItem) -> dict[str, Any]:
     snapshot = _require_snapshot_mapping(revision)
     knowledge_id = _positive_int(snapshot.get("knowledge_id"))
     version = _positive_int(snapshot.get("version"))
-    indexed_version = _positive_int(snapshot.get("indexed_version"))
+    indexed_version = _positive_int(item.indexed_version)
     content_token_count = _non_negative_int(snapshot.get("content_token_count"))
     knowledge_key = snapshot.get("knowledge_key")
     content_hash = snapshot.get("content_hash")
     source_type = _enum_value(snapshot.get("source_type"))
-    vector_item_ids = snapshot.get("vector_item_ids")
+    vector_item_ids = item.vector_item_ids
     if (
         knowledge_id is None
         or version is None
@@ -105,6 +176,11 @@ def _build_snapshot_item_from_revision(revision: ManagedKnowledgeRevision) -> di
         or revision.id is None
         or revision.knowledge_id != knowledge_id
         or revision.version != version
+        or item.id != knowledge_id
+        or item.version != version
+        or item.knowledge_key != knowledge_key
+        or item.content_hash != content_hash
+        or item.content_token_count != content_token_count
     ):
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
     return {
@@ -132,7 +208,7 @@ async def _iter_candidate_revisions(
     knowledge_base_id: int,
     boundary_revision_id: int,
     page_size: int,
-) -> AsyncIterator[ManagedKnowledgeRevision]:
+) -> AsyncIterator[tuple[ManagedKnowledgeRevision, ManagedKnowledgeItem]]:
     after_knowledge_id = 0
     while True:
         page = await managed_knowledge_revision_crud.list_latest_at_boundary_page(
@@ -145,10 +221,18 @@ async def _iter_candidate_revisions(
         )
         if not page:
             return
+        current_items = await managed_knowledge_item_crud.get_by_ids(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            knowledge_ids=[revision.knowledge_id for revision in page],
+        )
+        current_by_id = {item.id: item for item in current_items if item.id is not None}
         for revision in page:
             after_knowledge_id = max(after_knowledge_id, revision.knowledge_id)
-            if _revision_is_organization_candidate(revision):
-                yield revision
+            item = current_by_id.get(revision.knowledge_id)
+            if _revision_is_organization_candidate(revision, item):
+                yield revision, item
         if len(page) < page_size:
             return
 
@@ -182,6 +266,7 @@ async def _calculate_snapshot_identity(
     active_embedding_revision: int,
     index_revision: int,
     page_size: int,
+    lease_heartbeat: Callable[[bool], Awaitable[None]] | None = None,
 ) -> tuple[str, int]:
     digest = hashlib.sha256()
     digest.update(
@@ -194,14 +279,16 @@ async def _calculate_snapshot_identity(
         )
     )
     item_count = 0
-    async for revision in _iter_candidate_revisions(
+    async for revision, item in _iter_candidate_revisions(
         db,
         uid=uid,
         knowledge_base_id=knowledge_base_id,
         boundary_revision_id=boundary_revision_id,
         page_size=page_size,
     ):
-        item_payload = _build_snapshot_item_from_revision(revision)
+        if lease_heartbeat is not None:
+            await lease_heartbeat(False)
+        item_payload = _build_snapshot_item_from_revision(revision, item)
         encoded = canonical_json_dumps(item_payload).encode("utf-8")
         digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
         digest.update(encoded)
@@ -214,18 +301,22 @@ async def _ensure_snapshot_items(
     *,
     snapshot: KnowledgeOrganizationSnapshot,
     page_size: int,
+    organization_job_id: int | None = None,
+    lease_heartbeat: Callable[[bool], Awaitable[None]] | None = None,
 ) -> None:
     if snapshot.id is None:
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
     sequence = 0
-    async for revision in _iter_candidate_revisions(
+    async for revision, item in _iter_candidate_revisions(
         db,
         uid=snapshot.uid,
         knowledge_base_id=snapshot.knowledge_base_id,
         boundary_revision_id=snapshot.boundary_revision_id,
         page_size=page_size,
     ):
-        item_payload = _build_snapshot_item_from_revision(revision)
+        if lease_heartbeat is not None:
+            await lease_heartbeat(False)
+        item_payload = _build_snapshot_item_from_revision(revision, item)
         content_reference = item_payload["content_reference"]
         row = KnowledgeOrganizationSnapshotItem(
             snapshot_id=snapshot.id,
@@ -251,10 +342,18 @@ async def _ensure_snapshot_items(
         if persisted is None:
             await db.rollback()
             raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
+        if organization_job_id is not None:
+            locked = await managed_knowledge_item_crud.acquire_organization_lock(
+                db,
+                uid=snapshot.uid,
+                knowledge_base_id=snapshot.knowledge_base_id,
+                knowledge_id=item_payload["knowledge_id"],
+                expected_version=item_payload["expected_version"],
+                organization_job_id=organization_job_id,
+            )
+            if not locked:
+                raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_ORGANIZATION_LOCKED)
         sequence += 1
-        if sequence % page_size == 0:
-            await db.commit()
-    await db.commit()
     persisted_count = await knowledge_organization_snapshot_item_crud.count_for_snapshot(
         db,
         snapshot_id=snapshot.id,
@@ -268,12 +367,27 @@ async def create_knowledge_organization_snapshot(
     *,
     uid: str,
     knowledge_base_id: int,
+    organization_job_id: int | None = None,
 ) -> KnowledgeOrganizationSnapshot:
-    knowledge_base = await knowledge_base_crud.get(db, knowledge_base_id)
+    knowledge_base = await knowledge_base_crud.lock_owned_by_id(
+        db,
+        uid=uid,
+        knowledge_base_id=knowledge_base_id,
+    )
     if knowledge_base is None or knowledge_base.uid != uid:
         raise ManagedKnowledgeNotFoundError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_FOUND)
     if knowledge_base.knowledge_base_type != KnowledgeBaseType.LLM_MANAGED:
         raise ManagedKnowledgeConflictError(ERR_MANAGED_KNOWLEDGE_BASE_NOT_MANAGED)
+    lease_heartbeat: Callable[[bool], Awaitable[None]] | None = None
+    if organization_job_id is not None:
+        organization_job = await _validate_organization_job_for_lock(
+            db,
+            uid=uid,
+            knowledge_base_id=knowledge_base_id,
+            organization_job_id=organization_job_id,
+        )
+        lease_heartbeat = _build_snapshot_lease_heartbeat(db, job=organization_job)
+        await lease_heartbeat(True)
 
     boundary_revision_id = await managed_knowledge_revision_crud.get_boundary_revision_id(
         db,
@@ -288,6 +402,7 @@ async def create_knowledge_organization_snapshot(
         active_embedding_revision=knowledge_base.active_embedding_revision,
         index_revision=knowledge_base.index_revision,
         page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
+        lease_heartbeat=lease_heartbeat,
     )
     snapshot = KnowledgeOrganizationSnapshot(
         uid=uid,
@@ -299,13 +414,21 @@ async def create_knowledge_organization_snapshot(
         item_count=item_count,
         items=[],
     )
-    persisted, _ = await knowledge_organization_snapshot_crud.create_snapshot(db, snapshot=snapshot)
-    await _ensure_snapshot_items(
-        db,
-        snapshot=persisted,
-        page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
-    )
-    return persisted
+    try:
+        persisted, _ = await knowledge_organization_snapshot_crud.create_snapshot(db, snapshot=snapshot, commit=False)
+        await _ensure_snapshot_items(
+            db,
+            snapshot=persisted,
+            page_size=KNOWLEDGE_ORGANIZATION_SNAPSHOT_PAGE_SIZE,
+            organization_job_id=organization_job_id,
+            lease_heartbeat=lease_heartbeat,
+        )
+        await db.commit()
+        return persisted
+    except Exception:
+        if db.in_transaction():
+            await db.rollback()
+        raise
 
 
 def _revision_matches_snapshot_item(
@@ -323,15 +446,7 @@ def _resolve_snapshot_item(
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
     after_snapshot = _require_snapshot_mapping(revision)
     content = after_snapshot.get("content")
-    if (
-        not isinstance(content, str)
-        or not content
-        or after_snapshot.get("knowledge_key") != row.knowledge_key
-        or after_snapshot.get("content_hash") != row.content_hash
-        or after_snapshot.get("content_token_count") != row.content_token_count
-        or after_snapshot.get("llm_maintainable") is not True
-        or after_snapshot.get("indexed_version") != row.indexed_version
-    ):
+    if not isinstance(content, str) or not content or after_snapshot.get("knowledge_key") != row.knowledge_key or after_snapshot.get("content_hash") != row.content_hash or after_snapshot.get("content_token_count") != row.content_token_count or after_snapshot.get("llm_maintainable") is not True:
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
     if hashlib.sha256(content.encode("utf-8")).hexdigest() != row.content_hash:
         raise ValueError(t(ERR_KNOWLEDGE_ORGANIZATION_SNAPSHOT_INVALID))
