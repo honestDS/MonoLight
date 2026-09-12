@@ -6,10 +6,15 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-import app.core.terminal.manager as terminal_manager_module
+import app.core.terminal.audit_lifecycle as terminal_audit_lifecycle_module
+import app.core.terminal.session_runtime_commands as terminal_runtime_commands_module
+import app.core.terminal.session_runtime_core as terminal_runtime_core_module
+import app.core.terminal.session_runtime_state as terminal_runtime_state_module
+import app.core.terminal.worker_coordinator as terminal_worker_module
 from app.core.crud.audit.audit import audit_crud
-from app.core.terminal.manager import _TerminalSessionRuntime, cleanup_terminal_sessions_by_chat_session
+from app.core.terminal.manager import cleanup_terminal_sessions_by_chat_session
 from app.core.terminal.schemas import TerminalOutputBufferState, TerminalSessionStatus
+from app.core.terminal.session_runtime import _TerminalSessionRuntime
 from app.models.audit import (
     AuditExecutionRecord,
     AuditExecutionStatus,
@@ -19,6 +24,22 @@ from app.models.audit import (
     AuditToolDetail,
 )
 from app.models.terminal_session import TerminalControlCommand, TerminalControlCommandStatus, TerminalSession
+
+
+def _patch_terminal_session_factory(monkeypatch: pytest.MonkeyPatch, session_factory) -> None:
+    for module in (
+        terminal_runtime_commands_module,
+        terminal_runtime_core_module,
+        terminal_runtime_state_module,
+        terminal_worker_module,
+    ):
+        monkeypatch.setattr(module, "AsyncSessionLocal", session_factory)
+
+
+def _patch_confirmation_projection(monkeypatch: pytest.MonkeyPatch, callback) -> None:
+    monkeypatch.setattr(terminal_runtime_state_module, "_update_terminal_confirmation_status", callback)
+    monkeypatch.setattr(terminal_worker_module, "_update_terminal_confirmation_status", callback)
+
 
 WORKER_ID = "terminal-test-worker"
 CLAIM_TOKEN = "terminal-test-claim"
@@ -167,8 +188,8 @@ async def test_runtime_snapshot_finishes_terminal_audit_and_projects_completed_r
     async def record_confirmation_call(_db, *, audit_record_id):
         confirmation_calls.append(audit_record_id)
 
-    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", record_confirmation_call)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
+    _patch_confirmation_projection(monkeypatch, record_confirmation_call)
     audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
     execution_id, terminal_session = runtimes[0]
     runtime = _TerminalSessionRuntime(terminal_session, WORKER_ID)
@@ -217,15 +238,15 @@ async def test_runtime_snapshot_finishes_unaudited_terminal_without_audit_side_e
     async def fail_audit_call(*args, **kwargs):
         raise AssertionError("unaudited terminal finalization must not call audit services")
 
-    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
     for method_name in (
         "get_execution_record",
         "get_record",
         "finish_execution_attempt",
         "finish_execution_round_if_complete",
     ):
-        monkeypatch.setattr(terminal_manager_module.audit_crud, method_name, fail_audit_call)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", fail_audit_call)
+        monkeypatch.setattr(terminal_audit_lifecycle_module.audit_crud, method_name, fail_audit_call)
+    _patch_confirmation_projection(monkeypatch, fail_audit_call)
 
     terminal_session = TerminalSession(
         terminal_session_id="unaudited-terminal" + "s" * 19,
@@ -274,8 +295,8 @@ async def test_runtime_snapshot_projects_confirmation_only_after_the_whole_round
     async def record_confirmation_call(_db, *, audit_record_id):
         confirmation_calls.append(audit_record_id)
 
-    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", record_confirmation_call)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
+    _patch_confirmation_projection(monkeypatch, record_confirmation_call)
     audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path, execution_count=2)
 
     first_execution_id, first_terminal = runtimes[0]
@@ -318,8 +339,8 @@ async def test_runtime_snapshot_rolls_back_terminal_and_execution_when_audit_fin
     async def record_confirmation_call(_db, *, audit_record_id):
         confirmation_calls.append(audit_record_id)
 
-    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", record_confirmation_call)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
+    _patch_confirmation_projection(monkeypatch, record_confirmation_call)
     audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
     execution_id, terminal_session = runtimes[0]
     runtime = _TerminalSessionRuntime(terminal_session, WORKER_ID)
@@ -328,7 +349,7 @@ async def test_runtime_snapshot_rolls_back_terminal_and_execution_when_audit_fin
     async def fail_finish(*_args, **_kwargs):
         raise RuntimeError("audit finish failed")
 
-    monkeypatch.setattr(terminal_manager_module.audit_crud, "finish_execution_attempt", fail_finish)
+    monkeypatch.setattr(terminal_audit_lifecycle_module.audit_crud, "finish_execution_attempt", fail_finish)
     with pytest.raises(RuntimeError, match="audit finish failed"):
         await runtime._update_runtime_snapshot(
             TerminalSessionStatus.EXITED,
@@ -347,7 +368,7 @@ async def test_runtime_snapshot_rolls_back_terminal_and_execution_when_audit_fin
     assert stored_record.execution_claim_token == CLAIM_TOKEN
     assert confirmation_calls == []
 
-    monkeypatch.setattr(terminal_manager_module.audit_crud, "finish_execution_attempt", original_finish)
+    monkeypatch.setattr(terminal_audit_lifecycle_module.audit_crud, "finish_execution_attempt", original_finish)
     await runtime._update_runtime_snapshot(
         TerminalSessionStatus.EXITED,
         output_buffer=_output_buffer(),
@@ -375,8 +396,8 @@ async def test_cleanup_terminal_sessions_by_chat_session_finalizes_audit_and_del
     async def fail_confirmation_projection(*args, **kwargs):
         raise AssertionError("terminal cleanup must not project confirmation messages")
 
-    monkeypatch.setattr(terminal_manager_module, "cleanup_terminal_process_identity", cleanup_process_identity)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", fail_confirmation_projection)
+    monkeypatch.setattr(terminal_audit_lifecycle_module, "cleanup_terminal_process_identity", cleanup_process_identity)
+    _patch_confirmation_projection(monkeypatch, fail_confirmation_projection)
     audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
     execution_id, terminal_session = runtimes[0]
     control_command = TerminalControlCommand(
@@ -434,7 +455,7 @@ async def test_runtime_snapshot_finalization_is_idempotent(terminal_audit_databa
     update_snapshot_calls = 0
     confirmation_calls = []
     original_finish = audit_crud.finish_execution_attempt
-    original_update_snapshot = terminal_manager_module.terminal_session_crud.update_runtime_snapshot
+    original_update_snapshot = terminal_runtime_state_module.terminal_session_crud.update_runtime_snapshot
 
     async def count_finish(*args, **kwargs):
         nonlocal finish_calls
@@ -449,10 +470,10 @@ async def test_runtime_snapshot_finalization_is_idempotent(terminal_audit_databa
         update_snapshot_calls += 1
         return await original_update_snapshot(*args, **kwargs)
 
-    monkeypatch.setattr(terminal_manager_module, "AsyncSessionLocal", terminal_audit_database)
-    monkeypatch.setattr(terminal_manager_module.audit_crud, "finish_execution_attempt", count_finish)
-    monkeypatch.setattr(terminal_manager_module.terminal_session_crud, "update_runtime_snapshot", count_update_snapshot)
-    monkeypatch.setattr(terminal_manager_module, "_update_terminal_confirmation_status", record_confirmation_call)
+    _patch_terminal_session_factory(monkeypatch, terminal_audit_database)
+    monkeypatch.setattr(terminal_audit_lifecycle_module.audit_crud, "finish_execution_attempt", count_finish)
+    monkeypatch.setattr(terminal_runtime_state_module.terminal_session_crud, "update_runtime_snapshot", count_update_snapshot)
+    _patch_confirmation_projection(monkeypatch, record_confirmation_call)
     audit_record_id, runtimes = await _seed_audit_execution(terminal_audit_database, tmp_path)
     execution_id, terminal_session = runtimes[0]
     runtime = _TerminalSessionRuntime(terminal_session, WORKER_ID)

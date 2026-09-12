@@ -8,8 +8,8 @@ from sqlmodel import select
 from app.core.crud.session.message import message_crud
 from app.core.crud.session.reply_work_item import CRUDSessionReplyWorkItem, session_reply_work_item_crud
 from app.core.exceptions import BaseBusinessException
-from app.core.session_reply_queue import executor as executor_module
-from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.session_reply_queue import manager_result as manager_result_module
+from app.core.session_reply_queue.manager import SessionReplyQueueManager, build_session_reply_work_event_id
 from app.models.message import Message, MessageRole, MessageType
 from app.models.session import ChatSession
 from app.models.session_reply_work_item import (
@@ -429,8 +429,8 @@ async def test_running_foreground_work_absorbs_later_contiguous_messages(db_sess
     async def skip_runtime_instructions(db, session_id, message):
         return None
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager.logger", CapturingLogger())
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.logger", CapturingLogger())
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     additional_messages = await manager.absorb_contiguous_foreground_messages(
         db_session,
@@ -516,7 +516,7 @@ async def test_running_confirmed_tool_execution_absorbs_later_foreground_message
     async def skip_runtime_instructions(db, session_id, message):
         return None
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     additional_messages = await manager.absorb_contiguous_foreground_messages(
         db_session,
@@ -607,7 +607,7 @@ async def test_concurrent_absorb_merges_each_work_once_and_preserves_work_order(
         return None
 
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", synchronize_merge)
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     async def absorb_in_session():
         async with concurrent_session_factory() as db:
@@ -679,7 +679,7 @@ async def test_absorb_rolls_back_when_work_reaches_terminal_state_before_commit(
         return None
 
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", wait_for_terminal)
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     async def absorb():
         async with concurrent_session_factory() as db:
@@ -759,7 +759,7 @@ async def test_absorb_contiguous_messages_rolls_back_when_candidate_merge_is_not
         updated_work_ids = await original_merge_ready_foreground(*args, **kwargs)
         return updated_work_ids[:-1]
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
     monkeypatch.setattr(session_reply_work_item_crud, "merge_ready_foreground", merge_ready_foreground)
 
     assert (
@@ -847,7 +847,7 @@ async def test_absorb_contiguous_messages_rolls_back_when_claim_is_lost(db_sessi
     async def lose_claim(*args, **kwargs):
         return False
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
     monkeypatch.setattr(session_reply_work_item_crud, "update_claimed", lose_claim)
 
     assert (
@@ -928,7 +928,7 @@ async def test_running_foreground_work_does_not_absorb_across_background_boundar
     async def skip_runtime_instructions(db, session_id, message):
         return None
 
-    monkeypatch.setattr("app.core.session_reply_queue.manager.append_user_runtime_instructions", skip_runtime_instructions)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_freeze.append_user_runtime_instructions", skip_runtime_instructions)
 
     additional_messages = await manager.absorb_contiguous_foreground_messages(
         db_session,
@@ -991,7 +991,7 @@ async def test_wait_for_result_returns_resolved_work_id(monkeypatch):
         return resolved_work
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+    monkeypatch.setattr(manager_result_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
 
     response = await manager.wait_for_result(9)
 
@@ -1043,8 +1043,8 @@ async def test_wait_for_stream_returns_result_message_identity_in_done_event(mon
         return []
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
-    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "list_after_sequence", list_after_sequence)
+    monkeypatch.setattr(manager_result_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+    monkeypatch.setattr(manager_result_module.session_reply_stream_event_crud, "list_after_sequence", list_after_sequence)
 
     events = [event async for event in manager.wait_for_stream(7)]
 
@@ -1106,12 +1106,12 @@ async def test_wait_for_result_restores_persisted_user_error_for_adapter(monkeyp
         return work
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
+    monkeypatch.setattr(manager_result_module.session_reply_work_item_crud, "resolve_merged_target", resolve_merged_target)
 
     with pytest.raises(BaseBusinessException, match="所有对话渠道均不可用") as exc_info:
         await manager.wait_for_result(9)
 
     assert exc_info.value.data == {
         "work_id": 7,
-        "event_id": executor_module.build_session_reply_work_event_id(work, error=True),
+        "event_id": build_session_reply_work_event_id(work, error=True),
     }

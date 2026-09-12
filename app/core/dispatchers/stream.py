@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dispatchers.interactive import InteractiveDispatcherMixin
+from app.core.dispatchers.interactive import dispatch_interactive
 from app.core.exceptions import BaseBusinessException
 from app.core.i18n import t
 from app.core.log import get_logger
@@ -13,10 +13,14 @@ from app.core.utils.context_summary.common import ContextSummaryWorkValidityChec
 from app.core.utils.dispatcher.user_input_batch import UserInputBatch
 from app.models.message import InternalMessage
 
+__all__ = [
+    "StreamDispatcherMixin",
+]
+
 logger = get_logger(__name__)
 
 
-class StreamDispatcherMixin(InteractiveDispatcherMixin):
+class StreamDispatcherMixin:
     @staticmethod
     async def _emit_event(
         event: dict[str, Any],
@@ -47,7 +51,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
         session_id: str,
     ) -> None:
         try:
-            response = await cls._dispatch_interactive(**dispatch_kwargs)
+            response = await dispatch_interactive(**dispatch_kwargs)
         except BaseBusinessException as exc:
             await event_queue.put(("business_error", exc))
         except Exception as exc:
@@ -156,6 +160,7 @@ class StreamDispatcherMixin(InteractiveDispatcherMixin):
             "show_tool_calls": show_tool_calls,
             "additional_system_prompt": additional_system_prompt,
             "dispatcher_mode": "stream",
+            "validate_initial_message_before_save": cls.validate_initial_message_before_save,
         }
         dispatch_task = asyncio.create_task(
             cls._run_dispatch(

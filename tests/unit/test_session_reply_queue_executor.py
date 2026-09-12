@@ -10,7 +10,30 @@ from sqlmodel import SQLModel, select
 
 from app.core.constants import ERR_LLM_EMPTY_RESPONSE, SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.exceptions import LLMException
-from app.core.session_reply_queue import executor as executor_module
+from app.core.session_reply_queue import (
+    executor as executor_module,
+)
+from app.core.session_reply_queue import (
+    executor_audit as executor_audit_module,
+)
+from app.core.session_reply_queue import (
+    executor_common as executor_common_module,
+)
+from app.core.session_reply_queue import (
+    executor_confirmed as executor_confirmed_module,
+)
+from app.core.session_reply_queue import (
+    executor_interactive as executor_interactive_module,
+)
+from app.core.session_reply_queue import (
+    executor_lifecycle as executor_lifecycle_module,
+)
+from app.core.session_reply_queue import (
+    executor_metadata as executor_metadata_module,
+)
+from app.core.session_reply_queue import (
+    executor_replies as executor_replies_module,
+)
 from app.core.terminal.schemas import (
     ShellInteractiveHandoffResult,
     TerminalOutputBufferState,
@@ -120,23 +143,27 @@ async def test_foreground_executor_resumes_dispatcher_checkpoint(monkeypatch):
         checkpoint_updates.append(kwargs)
         return True
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
-    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        executor_module.session_reply_work_item_crud,
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
+        freeze_foreground_input,
+    )
+    monkeypatch.setattr(executor_interactive_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(
+        executor_interactive_module.session_reply_work_item_crud,
         "get_active_claims",
         get_active_claims,
     )
     monkeypatch.setattr(
-        executor_module.session_crud,
+        executor_interactive_module.session_crud,
         "get_by_session_id",
         get_session,
     )
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_interactive_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 
-    response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_foreground(FakeDb(), work, "worker-1")
 
     assert response == {"choices": []}
     assert dispatch_kwargs["execution_resume_state"] is checkpoint
@@ -207,16 +234,16 @@ async def test_non_streaming_interactive_work_delegates_provider_usage_persisten
         persistence_calls.append((dict(metadata), work))
         return None
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_interactive_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
     monkeypatch.setattr(
-        executor_module,
+        executor_metadata_module,
         "_persist_session_reply_provider_usage_reliably",
         persist_provider_usage,
     )
 
-    response = await executor_module._dispatch_interactive_work(
+    response = await executor_interactive_module._dispatch_interactive_work(
         object(),
         work=work,
         worker_id="worker-1",
@@ -292,7 +319,8 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
             )
             await seed_db.commit()
 
-        monkeypatch.setattr(executor_module, "AsyncSessionLocal", session_factory)
+        monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", session_factory)
+        monkeypatch.setattr(executor_metadata_module, "AsyncSessionLocal", session_factory)
 
         provider_metrics = {
             "input_tokens": 100,
@@ -331,14 +359,14 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
                 raise asyncio.CancelledError
             raise LLMException(message=ERR_LLM_EMPTY_RESPONSE)
 
-        monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
+        monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
 
         async def run_attempt(*, cancelled: bool = False) -> None:
             async with session_factory() as reply_db:
                 work = (await reply_db.execute(select(SessionReplyWorkItem).where(SessionReplyWorkItem.id == 7))).scalar_one()
                 if cancelled:
                     with pytest.raises(asyncio.CancelledError):
-                        await executor_module._dispatch_interactive_work(
+                        await executor_interactive_module._dispatch_interactive_work(
                             reply_db,
                             work=work,
                             worker_id="worker-1",
@@ -352,7 +380,7 @@ async def test_provider_usage_survives_reply_rollback_cancellation_and_retry_is_
                         )
                 else:
                     with pytest.raises(LLMException):
-                        await executor_module._dispatch_interactive_work(
+                        await executor_interactive_module._dispatch_interactive_work(
                             reply_db,
                             work=work,
                             worker_id="worker-1",
@@ -476,12 +504,16 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
     async def update_request_metadata(db, **kwargs):
         metadata_updates.append(kwargs)
 
-    monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+    monkeypatch.setattr(
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
+        freeze_foreground_input,
+    )
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
-    response = await executor_module._execute_foreground(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_foreground(FakeDb(), work, "worker-1")
 
     assert response["choices"][0]["message"]["content"] == "已取消"
     assert response["history"][0]["role"] == MessageRole.ASSISTANT
@@ -505,12 +537,12 @@ async def test_rejected_foreground_reply_uses_history_without_decision_user_inpu
             "commit": False,
         }
     ]
-    assert executor_module._event_for_work(work, response)["llm_request_metadata"] == expected_request_metadata
+    assert executor_common_module._event_for_work(work, response)["llm_request_metadata"] == expected_request_metadata
     assert captured["allow_tools"] is False
     assert captured["additional_system_prompt"] == "channel instruction"
     assert "extra_messages" not in captured
     assert "submission_context" not in captured
-    assert captured["final_message_dedupe_key"] == executor_module._result_message_dedupe_key(work)
+    assert captured["final_message_dedupe_key"] == executor_common_module._result_message_dedupe_key(work)
 
 
 @pytest.mark.asyncio
@@ -571,13 +603,17 @@ async def test_foreground_executor_checkpoint_preserves_and_clears_active_audit_
         work.execution_state = state
         return True
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_queue_manager, "freeze_foreground_input", freeze_foreground_input)
-    monkeypatch.setattr(executor_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "dispatch", dispatch)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
+        freeze_foreground_input,
+    )
+    monkeypatch.setattr(executor_interactive_module.session_reply_stream_event_crud, "get_latest_sequence", latest_sequence)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_interactive_module.session_reply_work_item_crud, "update_claimed", update_claimed)
 
-    await executor_module._execute_foreground(FakeDb(), work, "worker-1")
+    await executor_replies_module._execute_foreground(FakeDb(), work, "worker-1")
 
     assert checkpoint_states[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == active_binding
     assert SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY not in checkpoint_states[-1]
@@ -646,13 +682,13 @@ async def test_executor_resumes_from_persisted_result_without_calling_llm(monkey
         sent_events.append((uid, session_id, event))
         call_order.append("event")
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.message_crud, "get_by_dedupe_key", get_result)
-    monkeypatch.setattr(executor_module, "_execute_foreground", execute_foreground)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
-    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_lifecycle_module.message_crud, "get_by_dedupe_key", get_result)
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", execute_foreground)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", send_event)
 
     await executor_module.execute_session_reply_work(work_id=7, worker_id="worker-1")
 
@@ -722,12 +758,12 @@ async def test_executor_does_not_mark_terminal_when_event_delivery_fails(monkeyp
     async def send_event(uid: str, session_id: str, event: dict):
         raise RuntimeError("event delivery failed")
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.message_crud, "get_by_dedupe_key", get_result)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
-    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_lifecycle_module.message_crud, "get_by_dedupe_key", get_result)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", send_event)
 
     with pytest.raises(RuntimeError, match="event delivery failed"):
         await executor_module.execute_session_reply_work(work_id=7, worker_id="worker-1")
@@ -780,11 +816,11 @@ async def test_fail_executor_sends_event_before_marking_terminal(monkeypatch):
         sent_events.append((uid, session_id, event))
         call_order.append("event")
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module, "save_message", save_error_message)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
-    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_lifecycle_module, "save_message", save_error_message)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", send_event)
 
     await executor_module.fail_session_reply_work(
         work_id=7,
@@ -846,7 +882,7 @@ async def test_executor_does_not_query_legacy_result_prefix(monkeypatch):
 
     async def get_result(db, dedupe_key: str):
         result_lookups.append(dedupe_key)
-        if llm_calls and dedupe_key == executor_module._result_message_dedupe_key(work):
+        if llm_calls and dedupe_key == executor_common_module._result_message_dedupe_key(work):
             return generated_result
         return None
 
@@ -872,13 +908,13 @@ async def test_executor_does_not_query_legacy_result_prefix(monkeypatch):
     async def send_event(uid: str, session_id: str, event: dict):
         sent_events.append((uid, session_id, event))
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.message_crud, "get_by_dedupe_key", get_result)
-    monkeypatch.setattr(executor_module, "_execute_foreground", execute_foreground)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
-    monkeypatch.setattr(executor_module, "send_session_event", send_event)
+    monkeypatch.setattr(executor_lifecycle_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_lifecycle_module.message_crud, "get_by_dedupe_key", get_result)
+    monkeypatch.setattr(executor_lifecycle_module, "_execute_foreground", execute_foreground)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_lifecycle_module.session_reply_work_item_crud, "mark_terminal", mark_terminal)
+    monkeypatch.setattr(executor_lifecycle_module, "send_session_event", send_event)
 
     await executor_module.execute_session_reply_work(work_id=7, worker_id="worker-1")
 
@@ -930,20 +966,23 @@ def test_work_message_keys_do_not_depend_on_reusable_work_id():
         created_at=first.created_at.replace(tzinfo=None),
     )
 
-    first_key = executor_module._result_message_dedupe_key(first)
-    second_key = executor_module._result_message_dedupe_key(second)
+    first_key = executor_common_module._result_message_dedupe_key(first)
+    second_key = executor_common_module._result_message_dedupe_key(second)
 
     assert first_key != second_key
-    assert first_key == executor_module._result_message_dedupe_key(round_tripped)
+    assert first_key == executor_common_module._result_message_dedupe_key(round_tripped)
     assert len(first_key) <= 64
     assert len(second_key) <= 64
-    first_event = executor_module._event_for_work(first, {"content": "first"})
-    second_event = executor_module._event_for_work(second, {"content": "second"})
+    first_event = executor_common_module._event_for_work(first, {"content": "first"})
+    second_event = executor_common_module._event_for_work(second, {"content": "second"})
 
     assert first_event["event_id"] != second_event["event_id"]
     assert first_event["_stream_requested"] is True
     assert "_stream_requested" not in second_event
-    assert executor_module._event_for_work(first, {"content": "failed"}, error=True)["event_id"] == executor_module.build_session_reply_work_event_id(first, error=True)
+    assert executor_common_module._event_for_work(first, {"content": "failed"}, error=True)["event_id"] == executor_common_module.build_session_reply_work_event_id(
+        first,
+        error=True,
+    )
 
 
 def test_event_for_work_normalizes_large_assistant_files_content_without_mutating_response():
@@ -974,7 +1013,7 @@ def test_event_for_work_normalizes_large_assistant_files_content_without_mutatin
         "files": [{"path": "fresh.txt", "content": "structured"}],
     }
 
-    event = executor_module._event_for_work(work, response)
+    event = executor_common_module._event_for_work(work, response)
 
     assert len(text.encode("utf-8")) > 3000
     assert all(len(line.encode("utf-8")) <= 3000 for line in text.split("\n"))
@@ -1023,14 +1062,14 @@ def test_audit_execution_binding_supports_foreground_and_confirmed_work():
         },
     )
 
-    assert executor_module.get_bound_audit_execution(foreground) == (42, "foreground-token")
-    assert executor_module.get_bound_audit_execution(confirmed) == (43, "confirmed-token")
-    assert executor_module.get_bound_audit_execution(background) == (44, "background-token")
-    assert executor_module.get_bound_audit_execution(scheduled) == (45, "scheduled-token")
-    assert executor_module.work_has_active_audit_execution(foreground)
-    assert executor_module.work_has_active_audit_execution(background)
-    assert executor_module.work_has_active_audit_execution(scheduled)
-    assert not executor_module.work_has_active_audit_execution(confirmed)
+    assert executor_audit_module.get_bound_audit_execution(foreground) == (42, "foreground-token")
+    assert executor_audit_module.get_bound_audit_execution(confirmed) == (43, "confirmed-token")
+    assert executor_audit_module.get_bound_audit_execution(background) == (44, "background-token")
+    assert executor_audit_module.get_bound_audit_execution(scheduled) == (45, "scheduled-token")
+    assert executor_audit_module.work_has_active_audit_execution(foreground)
+    assert executor_audit_module.work_has_active_audit_execution(background)
+    assert executor_audit_module.work_has_active_audit_execution(scheduled)
+    assert not executor_audit_module.work_has_active_audit_execution(confirmed)
 
 
 def test_confirmed_work_prefers_active_audit_execution_binding_before_falling_back():
@@ -1047,23 +1086,23 @@ def test_confirmed_work_prefers_active_audit_execution_binding_before_falling_ba
         },
     )
 
-    assert executor_module.get_bound_audit_execution(work) == (99, "active-token")
+    assert executor_audit_module.get_bound_audit_execution(work) == (99, "active-token")
 
     work.execution_state.pop(SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY)
 
-    assert executor_module.get_bound_audit_execution(work) == (42, "original-token")
+    assert executor_audit_module.get_bound_audit_execution(work) == (42, "original-token")
 
 
 def test_confirmed_execution_rechecks_missing_append_target_before_running(tmp_path):
     target = tmp_path / "append.txt"
-    snapshot = executor_module.create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
+    snapshot = executor_audit_module.create_file_integrity_snapshot(target, working_directory=tmp_path).to_dict()
     details = [SimpleNamespace(file_snapshots=[snapshot])]
 
-    assert not executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+    assert not executor_audit_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
 
     target.write_text("created after audit", encoding="utf-8")
 
-    assert executor_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
+    assert executor_audit_module._confirmed_file_snapshots_changed(details, working_directory=str(tmp_path))
 
 
 def test_confirmed_execution_reaudits_legacy_file_snapshot_without_presence_state(tmp_path):
@@ -1076,7 +1115,7 @@ def test_confirmed_execution_reaudits_legacy_file_snapshot_without_presence_stat
         "sha256": "legacy-hash",
     }
 
-    assert executor_module._confirmed_file_snapshots_changed(
+    assert executor_audit_module._confirmed_file_snapshots_changed(
         [SimpleNamespace(file_snapshots=[legacy_snapshot])],
         working_directory=str(tmp_path),
     )
@@ -1120,15 +1159,15 @@ async def test_background_reply_persists_and_clears_audit_binding(work_type, mon
         await callback(None)
         return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
 
-    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
 
     if work_type == SessionReplyWorkType.BACKGROUND_TOOL_SUMMARY:
-        response = await executor_module._execute_background(object(), work, "worker-1")
+        response = await executor_replies_module._execute_background(object(), work, "worker-1")
     else:
-        response = await executor_module._execute_scheduled(object(), work, "worker-1")
+        response = await executor_replies_module._execute_scheduled(object(), work, "worker-1")
 
     assert response["content"] == "后台总结"
     assert persisted_states[0][SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY] == {
@@ -1204,13 +1243,13 @@ async def test_execute_background_persists_llm_request_metadata_with_work_identi
         metadata_updates.append(kwargs)
         return True
 
-    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+    monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_metadata_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
-    response = await executor_module._execute_background(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_background(FakeDb(), work, "worker-1")
 
     expected_request_metadata = {
         **second_request_metadata,
@@ -1298,12 +1337,12 @@ async def test_execute_scheduled_persists_llm_request_metadata_with_work_identit
         metadata_updates.append(kwargs)
         return True
 
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_module.session_crud, "get_by_session_id", get_session)
-    monkeypatch.setattr(executor_module.session_crud, "update_llm_request_metadata", update_request_metadata)
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_metadata_module.session_crud, "get_by_session_id", get_session)
+    monkeypatch.setattr(executor_metadata_module.session_crud, "update_llm_request_metadata", update_request_metadata)
 
-    response = await executor_module._execute_scheduled(FakeDb(), work, "worker-1")
+    response = await executor_replies_module._execute_scheduled(FakeDb(), work, "worker-1")
 
     expected_request_metadata = {
         **request_metadata,
@@ -1354,14 +1393,14 @@ async def test_confirmed_binding_failure_marks_new_audit_unknown(monkeypatch, fa
     async def update_confirmation(db, *, audit_record_id):
         assert audit_record_id == 99
 
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     expected_exception = asyncio.CancelledError if failure == "cancelled" else RuntimeError
     with pytest.raises(expected_exception) as exc_info:
-        await executor_module._persist_confirmed_work_audit_execution_binding(
+        await executor_audit_module._persist_confirmed_work_audit_execution_binding(
             object(),
             work=work,
             worker_id="worker-1",
@@ -1386,11 +1425,11 @@ async def test_confirmed_binding_cleanup_does_not_mask_update_exception(monkeypa
     async def mark_execution_unknown(db, **kwargs):
         raise RuntimeError("cleanup failure")
 
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
 
     with pytest.raises(RuntimeError, match="original update failure"):
-        await executor_module._persist_confirmed_work_audit_execution_binding(
+        await executor_audit_module._persist_confirmed_work_audit_execution_binding(
             object(),
             work=SimpleNamespace(id=7, source_id="42", execution_state={}),
             worker_id="worker-1",
@@ -1442,19 +1481,19 @@ async def test_mark_work_audit_execution_unknown_closes_bound_round_without_atte
     async def update_confirmation(db, *, audit_record_id):
         confirmation_calls.append(audit_record_id)
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(executor_audit_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_audit_module.background_task_crud, "list_by_audit_record", list_background_tasks)
     monkeypatch.setattr(
-        executor_module.terminal_session_crud,
+        executor_audit_module.terminal_session_crud,
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
-    await executor_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
+    await executor_audit_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
 
     assert finish_calls == [
         {
@@ -1509,7 +1548,7 @@ async def test_mark_work_audit_execution_unknown_preserves_active_handoffs(
         assert audit_record_id == 99
         return [
             SimpleNamespace(
-                status=executor_module.BackgroundTaskStatus.RUNNING,
+                status=executor_audit_module.BackgroundTaskStatus.RUNNING,
                 audit_execution_record_id=execution_id,
             )
             for execution_id in background_execution_ids
@@ -1534,24 +1573,24 @@ async def test_mark_work_audit_execution_unknown_preserves_active_handoffs(
         finish_round_calls.append(kwargs)
         return True
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(executor_audit_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "get", get_work)
+    monkeypatch.setattr(executor_audit_module.background_task_crud, "list_by_audit_record", list_background_tasks)
     monkeypatch.setattr(
-        executor_module.terminal_session_crud,
+        executor_audit_module.terminal_session_crud,
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
     monkeypatch.setattr(
-        executor_module.audit_crud,
+        executor_audit_module.audit_crud,
         "mark_running_executions_unknown_except",
         mark_running_executions_unknown_except,
     )
-    monkeypatch.setattr(executor_module, "_mark_audit_execution_unknown_reliably", mark_unknown_reliably)
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_execution_round)
+    monkeypatch.setattr(executor_audit_module, "_mark_audit_execution_unknown_reliably", mark_unknown_reliably)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "finish_execution_round", finish_execution_round)
 
-    await executor_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
+    await executor_audit_module.mark_work_audit_execution_unknown(7, "worker-1", "interrupted")
 
     assert unknown_except_calls == [
         {
@@ -1668,33 +1707,33 @@ async def test_confirmed_file_reaudit_persists_new_audit_binding(monkeypatch):
         replaced_results.append(kwargs)
         return kwargs["content"]
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
-    monkeypatch.setattr(executor_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "audit_tool_round", audit_round)
-    monkeypatch.setattr(executor_module.audit_crud, "claim_passed_for_execution", claim_passed)
-    monkeypatch.setattr(executor_module.session_reply_work_item_crud, "update_claimed", update_claimed)
-    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
-    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "claim_passed_for_execution", claim_passed)
+    monkeypatch.setattr(executor_audit_module.session_reply_work_item_crud, "update_claimed", update_claimed)
+    monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round", finish_round)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
 
-    await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+    await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
 
     assert update_calls[0]["work_id"] == 7
     assert update_calls[0]["worker_id"] == "worker-1"
     assert update_calls[0]["values"]["source_id"] == "99"
     assert update_calls[0]["values"]["execution_state"]["audit_claim_token"] == "new-token"
-    assert executor_module.get_bound_audit_execution(work) == (99, "new-token")
+    assert executor_audit_module.get_bound_audit_execution(work) == (99, "new-token")
     assert replaced_results[0]["original_tool_call_id"] == "original-1"
 
 
@@ -1801,24 +1840,24 @@ async def test_confirmed_file_reaudit_pending_replaces_original_result_without_s
         memory_chains.append([message.model_copy(deep=True) for message in messages])
         return []
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
-    monkeypatch.setattr(executor_module, "audit_tool_round", audit_round)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module, "save_message", save_confirmation)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "notify_confirmation_tool_results", notify_confirmation_results)
-    monkeypatch.setattr(executor_module, "dump_background_proactive_history", dump_history)
-    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("pending re-audit must not execute tools"))
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("pending re-audit must not continue interactively"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "cancel_execution_for_file_reaudit", cancel_reaudit)
+    monkeypatch.setattr(executor_confirmed_module, "audit_tool_round", audit_round)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module, "save_message", save_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "notify_confirmation_tool_results", notify_confirmation_results)
+    monkeypatch.setattr(executor_confirmed_module, "dump_background_proactive_history", dump_history)
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("pending re-audit must not execute tools"))
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("pending re-audit must not continue interactively"))
 
-    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+    response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
     assert json.loads(response["content"]) == {"audit_record_id": 99, "status": "pending"}
     assert len(replaced_results) == 1
@@ -1939,24 +1978,23 @@ async def test_confirmed_execution_replaces_original_results_and_keeps_fresh_mem
             "response_id": "response-final",
         }
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(executor_module, "create_file_integrity_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
-    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
-    response = await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
 
     assert response["content"] == "完成"
     assert response["history"] == [{"role": "assistant", "content": "完成"}]
@@ -2121,26 +2159,25 @@ async def test_confirmed_execution_shell_handoff_keeps_attempt_open_and_continue
             "response_id": "response-final",
         }
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(executor_module, "create_file_integrity_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
-    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "notify_confirmation_tool_results", notify_confirmation_results)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "notify_confirmation_tool_results", notify_confirmation_results)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
-    response = await executor_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
+    response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work, "worker-1")
 
     assert response["content"] == "完成"
     assert response["history"] == [{"role": "assistant", "content": "完成"}]
@@ -2222,21 +2259,21 @@ async def test_confirmed_execution_does_not_run_without_complete_pending_results
     async def update_confirmation(db, *, audit_record_id):
         return None
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module.audit_crud, "mark_source_message_invalid", mark_invalid)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("invalid pending results must not execute tools"))
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("invalid pending results must not continue interactively"))
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", lambda *args, **kwargs: pytest.fail("invalid pending results must not create executions"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "mark_source_message_invalid", mark_invalid)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("invalid pending results must not execute tools"))
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", lambda *args, **kwargs: pytest.fail("invalid pending results must not continue interactively"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", lambda *args, **kwargs: pytest.fail("invalid pending results must not create executions"))
 
-    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+    response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
     assert response["content"] == "原调用记录无效"
     assert invalidated[0]["audit_record_id"] == 42
@@ -2317,18 +2354,18 @@ async def test_confirmed_execution_rejects_mismatched_decision_message_boundary(
     async def dispatch_interactive_work(*args, **kwargs):
         interactive_dispatch_calls.append((args, kwargs))
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.audit_crud, "mark_source_message_invalid", mark_invalid)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module, "process_single_tool", process_tool)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "mark_source_message_invalid", mark_invalid)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_metadata_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", process_tool)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
 
-    response = await executor_module._execute_confirmed_tools(FakeDb(), work)
+    response = await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
     assert response["content"] == "原调用记录无效"
     assert invalidated == [
@@ -2433,25 +2470,25 @@ async def test_confirmed_execution_precheck_failure_closes_round_as_failed(monke
     async def get_pending(db, **kwargs):
         return {"original-1": SimpleNamespace(id=2, content="pending")}
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", lambda **kwargs: True)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
-    monkeypatch.setattr(executor_module, "prevalidate_tool_round", prevalidate)
-    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round", finish_round)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", lambda **kwargs: True)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", prevalidate)
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
 
-    await executor_module._execute_confirmed_tools(FakeDb(), work)
+    await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
     assert record.status == AuditRecordStatus.FAILED
     assert len(cancelled_attempts) == 1
@@ -2565,25 +2602,25 @@ async def test_confirmed_execution_closes_round_when_execution_attempt_creation_
     def verify_round(**kwargs):
         return True
 
-    monkeypatch.setattr(executor_module.audit_crud, "get_record", get_record)
-    monkeypatch.setattr(executor_module.audit_crud, "list_tool_details", list_details)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(executor_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(executor_module.audit_crud, "create_execution_attempt", create_execution)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_attempt", finish_attempt)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round", finish_round)
-    monkeypatch.setattr(executor_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
-    monkeypatch.setattr(executor_module, "_dispatch_interactive_work", dispatch_interactive_work)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
-    monkeypatch.setattr(executor_module, "get_pending_tool_results", get_pending)
-    monkeypatch.setattr(executor_module, "replace_pending_tool_result", replace_result)
-    monkeypatch.setattr(executor_module, "verify_persisted_tool_round", verify_round)
-    monkeypatch.setattr(executor_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
-    monkeypatch.setattr(executor_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
-    monkeypatch.setattr(executor_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "get_record", get_record)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "list_tool_details", list_details)
+    monkeypatch.setattr(executor_confirmed_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_confirmed_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(executor_confirmed_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "create_execution_attempt", create_execution)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_attempt", finish_attempt)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round", finish_round)
+    monkeypatch.setattr(executor_confirmed_module.audit_crud, "finish_execution_round_if_complete", finish_round_if_complete)
+    monkeypatch.setattr(executor_confirmed_module, "_dispatch_interactive_work", dispatch_interactive_work)
+    monkeypatch.setattr(executor_confirmed_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_confirmed_module, "get_pending_tool_results", get_pending)
+    monkeypatch.setattr(executor_confirmed_module, "replace_pending_tool_result", replace_result)
+    monkeypatch.setattr(executor_confirmed_module, "verify_persisted_tool_round", verify_round)
+    monkeypatch.setattr(executor_confirmed_module, "_confirmed_file_snapshots_changed", lambda *args, **kwargs: False)
+    monkeypatch.setattr(executor_confirmed_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(executor_confirmed_module, "process_single_tool", lambda *args, **kwargs: pytest.fail("tool execution must not start"))
 
-    await executor_module._execute_confirmed_tools(FakeDb(), work)
+    await executor_confirmed_module._execute_confirmed_tools(FakeDb(), work)
 
     assert record.status == AuditRecordStatus.FAILED
     assert len(cancelled_attempts) == 1

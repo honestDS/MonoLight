@@ -15,12 +15,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
+from app.core.audit.integrity import canonical_json_dumps
 from app.core.constants import MANAGED_KNOWLEDGE_CONTENT_MAX_TOKENS
 from app.core.crud.knowledge.embedding_transition import knowledge_base_migration_crud
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.exceptions import BaseBusinessException, LLMException, ParameterException, ResourceNotFoundException, ServerException
-from app.core.knowledge import managed as managed_module
-from app.core.knowledge import organization_executor as executor_module
+from app.core.knowledge import (
+    managed as managed_module,
+)
+from app.core.knowledge import (
+    organization_analysis,
+    organization_plan,
+    organization_reduction,
+    organization_run,
+    organization_scope,
+    organization_stages,
+)
+from app.core.knowledge import (
+    organization_executor as executor_module,
+)
 from app.core.knowledge.managed import build_managed_knowledge_snapshot
 from app.core.knowledge.organization import (
     create_knowledge_organization_snapshot,
@@ -43,6 +56,8 @@ from app.core.knowledge.organization_runtime import (
     validate_knowledge_organization_plan,
 )
 from app.core.knowledge.organization_types import KnowledgeOrganizationPlan
+from app.core.prompts import KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT
+from app.core.utils.tokenizer import estimate_tokens
 from app.models.channel import ModelChannel
 from app.models.knowledge_base import (
     KnowledgeBase,
@@ -293,8 +308,8 @@ async def test_stage14_independent_lease_renewal_starts_after_snapshot_transacti
         lease_started.set()
         await done.wait()
 
-    monkeypatch.setattr(executor_module, "create_knowledge_organization_snapshot", blocked_snapshot)
-    monkeypatch.setattr(executor_module, "_renew_direct_organization_job_lease", tracked_lease)
+    monkeypatch.setattr(organization_run, "create_knowledge_organization_snapshot", blocked_snapshot)
+    monkeypatch.setattr(organization_run, "_renew_direct_organization_job_lease", tracked_lease)
 
     task = asyncio.create_task(
         execute_knowledge_organization(
@@ -426,13 +441,13 @@ async def test_stage14_direct_runs_are_serialized_by_persistent_active_change_ke
     async with session_factory() as db:
         knowledge_base = await _create_managed_container(db)
 
-    first_job_id, first_worker = await executor_module._create_direct_organization_job(
+    first_job_id, first_worker = await organization_run._create_direct_organization_job(
         session_factory,
         uid="user-1",
         knowledge_base_id=knowledge_base.id,
     )
     with pytest.raises(executor_module.KnowledgeOrganizationExecutionError) as exc_info:
-        await executor_module._create_direct_organization_job(
+        await organization_run._create_direct_organization_job(
             session_factory,
             uid="user-1",
             knowledge_base_id=knowledge_base.id,
@@ -453,7 +468,7 @@ async def test_stage14_direct_runs_are_serialized_by_persistent_active_change_ke
 @pytest.mark.asyncio
 async def test_stage14_direct_run_reports_missing_knowledge_base_instead_of_busy(session_factory):
     with pytest.raises(ResourceNotFoundException) as exc_info:
-        await executor_module._create_direct_organization_job(
+        await organization_run._create_direct_organization_job(
             session_factory,
             uid="user-1",
             knowledge_base_id=999,
@@ -472,7 +487,7 @@ async def test_stage14_direct_run_is_created_already_claimed_without_pending_cla
 
     monkeypatch.setattr(knowledge_job_crud, "try_claim", unexpected_claim)
 
-    job_id, worker_id = await executor_module._create_direct_organization_job(
+    job_id, worker_id = await organization_run._create_direct_organization_job(
         session_factory,
         uid="user-1",
         knowledge_base_id=knowledge_base.id,
@@ -947,15 +962,15 @@ async def test_stage14_model_candidates_are_resolved_from_current_config_without
             context_window_tokens=64000,
             max_output_tokens=4096,
         )
-        stage_snapshot = executor_module._stage_model_snapshot(primary, purpose="initial")
+        stage_snapshot = organization_stages._stage_model_snapshot(primary, purpose="initial")
         assert stage_snapshot == {
             "execution_model": {"channel_id": channel.id, "model_id": "primary", "protocol": primary.protocol},
             "purpose": "initial",
         }
         assert "secret-api-key" not in str(stage_snapshot)
-        assert executor_module._model_key(transport_changed) == executor_module._model_key(primary)
-        assert executor_module._model_key(runtime_changed) == executor_module._model_key(primary)
-        assert executor_module._model_key(replace(primary, model_id="replacement-model")) != executor_module._model_key(primary)
+        assert organization_stages._model_key(transport_changed) == organization_stages._model_key(primary)
+        assert organization_stages._model_key(runtime_changed) == organization_stages._model_key(primary)
+        assert organization_stages._model_key(replace(primary, model_id="replacement-model")) != organization_stages._model_key(primary)
 
 
 @pytest.mark.asyncio
@@ -1185,10 +1200,10 @@ async def test_stage14_initial_grouping_reuses_one_frozen_neighbor_result_for_co
             return {1: {2}, 2: {1}}
         return {}
 
-    stage_result, analysis_stage_count = await executor_module._execute_plan_stage_for_model(
+    stage_result, analysis_stage_count = await organization_plan._execute_plan_stage_for_model(
         session_factory,
         snapshot=snapshot,
-        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        work_key=organization_run._work_key(snapshot, organization_job_id=1),
         stage_index=0,
         lower_stage=None,
         model=_model(input_budget_tokens=250),
@@ -1353,7 +1368,7 @@ def test_stage14_reduction_preserves_existing_merge_without_new_action_type():
         }
     )
 
-    effective_plan, output_scope = executor_module._compose_scope_plan(upper_plan, scope=scope)
+    effective_plan, output_scope = organization_reduction._compose_scope_plan(upper_plan, scope=scope)
 
     assert len(effective_plan.items) == 1
     assert effective_plan.items[0].action == "merge"
@@ -1398,7 +1413,7 @@ def test_stage14_reduction_new_single_source_update_replaces_lower_update():
         }
     )
 
-    effective_plan, output_scope = executor_module._compose_scope_plan(upper_plan, scope=scope)
+    effective_plan, output_scope = organization_reduction._compose_scope_plan(upper_plan, scope=scope)
 
     assert effective_plan.items[0].action == "update"
     assert effective_plan.items[0].target.knowledge_key == "topic-v2"
@@ -1474,7 +1489,7 @@ def test_stage14_reduction_cannot_change_existing_multi_source_action_without_co
     upper_plan = KnowledgeOrganizationPlan.model_validate({"items": [raw_item]})
 
     with pytest.raises(ValueError):
-        executor_module._compose_scope_plan(upper_plan, scope=scope)
+        organization_reduction._compose_scope_plan(upper_plan, scope=scope)
 
 
 def test_stage14_reduction_existing_conflict_keeps_effective_action_and_accepts_new_compact_summary():
@@ -1519,7 +1534,7 @@ def test_stage14_reduction_existing_conflict_keeps_effective_action_and_accepts_
         }
     )
 
-    effective_plan, output_scope = executor_module._compose_scope_plan(upper_plan, scope=scope)
+    effective_plan, output_scope = organization_reduction._compose_scope_plan(upper_plan, scope=scope)
 
     assert effective_plan.items[0] == lower_conflict
     assert output_scope[0].effective_item == lower_conflict
@@ -1571,7 +1586,7 @@ def test_stage14_reduction_existing_merge_rejects_primary_change_even_when_compa
     )
 
     with pytest.raises(ValueError):
-        executor_module._compose_scope_plan(changed_primary, scope=scope)
+        organization_reduction._compose_scope_plan(changed_primary, scope=scope)
 
 
 def test_stage14_reduction_can_create_conflict_by_combining_multiple_previous_candidates():
@@ -1607,7 +1622,7 @@ def test_stage14_reduction_can_create_conflict_by_combining_multiple_previous_ca
         }
     )
 
-    effective_plan, output_scope = executor_module._compose_scope_plan(upper_conflict, scope=scope)
+    effective_plan, output_scope = organization_reduction._compose_scope_plan(upper_conflict, scope=scope)
 
     assert effective_plan.items[0].action == "conflict"
     assert output_scope[0].sources == ((1, 1), (2, 1))
@@ -1641,7 +1656,7 @@ def test_stage14_reduction_rejects_single_candidate_merge_without_combining_prev
     )
 
     with pytest.raises(ValueError):
-        executor_module._compose_scope_plan(invalid_merge, scope=scope)
+        organization_reduction._compose_scope_plan(invalid_merge, scope=scope)
 
 
 def test_stage14_reduction_keep_revalidates_inherited_targets_across_fragments():
@@ -1705,7 +1720,7 @@ def test_stage14_reduction_keep_revalidates_inherited_targets_across_fragments()
     )
 
     with pytest.raises(ValueError):
-        executor_module._compose_scope_plan(upper_plan, scope=scope)
+        organization_reduction._compose_scope_plan(upper_plan, scope=scope)
 
 
 @pytest.mark.asyncio
@@ -1749,7 +1764,7 @@ async def test_stage14_each_reduction_layer_resolves_current_model_config(sessio
             }
         )
 
-    monkeypatch.setattr(executor_module, "load_knowledge_organization_model_candidates", resolve_current_models)
+    monkeypatch.setattr(organization_run.organization_runtime, "load_knowledge_organization_model_candidates", resolve_current_models)
     result = await execute_knowledge_organization(
         session_factory,
         uid="user-1",
@@ -1781,8 +1796,8 @@ async def test_stage14_rejects_and_logs_when_current_model_config_is_unavailable
         def warning(self, message):
             warnings.append(str(message))
 
-    monkeypatch.setattr(executor_module, "load_knowledge_organization_model_candidates", unavailable)
-    monkeypatch.setattr(executor_module, "logger", _Logger())
+    monkeypatch.setattr(organization_run.organization_runtime, "load_knowledge_organization_model_candidates", unavailable)
+    monkeypatch.setattr(organization_run, "logger", _Logger())
 
     with pytest.raises(executor_module.KnowledgeOrganizationConfigurationError) as exc_info:
         await execute_knowledge_organization(
@@ -1875,11 +1890,11 @@ async def test_stage14_long_single_item_is_fully_analyzed_before_organization(se
 @pytest.mark.asyncio
 async def test_stage14_long_item_split_accounts_for_serialized_analysis_payload(session_factory):
     content = '\\"' * 1000
-    raw_tokens = executor_module.estimate_tokens(content)
-    serialized_tokens = executor_module.estimate_tokens(executor_module.canonical_json_dumps({"content": content}))
+    raw_tokens = estimate_tokens(content)
+    serialized_tokens = estimate_tokens(canonical_json_dumps({"content": content}))
     assert serialized_tokens > raw_tokens + 32
 
-    prompt_tokens = executor_module.estimate_tokens(executor_module.KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT)
+    prompt_tokens = estimate_tokens(KNOWLEDGE_ORGANIZATION_ANALYSIS_SYSTEM_PROMPT)
     analysis_output_tokens = 256
     safety_margin_tokens = 64
     available_payload_tokens = raw_tokens + 32
@@ -1916,16 +1931,16 @@ async def test_stage14_long_item_split_accounts_for_serialized_analysis_payload(
     analyzed_parts: list[str] = []
 
     async def analysis_caller(_model_config, *, content):
-        payload_tokens = executor_module.estimate_tokens(executor_module.canonical_json_dumps({"content": content}))
+        payload_tokens = estimate_tokens(canonical_json_dumps({"content": content}))
         if payload_tokens > available_payload_tokens:
             raise KnowledgeOrganizationContextExceededError("serialized analysis payload exceeds budget")
         analyzed_parts.append(content)
         return "s"
 
-    reduced, _stage = await executor_module._execute_analysis_stage(
+    reduced, _stage = await organization_analysis._execute_analysis_stage(
         session_factory,
         snapshot=snapshot,
-        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        work_key=organization_run._work_key(snapshot, organization_job_id=1),
         model=model,
         scope_item=scope_item,
         content=content,
@@ -1959,22 +1974,22 @@ async def test_stage14_single_candidate_budget_uses_final_array_payload_and_comp
         source_reference=item.source_reference,
         vector_item_ids=tuple(item.vector_item_ids),
     )
-    item_tokens = executor_module._scope_item_tokens(scope_item)
-    actual_payload_tokens = executor_module._scope_tokens((scope_item,))
+    item_tokens = organization_scope._scope_item_tokens(scope_item)
+    actual_payload_tokens = organization_scope._scope_tokens((scope_item,))
     assert actual_payload_tokens > item_tokens
     model = _model(input_budget_tokens=item_tokens)
 
-    prepared, analysis_stage_count = await executor_module._prepare_scope_for_model(
+    prepared, analysis_stage_count = await organization_analysis._prepare_scope_for_model(
         session_factory,
         snapshot=snapshot,
-        work_key=executor_module._work_key(snapshot, organization_job_id=1),
+        work_key=organization_run._work_key(snapshot, organization_job_id=1),
         model=model,
         scope=(scope_item,),
         analysis_caller=lambda _model_config, *, content: "compact summary",
     )
 
     assert analysis_stage_count > 0
-    assert executor_module._scope_tokens(prepared) <= model.input_budget_tokens
+    assert organization_scope._scope_tokens(prepared) <= model.input_budget_tokens
 
 
 @pytest.mark.asyncio
@@ -2152,14 +2167,14 @@ async def test_stage14_completed_reduction_stage_revalidates_strict_decrease(mon
         nonlocal invalidated
         invalidated = True
 
-    monkeypatch.setattr(executor_module, "_count_groups", fake_count_groups)
-    monkeypatch.setattr(executor_module, "_create_stage", fake_create_stage)
-    monkeypatch.setattr(executor_module, "_measure_stage_output_tokens", fake_output_tokens)
-    monkeypatch.setattr(executor_module, "_iter_compact_scope_items", fake_compact_items)
-    monkeypatch.setattr(executor_module, "_fail_and_invalidate_stage", fake_invalidate)
+    monkeypatch.setattr(organization_scope, "_count_groups", fake_count_groups)
+    monkeypatch.setattr(organization_stages, "_create_stage", fake_create_stage)
+    monkeypatch.setattr(organization_reduction, "_measure_stage_output_tokens", fake_output_tokens)
+    monkeypatch.setattr(organization_reduction, "_iter_compact_scope_items", fake_compact_items)
+    monkeypatch.setattr(organization_stages, "_fail_and_invalidate_stage", fake_invalidate)
 
     with pytest.raises(executor_module.KnowledgeOrganizationNotConvergedError):
-        await executor_module._execute_plan_stage_for_model(
+        await organization_plan._execute_plan_stage_for_model(
             None,
             snapshot=snapshot,
             work_key=completed_stage.work_key,
@@ -2222,12 +2237,12 @@ async def test_stage14_completed_analysis_stage_revalidates_strict_decrease(monk
         nonlocal invalidated
         invalidated = True
 
-    monkeypatch.setattr(executor_module, "_create_stage", fake_create_stage)
-    monkeypatch.setattr(executor_module, "_read_analysis_stage_text", fake_read_analysis)
-    monkeypatch.setattr(executor_module, "_fail_and_invalidate_stage", fake_invalidate)
+    monkeypatch.setattr(organization_stages, "_create_stage", fake_create_stage)
+    monkeypatch.setattr(organization_analysis, "_read_analysis_stage_text", fake_read_analysis)
+    monkeypatch.setattr(organization_stages, "_fail_and_invalidate_stage", fake_invalidate)
 
     with pytest.raises(executor_module.KnowledgeOrganizationNotConvergedError):
-        await executor_module._execute_analysis_stage(
+        await organization_analysis._execute_analysis_stage(
             None,
             snapshot=snapshot,
             work_key=completed_stage.work_key,
@@ -2310,10 +2325,10 @@ async def test_stage14_new_execution_never_resumes_running_stage_from_previous_t
         )
 
     model = _model(input_budget_tokens=4000)
-    seeded = await executor_module._create_stage(
+    seeded = await organization_stages._create_stage(
         session_factory,
         snapshot=snapshot,
-        work_key=executor_module._work_key(snapshot, organization_job_id=previous_job.id),
+        work_key=organization_run._work_key(snapshot, organization_job_id=previous_job.id),
         stage_index=0,
         lower_stage_key=None,
         model=model,

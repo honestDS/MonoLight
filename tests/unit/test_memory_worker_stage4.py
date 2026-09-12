@@ -30,7 +30,7 @@ from app.core.memory import (
     memory_service,
     normalize_memory_content,
 )
-from app.core.memory import service as memory_service_module
+from app.core.memory import service_recall as memory_recall_service_module
 from app.core.memory_jobs.consumer import MemoryJobConsumer, create_memory_job_consumer
 from app.core.memory_jobs.executor import (
     MemoryJobDeterministicError,
@@ -65,6 +65,12 @@ class _ImportSafePersistentClient:
 
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
+    import app.core.memory_jobs.handler_cleanup as memory_cleanup_handler
+    import app.core.memory_jobs.handler_execution as memory_execution_handler
+    import app.core.memory_jobs.handler_prepare as memory_prepare_handler
+    import app.core.memory_jobs.handler_publication as memory_publication_handler
+    import app.core.memory_jobs.handler_publication_validation as memory_publication_validation_handler
+    import app.core.memory_jobs.handler_vector as memory_vector_handler
     from app.core.memory_jobs import handlers as memory_handlers
     from app.core.memory_jobs import vector_cleanup as memory_vector_cleanup
 
@@ -188,12 +194,15 @@ class _FakeVectorBackend:
 @pytest.fixture
 def vector_backend(monkeypatch: pytest.MonkeyPatch) -> _FakeVectorBackend:
     backend = _FakeVectorBackend()
-    monkeypatch.setattr(memory_handlers, "load_embedding_runtime_config", backend.load_config)
-    monkeypatch.setattr(memory_handlers, "embed_texts_with_config", backend.embed)
-    monkeypatch.setattr(memory_handlers, "async_get_or_create_collection", backend.get_or_create_collection)
-    monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", backend.upsert)
-    monkeypatch.setattr(memory_handlers, "async_validate_collection", backend.validate)
-    monkeypatch.setattr(memory_handlers, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_prepare_handler, "load_embedding_runtime_config", backend.load_config)
+    monkeypatch.setattr(memory_publication_validation_handler, "load_embedding_runtime_config", backend.load_config)
+    monkeypatch.setattr(memory_execution_handler, "embed_texts_with_config", backend.embed)
+    monkeypatch.setattr(memory_execution_handler, "async_get_or_create_collection", backend.get_or_create_collection)
+    monkeypatch.setattr(memory_execution_handler, "async_upsert_collection_items", backend.upsert)
+    monkeypatch.setattr(memory_cleanup_handler, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_cleanup_handler, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_vector_handler, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_vector_handler, "async_delete_collection_items", backend.delete)
     monkeypatch.setattr(memory_vector_cleanup, "async_validate_collection", backend.validate)
     monkeypatch.setattr(memory_vector_cleanup, "async_delete_collection_items", backend.delete)
     return backend
@@ -779,7 +788,7 @@ async def test_distinct_user_creates_allocate_database_ids_concurrently(
         return await memory_store_crud.get_by_uid(db, uid=uid)
 
     monkeypatch.setattr(memory_record_crud, "create_pending_placeholder", create_placeholder_at_barrier)
-    monkeypatch.setattr(memory_handlers.memory_store_crud, "lock_for_mutation", unlocked_store_lookup)
+    monkeypatch.setattr(memory_prepare_handler.memory_store_crud, "lock_for_mutation", unlocked_store_lookup)
     submissions = await asyncio.gather(
         *(
             _create_service_memory(
@@ -1202,9 +1211,9 @@ async def test_plaintext_credential_lifecycle_is_published_recalled_deleted_and_
                 )
             ]
 
-        monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", fake_loader)
-        monkeypatch.setattr(memory_service_module, "embed_texts_with_config", fake_embed)
-        monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", fake_query)
+        monkeypatch.setattr(memory_recall_service_module, "load_embedding_runtime_config", fake_loader)
+        monkeypatch.setattr(memory_recall_service_module, "embed_texts_with_config", fake_embed)
+        monkeypatch.setattr(memory_recall_service_module, "_hybrid_query_collection", fake_query)
 
         async with memory_session_factory() as db:
             recalled = await memory_service.recall(
@@ -1610,13 +1619,13 @@ async def test_recovered_owner_cannot_delete_reclaimed_owner_vector_item(
             await release_old_upsert.wait()
         return result
 
-    monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", coordinated_upsert)
+    monkeypatch.setattr(memory_execution_handler, "async_upsert_collection_items", coordinated_upsert)
     old_context = MemoryJobExecutionContext(
         job=old_claim,
         worker_id="old-owner",
         session_factory=memory_session_factory,
     )
-    old_task = asyncio.create_task(memory_handlers._handle_update(old_context))
+    old_task = asyncio.create_task(memory_execution_handler._handle_update(old_context))
     try:
         await asyncio.wait_for(old_written.wait(), timeout=WAIT_TIMEOUT_SECONDS)
         old_item_id = build_memory_staged_vector_item_id(memory_id, 2, job_id, "old-owner")
@@ -1651,7 +1660,7 @@ async def test_recovered_owner_cannot_delete_reclaimed_owner_vector_item(
             worker_id="new-owner",
             session_factory=memory_session_factory,
         )
-        new_result = await memory_handlers._handle_update(new_context)
+        new_result = await memory_execution_handler._handle_update(new_context)
         assert new_result.finalized
         new_item_id = build_memory_staged_vector_item_id(memory_id, 2, job_id, "new-owner")
         assert new_item_id == old_item_id
@@ -1763,13 +1772,13 @@ async def test_vector_written_before_publication_failure_is_cleaned_and_database
     await _configure_store(memory_session_factory, uid=uid)
     vector_backend.runtime_configs[(1, "memory-model-v1")] = _runtime_config()
     consumer = _consumer(memory_session_factory)
-    original_publish = memory_handlers.memory_record_crud.publish_pending_version
+    original_publish = memory_publication_handler.memory_record_crud.publish_pending_version
 
     async def return_none(*_args: Any, **_kwargs: Any) -> None:
         return None
 
     try:
-        monkeypatch.setattr(memory_handlers.memory_record_crud, "publish_pending_version", return_none)
+        monkeypatch.setattr(memory_publication_handler.memory_record_crud, "publish_pending_version", return_none)
         create_result = await _create_service_memory(
             memory_session_factory,
             uid=uid,
@@ -1789,13 +1798,13 @@ async def test_vector_written_before_publication_failure_is_cleaned_and_database
         assert await _get_record(memory_session_factory, uid=uid, memory_id=failed_create.memory_id) is None
         assert vector_backend.collections["memory-collection-v1"]["items"] == {}
 
-        monkeypatch.setattr(memory_handlers.memory_record_crud, "publish_pending_version", original_publish)
+        monkeypatch.setattr(memory_publication_handler.memory_record_crud, "publish_pending_version", original_publish)
         memory_id = await _seed_ready_record(memory_session_factory, vector_backend, uid=uid, memory_key="stable-key")
 
         async def raise_revision(*_args: Any, **_kwargs: Any) -> None:
             raise RuntimeError("revision storage failure")
 
-        monkeypatch.setattr(memory_handlers.memory_revision_crud, "create", raise_revision)
+        monkeypatch.setattr(memory_publication_handler.memory_revision_crud, "create", raise_revision)
         update_result = await _update_service_memory(
             memory_session_factory,
             uid=uid,
@@ -2103,9 +2112,9 @@ async def test_create_with_eviction_publishes_replacement_and_migration_deltas_b
             )
         ]
 
-    monkeypatch.setattr(memory_service_module, "load_embedding_runtime_config", recall_loader)
-    monkeypatch.setattr(memory_service_module, "embed_texts_with_config", recall_embed)
-    monkeypatch.setattr(memory_service_module, "_hybrid_query_collection", recall_query)
+    monkeypatch.setattr(memory_recall_service_module, "load_embedding_runtime_config", recall_loader)
+    monkeypatch.setattr(memory_recall_service_module, "embed_texts_with_config", recall_embed)
+    monkeypatch.setattr(memory_recall_service_module, "_hybrid_query_collection", recall_query)
     vector_backend.embedding_hook = embedding_hook
     consumer = _consumer(memory_session_factory)
     try:
@@ -2524,7 +2533,7 @@ async def test_create_with_eviction_cleanup_job_failure_rolls_back_publication_a
     async def raise_cleanup_job(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("cleanup job creation failure")
 
-    monkeypatch.setattr(memory_handlers.memory_job_manager, "create_eviction_cleanup_job", raise_cleanup_job)
+    monkeypatch.setattr(memory_publication_handler.memory_job_manager, "create_eviction_cleanup_job", raise_cleanup_job)
     consumer = _consumer(memory_session_factory)
     try:
         submission = await _create_service_memory(
