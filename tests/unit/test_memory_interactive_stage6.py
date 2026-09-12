@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.dispatchers import interactive as interactive_module
+from app.core.dispatchers import interactive_generation as interactive_generation_module
 from app.core.dispatchers import interactive_helpers as interactive_helpers_module
+from app.core.dispatchers import interactive_runtime as interactive_runtime_module
+from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.dispatchers import non_stream as non_stream_module
 from app.core.dispatchers import stream as stream_module
 from app.core.dispatchers.memory.types import build_result
@@ -170,15 +172,17 @@ def _install_dispatcher_stubs(
             content='{"status":"success"}',
         )
 
-    monkeypatch.setattr(interactive_module.user_crud, "get_by_uid", get_user)
-    monkeypatch.setattr(interactive_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(interactive_module, "validate_profile_and_cfg", validate_profile)
-    monkeypatch.setattr(interactive_module, "select_channel", select_channel)
-    monkeypatch.setattr(interactive_module, "get_tools_for_profile", get_tools)
-    monkeypatch.setattr(interactive_module, "mark_initial_message_processed", mark_processed)
-    monkeypatch.setattr(interactive_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(interactive_runtime_module.user_crud, "get_by_uid", get_user)
+    monkeypatch.setattr(interactive_runtime_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(interactive_runtime_module, "validate_profile_and_cfg", validate_profile)
+    monkeypatch.setattr(interactive_runtime_module, "select_channel", select_channel)
+    monkeypatch.setattr(interactive_generation_module, "select_channel", select_channel)
+    monkeypatch.setattr(interactive_runtime_module, "get_tools_for_profile", get_tools)
+    monkeypatch.setattr(interactive_runtime_module, "mark_initial_message_processed", mark_processed)
+    monkeypatch.setattr(interactive_runtime_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
+    monkeypatch.setattr(interactive_generation_module, "get_multimodal_from_entry", lambda model_entry: (False, False, False))
     monkeypatch.setattr(
-        interactive_module,
+        interactive_runtime_module,
         "resolve_chat_params",
         lambda model_entry, current_channel: {
             "temperature": None,
@@ -188,17 +192,28 @@ def _install_dispatcher_stubs(
             "context_window_k": 4,
         },
     )
-    monkeypatch.setattr(interactive_module, "prepare_messages", prepare_messages)
-    monkeypatch.setattr(interactive_module, "apply_context_summary_checkpoint", apply_checkpoint)
-    monkeypatch.setattr(interactive_module, "materialize_latest_user_environment_prompt", materialize_environment_prompt)
-    monkeypatch.setattr(interactive_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
-    monkeypatch.setattr(interactive_module, "run_memory_recall_precheck", precheck)
-    monkeypatch.setattr(interactive_module.LLMClient, "generate", generate)
-    monkeypatch.setattr(interactive_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
-    monkeypatch.setattr(interactive_module, "save_assistant_message", save_assistant)
-    monkeypatch.setattr(interactive_module, "save_tool_response", save_tool_response)
-    monkeypatch.setattr(interactive_module, "audit_tool_round", _audit_tool_round_none)
-    monkeypatch.setattr(interactive_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        interactive_generation_module,
+        "resolve_chat_params",
+        lambda model_entry, current_channel: {
+            "temperature": None,
+            "top_p": None,
+            "max_tokens": 256,
+            "chat_timeout": 60,
+            "context_window_k": 4,
+        },
+    )
+    monkeypatch.setattr(interactive_runtime_module, "prepare_messages", prepare_messages)
+    monkeypatch.setattr(interactive_generation_module, "apply_context_summary_checkpoint", apply_checkpoint)
+    monkeypatch.setattr(interactive_generation_module, "materialize_latest_user_environment_prompt", materialize_environment_prompt)
+    monkeypatch.setattr(interactive_generation_module.ContextManager, "trim_messages_for_model_request", lambda **kwargs: kwargs["messages"])
+    monkeypatch.setattr(interactive_runtime_module, "run_memory_recall_precheck", precheck)
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate", generate)
+    monkeypatch.setattr(interactive_generation_module.LLMClient, "generate_with_stream_callback", generate_with_stream_callback)
+    monkeypatch.setattr(interactive_runtime_module, "save_assistant_message", save_assistant)
+    monkeypatch.setattr(interactive_tools_module, "save_tool_response", save_tool_response)
+    monkeypatch.setattr(interactive_tools_module, "audit_tool_round", _audit_tool_round_none)
+    monkeypatch.setattr(interactive_tools_module, "prevalidate_tool_round", lambda *args, **kwargs: {})
     monkeypatch.setattr(interactive_helpers_module, "process_single_tool_with_isolated_db", isolated_tool)
 
 

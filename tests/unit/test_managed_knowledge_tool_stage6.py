@@ -11,13 +11,16 @@ from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core import profile_deletion as profile_deletion_module
 from app.core.crud.profile.profile import profile_crud
 from app.core.dispatch_context import build_dispatch_context
+from app.core.knowledge import deletion as deletion_module
 from app.core.knowledge.deletion import delete_owned_knowledge_base
 from app.core.knowledge.errors import ManagedKnowledgeContainerConflictError
 from app.core.knowledge.managed import managed_knowledge_service
 from app.core.knowledge.managed_container import get_or_create_managed_knowledge_base
 from app.core.knowledge_jobs import manager as knowledge_job_manager_module
+from app.core.profile_deletion import execute_profile_deletion
 from app.core.tools.longterm_memory import (
     MANAGE_LONGTERM_MEMORY_TOOL_SCHEMA,
     LongTermMemoryExecutor,
@@ -806,6 +809,132 @@ async def test_step6_managed_knowledge_base_delete_cascades_and_recreates_new_co
         assert new_knowledge_base is not None
         assert new_knowledge_base.id != old_knowledge_base_id
         assert new_knowledge_base.active_collection_name != old_collection_name
+
+
+@pytest.mark.asyncio
+async def test_step6_managed_knowledge_base_delete_logs_active_organization_lock_and_still_deletes(
+    stage6_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _channel = await _create_runtime(stage6_database)
+    warnings: list[str] = []
+
+    class _Logger:
+        def bind(self, **_kwargs):
+            return self
+
+        def warning(self, message):
+            warnings.append(str(message))
+
+    monkeypatch.setattr(deletion_module, "logger", _Logger())
+
+    async with stage6_database() as db:
+        executor = _executor(db, profile, tool_call_id="call-kb-delete-active-organization")
+        created = json.loads(
+            await executor.execute(
+                operation="knowledge_create",
+                knowledge_key="lifecycle.delete-during-organization",
+                knowledge_content="Managed knowledge that will be deleted with its container.",
+            )
+        )
+        knowledge_id = created["knowledge_id"]
+        knowledge_base = await db.scalar(
+            select(KnowledgeBase).where(
+                KnowledgeBase.uid == "user-1",
+                KnowledgeBase.managed_profile_id == profile.id,
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+            )
+        )
+        assert knowledge_base is not None
+        knowledge_base_id = knowledge_base.id
+        item = await db.get(ManagedKnowledgeItem, knowledge_id)
+        assert item is not None
+        item.organization_lock_token = "job:999"
+        db.add(item)
+        await db.commit()
+
+        await delete_owned_knowledge_base(
+            db,
+            knowledge_base_id=knowledge_base_id,
+            requester_uid="user-1",
+            is_superuser=False,
+        )
+
+    assert warnings
+    async with stage6_database() as db:
+        assert await db.get(KnowledgeBase, knowledge_base_id) is None
+        assert await db.get(ManagedKnowledgeItem, knowledge_id) is None
+
+
+@pytest.mark.asyncio
+async def test_step6_profile_delete_logs_active_organization_lock_and_still_deletes(
+    stage6_database: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, _channel = await _create_runtime(stage6_database)
+    warnings: list[str] = []
+
+    class _Logger:
+        def bind(self, **_kwargs):
+            return self
+
+        def warning(self, message):
+            warnings.append(str(message))
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(profile_deletion_module, "logger", _Logger())
+    monkeypatch.setattr(profile_deletion_module.scheduled_task_crud, "delete_by_profile", no_op)
+    monkeypatch.setattr(profile_deletion_module.message_platform_crud, "clear_profile_assignment", no_op)
+
+    async with stage6_database() as db:
+        current_profile = await db.get(Profile, profile.id)
+        assert current_profile is not None
+        executor = _executor(db, current_profile, tool_call_id="call-profile-delete-active-organization")
+        created = json.loads(
+            await executor.execute(
+                operation="knowledge_create",
+                knowledge_key="lifecycle.profile-delete-during-organization",
+                knowledge_content="Managed knowledge deleted through its owning profile.",
+            )
+        )
+        knowledge_id = created["knowledge_id"]
+        knowledge_base = await db.scalar(
+            select(KnowledgeBase).where(
+                KnowledgeBase.uid == "user-1",
+                KnowledgeBase.managed_profile_id == current_profile.id,
+                KnowledgeBase.knowledge_base_type == KnowledgeBaseType.LLM_MANAGED,
+            )
+        )
+        assert knowledge_base is not None
+        knowledge_base_id = knowledge_base.id
+        item = await db.get(ManagedKnowledgeItem, knowledge_id)
+        assert item is not None
+        item.organization_lock_token = "job:999"
+        db.add(item)
+        await db.flush()
+
+        await execute_profile_deletion(
+            db,
+            profile=current_profile,
+            impact={
+                "managed_knowledge_base": {
+                    "items": [{"id": knowledge_base_id}],
+                },
+                "sessions": {
+                    "items": [],
+                    "omitted_count": 0,
+                },
+            },
+        )
+        await db.commit()
+
+    assert warnings
+    async with stage6_database() as db:
+        assert await db.get(Profile, profile.id) is None
+        assert await db.get(KnowledgeBase, knowledge_base_id) is None
+        assert await db.get(ManagedKnowledgeItem, knowledge_id) is None
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ from sqlmodel import SQLModel
 
 import app.core.crypto as crypto_module
 import app.core.memory_jobs.consumer as consumer_module
-import app.core.memory_jobs.manager as manager_module
+import app.core.memory_jobs.manager_organization as manager_organization_module
 from app.core.constants import ERR_MEMORY_JOB_PAYLOAD_INVALID, MEMORY_ORGANIZE_MIN_INTERVAL_SECONDS
 from app.core.crud.channel.channel import channel_crud
 from app.core.crud.memory.job import memory_job_crud
@@ -451,7 +451,7 @@ async def test_auto_organization_accepts_exact_and_overdue_interval_for_naive_an
     async def fixed_database_time(_db: AsyncSession) -> datetime:
         return fixed_now
 
-    original_lock = manager_module.memory_store_crud.lock_for_mutation
+    original_lock = manager_organization_module.memory_store_crud.lock_for_mutation
 
     async def lock_with_requested_timezone(
         db: AsyncSession,
@@ -464,8 +464,8 @@ async def test_auto_organization_accepts_exact_and_overdue_interval_for_naive_an
             store.organization_last_run_at = last_run_at
         return store
 
-    monkeypatch.setattr(manager_module, "get_database_time", fixed_database_time)
-    monkeypatch.setattr(manager_module.memory_store_crud, "lock_for_mutation", lock_with_requested_timezone)
+    monkeypatch.setattr(manager_organization_module, "get_database_time", fixed_database_time)
+    monkeypatch.setattr(manager_organization_module.memory_store_crud, "lock_for_mutation", lock_with_requested_timezone)
 
     async with memory_database() as db:
         submission = await MemoryJobManager().submit_auto_organization(db, uid=uid)
@@ -487,7 +487,7 @@ async def test_auto_dedupe_reuses_succeeded_snapshot_manual_ignores_interval_and
     async def fixed_database_time(_db: AsyncSession) -> datetime:
         return fixed_now
 
-    monkeypatch.setattr(manager_module, "get_database_time", fixed_database_time)
+    monkeypatch.setattr(manager_organization_module, "get_database_time", fixed_database_time)
     manager = MemoryJobManager()
     async with memory_database() as db:
         first = await manager.submit_auto_organization(db, uid=uid)
@@ -581,7 +581,7 @@ async def test_auto_organization_retries_failed_snapshot_after_interval(
     async def fixed_database_time(_db: AsyncSession) -> datetime:
         return fixed_now
 
-    monkeypatch.setattr(manager_module, "get_database_time", fixed_database_time)
+    monkeypatch.setattr(manager_organization_module, "get_database_time", fixed_database_time)
     manager = MemoryJobManager()
 
     async with memory_database() as db:

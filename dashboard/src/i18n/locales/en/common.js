@@ -16,6 +16,7 @@ export default {
   no_data: 'No Data',
   empty_content: 'No content',
   unknown_tool: 'Unknown tool',
+  context_recall: 'Context Recall',
   tool_result: 'Tool result',
   ws_disconnected: 'WebSocket disconnected',
   unknown_error: 'Unknown error',

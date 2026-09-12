@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import ERR_PROFILE_DELETE_PERSISTED_OWNER_REQUIRED
+from app.core.constants import ERR_PROFILE_DELETE_PERSISTED_OWNER_REQUIRED, LOG_PROFILE_DELETE_WITH_ACTIVE_KNOWLEDGE_ORGANIZATION
 from app.core.crud.knowledge.base import (
     knowledge_base_collection_owner_crud,
     knowledge_base_crud,
@@ -19,10 +19,12 @@ from app.core.crud.session.message import message_crud
 from app.core.crud.session.session import session_crud
 from app.core.crud.task.scheduled import scheduled_task_crud
 from app.core.i18n import t
+from app.core.log import get_logger
 from app.core.session_cleanup import delete_session_data
 from app.models.profile import Profile
 
 _PREVIEW_ITEM_LIMIT = 20
+logger = get_logger(__name__)
 
 
 def _preview_items(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -153,6 +155,13 @@ async def execute_profile_deletion(
             managed[0]["id"],
         )
         if knowledge_base is not None:
+            locked_count = await managed_knowledge_item_crud.count_organization_locked(
+                db,
+                uid=profile.uid,
+                knowledge_base_id=knowledge_base.id,
+            )
+            if locked_count:
+                logger.bind(profile_id=profile.id, knowledge_base_id=knowledge_base.id, uid=profile.uid, locked_count=locked_count).warning(t(LOG_PROFILE_DELETE_WITH_ACTIVE_KNOWLEDGE_ORGANIZATION, locked_count=locked_count))
             await knowledge_base_collection_owner_crud.enqueue(
                 db,
                 knowledge_base_id=knowledge_base.id,

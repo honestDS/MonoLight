@@ -8,14 +8,14 @@ import pytest
 
 from app.adapters import chat_web as chat_web_module
 from app.core.constants import ERR_LLM_STREAM_TIMEOUT, ERR_LLM_STREAM_TOOL_CALL_AMBIGUOUS
+from app.core.dispatchers import stream as stream_module
 from app.core.dispatchers.stream import StreamDispatcherMixin
 from app.core.exceptions import BaseBusinessException, LLMException
-from app.core.session_reply_queue import executor as executor_module
-from app.core.session_reply_queue.executor import _execute_foreground
-from app.core.session_reply_queue.manager import (
-    SessionReplyQueueManager,
-    build_foreground_message_dedupe_key,
-)
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.core.session_reply_queue import executor_replies as executor_replies_module
+from app.core.session_reply_queue.executor_replies import _execute_foreground
+from app.core.session_reply_queue.manager import SessionReplyQueueManager
+from app.core.session_reply_queue.manager_common import build_foreground_message_dedupe_key
 from app.core.utils.dispatcher.helpers import dump_output_history
 from app.core.utils.dispatcher.save_message import _to_storable_content
 from app.models.message import InternalMessage, InternalResponse, InternalToolCall, MessageRole, MessageType
@@ -129,11 +129,16 @@ def test_llm_request_context_debug_log_reuses_provided_estimated_tokens(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_dispatch_stream_raise_errors_controls_business_exception_surface():
+async def test_dispatch_stream_raise_errors_controls_business_exception_surface(monkeypatch):
+    async def dispatch_interactive(**_kwargs):
+        raise LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
+
+    monkeypatch.setattr(stream_module, "dispatch_interactive", dispatch_interactive)
+
     class FailingStreamDispatcher(StreamDispatcherMixin):
         @classmethod
-        async def _dispatch_interactive(cls, **_kwargs):
-            raise LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
+        async def validate_initial_message_before_save(cls, *_args, **_kwargs):
+            return None
 
     expected_error = LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
 
@@ -967,15 +972,15 @@ async def test_enqueue_foreground_controls_tool_call_content_by_source(
         return None
 
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_crud.upsert_profile",
+        "app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile",
         upsert_profile,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_work_item_crud.enqueue",
+        "app.core.session_reply_queue.manager_enqueue.session_reply_work_item_crud.enqueue",
         enqueue,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.message_crud.activate_and_get_guidance_prompt",
+        "app.core.session_reply_queue.manager_enqueue.message_crud.activate_and_get_guidance_prompt",
         activate_and_get_guidance_prompt,
     )
 
@@ -1036,11 +1041,11 @@ async def test_http_foreground_can_request_summary_events_without_content_stream
         return work, True
 
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_crud.upsert_profile",
+        "app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile",
         upsert_profile,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_work_item_crud.enqueue",
+        "app.core.session_reply_queue.manager_enqueue.session_reply_work_item_crud.enqueue",
         enqueue,
     )
 
@@ -1362,14 +1367,14 @@ async def test_wait_for_stream_yields_persisted_chunks_before_work_finishes(monk
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_work_item_crud.resolve_merged_target",
+        "app.core.session_reply_queue.manager_result.session_reply_work_item_crud.resolve_merged_target",
         resolve_merged_target,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_stream_event_crud.list_after_sequence",
+        "app.core.session_reply_queue.manager_result.session_reply_stream_event_crud.list_after_sequence",
         list_after_sequence,
     )
-    monkeypatch.setattr("app.core.session_reply_queue.manager.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_result.asyncio.sleep", no_sleep)
 
     yielded = [event async for event in manager.wait_for_stream(7)]
 
@@ -1413,11 +1418,11 @@ async def test_wait_for_stream_returns_identified_error_event(monkeypatch):
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_work_item_crud.resolve_merged_target",
+        "app.core.session_reply_queue.manager_result.session_reply_work_item_crud.resolve_merged_target",
         resolve_merged_target,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_stream_event_crud.list_after_sequence",
+        "app.core.session_reply_queue.manager_result.session_reply_stream_event_crud.list_after_sequence",
         list_after_sequence,
     )
 
@@ -1577,33 +1582,38 @@ async def test_execute_foreground_persists_each_tool_event_with_original_respons
             "response_id": "response-turn-2",
         }
 
-    monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_queue_manager.freeze_foreground_input",
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
         freeze_foreground_input,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.get_latest_sequence",
+        executor_interactive_module.session_reply_stream_event_crud,
+        "get_latest_sequence",
         get_latest_sequence,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.publish",
+        executor_interactive_module.session_reply_stream_event_crud,
+        "publish",
         publish,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_crud.update_llm_request_metadata",
+        executor_interactive_module.session_crud,
+        "update_llm_request_metadata",
         update_llm_request_metadata,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.send_session_stream_event",
+        executor_interactive_module,
+        "send_session_stream_event",
         send_session_stream_event,
     )
 
     async def unexpected_non_stream_dispatch(**_kwargs):
         raise AssertionError("stream work must not use ChatDispatcher.dispatch")
 
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", dispatch_stream)
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", unexpected_non_stream_dispatch)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", dispatch_stream)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", unexpected_non_stream_dispatch)
 
     db = FakeDb()
     result = await _execute_foreground(db, work, "worker-1")
@@ -1722,16 +1732,18 @@ async def test_execute_foreground_stream_reraises_llm_exception(monkeypatch):
         raise LLMException(message=ERR_LLM_STREAM_TIMEOUT, timeout=120.0)
         yield
 
-    monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_queue_manager.freeze_foreground_input",
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
         freeze_foreground_input,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.get_latest_sequence",
+        executor_interactive_module.session_reply_stream_event_crud,
+        "get_latest_sequence",
         get_latest_sequence,
     )
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", dispatch_stream)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", dispatch_stream)
 
     with pytest.raises(LLMException) as exc_info:
         await _execute_foreground(FakeDb(), work, "worker-1")
@@ -1808,19 +1820,22 @@ async def test_execute_foreground_persists_non_stream_llm_request_metadata(monke
     async def unexpected_stream_dispatch(**_kwargs):
         raise AssertionError("non-stream work must not use ChatDispatcher.dispatch_stream")
 
-    monkeypatch.setattr("app.core.session_reply_queue.executor.AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_queue_manager.freeze_foreground_input",
+        executor_replies_module.session_reply_queue_manager,
+        "freeze_foreground_input",
         freeze_foreground_input,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_reply_stream_event_crud.get_latest_sequence",
+        executor_interactive_module.session_reply_stream_event_crud,
+        "get_latest_sequence",
         get_latest_sequence,
     )
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch", dispatch)
-    monkeypatch.setattr("app.core.session_reply_queue.executor.ChatDispatcher.dispatch_stream", unexpected_stream_dispatch)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch", dispatch)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", unexpected_stream_dispatch)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.executor.session_crud.update_llm_request_metadata",
+        executor_interactive_module.session_crud,
+        "update_llm_request_metadata",
         update_llm_request_metadata,
     )
 
@@ -1881,13 +1896,13 @@ async def test_publish_interactive_stream_dequeues_request_ids_once_across_agent
         assert commit is False
         persisted_events.append((work_id, sequence_no, dict(event)))
 
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        executor_module.session_reply_stream_event_crud,
+        executor_interactive_module.session_reply_stream_event_crud,
         "publish",
         publish,
     )
-    stream_state = executor_module._InteractiveWorkStreamEventState(
+    stream_state = executor_interactive_module._InteractiveWorkStreamEventState(
         work=work,
         next_sequence=1,
         dequeued_request_ids=set(),
@@ -1897,7 +1912,7 @@ async def test_publish_interactive_stream_dequeues_request_ids_once_across_agent
     db = FakeDb()
 
     await asyncio.wait_for(
-        executor_module._publish_interactive_work_stream_event(
+        executor_interactive_module._publish_interactive_work_stream_event(
             db,
             stream_state,
             {"type": "agent_loop_start", "response_id": "response-1"},
@@ -1906,7 +1921,7 @@ async def test_publish_interactive_stream_dequeues_request_ids_once_across_agent
     )
     work.execution_state["request_ids"].extend(["request-3", "request-2"])
     await asyncio.wait_for(
-        executor_module._publish_interactive_work_stream_event(
+        executor_interactive_module._publish_interactive_work_stream_event(
             db,
             stream_state,
             {"type": "agent_loop_start", "response_id": "response-2"},
@@ -2005,14 +2020,14 @@ async def test_wait_for_stream_switches_merged_target_without_replay_before_term
 
     monkeypatch.setattr("app.providers.database.AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_work_item_crud.resolve_merged_target",
+        "app.core.session_reply_queue.manager_result.session_reply_work_item_crud.resolve_merged_target",
         resolve_merged_target,
     )
     monkeypatch.setattr(
-        "app.core.session_reply_queue.manager.session_reply_stream_event_crud.list_after_sequence",
+        "app.core.session_reply_queue.manager_result.session_reply_stream_event_crud.list_after_sequence",
         list_after_sequence,
     )
-    monkeypatch.setattr("app.core.session_reply_queue.manager.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_result.asyncio.sleep", no_sleep)
 
     yielded = await asyncio.wait_for(collect_stream(), timeout=1)
 

@@ -102,6 +102,16 @@ EXPECTED_FOREIGN_KEY_CONSTRAINTS = {
         ("id", "uid"),
         "CASCADE",
     ),
+    (
+        "knowledge_organization_snapshot",
+        ("knowledge_base_id", "uid"),
+        "knowledge_base",
+        ("id", "uid"),
+        "CASCADE",
+    ),
+    ("knowledge_organization_snapshot_item", ("snapshot_id",), "knowledge_organization_snapshot", ("id",), "CASCADE"),
+    ("knowledge_organization_stage", ("snapshot_id",), "knowledge_organization_snapshot", ("id",), "CASCADE"),
+    ("knowledge_organization_fragment", ("stage_id",), "knowledge_organization_stage", ("id",), "CASCADE"),
     # session, profile, platform, and scheduled task
     ("profile", ("prompt_id",), "prompt", ("id",), "RESTRICT"),
     ("chat_session", ("profile_override_id",), "profile", ("id",), "RESTRICT"),

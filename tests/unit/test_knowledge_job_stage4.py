@@ -20,6 +20,7 @@ from app.core.crud.knowledge.managed import managed_knowledge_item_crud
 from app.core.embedding.common import EmbeddingRuntimeConfig
 from app.core.exceptions import BaseBusinessException
 from app.core.knowledge.managed import managed_knowledge_service
+from app.core.knowledge.organization import create_knowledge_organization_snapshot
 from app.core.knowledge.recall import (
     filter_recallable_managed_hits,
     materialize_recallable_managed_hits,
@@ -50,6 +51,8 @@ from app.models.knowledge_base import (
     KnowledgeJob,
     KnowledgeJobOperation,
     KnowledgeJobStatus,
+    KnowledgeOrganizationSnapshot,
+    KnowledgeOrganizationSnapshotItem,
     ManagedKnowledgeActorType,
     ManagedKnowledgeItem,
     ManagedKnowledgeRevision,
@@ -67,6 +70,8 @@ _TABLES = (
     KnowledgeBaseCollectionOwner.__table__,
     ManagedKnowledgeItem.__table__,
     ManagedKnowledgeRevision.__table__,
+    KnowledgeOrganizationSnapshot.__table__,
+    KnowledgeOrganizationSnapshotItem.__table__,
     KnowledgeJob.__table__,
 )
 
@@ -427,6 +432,16 @@ async def test_managed_publication_runs_external_calls_without_database_session(
     knowledge_base = await _create_container(knowledge_job_database)
     submission = await _submit_create(knowledge_job_database, knowledge_base.id)
     job_id = submission.job.id
+    async with knowledge_job_database() as db:
+        revision_before_publication = (
+            await db.execute(
+                select(ManagedKnowledgeRevision).where(
+                    ManagedKnowledgeRevision.knowledge_id == submission.item.id,
+                    ManagedKnowledgeRevision.version == 1,
+                )
+            )
+        ).scalar_one()
+        immutable_revision_snapshot = dict(revision_before_publication.after_snapshot)
     claimed = await _claim(knowledge_job_database, job_id=job_id, owner="worker-1")
     assert claimed is not None
 
@@ -484,13 +499,28 @@ async def test_managed_publication_runs_external_calls_without_database_session(
 
     async with knowledge_job_database() as db:
         item = await db.get(ManagedKnowledgeItem, submission.item.id)
+        revision = (
+            await db.execute(
+                select(ManagedKnowledgeRevision).where(
+                    ManagedKnowledgeRevision.knowledge_id == submission.item.id,
+                    ManagedKnowledgeRevision.version == 1,
+                )
+            )
+        ).scalar_one()
         current_knowledge_base = await db.get(KnowledgeBase, knowledge_base.id)
         job = await knowledge_job_crud.get_by_id(db, uid="user-1", job_id=job_id)
+        snapshot = await create_knowledge_organization_snapshot(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+        )
     assert item is not None
     assert item.indexed_version == item.version == 1
     assert item.is_recallable is True
     assert item.pending_job_id is None
     assert len(item.vector_item_ids) == 1
+    assert revision.after_snapshot == immutable_revision_snapshot
+    assert snapshot.item_count == 1
     assert current_knowledge_base is not None
     assert current_knowledge_base.index_status == KnowledgeBaseIndexStatus.READY
     assert job is not None and job.status == KnowledgeJobStatus.SUCCEEDED
@@ -1659,25 +1689,40 @@ async def test_failed_managed_publish_can_be_resubmitted_with_new_dedupe_key(
     assert first.job is not None
     assert first.item is not None
 
-    async with knowledge_job_database() as db:
-        await db.execute(
-            update(KnowledgeJob)
-            .where(KnowledgeJob.id == first.job.id)
-            .values(
-                status=KnowledgeJobStatus.FAILED,
-                active_change_key=None,
-                locked_by=None,
-                lock_until=None,
-            )
-        )
-        await db.execute(update(ManagedKnowledgeItem).where(ManagedKnowledgeItem.id == first.item.id).values(pending_job_id=None))
-        await db.commit()
-
-    second = await _submit_create(
+    claimed = await _claim(
         knowledge_job_database,
-        knowledge_base.id,
-        dedupe_key="publish-failed-second",
+        job_id=first.job.id,
+        owner="failed-publish-worker",
     )
+    assert claimed is not None
+    async with knowledge_job_database() as db:
+        changed = await knowledge_job_crud.mark_failed(
+            db,
+            uid="user-1",
+            job_id=first.job.id,
+            owner="failed-publish-worker",
+            error="publication failed",
+        )
+        assert changed is True
+        failed_item = await managed_knowledge_item_crud.get_by_id(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            knowledge_id=first.item.id,
+        )
+        assert failed_item is not None
+        assert failed_item.pending_job_id is None
+
+    async with knowledge_job_database() as db:
+        second = await knowledge_job_manager.retry_failed_publication(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            knowledge_id=first.item.id,
+            expected_version=first.item.version,
+            failed_job_id=first.job.id,
+            dedupe_key="publish-failed-second",
+        )
 
     assert second.job is not None
     assert second.job.id != first.job.id
@@ -1693,6 +1738,80 @@ async def test_failed_managed_publish_can_be_resubmitted_with_new_dedupe_key(
         KnowledgeJobStatus.FAILED,
         KnowledgeJobStatus.PENDING,
     ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failed_publication_retries_create_only_one_active_job(
+    knowledge_job_database: async_sessionmaker[AsyncSession],
+) -> None:
+    knowledge_base = await _create_container(knowledge_job_database)
+    first = await _submit_create(
+        knowledge_job_database,
+        knowledge_base.id,
+        dedupe_key="publish-failed-concurrent-source",
+    )
+    assert first.job is not None
+    assert first.item is not None
+
+    claimed = await _claim(
+        knowledge_job_database,
+        job_id=first.job.id,
+        owner="failed-publish-concurrent-worker",
+    )
+    assert claimed is not None
+    async with knowledge_job_database() as db:
+        assert await knowledge_job_crud.mark_failed(
+            db,
+            uid="user-1",
+            job_id=first.job.id,
+            owner="failed-publish-concurrent-worker",
+            error="publication failed",
+        )
+
+    async def retry(dedupe_key: str):
+        async with knowledge_job_database() as db:
+            return await knowledge_job_manager.retry_failed_publication(
+                db,
+                uid="user-1",
+                knowledge_base_id=knowledge_base.id,
+                knowledge_id=first.item.id,
+                expected_version=first.item.version,
+                failed_job_id=first.job.id,
+                dedupe_key=dedupe_key,
+            )
+
+    results = await asyncio.gather(
+        retry("publish-failed-concurrent-a"),
+        retry("publish-failed-concurrent-b"),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, Exception)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], KnowledgeJobTargetBusyError)
+
+    async with knowledge_job_database() as db:
+        active_jobs = list(
+            (
+                await db.scalars(
+                    select(KnowledgeJob).where(
+                        KnowledgeJob.knowledge_base_id == knowledge_base.id,
+                        KnowledgeJob.active_change_key.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        item = await managed_knowledge_item_crud.get_by_id(
+            db,
+            uid="user-1",
+            knowledge_base_id=knowledge_base.id,
+            knowledge_id=first.item.id,
+        )
+    assert len(active_jobs) == 1
+    assert item is not None
+    assert item.pending_job_id == active_jobs[0].id
 
 
 @pytest.mark.asyncio

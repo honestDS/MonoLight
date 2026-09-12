@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel, select
 from starlette.websockets import WebSocketDisconnect
 
-import app.core.session_reply_queue.manager as session_reply_queue_manager_module
+import app.core.session_reply_queue.manager_submission as session_reply_queue_manager_module
 from app.adapters.chat_web import web_chat_adapter
 from app.adapters.chat_ws import ws_chat_adapter
 from app.adapters.weixin_openclaw.adapter import WeixinOpenClawAdapter
@@ -144,8 +144,8 @@ def entry_dependencies(monkeypatch):
         monkeypatch.setattr(f"{module_name}.resolve_profile_for_session", resolve_profile)
         monkeypatch.setattr(f"{module_name}.ChatDispatcher.validate_initial_message_before_save", validate)
     monkeypatch.setattr("app.adapters.chat_web.ensure_web_session_writable", ensure_writable)
-    monkeypatch.setattr("app.core.session_reply_queue.manager.session_crud.upsert_profile", upsert_profile)
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.session_reply_queue.manager_enqueue.session_crud.upsert_profile", upsert_profile)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
     monkeypatch.setattr("app.adapters.weixin_openclaw.adapter.generate_session_title_for_selected_profile", generate_title)
     return profile
 
@@ -1066,7 +1066,7 @@ async def test_invalid_confirmation_input_rolls_back_bundle_when_work_enqueue_fa
 
     monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
     monkeypatch.setattr(session_reply_queue_manager, "_enqueue_foreground_message", fail_enqueue)
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     with pytest.raises(RuntimeError, match="injected work enqueue failure"):
         await session_reply_queue_manager.submit_user_message(
@@ -1118,7 +1118,7 @@ async def test_invalid_confirmation_input_commits_bundle_before_broadcast(db_ses
     monkeypatch.setattr(session_reply_queue_manager_module, "expire_confirmation_by_session", no_expiration)
     monkeypatch.setattr(db_session, "commit", counted_commit)
     monkeypatch.setattr(session_reply_queue_manager_module, "broadcast_pending_confirmation_cancellation", broadcast_after_commit)
-    monkeypatch.setattr("app.core.audit.confirmation.send_session_event", send_event)
+    monkeypatch.setattr("app.core.audit.confirmation_events.send_session_event", send_event)
 
     initial_message, work, status, direct_events = await session_reply_queue_manager.submit_user_message(
         db_session,

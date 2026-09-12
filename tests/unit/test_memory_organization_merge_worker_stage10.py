@@ -84,6 +84,12 @@ class _ImportSafePersistentClient:
 
 
 with patch.object(chromadb, "PersistentClient", _ImportSafePersistentClient):
+    import app.core.memory_jobs.handler_cleanup as memory_cleanup_handler
+    import app.core.memory_jobs.handler_execution as memory_execution_handler
+    import app.core.memory_jobs.handler_organization as memory_organization_handler
+    import app.core.memory_jobs.handler_prepare as memory_prepare_handler
+    import app.core.memory_jobs.handler_publication_validation as memory_publication_validation_handler
+    import app.core.memory_jobs.handler_vector as memory_vector_handler
     from app.core.memory_jobs import handlers as memory_handlers
     from app.core.memory_jobs import vector_cleanup as memory_vector_cleanup
 
@@ -213,12 +219,15 @@ class _FakeVectorBackend:
 @pytest.fixture
 def vector_backend(monkeypatch: pytest.MonkeyPatch) -> _FakeVectorBackend:
     backend = _FakeVectorBackend()
-    monkeypatch.setattr(memory_handlers, "load_embedding_runtime_config", backend.load_config)
-    monkeypatch.setattr(memory_handlers, "embed_texts_with_config", backend.embed)
-    monkeypatch.setattr(memory_handlers, "async_get_or_create_collection", backend.get_or_create_collection)
-    monkeypatch.setattr(memory_handlers, "async_upsert_collection_items", backend.upsert)
-    monkeypatch.setattr(memory_handlers, "async_validate_collection", backend.validate)
-    monkeypatch.setattr(memory_handlers, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_prepare_handler, "load_embedding_runtime_config", backend.load_config)
+    monkeypatch.setattr(memory_publication_validation_handler, "load_embedding_runtime_config", backend.load_config)
+    monkeypatch.setattr(memory_execution_handler, "embed_texts_with_config", backend.embed)
+    monkeypatch.setattr(memory_execution_handler, "async_get_or_create_collection", backend.get_or_create_collection)
+    monkeypatch.setattr(memory_execution_handler, "async_upsert_collection_items", backend.upsert)
+    monkeypatch.setattr(memory_cleanup_handler, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_cleanup_handler, "async_delete_collection_items", backend.delete)
+    monkeypatch.setattr(memory_vector_handler, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(memory_vector_handler, "async_delete_collection_items", backend.delete)
     monkeypatch.setattr(memory_vector_cleanup, "async_validate_collection", backend.validate)
     monkeypatch.setattr(memory_vector_cleanup, "async_delete_collection_items", backend.delete)
     return backend
@@ -1925,7 +1934,7 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
         max_attempts=1,
     )
     before = {memory_id: await _get_record(memory_session_factory, uid=uid, memory_id=memory_id) for memory_id in (1, 2, 3)}
-    original_append = memory_handlers.append_memory_embedding_delta
+    original_append = memory_organization_handler.append_memory_embedding_delta
     append_calls = 0
 
     async def raise_on_second_delta(*args: Any, **kwargs: Any) -> Any:
@@ -1935,7 +1944,7 @@ async def test_organization_merge_second_delta_conflict_rolls_back_publication_a
             raise MemoryConflictError("second migration delta conflict")
         return await original_append(*args, **kwargs)
 
-    monkeypatch.setattr(memory_handlers, "append_memory_embedding_delta", raise_on_second_delta)
+    monkeypatch.setattr(memory_organization_handler, "append_memory_embedding_delta", raise_on_second_delta)
     consumer = _consumer(memory_session_factory)
     try:
         failed = await _run_child(
@@ -2009,7 +2018,7 @@ async def test_organization_merge_cleanup_creation_conflict_rolls_back_all_datab
     async def raise_cleanup_conflict(*_args: Any, **_kwargs: Any) -> Any:
         raise MemoryJobTargetBusyError("existing cleanup business conflict")
 
-    monkeypatch.setattr(memory_handlers.memory_job_manager, "create_organization_cleanup_job", raise_cleanup_conflict)
+    monkeypatch.setattr(memory_organization_handler.memory_job_manager, "create_organization_cleanup_job", raise_cleanup_conflict)
     consumer = _consumer(memory_session_factory)
     try:
         failed = await _run_child(

@@ -11,7 +11,8 @@ from app.adapters.chat_ws import ws_chat_adapter
 from app.core.crud.session.reply_stream_event import session_reply_stream_event_crud
 from app.core.crud.session.reply_work_item import session_reply_work_item_crud
 from app.core.dispatcher import ChatDispatcher
-from app.core.session_reply_queue import executor as session_reply_executor
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
+from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.core.session_reply_queue.manager import session_reply_queue_manager
 from app.models.audit import AuditConfirmationClaim, AuditRecord
 from app.models.message import Message
@@ -122,8 +123,8 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
     monkeypatch.setattr(ChatDispatcher, "validate_initial_message_before_save", validate_initial_message)
     monkeypatch.setattr("app.adapters.chat_web.ensure_web_session_writable", ensure_writable)
     monkeypatch.setattr(database_provider, "AsyncSessionLocal", concurrent_queue_session_factory)
-    monkeypatch.setattr(session_reply_executor, "AsyncSessionLocal", concurrent_queue_session_factory)
-    monkeypatch.setattr(session_reply_executor.ChatDispatcher, "dispatch_stream", controlled_dispatch_stream)
+    monkeypatch.setattr(executor_interactive_module, "AsyncSessionLocal", concurrent_queue_session_factory)
+    monkeypatch.setattr(executor_interactive_module.ChatDispatcher, "dispatch_stream", controlled_dispatch_stream)
 
     async def submit_first_web_connection():
         async with concurrent_queue_session_factory() as db:
@@ -144,7 +145,7 @@ async def test_concurrent_web_and_websocket_input_is_absorbed_and_replayed_from_
         claimed = await session_reply_work_item_crud.claim_next(worker_db, worker_id="worker-primary", lease_seconds=300)
         assert claimed is not None
         assert claimed.id == first_work.id
-        execution = asyncio.create_task(session_reply_executor._execute_foreground(worker_db, claimed, "worker-primary"))
+        execution = asyncio.create_task(executor_replies_module._execute_foreground(worker_db, claimed, "worker-primary"))
         await first_dispatch_started.wait()
 
         async def submit_web_connection():

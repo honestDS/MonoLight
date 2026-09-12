@@ -16,6 +16,12 @@ from app.models.knowledge_base import KnowledgeBaseProfileBinding as KnowledgeBa
 from app.models.knowledge_base import KnowledgeJob as KnowledgeJob
 from app.models.knowledge_base import KnowledgeJobOperation as KnowledgeJobOperation
 from app.models.knowledge_base import KnowledgeJobStatus as KnowledgeJobStatus
+from app.models.knowledge_base import KnowledgeOrganizationFragment as KnowledgeOrganizationFragment
+from app.models.knowledge_base import KnowledgeOrganizationFragmentStatus as KnowledgeOrganizationFragmentStatus
+from app.models.knowledge_base import KnowledgeOrganizationSnapshot as KnowledgeOrganizationSnapshot
+from app.models.knowledge_base import KnowledgeOrganizationSnapshotItem as KnowledgeOrganizationSnapshotItem
+from app.models.knowledge_base import KnowledgeOrganizationStage as KnowledgeOrganizationStage
+from app.models.knowledge_base import KnowledgeOrganizationStageStatus as KnowledgeOrganizationStageStatus
 from app.models.knowledge_base import ManagedKnowledgeActorType as ManagedKnowledgeActorType
 from app.models.knowledge_base import ManagedKnowledgeItem as ManagedKnowledgeItem
 from app.models.knowledge_base import ManagedKnowledgeRevision as ManagedKnowledgeRevision

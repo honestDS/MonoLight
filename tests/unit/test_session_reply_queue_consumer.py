@@ -6,7 +6,7 @@ import pytest
 from app.core.constants import SESSION_REPLY_ACTIVE_AUDIT_EXECUTION_KEY
 from app.core.exceptions import LLMException
 from app.core.session_reply_queue import consumer as consumer_module
-from app.core.session_reply_queue import executor as executor_module
+from app.core.session_reply_queue import executor_audit as executor_audit_module
 from app.models.session_reply_work_item import SessionReplyWorkType
 
 
@@ -428,17 +428,17 @@ async def test_consumer_marks_background_or_scheduled_audit_unknown_when_cancell
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_audit_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
     monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(executor_audit_module.background_task_crud, "list_by_audit_record", list_background_tasks)
     monkeypatch.setattr(
-        executor_module.terminal_session_crud,
+        executor_audit_module.terminal_session_crud,
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     with pytest.raises(asyncio.CancelledError):
         await consumer._run_claimed(work_id=7, worker_id="worker-1", attempt_count=1, max_attempts=3)
@@ -491,17 +491,17 @@ async def test_consumer_marks_foreground_audit_execution_unknown_when_cancelled(
         unknown_calls.append({"confirmation_audit_record_id": audit_record_id})
 
     monkeypatch.setattr(consumer_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(executor_module, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(executor_audit_module, "AsyncSessionLocal", SessionContext)
     monkeypatch.setattr(consumer_module, "execute_session_reply_work", execute_work)
     monkeypatch.setattr(consumer_module.session_reply_work_item_crud, "get", get_work)
-    monkeypatch.setattr(executor_module.background_task_crud, "list_by_audit_record", list_background_tasks)
+    monkeypatch.setattr(executor_audit_module.background_task_crud, "list_by_audit_record", list_background_tasks)
     monkeypatch.setattr(
-        executor_module.terminal_session_crud,
+        executor_audit_module.terminal_session_crud,
         "list_active_audit_execution_record_ids",
         list_active_audit_execution_record_ids,
     )
-    monkeypatch.setattr(executor_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
-    monkeypatch.setattr(executor_module, "update_confirmation_message_status", update_confirmation)
+    monkeypatch.setattr(executor_audit_module.audit_crud, "mark_execution_unknown", mark_execution_unknown)
+    monkeypatch.setattr(executor_audit_module, "update_confirmation_message_status", update_confirmation)
 
     with pytest.raises(asyncio.CancelledError):
         await consumer._run_claimed(work_id=7, worker_id="worker-1", attempt_count=1, max_attempts=3)

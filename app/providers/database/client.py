@@ -78,6 +78,17 @@ if DATABASE_URL.startswith("sqlite+"):
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=CancellationSafeAsyncSession, expire_on_commit=False)
 
 
+async def ensure_sqlite_outer_transaction(db: AsyncSession) -> None:
+    connection = await db.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    raw_connection = await connection.get_raw_connection()
+    driver_connection = getattr(raw_connection, "driver_connection", None)
+    if driver_connection is None or getattr(driver_connection, "in_transaction", False):
+        return
+    await connection.exec_driver_sql("BEGIN")
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session

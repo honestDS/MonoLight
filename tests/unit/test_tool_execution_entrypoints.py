@@ -1,11 +1,13 @@
 import inspect
 
-from app.core.dispatchers import interactive as interactive_module
+from app.core.dispatchers import interactive_helpers as interactive_helpers_module
+from app.core.dispatchers import interactive_runtime as interactive_runtime_module
+from app.core.dispatchers import interactive_tools as interactive_tools_module
 from app.core.dispatchers.background import BackgroundDispatcherMixin
-from app.core.dispatchers.interactive import InteractiveDispatcherMixin
 from app.core.dispatchers.non_stream import NonStreamDispatcherMixin
 from app.core.dispatchers.stream import StreamDispatcherMixin
-from app.core.session_reply_queue import executor as executor_module
+from app.core.session_reply_queue import executor_confirmed as executor_confirmed_module
+from app.core.session_reply_queue import executor_interactive as executor_interactive_module
 from app.core.tools import TOOL_EXECUTOR_MAP, tool_requires_audit
 
 
@@ -25,19 +27,20 @@ def test_registered_tools_explicitly_declare_audit_requirement():
 
 
 def test_interactive_stream_and_non_stream_share_audited_execution_entrypoint():
-    interactive_source = inspect.getsource(InteractiveDispatcherMixin._dispatch_interactive)
-    assert "if cfg.security.audit_channel_id and cfg.security.audit_model_id" not in interactive_source
+    interactive_tools_source = inspect.getsource(interactive_tools_module.handle_interactive_tool_round)
+    assert "if cfg.security.audit_channel_id and cfg.security.audit_model_id" not in interactive_tools_source
     _assert_source_order(
-        interactive_source,
+        interactive_tools_source,
         "prevalidate_tool_round(",
         "audit_tool_round(",
         "_execute_isolated_tool_call(",
     )
-    assert "process_single_tool_with_isolated_db(" in inspect.getsource(interactive_module._execute_isolated_tool_call)
+    assert "process_single_tool_with_isolated_db(" in inspect.getsource(interactive_helpers_module._execute_isolated_tool_call)
+    assert "handle_interactive_tool_round(" in inspect.getsource(interactive_runtime_module.dispatch_interactive)
 
-    assert "_dispatch_interactive(" in inspect.getsource(NonStreamDispatcherMixin.dispatch)
+    assert "dispatch_interactive(" in inspect.getsource(NonStreamDispatcherMixin.dispatch)
     assert "_run_dispatch(" in inspect.getsource(StreamDispatcherMixin.dispatch_stream)
-    assert "_dispatch_interactive(" in inspect.getsource(StreamDispatcherMixin._run_dispatch)
+    assert "dispatch_interactive(" in inspect.getsource(StreamDispatcherMixin._run_dispatch)
 
 
 def test_background_entrypoint_prechecks_before_batch_audit_and_execution():
@@ -53,7 +56,7 @@ def test_background_entrypoint_prechecks_before_batch_audit_and_execution():
 
 
 def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_execution():
-    source = inspect.getsource(executor_module._execute_confirmed_tools)
+    source = inspect.getsource(executor_confirmed_module._execute_confirmed_tools)
     _assert_source_order(
         source,
         "audit_tool_round(",
@@ -61,6 +64,6 @@ def test_confirmed_entrypoint_reaudits_changed_files_before_precheck_and_executi
         "process_single_tool(",
         "_dispatch_interactive_work(",
     )
-    interactive_source = inspect.getsource(executor_module._dispatch_interactive_work)
+    interactive_source = inspect.getsource(executor_interactive_module._dispatch_interactive_work)
     assert "ChatDispatcher.dispatch(" in interactive_source
     assert "ChatDispatcher.dispatch_stream(" in interactive_source

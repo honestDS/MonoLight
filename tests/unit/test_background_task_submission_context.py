@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.session_reply_queue import executor as executor_module
+from app.core.session_reply_queue import executor_replies as executor_replies_module
 from app.models.message import InternalMessage, InternalToolCall, MessageRole
 
 
@@ -56,15 +56,15 @@ async def test_background_summary_uses_submission_context_and_task_result(monkey
         assert profile_id == 3
         return profile
 
-    async def generate_reply(_db, **kwargs):
+    async def generate_reply(_db, work=None, **kwargs):
         captured.update(kwargs)
-        return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], []
+        return InternalMessage(role=MessageRole.ASSISTANT, content="后台总结"), [], [], None
 
-    monkeypatch.setattr(executor_module.background_task_crud, "get", get_task)
-    monkeypatch.setattr(executor_module.profile_crud, "get_with_relations", get_profile)
-    monkeypatch.setattr(executor_module.ChatDispatcher, "_generate_reply_from_history", generate_reply)
+    monkeypatch.setattr(executor_replies_module.background_task_crud, "get", get_task)
+    monkeypatch.setattr(executor_replies_module.profile_crud, "get_with_relations", get_profile)
+    monkeypatch.setattr(executor_replies_module, "_generate_reply_with_request_metadata", generate_reply)
 
-    response = await executor_module._execute_background(object(), work)
+    response = await executor_replies_module._execute_background(object(), work)
 
     assert response["content"] == "后台总结"
     assert [message.content for message in captured["submission_context"] if message.role == MessageRole.USER] == ["提交任务前的消息"]
