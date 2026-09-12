@@ -10,6 +10,10 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+import app.core.knowledge_jobs.migration_build as migration_build_module
+import app.core.knowledge_jobs.migration_handlers as migration_handlers_module
+import app.core.knowledge_jobs.migration_prepare as migration_prepare_module
+import app.core.knowledge_jobs.migration_switch as migration_switch_module
 from app.core.crud.knowledge.job import knowledge_job_crud
 from app.core.embedding.knowledge_base_runtime import resolve_active_knowledge_base_embedding
 from app.core.knowledge.embedding_migration import submit_managed_knowledge_base_migrations_for_memory_revision
@@ -292,7 +296,7 @@ async def _claim(
     return claimed
 
 
-def _patch_migration_backend(monkeypatch, migration_module, backend: _VectorBackend) -> None:
+def _patch_migration_backend(monkeypatch, backend: _VectorBackend) -> None:
     async def _load_config(_db, channel_id, model_id):
         return SimpleNamespace(
             channel_id=channel_id,
@@ -305,15 +309,18 @@ def _patch_migration_backend(monkeypatch, migration_module, backend: _VectorBack
         size = dimensions or 3
         return [[float(index + 1) for index in range(size)] for _ in texts]
 
-    monkeypatch.setattr(migration_module, "load_embedding_runtime_config", _load_config)
-    monkeypatch.setattr(migration_module, "embed_texts_with_config", _embed)
-    monkeypatch.setattr(migration_module, "async_get_or_create_collection", backend.get_or_create)
-    monkeypatch.setattr(migration_module, "async_upsert_collection_items", backend.upsert)
-    monkeypatch.setattr(migration_module, "async_delete_collection_items", backend.delete_items)
-    monkeypatch.setattr(migration_module, "async_get_collection_items", backend.list_items)
-    monkeypatch.setattr(migration_module, "async_validate_collection", backend.validate)
-    monkeypatch.setattr(migration_module, "async_query_collection", backend.query)
-    monkeypatch.setattr(migration_module, "async_delete_collection", backend.delete_collection)
+    monkeypatch.setattr(migration_prepare_module, "load_embedding_runtime_config", _load_config)
+    monkeypatch.setattr(migration_build_module, "embed_texts_with_config", _embed)
+    monkeypatch.setattr(migration_switch_module, "embed_texts_with_config", _embed)
+    monkeypatch.setattr(migration_prepare_module, "async_get_or_create_collection", backend.get_or_create)
+    monkeypatch.setattr(migration_build_module, "async_upsert_collection_items", backend.upsert)
+    monkeypatch.setattr(migration_build_module, "async_delete_collection_items", backend.delete_items)
+    monkeypatch.setattr(migration_build_module, "async_get_collection_items", backend.list_items)
+    monkeypatch.setattr(migration_switch_module, "async_get_collection_items", backend.list_items)
+    monkeypatch.setattr(migration_switch_module, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(migration_switch_module, "async_query_collection", backend.query)
+    monkeypatch.setattr(migration_handlers_module, "async_validate_collection", backend.validate)
+    monkeypatch.setattr(migration_handlers_module, "async_delete_collection", backend.delete_collection)
 
 
 @pytest.mark.asyncio
@@ -321,10 +328,9 @@ async def test_migration_rebuilds_user_documents_and_switches_only_after_validat
     migration_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database)
 
     async with migration_database() as db:
@@ -413,7 +419,7 @@ async def test_migration_applies_monotonic_delta_for_new_document_after_snapshot
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="delta-user")
 
     async with migration_database() as db:
@@ -440,7 +446,7 @@ async def test_migration_applies_monotonic_delta_for_new_document_after_snapshot
         worker_id="stage7-delta-worker",
         session_factory=migration_database,
     )
-    await migration_module._prepare_migration(context, claimed.payload)
+    await migration_prepare_module._prepare_migration(context, claimed.payload)
 
     async with migration_database() as db:
         locked = await migration_module.lock_migrating_knowledge_base(
@@ -629,7 +635,7 @@ async def test_delta_arriving_during_validation_returns_to_catchup(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="validation-delta-user")
     async with migration_database() as db:
         job = await prepare_knowledge_base_embedding_migration(
@@ -655,9 +661,9 @@ async def test_delta_arriving_during_validation_returns_to_catchup(
         worker_id="stage7-validation-delta-worker",
         session_factory=migration_database,
     )
-    payload = await migration_module._prepare_migration(context, claimed.payload)
-    await migration_module._build_migration(context, payload)
-    await migration_module._catch_up_migration(context, payload)
+    payload = await migration_prepare_module._prepare_migration(context, claimed.payload)
+    await migration_build_module._build_migration(context, payload)
+    await migration_build_module._catch_up_migration(context, payload)
 
     async with migration_database() as db:
         current = await db.get(KnowledgeBase, kb.id)
@@ -711,7 +717,7 @@ async def test_document_delete_after_snapshot_is_removed_from_target(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="delete-delta-user")
     async with migration_database() as db:
         document = KnowledgeBaseDocument(
@@ -751,8 +757,8 @@ async def test_document_delete_after_snapshot_is_removed_from_target(
         worker_id="stage7-delete-worker",
         session_factory=migration_database,
     )
-    payload = await migration_module._prepare_migration(context, claimed.payload)
-    await migration_module._build_migration(context, payload)
+    payload = await migration_prepare_module._prepare_migration(context, claimed.payload)
+    await migration_build_module._build_migration(context, payload)
     assert backend.collections["stage7-delete-target"]["items"]
 
     async with migration_database() as db:
@@ -791,10 +797,9 @@ async def test_switch_transaction_failure_keeps_old_collection_active(
     migration_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="switch-failure-user")
     async with migration_database() as db:
         document = KnowledgeBaseDocument(
@@ -834,17 +839,17 @@ async def test_switch_transaction_failure_keeps_old_collection_active(
         worker_id="stage7-switch-failure-worker",
         session_factory=migration_database,
     )
-    payload = await migration_module._prepare_migration(context, claimed.payload)
-    await migration_module._build_migration(context, payload)
-    await migration_module._catch_up_migration(context, payload)
-    validation = await migration_module._validate_migration(context, payload)
+    payload = await migration_prepare_module._prepare_migration(context, claimed.payload)
+    await migration_build_module._build_migration(context, payload)
+    await migration_build_module._catch_up_migration(context, payload)
+    validation = await migration_switch_module._validate_migration(context, payload)
 
     async def _reject_success(*args, **kwargs):
         return False
 
     monkeypatch.setattr(knowledge_job_crud, "mark_succeeded", _reject_success)
     with pytest.raises(KnowledgeJobLeaseLostError):
-        await migration_module._switch_migration(context, payload, validation)
+        await migration_switch_module._switch_migration(context, payload, validation)
 
     async with migration_database() as db:
         current = await db.get(KnowledgeBase, kb.id)
@@ -870,10 +875,9 @@ async def test_switch_reuses_validated_plan_without_reloading_sources_under_lock
     migration_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="short-switch-user")
     async with migration_database() as db:
         document = KnowledgeBaseDocument(
@@ -913,20 +917,20 @@ async def test_switch_reuses_validated_plan_without_reloading_sources_under_lock
         worker_id="stage7-short-switch-worker",
         session_factory=migration_database,
     )
-    payload = await migration_module._prepare_migration(context, claimed.payload)
-    await migration_module._build_migration(context, payload)
-    await migration_module._catch_up_migration(context, payload)
-    validation = await migration_module._validate_migration(context, payload)
+    payload = await migration_prepare_module._prepare_migration(context, claimed.payload)
+    await migration_build_module._build_migration(context, payload)
+    await migration_build_module._catch_up_migration(context, payload)
+    validation = await migration_switch_module._validate_migration(context, payload)
 
     async def _unexpected_reload(*args, **kwargs):
         raise AssertionError("final switch must not reload and re-split all knowledge sources")
 
     monkeypatch.setattr(
-        migration_module.knowledge_base_migration_crud,
+        migration_switch_module.knowledge_base_migration_crud,
         "list_current_sources",
         _unexpected_reload,
     )
-    execution = await migration_module._switch_migration(context, payload, validation)
+    execution = await migration_switch_module._switch_migration(context, payload, validation)
 
     assert execution.finalized is True
     async with migration_database() as db:
@@ -947,7 +951,7 @@ async def test_switch_batches_managed_vector_reference_updates(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(
         migration_database,
         uid="managed-switch-user",
@@ -1032,7 +1036,7 @@ async def test_managed_memory_follow_submission_completes_to_final_embedding_con
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(
         migration_database,
         uid="managed-memory-follow-final-user",
@@ -1094,10 +1098,9 @@ async def test_managed_memory_follow_retries_immediately_three_times_then_keeps_
     migration_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(
         migration_database,
         uid="managed-memory-follow-retry-user",
@@ -1170,7 +1173,7 @@ async def test_switch_rejects_validated_plan_when_delta_arrives_before_lock(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="switch-fence-user")
     async with migration_database() as db:
         job = await prepare_knowledge_base_embedding_migration(
@@ -1196,10 +1199,10 @@ async def test_switch_rejects_validated_plan_when_delta_arrives_before_lock(
         worker_id="stage7-switch-fence-worker",
         session_factory=migration_database,
     )
-    payload = await migration_module._prepare_migration(context, claimed.payload)
-    await migration_module._build_migration(context, payload)
-    await migration_module._catch_up_migration(context, payload)
-    validation = await migration_module._validate_migration(context, payload)
+    payload = await migration_prepare_module._prepare_migration(context, claimed.payload)
+    await migration_build_module._build_migration(context, payload)
+    await migration_build_module._catch_up_migration(context, payload)
+    validation = await migration_switch_module._validate_migration(context, payload)
 
     async with migration_database() as db:
         locked = await migration_module.lock_migrating_knowledge_base(
@@ -1231,7 +1234,7 @@ async def test_switch_rejects_validated_plan_when_delta_arrives_before_lock(
         await db.commit()
 
     with pytest.raises(KnowledgeJobRetryableError):
-        await migration_module._switch_migration(context, payload, validation)
+        await migration_switch_module._switch_migration(context, payload, validation)
 
     async with migration_database() as db:
         current = await db.get(KnowledgeBase, kb.id)
@@ -1250,7 +1253,7 @@ async def test_validation_failure_never_switches_active_collection(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="validation-user")
 
     async with migration_database() as db:
@@ -1299,7 +1302,7 @@ async def test_validation_failure_never_switches_active_collection(
             errors=("forced_validation_failure",),
         )
 
-    monkeypatch.setattr(migration_module, "async_validate_collection", _invalid_validate)
+    monkeypatch.setattr(migration_switch_module, "async_validate_collection", _invalid_validate)
     context = KnowledgeJobExecutionContext(
         job=claimed,
         worker_id="stage7-validation-worker",
@@ -1324,7 +1327,7 @@ async def test_old_collection_cleanup_failure_is_independent_from_migration_succ
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="cleanup-user")
     await backend.get_or_create(kb.active_collection_name)
     backend.delete_failures[kb.active_collection_name] = 1
@@ -1442,10 +1445,9 @@ async def test_worker_lease_expiry_resumes_migration_even_at_attempt_limit(
     migration_database: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="restart-user")
     async with migration_database() as db:
         job = await prepare_knowledge_base_embedding_migration(
@@ -1472,7 +1474,7 @@ async def test_worker_lease_expiry_resumes_migration_even_at_attempt_limit(
         worker_id="stage7-restart-worker",
         session_factory=migration_database,
     )
-    await migration_module._prepare_migration(context, claimed.payload)
+    await migration_prepare_module._prepare_migration(context, claimed.payload)
 
     async with migration_database() as db:
         current_job = await knowledge_job_crud.get_by_id(db, uid=kb.uid, job_id=job.id)
@@ -1511,7 +1513,7 @@ async def test_cancelled_migration_keeps_old_collection_and_cleans_target(
     from app.core.knowledge_jobs import migration as migration_module
 
     backend = _VectorBackend()
-    _patch_migration_backend(monkeypatch, migration_module, backend)
+    _patch_migration_backend(monkeypatch, backend)
     kb = await _create_container(migration_database, uid="cancel-user")
     async with migration_database() as db:
         job = await prepare_knowledge_base_embedding_migration(
@@ -1537,7 +1539,7 @@ async def test_cancelled_migration_keeps_old_collection_and_cleans_target(
         worker_id="stage7-cancel-worker",
         session_factory=migration_database,
     )
-    await migration_module._prepare_migration(context, claimed.payload)
+    await migration_prepare_module._prepare_migration(context, claimed.payload)
     assert "stage7-cancel-target" in backend.collections
 
     async with migration_database() as db:

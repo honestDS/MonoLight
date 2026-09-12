@@ -7,10 +7,11 @@ import psutil
 import pytest
 from sqlalchemy import delete, update
 
+import app.core.terminal.worker_coordinator as worker_coordinator_module
 from app.core.constants import ERR_TERMINAL_SESSION_LEASE_LOST
 from app.core.crud.terminal.session import terminal_control_command_crud, terminal_session_crud
 from app.core.i18n import t
-from app.core.terminal import ALL_TERMINAL_ACTIONS, TerminalSessionStatus, TerminalWriteRequest, manager, recovery
+from app.core.terminal import ALL_TERMINAL_ACTIONS, TerminalSessionStatus, TerminalWriteRequest, recovery
 from app.core.terminal.manager import TerminalWorkerCoordinator, terminal_session_manager
 from app.core.terminal.recovery import (
     TerminalProcessCleanupResult,
@@ -115,7 +116,7 @@ async def test_terminal_worker_recovers_stale_unaudited_session_and_pending_comm
     async def cleanup_without_processes(identity):
         return TerminalProcessCleanupResult((), (), ())
 
-    monkeypatch.setattr(manager, "cleanup_terminal_process_identity", cleanup_without_processes)
+    monkeypatch.setattr(worker_coordinator_module, "cleanup_terminal_process_identity", cleanup_without_processes)
     coordinator = TerminalWorkerCoordinator()
 
     async with AsyncSessionLocal() as db:
